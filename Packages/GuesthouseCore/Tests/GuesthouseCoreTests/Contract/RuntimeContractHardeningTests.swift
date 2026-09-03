@@ -42,10 +42,10 @@ import Testing
 
     @Test func theTartVersionIsSanitizedOnTheWire() throws {
         let info = RuntimeVersionInfo(serviceVersion: "1.0", serviceBuild: "1", tart: .init(version: "2.36.0\u{1B}[31m evil", verified: true))
-        #expect(info.tart?.version.contains("\u{1B}") == false)
+        #expect(info.tart?.version?.contains("\u{1B}") == false)
         let json = #"{"serviceVersion":"1.0","serviceBuild":"1","protocolVersion":1,"tart":{"version":"2.36.0\u001b[31m","verified":true}}"#
         let decoded = try JSONDecoder().decode(RuntimeVersionInfo.self, from: Data(json.utf8))
-        #expect(decoded.tart?.version.contains("\u{1B}") == false)
+        #expect(decoded.tart?.version?.contains("\u{1B}") == false)
     }
 
     @Test func aPhaseFractionIsAlwaysEncodable() throws {

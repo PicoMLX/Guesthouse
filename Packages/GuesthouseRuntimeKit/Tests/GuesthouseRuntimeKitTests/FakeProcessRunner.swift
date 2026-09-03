@@ -23,7 +23,7 @@ actor FakeProcessRunner: ProcessRunning {
         let redactor = Redactor()
         for line in stdout { continuation.yield(.stdout(redactor.redact(lines: [line])[0])) }
         for line in stderr { continuation.yield(.stderr(redactor.redact(lines: [line])[0])) }
-        run.finish(with: exit)
+        run.finish(with: exit.reason)
         return run
     }
 }
