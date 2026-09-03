@@ -8,6 +8,21 @@ import GuesthouseCore
 public enum IntegrationWorkspaceWriter {
     public static func write(_ files: [GeneratedFile], to root: URL) throws {
         let resolvedRoot = root.standardizedFileURL
+        // The workspace directory itself is checked without following links: a root replaced
+        // by a link to a checkout would otherwise redirect every write into it. A root that
+        // does not exist yet is created here, so what follows always writes into a directory.
+        var rootInfo = stat()
+        if lstat(resolvedRoot.path, &rootInfo) == 0 {
+            guard (rootInfo.st_mode & S_IFMT) == S_IFDIR else {
+                throw GeneratedFileError.pathOutsideWorkspace(resolvedRoot.lastPathComponent)
+            }
+        } else {
+            do {
+                try FileManager.default.createDirectory(at: resolvedRoot, withIntermediateDirectories: true)
+            } catch {
+                throw GeneratedFileError.unwritable(path: resolvedRoot.lastPathComponent, reason: SanitizedText(error.localizedDescription, limit: 120))
+            }
+        }
         for file in files {
             let url = try destination(for: file.relativePath, in: resolvedRoot)
             do {
@@ -34,7 +49,11 @@ public enum IntegrationWorkspaceWriter {
         guard !relativePath.hasPrefix("/"), !components.isEmpty,
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
         else { throw GeneratedFileError.invalidPath(relativePath) }
-        guard components[0].lowercased() != "repos" else { throw GeneratedFileError.pathOutsideWorkspace(relativePath) }
+        // Case folding, not `lowercased()`: on a case-insensitive volume `repoſ` and `REPOS`
+        // name the same directory as `repos`, and only folding treats them as equal.
+        guard components[0].folding(options: [.caseInsensitive, .widthInsensitive], locale: nil) != "repos" else {
+            throw GeneratedFileError.pathOutsideWorkspace(relativePath)
+        }
         var url = resolvedRoot
         for component in components {
             url.append(path: component)
