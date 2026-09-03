@@ -39,8 +39,11 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
     private func activeSession() throws -> XPCSession {
         try lock.withLock {
             if let session { return session }
+            // Created inactive: the session is activated once below. Creating it active and
+            // activating again is an XPC API misuse that traps on first use.
             let created = try XPCSession(
                 xpcService: Self.serviceName,
+                options: .inactive,
                 incomingMessageHandler: { [weak self] (message: XPCReceivedMessage) -> (any Encodable)? in
                     guard let self else { return nil }
                     if let event = try? message.decode(as: RuntimeEvent.self) {
