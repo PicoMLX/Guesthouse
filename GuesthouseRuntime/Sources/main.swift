@@ -19,13 +19,14 @@ do {
         }
     }
 } catch {
-    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot create listener: \(error)\n".utf8))
+    // A fixed message: the system error's text is opaque and could quote context.
+    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot create the XPC listener\n".utf8))
     exit(EXIT_FAILURE)
 }
 do {
     try listener.activate()
 } catch {
-    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot activate listener: \(error)\n".utf8))
+    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot activate the XPC listener\n".utf8))
     exit(EXIT_FAILURE)
 }
 dispatchMain()
