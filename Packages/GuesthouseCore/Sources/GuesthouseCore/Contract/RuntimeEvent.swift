@@ -172,7 +172,7 @@ extension ObservedTuple {
         copy.xcodeBuild = clean(xcodeBuild)
         copy.codexCLIVersion = clean(codexCLIVersion)
         copy.codexCLIPath = clean(codexCLIPath)
-        copy.codexCLICapabilities = codexCLICapabilities.map { Array($0.prefix(64)).map { Self.bounded($0, limit: 128) } }
+        copy.codexCLICapabilities = codexCLICapabilities.map { Self.boundedCapabilities($0) }
         copy.githubCLIVersion = clean(githubCLIVersion)
         copy.provisioningScriptVersion = clean(provisioningScriptVersion)
         return copy
@@ -183,17 +183,29 @@ extension ObservedTuple {
     /// carries a digest of the exact observation, so two different observations never
     /// collapse into one verified compatibility tuple.
     static func bounded(_ value: String, limit: Int) -> String {
-        let sanitized = GuesthouseError.sanitize(value, limit: limit)
+        let (sanitized, wasRedacted) = GuesthouseError.sanitizeReporting(value, limit: limit)
         // A redacted value stands for a secret: it gets no digest, since that would let a
-        // guess be confirmed. Only a value that was merely bounded or normalized carries one,
-        // and the suffix is counted against the same limit.
-        guard sanitized != value, !sanitized.contains("[redacted") else { return sanitized }
+        // guess be confirmed. Whether redaction happened comes from the sanitizer itself, not
+        // from marker text the value could contain. Only a value that was merely bounded or
+        // normalized carries a digest, counted against the same limit.
+        guard sanitized != value, !wasRedacted else { return sanitized }
         let room = max(16, limit - identitySuffixLength)
         return "\(GuesthouseError.sanitize(value, limit: room)) [exact:\(digest(of: value))]"
     }
 
     /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
     static let identitySuffixLength = 22
+    static let maximumCapabilities = 64
+
+    /// The first `maximumCapabilities` entries, each bounded; when entries are dropped, one
+    /// final entry names how many and carries a digest of the whole list, so two capability
+    /// sets that share a prefix keep different identities.
+    static func boundedCapabilities(_ values: [String]) -> [String] {
+        guard values.count > maximumCapabilities else { return values.map { bounded($0, limit: 128) } }
+        let kept = values.prefix(maximumCapabilities - 1).map { bounded($0, limit: 128) }
+        let omitted = values.count - kept.count
+        return kept + ["[\(omitted) more; exact:\(digest(of: values.joined(separator: "\u{0}")))]"]
+    }
 
     static func digest(of value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()

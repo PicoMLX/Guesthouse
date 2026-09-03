@@ -56,6 +56,36 @@ import Testing
         #expect(throws: Never.self) { try JSONEncoder().encode(phase.measured(.infinity)) }
     }
 
+    @Test func aDanglingRootIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Root-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let dangling = base.appending(path: "import")
+        try FileManager.default.createSymbolicLink(at: dangling, withDestinationURL: URL(fileURLWithPath: "/nonexistent/outside/new-file"))
+        #expect(throws: RequestValidationError.pathEscapesRoot) { try RequestValidator.validateContainment(of: dangling, within: dangling) }
+        #expect(throws: RequestValidationError.pathEscapesRoot) { try RequestValidator.validateContainment(of: dangling.appending(path: "x"), within: dangling) }
+    }
+
+    @Test func aCappedCapabilityListKeepsItsIdentity() {
+        let many = (0..<200).map { "cap\($0)" }
+        var other = many; other[199] = "different"
+        let first = ObservedTuple(codexCLICapabilities: many).sanitizedForWire().codexCLICapabilities
+        let second = ObservedTuple(codexCLICapabilities: other).sanitizedForWire().codexCLICapabilities
+        #expect(first?.count == 64)
+        #expect(first != second, "two lists that share their first entries keep different identities")
+        #expect(first?.last?.contains("137 more") == true)
+        let few = ObservedTuple(codexCLICapabilities: ["a", "b"]).sanitizedForWire().codexCLICapabilities
+        #expect(few == ["a", "b"], "a list under the cap is untouched")
+    }
+
+    @Test func aForgedRedactionMarkerDoesNotSuppressTheIdentity() {
+        let a = "/opt/[redacted:token]/" + String(repeating: "a", count: 400)
+        let b = "/opt/[redacted:token]/" + String(repeating: "a", count: 401)
+        let first = ObservedTuple(codexCLIPath: a).sanitizedForWire().codexCLIPath
+        let second = ObservedTuple(codexCLIPath: b).sanitizedForWire().codexCLIPath
+        #expect(first != second, "marker text in the value is not evidence that a secret was removed")
+        #expect(first?.contains("[exact:") == true)
+    }
+
     @Test func lineSeparatorsAreNotDisplayNames() {
         for bad in ["Xcode\u{2028}.app", "Xcode\u{2029}.app", "Xcode\u{202E}.app"] {
             #expect(throws: RequestValidationError.invalidDisplayName) {

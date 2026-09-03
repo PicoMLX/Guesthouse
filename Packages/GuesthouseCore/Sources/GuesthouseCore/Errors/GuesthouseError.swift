@@ -208,6 +208,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     static let sanitizeLookahead = 512
 
     public static func sanitize(_ value: String, limit: Int = 80) -> String {
+        sanitizeReporting(value, limit: limit).value
+    }
+
+    /// The sanitized text, and whether the redactor actually replaced something. Callers that
+    /// need to tell "a secret was removed" from "the text merely happens to contain the
+    /// marker" use this rather than searching the result for marker text.
+    public static func sanitizeReporting(_ value: String, limit: Int = 80) -> (value: String, redacted: Bool) {
         // Only the window plus one scalar is ever looked at, so the cost is independent of the
         // input's size.
         let window = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead + 1)
@@ -232,9 +239,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             normalized = normalized.replacing(#/(:\/\/)[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
         }
         let redacted = Redactor().redact(fieldValue: normalized)
+        let wasRedacted = redacted != normalized
         let scalars = redacted.unicodeScalars
-        guard scalars.count > limit else { return redacted }
-        return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
+        guard scalars.count > limit else { return (redacted, wasRedacted) }
+        return (String(String.UnicodeScalarView(scalars.prefix(limit))) + "…", wasRedacted)
     }
 
     static func list(_ components: MissingComponents) -> String {
