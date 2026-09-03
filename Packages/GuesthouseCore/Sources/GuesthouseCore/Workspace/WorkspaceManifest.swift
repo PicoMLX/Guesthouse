@@ -96,6 +96,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         guard Self.isRelativeProjectPath(appProjectPath) else { throw .invalidAppProjectPath(appProjectPath) }
         guard !sharedScheme.isEmpty, !sharedScheme.contains("/"), !Self.containsControlCharacters(sharedScheme) else { throw .invalidScheme(sharedScheme) }
         guard testDestination.isValid else { throw .invalidTestDestination(testDestination.specifier) }
+        guard createdAt.timeIntervalSinceReferenceDate.isFinite, updatedAt.timeIntervalSinceReferenceDate.isFinite else { throw .invalidTimestamp }
         // Last, so a structural problem is reported before an incomplete clone is.
         if stage == .supported, let unclone = repositories.first(where: { $0.baseSHA == nil }) {
             throw .missingBaseSHA(unclone.checkoutName.rawValue)
@@ -108,14 +109,16 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 
-    /// Control, format, and separator characters cannot travel in an argument vector, and
-    /// separators would let one value render as several lines in the GUI.
+    /// Control, format, and separator characters cannot travel in an argument vector,
+    /// separators would let one value render as several lines in the GUI, and scalars outside
+    /// the XML character set cannot be serialized into the workspace file.
     static func containsControlCharacters(_ text: String) -> Bool {
         text.unicodeScalars.contains { scalar in
             switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator: true
-            default: scalar.value == 0xFFFE || scalar.value == 0xFFFF
+            case .control, .format, .lineSeparator, .paragraphSeparator: return true
+            default: break
             }
+            return scalar.properties.isNoncharacterCodePoint || scalar.value == 0xFFFE || scalar.value == 0xFFFF
         }
     }
 }
@@ -212,6 +215,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case invalidAppProjectPath(String)
     case invalidScheme(String)
     case invalidTestDestination(String)
+    /// A timestamp that cannot be encoded.
+    case invalidTimestamp
     case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
     case duplicatePackageIdentity(String)
     /// The file could not be read as a workspace at all.
@@ -243,6 +248,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "\(GuesthouseError.sanitize(destination)) is not a valid test destination."
         case .malformed(let reason):
             "The workspace file in the development Mac could not be read (\(reason.value)). Guesthouse can rebuild it from the repositories you selected."
+        case .invalidTimestamp:
+            "The workspace carries a timestamp that cannot be saved. This is a bug in Guesthouse."
         case .checkoutNameDoesNotMatchRepository(let checkout, let repository):
             "The package repository \(GuesthouseError.sanitize(repository)) must be checked out as \(GuesthouseError.sanitize(repository)), not \(GuesthouseError.sanitize(checkout)), or Xcode will not use the local copy."
         case .duplicatePackageIdentity(let identity):

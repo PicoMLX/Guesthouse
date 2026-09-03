@@ -101,6 +101,15 @@ import Testing
         #expect(IntegrationWorkspaceGenerator.cell("x|y") == "`x\\|y`")
     }
 
+    @Test func xmlInvalidScalarsAndNonFiniteTimestampsAreRefused() {
+        var bad = manifest()
+        bad.appProjectPath = "My\u{FFFE}App.xcodeproj"
+        #expect(throws: WorkspaceValidationError.invalidAppProjectPath("My\u{FFFE}App.xcodeproj")) { try IntegrationWorkspaceGenerator.generate(bad) }
+        var infinite = manifest()
+        infinite.updatedAt = Date(timeIntervalSinceReferenceDate: .infinity)
+        #expect(throws: WorkspaceValidationError.invalidTimestamp) { try IntegrationWorkspaceGenerator.generate(infinite) }
+    }
+
     @Test func writeFailuresAreActionable() throws {
         let files = try IntegrationWorkspaceGenerator.generate(manifest())
         #expect(throws: GeneratedFileError.self) { try IntegrationWorkspaceGenerator.write(files, to: URL(fileURLWithPath: "/dev/null/workspace")) }
