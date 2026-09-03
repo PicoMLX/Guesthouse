@@ -8,6 +8,7 @@ import XPC
 // identifier; the same requirement is re-checked per message in `RuntimeService`.
 
 let service = RuntimeService()
+Task { await service.discoverTart() }
 let listener: XPCListener
 do {
     listener = try XPCListener(service: RuntimeService.serviceName, requirement: RuntimeService.peerRequirement) { request in
