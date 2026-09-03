@@ -34,7 +34,7 @@ struct DashboardView: View {
             }
             .padding(20)
         }
-        .sheet(isPresented: $showingWizard) { WizardPlaceholderView() }
+        .sheet(isPresented: $showingWizard) { SetupWizardView(wizard: SetupWizardModel()) }
         .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model, subject: diagnosticsSubject) }
     }
 }
@@ -229,22 +229,6 @@ struct AvailabilityButton: View {
                 .help("Not implemented yet. \(note)")
                 .accessibilityHint("Not implemented yet")
         }
-    }
-}
-
-/// Stands in for the setup wizard until #31 lands.
-struct WizardPlaceholderView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Create a development Mac").font(.headline)
-            Text("The setup wizard is not implemented yet. It will check this Mac, create the virtual machine, finish macOS setup, connect securely, add Xcode, sign in, add a workspace, and validate the Codex handoff (MVP-PLAN.md §2).")
-                .foregroundStyle(.secondary)
-            HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
-        }
-        .padding(20)
-        .frame(width: 460)
     }
 }
 
