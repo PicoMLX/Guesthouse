@@ -233,8 +233,14 @@ public enum IntegrationWorkspaceGenerator {
     static func encodedManifest(_ manifest: WorkspaceManifest) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
-        // A manifest that validated cannot fail to encode; every field is a plain value type.
-        return (try? encoder.encode(manifest)) ?? Data()
+        // A manifest that validated cannot fail to encode: every field is a plain value type
+        // and validation refuses timestamps that are not finite. A failure here is a bug and
+        // is reported as one rather than written as an empty file.
+        do {
+            return try encoder.encode(manifest)
+        } catch {
+            preconditionFailure("a validated manifest failed to encode: \(error)")
+        }
     }
 
     /// Reads a `workspace.json` written by `generate`.
