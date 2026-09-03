@@ -21,13 +21,13 @@ public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomString
     }
 
     /// Parses the output of `tart --version`. Accepts exactly one non-empty line of the form
-    /// `2.36.0`, `v2.36.0`, or `tart 2.36.0`, with all three numeric components present and
-    /// at most one prefix. Anything else (extra lines, a two-component version, `tart v2.36.0`,
+    /// `2.36.0`, `v2.36.0`, or `tart 2.36.0`, with all three numeric components present in their
+    /// canonical decimal spelling (no leading zeros) and at most one prefix. Anything else (extra lines, a two-component version, `tart v2.36.0`,
     /// trailing text) is not a version and must be treated as unknown, never as matching the pin.
     public init?(parsing output: String) {
         let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard lines.count == 1,
-              let match = lines[0].wholeMatch(of: #/(?:[Tt][Aa][Rr][Tt] |v)?([0-9]+\.[0-9]+\.[0-9]+)/#),
+              let match = lines[0].wholeMatch(of: #/(?:[Tt][Aa][Rr][Tt] |v)?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))/#),
               let semantic = SemanticVersion(String(match.1))
         else { return nil }
         self.init(semantic)

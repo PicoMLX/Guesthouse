@@ -42,7 +42,9 @@ public enum TartErrorClassifier {
         if has("seems to be already in use, unmount it first") || has("already in use, try umounting it") { return .diskInUse }
         if has("the number of vms exceeds the system limit") { return .virtualMachineLimitExceeded }
         if text.contains(#/vm "[^"]*" (?:is running|must be stopped)/#) { return .requiresStoppedVM }
+        // Unknown text is treated as a field value: redacted without context (a bare device
+        // code included), stripped of controls, and bounded.
         let firstLine = stderr.split(whereSeparator: \.isNewline).first.map(String.init) ?? "exit status \(exitStatus)"
-        return .unknown(Redactor().redact(lines: [firstLine]).first ?? RedactedLine(literal: "unknown Tart failure"))
+        return .unknown(RedactedLine(GuesthouseError.sanitize(firstLine, limit: 200)))
     }
 }
