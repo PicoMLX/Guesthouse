@@ -30,6 +30,28 @@ import Testing
         return String(decoding: f.contents, as: UTF8.self)
     }
 
+    @Test func aLinkedWorkspaceRootIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Root-\(UUID().uuidString)")
+        let real = base.appending(path: "repos/MyApp")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let root = base.appending(path: "workspace")
+        try FileManager.default.createSymbolicLink(at: root, withDestinationURL: real)
+        #expect(throws: GeneratedFileError.self) {
+            try IntegrationWorkspaceWriter.write([GeneratedFile(relativePath: "AGENTS.md", text: "x")], to: root)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: real.path).isEmpty, "nothing was written through the root link")
+    }
+
+    @Test func caseFoldedSpellingsOfReposAreRefused() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Root-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for spelling in ["repos", "REPOS", "Repos", "repo\u{017F}"] {
+            #expect(throws: GeneratedFileError.self, "\(spelling)") {
+                try IntegrationWorkspaceWriter.write([GeneratedFile(relativePath: "\(spelling)/MyApp/file", text: "x")], to: root)
+            }
+        }
+    }
+
     @Test func aLinkedDestinationComponentIsRefused() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Generated-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
