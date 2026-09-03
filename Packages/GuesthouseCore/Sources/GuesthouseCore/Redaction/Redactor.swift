@@ -177,6 +177,14 @@ public struct Redactor: Sendable {
         redact(untrusted: fieldValue)
     }
 
+    /// Redacts one line of child-process output: everything `redact(line:state:)` does, and
+    /// the device-code rule unconditionally, because an authentication CLI may print a bare
+    /// code on a line of its own.
+    public func redact(processOutputLine line: String, state: inout StreamState) -> RedactedLine {
+        let first = redact(line: line, state: &state)
+        return RedactedLine(Self.applyDeviceCodePattern(to: first.text))
+    }
+
     /// Convenience for a batch of lines from one stream.
     public func redact(lines: [String]) -> [RedactedLine] {
         var state = StreamState()
