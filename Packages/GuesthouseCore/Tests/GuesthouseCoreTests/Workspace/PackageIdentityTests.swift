@@ -46,11 +46,13 @@ import Testing
 
     @Test func matchesDirectAndTransitiveDependenciesByIdentityAndRemote() throws {
         let resolved = try ResolvedPackagesFile.decode(fixture("Package.resolved.v3"))
-        let results = LocalOverrideMatcher.match(selected: [
+        let selected = [
             package("git@github.com:PicoMLX/SharedUI.git"),
             package("https://github.com/picomlx/modelkit"),
             package("https://github.com/apple/swift-collections"),
-        ], resolved: resolved)
+        ]
+        let origins = Dictionary(uniqueKeysWithValues: selected.map { ($0.checkoutName, $0.remote) })
+        let results = LocalOverrideMatcher.match(selected: selected, resolved: resolved, observedOrigins: origins)
         #expect(results == [
             .matched(identity: PackageIdentity(location: "sharedui")!, location: "https://github.com/PicoMLX/SharedUI.git"),
             .matched(identity: PackageIdentity(location: "modelkit")!, location: "https://github.com/PicoMLX/ModelKit"),
@@ -64,14 +66,14 @@ import Testing
             package("https://github.com/Fork/SharedUI"),
             package("https://github.com/PicoMLX/Unrelated"),
             package("https://github.com/PicoMLX/RegistryKit"),
-        ], resolved: resolved)
+        ], resolved: resolved, observedOrigins: [:])
         #expect(results == [
             .remoteMismatch(identity: PackageIdentity(location: "sharedui")!, expected: "https://github.com/PicoMLX/SharedUI.git", selected: "https://github.com/Fork/SharedUI"),
             .notADependency(identity: PackageIdentity(location: "unrelated")!),
             .unsupportedKind(identity: PackageIdentity(location: "registrykit")!, kind: .registry),
         ])
         let local = try ResolvedPackagesFile.decode(fixture("Package.resolved.v2"))
-        #expect(LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/LocalKit")], resolved: local)
+        #expect(LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/LocalKit")], resolved: local, observedOrigins: [:])
             == [.unsupportedKind(identity: PackageIdentity(location: "localkit")!, kind: .localSourceControl)])
     }
 
@@ -80,17 +82,17 @@ import Testing
         resolved = ResolvedPackagesFile(version: 3, pins: resolved.pins + [
             .init(identity: PackageIdentity(location: "sharedui")!, kind: .remoteSourceControl, location: "https://github.com/Other/SharedUI.git", revision: nil, version: "0.1.0", branch: nil),
         ])
-        #expect(LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/SharedUI")], resolved: resolved)
+        #expect(LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/SharedUI")], resolved: resolved, observedOrigins: [:])
             == [.collision(identity: PackageIdentity(location: "sharedui")!, locations: ["https://github.com/Other/SharedUI.git", "https://github.com/PicoMLX/SharedUI.git"])])
 
         let clean = try ResolvedPackagesFile.decode(fixture("Package.resolved.v3"))
-        let twoSelected = LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/SharedUI"), package("https://github.com/Fork/SharedUI")], resolved: clean)
+        let twoSelected = LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/SharedUI"), package("https://github.com/Fork/SharedUI")], resolved: clean, observedOrigins: [:])
         #expect(twoSelected.allSatisfy { if case .collision = $0 { true } else { false } })
     }
 
     @Test func appRepositoryIsIgnoredByTheMatcher() throws {
         let resolved = try ResolvedPackagesFile.decode(fixture("Package.resolved.v3"))
         let app = WorkspaceRepository(role: .app, remote: RemoteURL("https://github.com/PicoMLX/MyApp")!, baseBranch: BranchName("main")!, taskBranch: BranchName("feature/1")!)
-        #expect(LocalOverrideMatcher.match(selected: [app], resolved: resolved).isEmpty)
+        #expect(LocalOverrideMatcher.match(selected: [app], resolved: resolved, observedOrigins: [:]).isEmpty)
     }
 }

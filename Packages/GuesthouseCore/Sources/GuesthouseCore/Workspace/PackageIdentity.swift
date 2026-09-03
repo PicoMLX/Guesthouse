@@ -23,6 +23,15 @@ public struct PackageIdentity: Hashable, Sendable, Codable, CustomStringConverti
         rawValue = remote.name.lowercased()
     }
 
+    /// The identity SwiftPM derives from a local checkout directory: the basename with a
+    /// terminal lowercase `.git` removed, lowercased. This is the rule that decides whether a
+    /// local package can replace a pinned dependency.
+    public init(checkoutName: DirectoryName) {
+        var name = checkoutName.rawValue
+        if name.hasSuffix(".git") { name = String(name.dropLast(4)) }
+        rawValue = name.lowercased()
+    }
+
     /// An identity exactly as `Package.resolved` spells it. SwiftPM has already canonicalized
     /// it, so no location rules (such as dropping `.git`) are applied again.
     public init?(resolvedIdentity: String) {
@@ -127,15 +136,19 @@ public enum LocalOverrideMatcher {
         case checkoutNameMismatch(identity: PackageIdentity, checkout: String)
         /// The checkout's actual `origin` is not the selected repository.
         case originMismatch(identity: PackageIdentity, expected: String, observed: String)
+        /// No `origin` was read for the checkout, so the clone was never inspected. An
+        /// override is never approved on an unread checkout.
+        case originUnknown(identity: PackageIdentity, checkout: String)
     }
 
     /// - Parameters:
     ///   - selected: the repositories the workspace names.
     ///   - resolved: the app's `Package.resolved`.
     ///   - observedOrigins: the `origin` remote of each existing checkout, keyed by checkout
-    ///     name, as read from the clone by the caller; a checkout whose origin differs from the
-    ///     selected repository is refused rather than trusted.
-    public static func match(selected: [WorkspaceRepository], resolved: ResolvedPackagesFile, observedOrigins: [DirectoryName: RemoteURL] = [:]) -> [MatchResult] {
+    ///     name, as read from the clone by the caller. Every selected package needs an entry:
+    ///     an origin that differs is refused, and one that was never read is refused too,
+    ///     since an unread checkout is not evidence of anything.
+    public static func match(selected: [WorkspaceRepository], resolved: ResolvedPackagesFile, observedOrigins: [DirectoryName: RemoteURL]) -> [MatchResult] {
         let packages = selected.filter { $0.role == .package }
         var results: [MatchResult] = []
         let selectedIdentities = Dictionary(grouping: packages, by: { PackageIdentity(remote: $0.remote) })
@@ -165,13 +178,17 @@ public enum LocalOverrideMatcher {
                 continue
             }
             // SwiftPM derives the local package's identity from the directory name, so the
-            // checkout must carry the repository's name (or its derived safe form).
-            let derived = DirectoryName.derived(from: repository.remote.name).identity
-            guard repository.checkoutName.identity == identity.rawValue || repository.checkoutName.identity == derived else {
+            // checkout's own identity must equal the dependency's. A name the workspace had
+            // to derive differently is refused rather than approved under another identity.
+            guard PackageIdentity(checkoutName: repository.checkoutName) == identity else {
                 results.append(.checkoutNameMismatch(identity: identity, checkout: repository.checkoutName.rawValue))
                 continue
             }
-            if let origin = observedOrigins[repository.checkoutName], origin != repository.remote {
+            guard let origin = observedOrigins[repository.checkoutName] else {
+                results.append(.originUnknown(identity: identity, checkout: repository.checkoutName.rawValue))
+                continue
+            }
+            guard origin == repository.remote else {
                 results.append(.originMismatch(identity: identity, expected: repository.remote.canonical, observed: origin.canonical))
                 continue
             }
