@@ -36,12 +36,14 @@ import Testing
         let chmod = Process()
         chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
         chmod.arguments = ["+a", "everyone allow read,list", target.path]
+        chmod.environment = [:]
         try chmod.run()
         chmod.waitUntilExit()
         try #require(chmod.terminationStatus == 0)
-        #expect(RuntimeStorage.hasAccessControlEntries(target))
+        #expect(try RuntimeStorage.hasAccessControlEntries(target))
         _ = try RuntimeStorage(root: root)
-        #expect(!RuntimeStorage.hasAccessControlEntries(target))
+        #expect(try !RuntimeStorage.hasAccessControlEntries(target))
+        #expect(throws: RuntimeStorageError.self) { try RuntimeStorage.hasAccessControlEntries(root.appending(path: "missing")) }
     }
 
     @Test func errorsAreActionable() {
