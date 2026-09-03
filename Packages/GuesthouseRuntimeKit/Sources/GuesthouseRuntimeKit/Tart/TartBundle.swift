@@ -13,6 +13,7 @@ public enum TartVerificationError: Error, Hashable, Sendable {
     case requirementNotMet(status: Int32)
     case entitlementMissing(String)
     case digestMismatch
+    case archiveUnreadable
 }
 
 /// What verification established about a bundle.
@@ -44,6 +45,15 @@ public struct TartBundle: Hashable, Sendable {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
         return TartBundle(url: url)
+    }
+
+    /// The version the bundle claims in its Info.plist, read without executing anything.
+    public var claimedVersion: TartVersion? {
+        guard let data = try? Data(contentsOf: infoPlist),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let text = plist["CFBundleShortVersionString"] as? String
+        else { return nil }
+        return TartVersion(parsing: text)
     }
 
     /// Verifies the bundle against the pinned release: identifier and version from Info.plist,
@@ -102,7 +112,14 @@ public struct TartBundle: Hashable, Sendable {
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { throw .bundleMissing(path: fileURL.path) }
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+        while true {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: 1 << 20)
+            } catch {
+                throw .archiveUnreadable
+            }
+            guard let chunk, !chunk.isEmpty else { break }
             hasher.update(data: chunk)
         }
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()

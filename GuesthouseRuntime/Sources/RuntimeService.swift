@@ -157,26 +157,51 @@ final class RuntimeService: Sendable {
     /// `runtimeVersion` reports the runtime as not located. A bundle that fails verification
     /// is reported with `verified: false` and its claimed version, never treated as usable.
     func discoverTart() async {
+        let storage: RuntimeStorage
         do {
-            let storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
-            guard let bundle = TartBundle.locate(in: storage) else {
-                log.notice("no Tart bundle at the pinned location")
-                return
-            }
-            let verified: Bool
-            do {
-                _ = try bundle.verify()
-                verified = true
-            } catch {
-                log.error("Tart bundle failed verification: \(String(describing: error), privacy: .public)")
-                verified = false
-            }
-            let version = try await TartBackend(bundle: bundle, storage: storage, runner: ProcessRunner()).version()
-            tartInfo.withLock { $0 = .init(version: version.description, verified: verified) }
-            log.notice("Tart \(version.description, privacy: .public) located, verified: \(verified, privacy: .public)")
+            storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
         } catch {
-            log.error("Tart discovery failed: \(String(describing: error), privacy: .public)")
+            log.error("runtime storage unavailable: \(Self.describe(error), privacy: .public)")
+            tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: .runtimeMissing) }
+            return
         }
+        guard let bundle = TartBundle.locate(in: storage) else {
+            log.notice("no Tart bundle at the pinned location")
+            tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: .runtimeMissing) }
+            return
+        }
+        // Never execute a bundle that failed verification: only its metadata is reported.
+        do {
+            _ = try bundle.verify()
+        } catch {
+            log.error("Tart bundle failed verification: \(Self.describe(error), privacy: .public)")
+            let claimed = bundle.claimedVersion?.description
+            tartInfo.withLock { $0 = .init(version: claimed, verified: false, problem: .runtimeIncompatible(found: claimed.map { SanitizedText($0) }, required: TartPin.releaseTag)) }
+            return
+        }
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: ProcessRunner())
+        let version: TartVersion
+        do {
+            version = try await backend.version()
+        } catch {
+            log.error("verified Tart bundle could not report its version: \(Self.describe(error), privacy: .public)")
+            tartInfo.withLock { $0 = .init(version: bundle.claimedVersion?.description, verified: true, problem: .toolMismatch(tool: "tart", found: nil, expected: TartPin.releaseTag)) }
+            return
+        }
+        guard version == TartPin.version else {
+            log.error("Tart \(version.description, privacy: .public) is not the pinned \(TartPin.releaseTag, privacy: .public)")
+            tartInfo.withLock { $0 = .init(version: version.description, verified: true, problem: .runtimeIncompatible(found: SanitizedText(version.description), required: TartPin.releaseTag)) }
+            return
+        }
+        tartInfo.withLock { $0 = .init(version: version.description, verified: true) }
+        log.notice("Tart \(version.description, privacy: .public) located and verified")
+    }
+
+    /// Error text for the log: the error's case name only, never its payload, which can hold
+    /// paths or process output.
+    static func describe(_ error: any Error) -> String {
+        let text = String(describing: error)
+        return String(text.prefix { $0 != "(" && $0 != ":" })
     }
 
     /// Per-session state: the in-flight request count used for the concurrency cap.

@@ -50,6 +50,7 @@ import Testing
         #expect(TartVersion(parsing: "2.36.0\nwarning: something") == nil, "extra lines are not a version")
         #expect(TartVersion(parsing: "2.36.0 extra") == nil)
         #expect(TartVersion(parsing: TartPin.releaseTag) == TartPin.version)
+        #expect(TartPin.version.description == "2.36.0", "the patch component is preserved for exact comparisons")
     }
 
     @Test func parsesExactlyOneIPAddress() throws {

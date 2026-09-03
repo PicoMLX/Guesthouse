@@ -61,6 +61,7 @@ struct DummyBundle {
         let wrongID = try await DummyBundle(root: root.appending(path: "id"), identifier: "com.example.tart", sign: false)
         #expect(throws: TartVerificationError.bundleIdentifierMismatch(found: "com.example.tart")) { try TartBundle(url: wrongID.url).verify() }
         let wrongVersion = try await DummyBundle(root: root.appending(path: "version"), version: "2.35.0", sign: false)
+        #expect(TartBundle(url: wrongVersion.url).claimedVersion?.description == "2.35.0", "claimed version comes from metadata, not execution")
         #expect(throws: TartVerificationError.versionMismatch(found: "2.35.0")) { try TartBundle(url: wrongVersion.url).verify() }
         let noExecutable = try await DummyBundle(root: root.appending(path: "exe"), executable: false, sign: false)
         #expect(throws: TartVerificationError.executableMissing) { try TartBundle(url: noExecutable.url).verify() }
@@ -87,6 +88,9 @@ struct DummyBundle {
         hasher.update(Data(repeating: 0xAB, count: 3_000_000))
         try TartBundle.verifyArchiveDigest(of: file, expected: hasher.hex)
         #expect(throws: TartVerificationError.self) { try TartBundle.verifyArchiveDigest(of: root.appending(path: "missing.bin"), expected: hasher.hex) }
+        let directory = root.appending(path: "dir.bin")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        #expect(throws: TartVerificationError.self) { try TartBundle.verifyArchiveDigest(of: directory, expected: hasher.hex) }
     }
 
     @Test func versionRunsTartWithOnlyTartHomeAndParsesStrictly() async throws {

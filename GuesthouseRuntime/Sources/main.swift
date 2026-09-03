@@ -8,7 +8,14 @@ import XPC
 // identifier; the same requirement is re-checked per message in `RuntimeService`.
 
 let service = RuntimeService()
-Task { await service.discoverTart() }
+// Discovery (signature check plus one `tart --version`) completes before the listener
+// activates, so the very first `runtimeVersion` reply already reflects the installed runtime.
+let discovery = DispatchSemaphore(value: 0)
+Task {
+    await service.discoverTart()
+    discovery.signal()
+}
+discovery.wait()
 let listener: XPCListener
 do {
     listener = try XPCListener(service: RuntimeService.serviceName, requirement: RuntimeService.peerRequirement) { request in
