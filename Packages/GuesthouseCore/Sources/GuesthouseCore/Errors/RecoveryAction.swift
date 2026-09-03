@@ -19,6 +19,11 @@ public enum RecoveryAction: Codable, Hashable, Sendable {
     case signInAgain
     /// Free disk space, then continue.
     case freeDiskSpace
+    /// Delete a development Mac the user no longer needs. Always offered after `exportWork`,
+    /// never as the first choice (MVP-PLAN.md §2: deletion must not look like a routine fix).
+    case deleteEnvironment
+    /// Reinstall Guesthouse itself, for example when the app and its embedded service disagree.
+    case reinstallApp
     /// Abandon the operation.
     case cancel
 }
