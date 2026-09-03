@@ -13,7 +13,7 @@ final class DebugRuntimeProbe {
     var result: String = "Not requested"
     private let backend: any RuntimeBackend
 
-    init(backend: any RuntimeBackend = RuntimeClient()) {
+    init(backend: any RuntimeBackend) {
         self.backend = backend
     }
 
