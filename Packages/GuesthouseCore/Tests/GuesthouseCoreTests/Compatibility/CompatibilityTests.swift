@@ -20,7 +20,9 @@ import Testing
         #expect(range.contains(try #require(SemanticVersion("26.4"))))
         #expect(range.contains(try #require(SemanticVersion("27.0"))))
         #expect(!range.contains(try #require(SemanticVersion("26.3.9"))))
-        let closed = VersionRange(minimum: try #require(SemanticVersion("26.2")), maximum: try #require(SemanticVersion("26.9")))
+        let lower = try #require(SemanticVersion("26.2"))
+        let upper = try #require(SemanticVersion("26.9"))
+        let closed = VersionRange(minimum: lower, maximum: upper)
         #expect(closed.contains(try #require(SemanticVersion("26.9"))))
         #expect(!closed.contains(try #require(SemanticVersion("26.10"))))
     }
