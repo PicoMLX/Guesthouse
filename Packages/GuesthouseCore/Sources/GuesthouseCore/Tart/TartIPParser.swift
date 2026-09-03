@@ -12,7 +12,7 @@ public struct GuestIPAddress: Hashable, Sendable, CustomStringConvertible {
 
     public init?(_ string: String) {
         let text = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !text.contains(where: \.isWhitespace) else { return nil }
+        guard !text.isEmpty, !text.contains(where: \.isWhitespace), !text.utf8.contains(0) else { return nil }
         var v4 = in_addr()
         if text.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 {
             rawValue = text

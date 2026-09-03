@@ -37,7 +37,7 @@ public enum TartErrorClassifier {
         if has("is not running") { return .notRunning }
         if has("no ip address found") { return .noIPAddress }
         if has("failed to lock ") { return .lockHeld }
-        if has("already initialized") { return .directoryAlreadyInitialized }
+        if has("vm directory is already initialized") { return .directoryAlreadyInitialized }
         if has("disk") && has("in use") { return .diskInUse }
         if has("the number of vms exceeds the system limit") { return .virtualMachineLimitExceeded }
         if has("is running") || has("must be stopped") { return .requiresStoppedVM }

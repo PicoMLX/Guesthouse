@@ -31,6 +31,8 @@ import Testing
         #expect(throws: TartParseError.unknownValue(field: "State", value: "hibernating")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":false,\"State\":\"hibernating\"}]") }
         #expect(throws: TartParseError.unknownValue(field: "Source", value: "cloud")) { try TartListParser.parse("[{\"Source\":\"cloud\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
         #expect(try TartListParser.parse("[]").isEmpty)
+        #expect(try TartListParser.parse(fixture("list-empty.json")).isEmpty, "real capture of an empty store")
+        #expect(throws: TartParseError.unknownValue(field: "Disk", value: "-1")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":-1,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
         #expect(throws: TartParseError.unexpectedShape("Disk")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":true,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
         #expect(throws: TartParseError.unexpectedShape("Running")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":1,\"State\":\"stopped\"}]") }
     }
@@ -61,6 +63,8 @@ import Testing
         #expect(throws: TartParseError.notAnIPAddress) { try TartIPParser.parse("999.1.1.1") }
         #expect(throws: TartParseError.notAnIPAddress) { try TartIPParser.parse(fixture("ip-error.txt")) }
         #expect(GuestIPAddress("192.168.64.5 extra") == nil)
+        #expect(GuestIPAddress("192.168.64.5\u{0}junk") == nil)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(GuestIPAddress.self, from: Data("\"192.168.64.5\\u0000junk\"".utf8)) }
         let encoded = try JSONEncoder().encode(v4)
         #expect(String(decoding: encoded, as: UTF8.self) == "\"192.168.64.5\"")
         #expect(try JSONDecoder().decode(GuestIPAddress.self, from: encoded) == v4)
@@ -70,6 +74,7 @@ import Testing
     @Test func classifiesKnownFailures() throws {
         let cases: [(String, TartFailure)] = [
             ("Error: the specified VM \"guesthouse-x\" does not exist", .vmNotFound),
+            (try fixture("vm-does-not-exist.txt"), .vmNotFound),
             ("VM \"guesthouse-x\" is already running!", .alreadyRunning),
             ("VM \"guesthouse-x\" is not running", .notRunning),
             (try fixture("ip-error.txt"), .noIPAddress),
@@ -85,7 +90,7 @@ import Testing
     }
 
     @Test func lookalikePhrasesStayUnknown() {
-        for stderr in ["manifest ghcr.io/x/y:latest does not exist", "failed to open lock file /x/lock: Permission denied", "registry rate limit exceeded, retry later"] {
+        for stderr in ["manifest ghcr.io/x/y:latest does not exist", "failed to open lock file /x/lock: Permission denied", "registry rate limit exceeded, retry later", "OCI cache is already initialized"] {
             guard case .unknown = TartErrorClassifier.classify(stderr: stderr, exitStatus: 1) else { Issue.record("misclassified: \(stderr)"); continue }
         }
     }

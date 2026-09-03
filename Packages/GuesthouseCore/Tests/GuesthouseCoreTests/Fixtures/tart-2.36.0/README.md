@@ -1,7 +1,13 @@
 # Tart 2.36.0 output fixtures
 
-Derived from the Tart sources at tag 2.36.0 (`Sources/tart/Commands/List.swift`,
-`Sources/tart/Formatter/Format.swift`, `Sources/tart/Formatter/HumanReadableByteCount.swift`,
-`Sources/tart/Commands/IP.swift`, `Sources/tart/VMStorageHelper.swift`), not captured from a
-running installation. Verify on hardware during phase-0 gate #35 and replace these files with
-real captures if anything differs.
+Captured from the official 2.36.0 release binary (`tart.tar.gz`, SHA-256
+`c72a8ab8d78a6498a1e42688b1a1ec6c512ce46ca35a3a3be130c3de1440c7e8`, signed by Cirrus Labs, Inc.,
+Team ID `9M2P8L4D89`, bundle identifier `com.github.cirruslabs.tart`) run on the host with an empty
+`TART_HOME`:
+
+- `version.txt`: `tart --version`
+- `list-empty.json`: `tart list --format json` with no VMs
+- `vm-does-not-exist.txt`: stderr of `tart ip does-not-exist` (exit status 2); `tart stop` prints the same text
+
+`list.json` is derived from `Sources/tart/Commands/List.swift` at tag 2.36.0 because capturing a
+populated inventory needs a created VM; gate #35 replaces it with a real capture.
