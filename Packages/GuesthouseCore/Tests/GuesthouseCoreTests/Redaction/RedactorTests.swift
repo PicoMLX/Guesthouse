@@ -19,6 +19,7 @@ import Testing
         ("password with escaped quote", "password: \"correct\\\"horse battery\"", "horse battery"),
         ("url password containing at", "cloning https://user:p@ss@example.com/repo.git", "p@ss"),
         ("token wrapped in ansi color", "\u{1B}[31mghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\u{1B}[0m", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"),
+        ("token wrapped in colon-parameter sgr", "\u{1B}[38:2:255:0:0mghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\u{1B}[0m", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"),
         ("url userinfo", "cloning https://ronald:hunter2secret@github.com/PicoMLX/Guesthouse.git", "hunter2secret"),
         ("password label", "password: hunter2secret", "hunter2secret"),
         ("passphrase label", "Passphrase=\"correct horse battery\"", "correct horse battery"),

@@ -88,7 +88,7 @@ public struct Redactor: Sendable {
     /// so this container vouches for it: nothing here is ever mutated after initialization.
     private struct Patterns: @unchecked Sendable {
         /// ANSI CSI and other escape sequences.
-        let terminalEscape = #/\u{1B}(?:\[[0-9;?]*[ -\/]*[@-~]|[@-Z\\-_])/#
+        let terminalEscape = #/\u{1B}(?:\[[0-9;:?<=>]*[ -\/]*[@-~]|[@-Z\\-_])/#
         /// A folded header: the label alone on a line, value on the next.
         let authorizationLabelOnly = #/\s*authorization:\s*/#.ignoresCase()
         /// The continuation of a folded header: leading whitespace (folding requires it) and
