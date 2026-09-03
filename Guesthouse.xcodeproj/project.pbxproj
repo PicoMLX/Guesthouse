@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		F8ACD8A830493E2C00550943 /* VirtualMacCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* VirtualMacCore */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		F8976E98304933D30071C234 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F8ACD8A830493E2C00550943 /* VirtualMacCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = Guesthouse;
 			packageProductDependencies = (
+				F8ACD8A730493E2C00550943 /* VirtualMacCore */,
 			);
 			productName = Guesthouse;
 			productReference = F8976E8A304933D10071C234 /* Guesthouse.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = F8976E81304933D10071C234;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/VirtualMacCore" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F8976E8B304933D10071C234 /* Products */;
 			projectDirPath = "";
@@ -423,7 +432,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
@@ -467,7 +476,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
@@ -615,6 +624,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/VirtualMacCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/VirtualMacCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F8ACD8A730493E2C00550943 /* VirtualMacCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VirtualMacCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = F8976E82304933D10071C234 /* Project object */;
 }
