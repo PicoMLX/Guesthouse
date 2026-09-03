@@ -29,8 +29,15 @@ import Testing
         #expect(error == .invalidRequest(.tooManyInFlight))
     }
 
-    @Test func undecodableMessagesAreMalformed() {
-        guard case .reply(.failed(_, let error)) = RuntimeDispatcher.undecodable() else { Issue.record("expected reply"); return }
+    @Test func protocolMismatchDuringDecodingRepliesAndClosesTheSession() {
+        let clientVersion = RuntimeProtocolVersion(RuntimeProtocolVersion.current.rawValue - 1)
+        let mismatch = RuntimeRequestEnvelope.ProtocolMismatch(client: clientVersion)
+        guard case .replyAndClose(.failed(_, let error)) = RuntimeDispatcher.decodingFailure(mismatch) else { Issue.record("expected replyAndClose"); return }
+        #expect(error == .protocolMismatch(client: clientVersion.rawValue, service: RuntimeProtocolVersion.current.rawValue))
+    }
+
+    @Test func otherDecodingFailuresAreMalformed() {
+        guard case .reply(.failed(_, let error)) = RuntimeDispatcher.decodingFailure(DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "secret input"))) else { Issue.record("expected reply"); return }
         #expect(error == .invalidRequest(.malformed))
     }
     @Test func anOverCapPeerIsRefusedBeforeAnythingIsDecoded() {

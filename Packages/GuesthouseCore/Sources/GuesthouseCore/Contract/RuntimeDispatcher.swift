@@ -20,9 +20,17 @@ public enum RuntimeDispatcher: Sendable {
     /// beyond this is a bug or an attempt to exhaust the service.
     public static let maximumInFlightRequestsPerSession = 8
 
-    /// Decides what to do with a message that failed to decode as an envelope.
-    public static func undecodable() -> Decision {
-        .reply(.failed(OperationID(), .invalidRequest(.malformed)))
+    /// Decides what to do when envelope decoding fails.
+    ///
+    /// The envelope decoder deliberately rejects another protocol version before decoding its
+    /// version-specific payload. Preserve that typed failure so stale peers get an actionable
+    /// response and the service closes the incompatible session. All other decoding failures are
+    /// malformed requests and must not echo attacker-controlled decoder diagnostics.
+    public static func decodingFailure(_ error: any Error) -> Decision {
+        if let mismatch = error as? RuntimeRequestEnvelope.ProtocolMismatch {
+            return .replyAndClose(.failed(OperationID(), mismatch.error))
+        }
+        return .reply(.failed(OperationID(), .invalidRequest(.malformed)))
     }
 
     /// Decides what to do before anything is decoded: the concurrency cap costs nothing to

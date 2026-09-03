@@ -46,7 +46,7 @@ final class RuntimeService: Sendable {
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error("undecodable request rejected")
-            return reply(RuntimeDispatcher.undecodable(), session: session)
+            return reply(RuntimeDispatcher.decodingFailure(error), session: session)
         }
         return reply(RuntimeDispatcher.decide(envelope, inFlight: inFlight), session: session)
     }
