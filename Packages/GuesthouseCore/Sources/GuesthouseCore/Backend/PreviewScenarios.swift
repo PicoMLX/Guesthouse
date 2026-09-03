@@ -78,6 +78,7 @@ public enum PreviewScenarios: Sendable {
         let backend = FakeRuntimeBackend(delay: .milliseconds(800))
         let inFlight = OperationID()
         await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: inFlight, reconciledAt: date))
+        await backend.useOperationID(inFlight, forNext: "startEnvironment")
         await backend.script("startEnvironment", .succeed(phases: [
             ProgressPhase(kind: .verifyingRuntime), ProgressPhase(kind: .startingVM), ProgressPhase(kind: .waitingForNetwork, fraction: 0.3), ProgressPhase(kind: .waitingForNetwork, fraction: 0.9),
         ], status: EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready, reconciledAt: date)))

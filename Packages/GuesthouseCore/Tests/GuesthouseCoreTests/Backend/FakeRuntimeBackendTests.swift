@@ -86,6 +86,32 @@ import Testing
         #expect(await backend.receivedRequests == [.startEnvironment(environment, StartOptions()), .cancelOperation(id)])
     }
 
+    @Test func cancelRequestsHonorScenarios() async throws {
+        let backend = FakeRuntimeBackend()
+        await backend.script("startEnvironment", .hang)
+        await backend.script("cancelOperation", .disconnect())
+        let stream = backend.send(.startEnvironment(environment, StartOptions()))
+        var iterator = stream.makeAsyncIterator()
+        guard case .accepted(let id) = try await iterator.next() else { Issue.record("no accepted"); return }
+        await #expect(throws: RuntimeConnectionInterrupted.self) {
+            for try await _ in backend.send(.cancelOperation(id)) {}
+        }
+        await backend.script("cancelOperation", .fail(error: .unauthorizedCaller))
+        let events = try await collect(backend.send(.cancelOperation(id)))
+        #expect(events == [.failed(id, .unauthorizedCaller)])
+        #expect(await backend.receivedRequests.count == 3)
+    }
+
+    @Test func seededOperationIDIsReusedByTheNextRequest() async throws {
+        let backend = FakeRuntimeBackend()
+        let id = OperationID()
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        let events = try await collect(backend.send(.startEnvironment(environment, StartOptions())))
+        #expect(events.first == .accepted(id))
+        let again = try await collect(backend.send(.startEnvironment(environment, StartOptions())))
+        #expect(again.first != .accepted(id), "the seeded id is used once")
+    }
+
     @Test func scriptedFailuresApplyToQueries() async throws {
         let backend = FakeRuntimeBackend()
         await backend.script("environmentStatus", .disconnect())
@@ -154,8 +180,10 @@ import Testing
         #expect(await running.backend.status(of: runningID)?.vm == .stopped)
         let inProgress = await PreviewScenarios.operationInProgress()
         let progressID = inProgress.snapshot.environments[0].id
-        #expect(await inProgress.backend.status(of: progressID)?.inFlightOperation != nil)
+        let seeded = try #require(await inProgress.backend.status(of: progressID)?.inFlightOperation)
         #expect(inProgress.initialRequest == .startEnvironment(progressID, StartOptions()))
+        let first = try await inProgress.backend.send(inProgress.initialRequest!).first { _ in true }
+        #expect(first == .accepted(seeded), "preview progress events carry the seeded operation id")
         let repair = await PreviewScenarios.environmentNeedingRepair()
         let id = repair.snapshot.environments[0].id
         let events = try await collect(repair.backend.send(.startEnvironment(id, StartOptions())))
