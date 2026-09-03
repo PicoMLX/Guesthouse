@@ -64,6 +64,31 @@ public enum VMSlotError: Error, Hashable, Sendable {
     case unknownEnvironment(EnvironmentID)
 }
 
+extension VMSlotError: LocalizedError {
+    /// Plain-language explanation for the user.
+    public var userMessage: String {
+        switch self {
+        case .inventoryFull(let maximum):
+            "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones."
+        case .unknownEnvironment(let id):
+            "No development Mac with the identifier \(id) is registered on this Mac."
+        }
+    }
+
+    /// What the user can do about it.
+    public var recoveryMessage: String {
+        switch self {
+        case .inventoryFull:
+            "Delete or export an existing development Mac to make room for another."
+        case .unknownEnvironment:
+            "Check the environment list; the record may have been removed by a repair or deletion."
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
+    public var recoverySuggestion: String? { recoveryMessage }
+}
+
 extension VMSlotInventory: Codable {
     private enum CodingKeys: String, CodingKey {
         case slots

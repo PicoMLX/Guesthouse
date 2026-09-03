@@ -11,13 +11,15 @@ public struct EnvironmentID: Hashable, Sendable, CustomStringConvertible {
         self.uuid = uuid
     }
 
-    /// The app-managed Tart VM name derived from this identity, for example `guesthouse-1a2b3c4d`.
+    /// The app-managed Tart VM name derived from this identity, for example
+    /// `guesthouse-1a2b3c4d-0000-4000-8000-000000000000`.
     ///
-    /// Stable for the life of the environment. Eight hex characters are enough to keep the
-    /// two app-managed VMs (MVP-PLAN.md §1) apart and to recognize them in `tart list`.
+    /// Uses the whole UUID so two environments can never share a VM bundle: lifecycle
+    /// operations address VMs by this name, and a truncated identifier could start, preserve,
+    /// or delete the wrong environment. The `guesthouse-` prefix marks app-managed VMs in
+    /// `tart list`.
     public var tartVMName: String {
-        let hex = uuid.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
-        return "guesthouse-\(hex.prefix(8))"
+        "guesthouse-\(uuid.uuidString.lowercased())"
     }
 
     public var description: String { uuid.uuidString }

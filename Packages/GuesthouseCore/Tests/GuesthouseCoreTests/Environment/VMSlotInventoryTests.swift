@@ -56,6 +56,15 @@ import Testing
         }
     }
 
+    @Test func errorsCarryUserFacingMessageAndRecovery() {
+        let full = VMSlotError.inventoryFull(maximum: 2)
+        #expect(full.errorDescription?.contains("at most 2") == true)
+        #expect(full.recoverySuggestion?.isEmpty == false)
+        let unknown = VMSlotError.unknownEnvironment(a)
+        #expect(unknown.errorDescription?.contains(a.description) == true)
+        #expect(unknown.recoverySuggestion?.isEmpty == false)
+    }
+
     @Test func roundTripsThroughJSON() throws {
         var inventory = VMSlotInventory()
         try inventory.reserve(a)
