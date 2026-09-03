@@ -27,6 +27,11 @@ public struct ResourcePolicy: Hashable, Sendable {
     public init() {}
 
     public static let standard = ResourcePolicy()
+
+    /// A policy whose blocking minimum exceeds its recommendation is contradictory; the
+    /// preflight evaluates the minimum first regardless, and this check makes the mistake
+    /// visible in tests.
+    public var isWellFormed: Bool { minimumMemoryBytes <= recommendedMemoryBytes }
 }
 
 extension ResourcePreset {
