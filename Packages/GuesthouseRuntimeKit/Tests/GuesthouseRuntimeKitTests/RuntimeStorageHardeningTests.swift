@@ -10,6 +10,16 @@ import Testing
         try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup ?? false
     }
 
+    func addEveryoneReadACL(to url: URL) throws {
+        let chmod = Process()
+        chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmod.arguments = ["+a", "everyone allow read,list", url.path]
+        chmod.environment = [:]
+        try chmod.run()
+        chmod.waitUntilExit()
+        try #require(chmod.terminationStatus == 0)
+    }
+
     @Test func staleBackupExclusionsAreClearedOnIncludedDirectories() throws {
         _ = try RuntimeStorage(root: root)
         for subdirectory in [RuntimeStorage.Subdirectory.state, .vms] {
@@ -33,17 +43,37 @@ import Testing
     @Test func accessControlEntriesAreRemoved() throws {
         _ = try RuntimeStorage(root: root)
         let target = root.appending(path: RuntimeStorage.Subdirectory.sshMaintenance.rawValue)
-        let chmod = Process()
-        chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmod.arguments = ["+a", "everyone allow read,list", target.path]
-        chmod.environment = [:]
-        try chmod.run()
-        chmod.waitUntilExit()
-        try #require(chmod.terminationStatus == 0)
+        try addEveryoneReadACL(to: target)
         #expect(try RuntimeStorage.hasAccessControlEntries(target))
         _ = try RuntimeStorage(root: root)
         #expect(try !RuntimeStorage.hasAccessControlEntries(target))
         #expect(throws: RuntimeStorageError.self) { try RuntimeStorage.hasAccessControlEntries(root.appending(path: "missing")) }
+    }
+
+    @Test func strictVerificationRejectsPermissionDriftAfterInitialization() throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "mode-drift"))
+        let target = storage.url(for: .runtime)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "permissions are not 0700")) {
+            try RuntimeStorage.verify(target)
+        }
+
+        _ = try RuntimeStorage(root: storage.root)
+        try RuntimeStorage.verify(target)
+    }
+
+    @Test func strictVerificationRejectsACLDriftAfterInitialization() throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "acl-drift"))
+        let target = storage.url(for: .runtime)
+        try addEveryoneReadACL(to: target)
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "carries access control entries")) {
+            try RuntimeStorage.verify(target)
+        }
+
+        _ = try RuntimeStorage(root: storage.root)
+        try RuntimeStorage.verify(target)
     }
 
     @Test func errorsAreActionable() {

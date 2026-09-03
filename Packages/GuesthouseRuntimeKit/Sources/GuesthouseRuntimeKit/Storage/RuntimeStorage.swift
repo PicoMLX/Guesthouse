@@ -102,7 +102,7 @@ public struct RuntimeStorage: Sendable {
                 // object that now exists before translating the creation failure, so a
                 // dangling link can never acquire writable-storage recovery actions.
                 if lstat(url.path, &info) == 0 {
-                    try verify(url)
+                    _ = try verifyStructure(url)
                 } else {
                     let retryInspectionError = errno
                     if isPathTraversalFailure(retryInspectionError) {
@@ -115,7 +115,7 @@ public struct RuntimeStorage: Sendable {
         // Unlike FileManager.fileExists, lstat observes a symbolic link even when its target
         // is absent. Verify before changing permissions or backup metadata so every link is
         // refused with preservation-first guidance.
-        try verify(url)
+        _ = try verifyStructure(url)
         do {
             try manager.setAttributes([.posixPermissions: directoryPermissions], ofItemAtPath: url.path)
         } catch {
@@ -131,6 +131,9 @@ public struct RuntimeStorage: Sendable {
         } catch {
             throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
         }
+        // Do not assume the filesystem honored the requested protection. Re-read the final mode
+        // and ACL state after every mutation and fail closed if either is still permissive.
+        try verify(url)
     }
 
     /// If a missing suffix sits below a path component that cannot resolve to a directory,
@@ -176,9 +179,21 @@ public struct RuntimeStorage: Sendable {
         code == ENOENT || code == ENOTDIR || code == ELOOP
     }
 
-    /// A real directory owned by the current user, not a link. Read with `lstat`, so a missing
-    /// or unrepresentable owner is a refusal, never a pass.
+    /// A private directory owned by the current user, not a link. This is the strict check used
+    /// after initialization and whenever runtime code re-enters the storage tree.
     static func verify(_ url: URL) throws {
+        let info = try verifyStructure(url)
+        guard info.st_mode & mode_t(0o7777) == mode_t(directoryPermissions) else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "permissions are not 0700")
+        }
+        guard try !hasAccessControlEntries(url) else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "carries access control entries")
+        }
+    }
+
+    /// Structural preflight used only while preparing storage. Existing directories may start
+    /// with repairable permissions or ACLs, but links and foreign-owned objects are never changed.
+    private static func verifyStructure(_ url: URL) throws -> stat {
         var info = stat()
         guard lstat(url.path, &info) == 0 else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
@@ -191,6 +206,7 @@ public struct RuntimeStorage: Sendable {
         guard info.st_uid == getuid() else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "owned by another user")
         }
+        return info
     }
 
     /// POSIX mode `0700` does not remove access control entries an existing or inherited
