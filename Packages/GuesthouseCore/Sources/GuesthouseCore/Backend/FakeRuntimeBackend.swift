@@ -30,6 +30,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
     private var canceledOperations: Set<OperationID> = []
+    private var pendingOperationIDs: [String: OperationID] = [:]
 
     private nonisolated let ticketCounter = Mutex<UInt64>(0)
     private var servingTicket: UInt64 = 0
@@ -58,6 +59,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     public func status(of id: EnvironmentID) -> EnvironmentStatus? {
         statuses[id]
+    }
+
+    /// Makes the next request with this case name use `id` as its operation id, so a preview
+    /// or test can correlate a pre-seeded `EnvironmentStatus.inFlightOperation` with the events.
+    public func useOperationID(_ id: OperationID, forNext caseName: String) {
+        pendingOperationIDs[caseName] = id
     }
 
     // MARK: - RuntimeBackend
@@ -102,16 +109,28 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             return
 
         case .cancelOperation(let id):
-            canceledOperations.insert(id)
             advanceTurn()
-            continuation.finish()
+            await pause()
+            switch scenario {
+            case .disconnect:
+                continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
+            case .fail(_, let error):
+                continuation.yield(.failed(id, error))
+                continuation.finish()
+            case .hang:
+                while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+                continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
+            case .succeed:
+                canceledOperations.insert(id)
+                continuation.finish()
+            }
             return
 
         case .startEnvironment, .stopEnvironment, .importXcode:
             break
         }
 
-        let id = OperationID()
+        let id = pendingOperationIDs.removeValue(forKey: request.caseName) ?? OperationID()
         continuation.yield(.accepted(id))
         advanceTurn()
 
