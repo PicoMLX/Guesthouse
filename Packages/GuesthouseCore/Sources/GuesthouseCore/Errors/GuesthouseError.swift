@@ -83,7 +83,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible(let found, let required):
-            "The installed virtual machine runtime (\(found.map(Self.sanitize) ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
+            "The installed virtual machine runtime (\(found.map { Self.sanitize($0) } ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
         case .guestNotReachable(let id):
             "The development Mac \(id.tartVMName) is not answering over the network."
         case .hostKeyChanged(let id):
@@ -95,9 +95,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired(let provider):
             "Your \(Self.name(of: provider)) sign-in on the development Mac has expired."
         case .toolMismatch(let tool, let found, let expected):
-            "The development Mac has \(Self.sanitize(tool)) \(found.map(Self.sanitize) ?? "missing") but the tested version is \(Self.sanitize(expected))."
+            "The development Mac has \(Self.sanitize(tool)) \(found.map { Self.sanitize($0) } ?? "missing") but the tested version is \(Self.sanitize(expected))."
         case .xcodeComponentsIncomplete(let missing):
-            "Xcode is installed on the development Mac but is missing required components: \(missing.map(Self.sanitize).joined(separator: ", "))."
+            "Xcode is installed on the development Mac but is missing required components: \(missing.map { Self.sanitize($0) }.joined(separator: ", "))."
         case .vmSlotUnavailable(let maximum):
             "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones. Export any unpublished work from one you no longer need, then delete it to make room."
         case .operationOutcomeUnknown:
