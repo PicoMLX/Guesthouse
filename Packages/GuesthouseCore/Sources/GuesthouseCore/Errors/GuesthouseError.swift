@@ -73,17 +73,17 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
         case .unsupportedHost(.macOSTooOld(let found, let minimum)):
-            "This Mac runs macOS \(found). Guesthouse needs macOS \(minimum) or later."
+            "This Mac runs macOS \(Self.sanitize(found)). Guesthouse needs macOS \(Self.sanitize(minimum)) or later."
         case .unsupportedHost(.insufficientMemory(let found, let minimum)):
             "This Mac has \(Self.formatMemory(found)) of memory. Guesthouse needs at least \(Self.formatMemory(minimum)) to run a development Mac alongside your other apps."
         case .insufficientDisk(let required, let available, let volume):
-            "This step needs \(Self.formatBytes(required)) free on \(volume), but only \(Self.formatBytes(available)) is available."
+            "This step needs \(Self.formatBytes(required)) free on \(Self.sanitize(volume)), but only \(Self.formatBytes(available)) is available."
         case .downloadVerificationFailed(let artifact, let check):
-            "The downloaded \(artifact) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
+            "The downloaded \(Self.sanitize(artifact)) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible(let found, let required):
-            "The installed virtual machine runtime (\(found ?? "unknown version")) is not the tested version \(required)."
+            "The installed virtual machine runtime (\(found.map(Self.sanitize) ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
         case .guestNotReachable(let id):
             "The development Mac \(id.tartVMName) is not answering over the network."
         case .hostKeyChanged(let id):
@@ -95,11 +95,11 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired(let provider):
             "Your \(Self.name(of: provider)) sign-in on the development Mac has expired."
         case .toolMismatch(let tool, let found, let expected):
-            "The development Mac has \(tool) \(found ?? "missing") but the tested version is \(expected)."
+            "The development Mac has \(Self.sanitize(tool)) \(found.map(Self.sanitize) ?? "missing") but the tested version is \(Self.sanitize(expected))."
         case .xcodeComponentsIncomplete(let missing):
-            "Xcode is installed on the development Mac but is missing required components: \(missing.joined(separator: ", "))."
+            "Xcode is installed on the development Mac but is missing required components: \(missing.map(Self.sanitize).joined(separator: ", "))."
         case .vmSlotUnavailable(let maximum):
-            "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones. Delete or export one to create another."
+            "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones. Export any unpublished work from one you no longer need, then delete it to make room."
         case .operationOutcomeUnknown:
             "Guesthouse lost contact with its runtime before this operation reported a result. The operation may or may not have completed."
         case .unauthorizedCaller:
@@ -128,10 +128,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired: [.signInAgain, .cancel]
         case .toolMismatch: [.repair(.tools), .cancel]
         case .xcodeComponentsIncomplete: [.repair(.xcodeComponents), .cancel]
-        case .vmSlotUnavailable: [.exportWork, .cancel]
+        case .vmSlotUnavailable: [.exportWork, .deleteEnvironment, .cancel]
         case .operationOutcomeUnknown: [.inspectState, .cancel]
         case .unauthorizedCaller: [.cancel]
-        case .protocolMismatch: [.repair(.runtime), .cancel]
+        case .protocolMismatch: [.reinstallApp, .cancel]
         case .invalidRequest: [.cancel]
         case .canceled: [.retry, .cancel]
         }
@@ -190,6 +190,19 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         }
     }
 
+    /// Values that can originate outside the app (CLI output, guest responses, file names)
+    /// are reduced to printable characters and a bounded length before interpolation, so a
+    /// message and its `redactedDescription` can never carry injected lines or raw CLI text.
+    static func sanitize(_ value: String, limit: Int = 80) -> String {
+        let printable = value.unicodeScalars.filter { scalar in
+            scalar.properties.generalCategory != .control
+                && scalar.properties.generalCategory != .lineSeparator
+                && scalar.properties.generalCategory != .paragraphSeparator
+        }
+        let text = String(String.UnicodeScalarView(printable))
+        return text.count > limit ? String(text.prefix(limit)) + "…" : text
+    }
+
     private static func formatBytes(_ bytes: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
     }
@@ -216,6 +229,8 @@ extension GuesthouseError: LocalizedError {
         case .openSettings: "Open Settings."
         case .signInAgain: "Sign in again."
         case .freeDiskSpace: "Free up disk space, then try again."
+        case .deleteEnvironment: "Delete a development Mac you no longer need."
+        case .reinstallApp: "Reinstall Guesthouse."
         case .cancel, .none: nil
         }
     }
