@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		F8ACD8A830493E2C00550943 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* GuesthouseCore */; };
+		4DF3B7691BA84C0992A05F43 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9668531454184F48A8F15863 /* GuesthouseCore */; };
+		24C65336F28345A5ACC4C24E /* GuesthouseRuntime.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -25,7 +27,28 @@
 			remoteGlobalIDString = F8976E89304933D10071C234;
 			remoteInfo = Guesthouse;
 		};
+		B736EBAA2A7A4CC5975E5B05 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F8976E82304933D10071C234 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 16255D1DB7F34BFAB6C65BC8;
+			remoteInfo = GuesthouseRuntime;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		7B059FE13FBE429E9CE0FDD6 /* Embed XPC Services */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (
+				24C65336F28345A5ACC4C24E /* GuesthouseRuntime.xpc in Embed XPC Services */,
+			);
+			name = "Embed XPC Services";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Guesthouse Codex VM.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -33,6 +56,7 @@
 		F8976EA1304933D30071C234 /* GuesthouseUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GuesthouseUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8ACD8A93049406300550943 /* MVP-PLAN.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MVP-PLAN.md"; sourceTree = "<group>"; };
 		921BF84465C14B2296CA65E2 /* GuesthouseCore */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = GuesthouseCore; path = Packages/GuesthouseCore; sourceTree = "<group>"; };
+		A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = GuesthouseRuntime.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -49,6 +73,12 @@
 		F8976EA4304933D30071C234 /* GuesthouseUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = GuesthouseUITests;
+			sourceTree = "<group>";
+		};
+		3EAD2573296645A68021C352 /* GuesthouseRuntime */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			name = GuesthouseRuntime;
+			path = GuesthouseRuntime/Sources;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -76,6 +106,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		739B23D1D5D0418FA13E75FD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4DF3B7691BA84C0992A05F43 /* GuesthouseCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -87,6 +125,7 @@
 				F8976E8C304933D10071C234 /* Guesthouse */,
 				F8976E9A304933D30071C234 /* GuesthouseTests */,
 				F8976EA4304933D30071C234 /* GuesthouseUITests */,
+				3EAD2573296645A68021C352 /* GuesthouseRuntime */,
 				F8976E8B304933D10071C234 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -97,6 +136,7 @@
 				F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */,
 				F8976E97304933D30071C234 /* GuesthouseTests.xctest */,
 				F8976EA1304933D30071C234 /* GuesthouseUITests.xctest */,
+				A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -111,10 +151,12 @@
 				F8976E86304933D10071C234 /* Sources */,
 				F8976E87304933D10071C234 /* Frameworks */,
 				F8976E88304933D10071C234 /* Resources */,
+				7B059FE13FBE429E9CE0FDD6 /* Embed XPC Services */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				4A465B87B26A476B8A414EE2 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				F8976E8C304933D10071C234 /* Guesthouse */,
@@ -173,6 +215,29 @@
 			productReference = F8976EA1304933D30071C234 /* GuesthouseUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		16255D1DB7F34BFAB6C65BC8 /* GuesthouseRuntime */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0F136BAB2D67436C81229C09 /* Build configuration list for PBXNativeTarget "GuesthouseRuntime" */;
+			buildPhases = (
+				3F90A9E53755462D9CEF9426 /* Sources */,
+				739B23D1D5D0418FA13E75FD /* Frameworks */,
+				A599CC66E8FD406CA0FDA6CA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				3EAD2573296645A68021C352 /* GuesthouseRuntime */,
+			);
+			name = GuesthouseRuntime;
+			packageProductDependencies = (
+				9668531454184F48A8F15863 /* GuesthouseCore */,
+			);
+			productName = GuesthouseRuntime;
+			productReference = A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */;
+			productType = "com.apple.product-type.xpc-service";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -193,6 +258,9 @@
 					F8976EA0304933D30071C234 = {
 						CreatedOnToolsVersion = 26.6;
 						TestTargetID = F8976E89304933D10071C234;
+					};
+					16255D1DB7F34BFAB6C65BC8 = {
+						CreatedOnToolsVersion = 26.6;
 					};
 				};
 			};
@@ -216,6 +284,7 @@
 				F8976E89304933D10071C234 /* Guesthouse */,
 				F8976E96304933D30071C234 /* GuesthouseTests */,
 				F8976EA0304933D30071C234 /* GuesthouseUITests */,
+				16255D1DB7F34BFAB6C65BC8 /* GuesthouseRuntime */,
 			);
 		};
 /* End PBXProject section */
@@ -236,6 +305,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		F8976E9F304933D30071C234 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A599CC66E8FD406CA0FDA6CA /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -266,6 +342,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		3F90A9E53755462D9CEF9426 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -278,6 +361,11 @@
 			isa = PBXTargetDependency;
 			target = F8976E89304933D10071C234 /* Guesthouse */;
 			targetProxy = F8976EA2304933D30071C234 /* PBXContainerItemProxy */;
+		};
+		4A465B87B26A476B8A414EE2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 16255D1DB7F34BFAB6C65BC8 /* GuesthouseRuntime */;
+			targetProxy = B736EBAA2A7A4CC5975E5B05 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -427,6 +515,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.starlingprotocol.Guesthouse;
+				PRODUCT_MODULE_NAME = Guesthouse;
 				PRODUCT_NAME = "Guesthouse Codex VM";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -471,6 +560,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.starlingprotocol.Guesthouse;
+				PRODUCT_MODULE_NAME = Guesthouse;
 				PRODUCT_NAME = "Guesthouse Codex VM";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -588,6 +678,64 @@
 			};
 			name = Release;
 		};
+		B25ED7FAA0094EE18B8FCB75 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = TPKP4XK352;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GuesthouseRuntime/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.starlingprotocol.Guesthouse.Runtime;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		B8F0C7A4BF3B43648D2AE322 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = TPKP4XK352;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GuesthouseRuntime/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.starlingprotocol.Guesthouse.Runtime;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -627,6 +775,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		0F136BAB2D67436C81229C09 /* Build configuration list for PBXNativeTarget "GuesthouseRuntime" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B25ED7FAA0094EE18B8FCB75 /* Debug */,
+				B8F0C7A4BF3B43648D2AE322 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -638,6 +795,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		F8ACD8A730493E2C00550943 /* GuesthouseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GuesthouseCore;
+		};
+		9668531454184F48A8F15863 /* GuesthouseCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = GuesthouseCore;
 		};

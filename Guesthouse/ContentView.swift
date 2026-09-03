@@ -8,12 +8,21 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(DebugRuntimeProbe.self) private var debugProbe
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
+        VStack(spacing: 12) {
+            Image(systemName: "desktopcomputer")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
-            Text("Hello, world!")
+            Text("Guesthouse")
+            #if DEBUG
+            Text(debugProbe.result)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .accessibilityLabel("Runtime version result")
+            #endif
         }
         .padding()
     }
@@ -21,4 +30,5 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environment(DebugRuntimeProbe())
 }
