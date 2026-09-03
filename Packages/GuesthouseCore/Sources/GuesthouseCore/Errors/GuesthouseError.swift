@@ -17,7 +17,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case credentialsLocked(CredentialStore)
     case loginExpired(Provider)
     case toolMismatch(tool: String, found: SanitizedText?, expected: String)
-    case xcodeComponentsIncomplete(missing: [SanitizedText])
+    case xcodeComponentsIncomplete(missing: MissingComponents)
     case vmSlotUnavailable(maximum: Int)
     case operationOutcomeUnknown(OperationID)
     case unauthorizedCaller
@@ -208,15 +208,19 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     static let sanitizeLookahead = 512
 
     public static func sanitize(_ value: String, limit: Int = 80) -> String {
-        let input = value.unicodeScalars
-        let truncated = input.count > limit + Self.sanitizeLookahead
-        let bounded = String(String.UnicodeScalarView(input.prefix(limit + Self.sanitizeLookahead)))
+        // Only the window plus one scalar is ever looked at, so the cost is independent of the
+        // input's size.
+        let window = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead + 1)
+        let truncated = window.count > limit + Self.sanitizeLookahead
+        let bounded = String(String.UnicodeScalarView(window.prefix(limit + Self.sanitizeLookahead)))
         // Complete escape sequences go first, so styling inside a token cannot leave a
-        // fragment behind once the bare control scalars are dropped.
+        // fragment behind once the bare control scalars are dropped. Combining marks go too:
+        // a mark inside a token would otherwise split it out of the redactor's reach.
         let stripped = Redactor.stripTerminalEscapes(bounded)
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
+            case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
+                 .nonspacingMark, .spacingMark, .enclosingMark:
                 false
             default:
                 true
@@ -233,13 +237,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
     }
 
-    /// How many missing components are named before the rest is summarized as a count.
-    static let maximumListedComponents = 20
-
-    static func list(_ items: [SanitizedText]) -> String {
-        let shown = items.prefix(maximumListedComponents).map(\.value).joined(separator: ", ")
-        let rest = items.count - maximumListedComponents
-        return rest > 0 ? "\(shown), and \(rest) more" : shown
+    static func list(_ components: MissingComponents) -> String {
+        let shown = components.listed.map(\.value).joined(separator: ", ")
+        return components.omitted > 0 ? "\(shown), and \(components.omitted) more" : shown
     }
 
     /// Names the shortfall explicitly, and falls back to exact byte counts when rounding would
