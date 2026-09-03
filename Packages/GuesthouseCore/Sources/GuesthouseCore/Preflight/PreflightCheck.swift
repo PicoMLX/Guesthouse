@@ -81,9 +81,12 @@ public enum PreflightCheck {
         var results: [PreflightResult] = []
 
         let architecture = probe.cpuArchitecture
-        results.append(PreflightResult(kind: .architecture, outcome: architecture == policy.requiredArchitecture
-            ? .pass(detail: "Apple silicon")
-            : .fail(.unsupportedHost(.notAppleSilicon))))
+        let architectureOutcome: PreflightResult.Outcome = switch architecture {
+        case policy.requiredArchitecture: .pass(detail: "Apple silicon")
+        case .unknown: .fail(.unsupportedHost(.architectureUnknown))
+        default: .fail(.unsupportedHost(.notAppleSilicon))
+        }
+        results.append(PreflightResult(kind: .architecture, outcome: architectureOutcome))
 
         let version = probe.operatingSystemVersion
         let build = probe.operatingSystemBuild.map { " (\($0))" } ?? ""
@@ -93,8 +96,11 @@ public enum PreflightCheck {
 
         let memory = probe.physicalMemoryBytes
         let memoryOutcome: PreflightResult.Outcome
-        if memory < policy.minimumMemoryBytes {
-            memoryOutcome = .fail(.unsupportedHost(.insufficientMemory(foundBytes: memory, minimumBytes: policy.minimumMemoryBytes)))
+        // The guest's allocation plus the host's headroom is the real floor; the policy minimum
+        // applies on top of it.
+        let floor = max(policy.minimumMemoryBytes, preset.memoryBytes.addingReportingOverflow(policy.hostMemoryHeadroomBytes).partialValue)
+        if memory < floor {
+            memoryOutcome = .fail(.unsupportedHost(.insufficientMemory(foundBytes: memory, minimumBytes: floor)))
         } else if memory >= policy.recommendedMemoryBytes {
             memoryOutcome = .pass(detail: "\(format(memory, memory: true)) of memory")
         } else {
@@ -114,7 +120,7 @@ public enum PreflightCheck {
                 diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
             }
         } catch {
-            diskOutcome = .warn(detail: "Free space on \(storageRoot.path) could not be determined.", recovery: [.retry])
+            diskOutcome = .warn(detail: "Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined.", recovery: [.retry])
         }
         results.append(PreflightResult(kind: .freeDisk, outcome: diskOutcome))
 
@@ -127,7 +133,7 @@ public enum PreflightCheck {
         } ?? .warn(detail: "Codex desktop is not installed. Guesthouse can prepare a development Mac without it, but you will need it to open a workspace in Codex.", recovery: [])))
 
         let storage = StorageSummary(
-            storageRootPath: storageRoot.path,
+            storageRootPath: GuesthouseError.sanitize(storageRoot.path, limit: 400),
             runtimeDownloadEstimateBytes: policy.runtimeDownloadEstimateBytes,
             restoreImageEstimateBytes: policy.restoreImageEstimateBytes,
             guestDiskBytes: preset.diskBytes,
@@ -150,8 +156,9 @@ public enum LargeOperationPreflight {
         volumePath: String,
         policy: ResourcePolicy = .standard
     ) throws(GuesthouseError) {
-        let needed = requiredBytes &+ policy.largeOperationMarginBytes
-        guard freeBytes >= needed else {
+        // A requirement that cannot be represented cannot be satisfied.
+        let (needed, overflow) = requiredBytes.addingReportingOverflow(policy.largeOperationMarginBytes)
+        guard !overflow, freeBytes >= needed else {
             throw .insufficientDisk(requiredBytes: needed, availableBytes: freeBytes, volumePath: SanitizedText(volumePath))
         }
     }

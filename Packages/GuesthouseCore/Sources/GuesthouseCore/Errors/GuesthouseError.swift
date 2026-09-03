@@ -28,6 +28,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
         case notAppleSilicon
         case macOSTooOld(found: SanitizedText, minimum: String)
+        /// The processor architecture could not be determined; the check can be run again.
+        case architectureUnknown
         case insufficientMemory(foundBytes: UInt64, minimumBytes: UInt64)
     }
 
@@ -72,6 +74,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         switch self {
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
+        case .unsupportedHost(.architectureUnknown):
+            "Guesthouse could not determine this Mac's processor type. Check this Mac again; if it keeps failing, export diagnostics."
         case .unsupportedHost(.macOSTooOld(let found, let minimum)):
             "This Mac runs macOS \(found.value). Guesthouse needs macOS \(Self.sanitize(minimum)) or later."
         case .unsupportedHost(.insufficientMemory(let found, let minimum)):
@@ -117,6 +121,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public var recoveryActions: [RecoveryAction] {
         switch self {
         case .unsupportedHost(.macOSTooOld): [.openSettings, .cancel]
+        case .unsupportedHost(.architectureUnknown): [.retry, .cancel]
         case .unsupportedHost: [.cancel]
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]

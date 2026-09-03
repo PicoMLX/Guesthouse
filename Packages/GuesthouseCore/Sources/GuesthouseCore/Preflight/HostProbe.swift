@@ -90,8 +90,16 @@ public struct SystemHostProbe: HostProbe {
         }
     }
 
+    /// The destination usually does not exist yet on first launch; the nearest existing
+    /// ancestor tells which volume it will land on.
     public func freeBytes(at url: URL) throws -> UInt64 {
-        let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        var existing = url.standardizedFileURL
+        while !FileManager.default.fileExists(atPath: existing.path) {
+            let parent = existing.deletingLastPathComponent()
+            if parent.path == existing.path { break }
+            existing = parent
+        }
+        let values = try existing.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         guard let capacity = values.volumeAvailableCapacityForImportantUsage else {
             throw CocoaError(.fileReadUnknown)
         }
