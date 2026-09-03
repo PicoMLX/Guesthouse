@@ -174,6 +174,8 @@ import Testing
         #expect(json["schemaVersion"] as? Int == SchemaVersion.current.rawValue)
         let future = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(SchemaVersion.current.rawValue)", with: "\"schemaVersion\":99")
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(future.utf8)) }
+        let older = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(SchemaVersion.current.rawValue)", with: "\"schemaVersion\":0")
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(older.utf8)) }
         for state in [CompatibilityState.needsValidation(.changedSinceLastVerified([.tartVersion, .xcodeBuild])), .needsValidation(.competingInstallations(count: 3)), .needsValidation(.verifiedOnDifferentHost)] {
             let stateData = try JSONEncoder().encode(state)
             #expect(try JSONDecoder().decode(CompatibilityState.self, from: stateData) == state)

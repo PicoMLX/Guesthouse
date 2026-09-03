@@ -30,8 +30,10 @@ extension ConnectionVerificationRecord: Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(SchemaVersion.self, forKey: .schemaVersion)
-        guard version <= SchemaVersion.current else {
-            throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "record schema \(version) is newer than \(SchemaVersion.current)")
+        // Exactly the current schema until an explicit migration exists: an older or newer
+        // record would otherwise be interpreted under a shape it was never written in.
+        guard version == SchemaVersion.current else {
+            throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "record schema \(version) is not \(SchemaVersion.current)")
         }
         schemaVersion = version
         tuple = try container.decode(CompatibilityTuple.self, forKey: .tuple)
