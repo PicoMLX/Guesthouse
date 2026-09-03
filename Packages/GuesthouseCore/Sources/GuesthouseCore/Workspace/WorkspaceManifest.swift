@@ -78,11 +78,13 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
                 // dependency's identity from the repository name, so the two must agree or the
                 // override never applies (MVP-PLAN.md §6). Two packages with one identity are
                 // ambiguous and refused.
-                // The checkout must carry the repository's identity: its name, or the safe
-                // form derived from it when the name itself is not a valid directory name.
+                // A package's checkout directory is where SwiftPM reads the local package's
+                // identity, so it must be the repository's own name. A name the deriver has
+                // to change (too long, or leading dots) would produce a package that cannot
+                // replace the pinned dependency, so such a repository is refused outright
+                // rather than checked out under a name that means something else.
                 let identity = repository.remote.name.lowercased()
-                let derived = DirectoryName.derived(from: repository.remote.name).identity
-                guard repository.checkoutName.identity == identity || repository.checkoutName.identity == derived else {
+                guard repository.checkoutName.identity == identity else {
                     throw .checkoutNameDoesNotMatchRepository(checkout: repository.checkoutName.rawValue, repository: repository.remote.name)
                 }
                 guard seenIdentities.insert(identity).inserted else {
@@ -106,9 +108,15 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 
-    /// Control and format characters (NUL included) cannot travel in an argument vector.
+    /// Control, format, and separator characters cannot travel in an argument vector, and
+    /// separators would let one value render as several lines in the GUI.
     static func containsControlCharacters(_ text: String) -> Bool {
-        text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.generalCategory == .format }
+        text.unicodeScalars.contains { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: true
+            default: scalar.value == 0xFFFE || scalar.value == 0xFFFF
+            }
+        }
     }
 }
 
@@ -206,6 +214,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case invalidTestDestination(String)
     case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
     case duplicatePackageIdentity(String)
+    /// The file could not be read as a workspace at all.
+    case malformed(reason: SanitizedText)
 
     public var userMessage: String {
         switch self {
@@ -231,6 +241,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "\(GuesthouseError.sanitize(scheme)) is not a valid scheme name."
         case .invalidTestDestination(let destination):
             "\(GuesthouseError.sanitize(destination)) is not a valid test destination."
+        case .malformed(let reason):
+            "The workspace file in the development Mac could not be read (\(reason.value)). Guesthouse can rebuild it from the repositories you selected."
         case .checkoutNameDoesNotMatchRepository(let checkout, let repository):
             "The package repository \(GuesthouseError.sanitize(repository)) must be checked out as \(GuesthouseError.sanitize(repository)), not \(GuesthouseError.sanitize(checkout)), or Xcode will not use the local copy."
         case .duplicatePackageIdentity(let identity):
@@ -242,10 +254,38 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     public var recoveryActions: [RecoveryAction] {
         switch self {
         case .unsupportedSchemaVersion: [.reinstallApp, .cancel]
-        case .missingBaseSHA: [.inspectState, .retry, .cancel]
+        // The clone may have finished with only the manifest update lost, so the outcome is
+        // not known: only inspection is offered, never a blind repeat.
+        case .missingBaseSHA: [.inspectState, .cancel]
+        case .malformed: [.inspectState, .repair(.tools), .cancel]
         default: [.openSettings, .cancel]
         }
     }
 
     public var errorDescription: String? { userMessage }
+}
+
+public extension WorkspaceManifest {
+    /// Reads a manifest that came from the guest. Structural failures become
+    /// `WorkspaceValidationError.malformed`, which carries a message and recovery actions,
+    /// rather than a bare `DecodingError` the app cannot present.
+    static func decode(_ data: Data) throws(WorkspaceValidationError) -> WorkspaceManifest {
+        do {
+            return try JSONDecoder().decode(WorkspaceManifest.self, from: data)
+        } catch {
+            throw WorkspaceValidationError.malformed(reason: SanitizedText(Self.reason(for: error), limit: 200))
+        }
+    }
+
+    private static func reason(for error: any Error) -> String {
+        guard let error = error as? DecodingError else { return "the file could not be read" }
+        switch error {
+        case .keyNotFound(let key, _):
+            return "a required field is missing: \(key.stringValue)"
+        case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
+            return context.codingPath.isEmpty ? "the file is not a valid workspace" : "an invalid value at \(context.codingPath.map(\.stringValue).joined(separator: "."))"
+        @unknown default:
+            return "the file is not a valid workspace"
+        }
+    }
 }
