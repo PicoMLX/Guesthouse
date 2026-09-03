@@ -33,6 +33,9 @@ let package = Package(
         .testTarget(
             name: "GuesthouseCoreTests",
             dependencies: ["GuesthouseCore"],
+            resources: [
+                .copy("Fixtures")
+            ],
             swiftSettings: coreSwiftSettings
         ),
     ],
