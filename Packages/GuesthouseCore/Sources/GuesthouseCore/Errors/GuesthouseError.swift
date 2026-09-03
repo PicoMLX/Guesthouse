@@ -12,6 +12,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case downloadVerificationFailed(artifact: SanitizedText, check: VerificationCheck)
     case runtimeMissing
     /// The installed runtime bundle failed verification and will not be executed.
+    /// Guesthouse's own storage could not be used: the location is missing, unsafe, or not
+    /// writable. Distinct from a missing runtime, which reinstalling Tart would fix.
+    case runtimeStateUnavailable(reason: SanitizedText)
     case runtimeVerificationFailed(check: RuntimeVerificationCheck)
     case runtimeIncompatible(found: SanitizedText?, required: SanitizedText)
     case guestNotReachable(EnvironmentID)
@@ -81,7 +84,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public var category: Category {
         switch self {
         case .unsupportedHost: .host
-        case .insufficientDisk: .storage
+        case .insufficientDisk, .runtimeStateUnavailable: .storage
         case .downloadVerificationFailed, .runtimeMissing, .runtimeVerificationFailed, .runtimeIncompatible: .runtime
         case .guestNotReachable, .hostKeyChanged: .guest
         case .credentialsLocked, .loginExpired: .credentials
@@ -112,6 +115,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "The downloaded \(artifact.value) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
+        case .runtimeStateUnavailable(let reason):
+            "Guesthouse's saved state could not be used (\(reason.value)). Guesthouse will inspect the actual virtual machines before offering anything; if this persists, check the storage location in Settings."
         case .runtimeVerificationFailed(let check):
             "The installed virtual machine runtime failed its \(Self.describe(check)) check and will not be run. Repair reinstalls the tested version."
         case .runtimeIncompatible(let found, let required):
@@ -154,6 +159,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
+        case .runtimeStateUnavailable: [.inspectState, .openSettings, .cancel]
         case .runtimeVerificationFailed: [.repair(.runtime), .cancel]
         case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
         case .guestNotReachable: [.inspectState, .retry, .openConsole, .cancel]
@@ -194,6 +200,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: "insufficientDisk"
         case .downloadVerificationFailed: "downloadVerificationFailed"
         case .runtimeMissing: "runtimeMissing"
+        case .runtimeStateUnavailable: "runtimeStateUnavailable"
         case .runtimeVerificationFailed: "runtimeVerificationFailed"
         case .runtimeIncompatible: "runtimeIncompatible"
         case .guestNotReachable: "guestNotReachable"

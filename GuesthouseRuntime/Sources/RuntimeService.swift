@@ -161,8 +161,12 @@ final class RuntimeService: Sendable {
         do {
             storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
         } catch {
+            // A storage problem is not a missing runtime: reinstalling Tart cannot fix an
+            // unwritable or unsafe storage directory, so the storage error is reported as it
+            // is, with its own recovery actions.
             log.error("runtime storage unavailable: \(Self.describe(error), privacy: .public)")
-            tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: .runtimeMissing) }
+            let problem = (error as? RuntimeStorageError).map { GuesthouseError.runtimeStateUnavailable(reason: SanitizedText($0.userMessage, limit: 200)) } ?? .runtimeMissing
+            tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: problem) }
             return
         }
         guard let bundle = TartBundle.locate(in: storage) else {

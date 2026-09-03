@@ -31,6 +31,17 @@ struct DummyBundle {
 
     init() { try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
 
+    @Test func anEnormousInfoPlistIsRefusedBeforeItIsParsed() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Bundle-\(UUID().uuidString)")
+        let contents = root.appending(path: "tart.app/Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let plist = contents.appending(path: "Info.plist")
+        try Data(repeating: 0x20, count: TartBundle.maximumInfoPlistBytes + 1).write(to: plist)
+        let bundle = TartBundle(url: root.appending(path: "tart.app"))
+        #expect(bundle.claimedVersion == nil)
+        #expect(throws: TartVerificationError.infoPlistUnreadable) { try bundle.verify() }
+    }
+
     @Test func recordedReleaseFactsAreConsistent() {
         #expect(TartRelease.version.description == "2.36" || TartVersion(parsing: TartPin.releaseTag) == TartRelease.version)
         #expect(TartRelease.archiveSHA256.count == 64)

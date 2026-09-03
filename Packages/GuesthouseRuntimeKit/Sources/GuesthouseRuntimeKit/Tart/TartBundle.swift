@@ -49,11 +49,20 @@ public struct TartBundle: Hashable, Sendable {
 
     /// The version the bundle claims in its Info.plist, read without executing anything.
     public var claimedVersion: TartVersion? {
-        guard let data = try? Data(contentsOf: infoPlist),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let text = plist["CFBundleShortVersionString"] as? String
-        else { return nil }
+        guard let plist = Self.readInfoPlist(at: infoPlist), let text = plist["CFBundleShortVersionString"] as? String else { return nil }
         return TartVersion(parsing: text)
+    }
+
+    /// The largest `Info.plist` this reads. A real one is a few kilobytes; anything larger
+    /// is refused rather than parsed.
+    static let maximumInfoPlistBytes = 256 << 10
+
+    static func readInfoPlist(at url: URL) -> [String: Any]? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true, let size = values.fileSize, size <= maximumInfoPlistBytes,
+              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]), data.count <= maximumInfoPlistBytes
+        else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
     }
 
     /// Verifies the bundle against the pinned release: identifier and version from Info.plist,
@@ -64,9 +73,9 @@ public struct TartBundle: Hashable, Sendable {
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw .bundleMissing(path: url.path)
         }
-        guard let data = try? Data(contentsOf: infoPlist),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-        else { throw .infoPlistUnreadable }
+        // The bundle is untrusted until its signature is checked, so its metadata is read
+        // under a size cap: a huge Info.plist must not exhaust the service before the check.
+        guard let plist = Self.readInfoPlist(at: infoPlist) else { throw .infoPlistUnreadable }
         let identifier = plist["CFBundleIdentifier"] as? String ?? ""
         guard identifier == TartRelease.signingIdentifier else { throw .bundleIdentifierMismatch(found: Self.describe(identifier)) }
         let versionText = plist["CFBundleShortVersionString"] as? String ?? ""

@@ -36,6 +36,9 @@ public struct TartBackend: Sendable {
         guard exit.succeeded else {
             throw TartInvocationError.failed(TartErrorClassifier.classify(stderr: stderr.joined(separator: "\n"), exitStatus: exitStatus(exit)))
         }
+        // A truncated capture is not a complete answer: the parser must see all of stdout
+        // before a version is accepted as the runtime's own.
+        guard !exit.outputTruncated else { throw TartInvocationError.unparseableOutput }
         guard let version = TartVersion(parsing: stdout.joined(separator: "\n")) else {
             throw TartInvocationError.unparseableOutput
         }
