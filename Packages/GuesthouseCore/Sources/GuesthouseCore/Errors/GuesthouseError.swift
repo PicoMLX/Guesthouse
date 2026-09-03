@@ -116,18 +116,19 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// Actions the GUI may offer, in preference order. Never empty.
     public var recoveryActions: [RecoveryAction] {
         switch self {
+        case .unsupportedHost(.macOSTooOld): [.openSettings, .cancel]
         case .unsupportedHost: [.cancel]
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
-        case .runtimeIncompatible: [.repair(.runtime), .cancel]
+        case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
         case .guestNotReachable: [.inspectState, .retry, .openConsole, .cancel]
         case .hostKeyChanged: [.repair(.sshPairing), .openConsole, .exportWork, .cancel]
         case .credentialsLocked(.guestKeychain): [.openConsole, .repair(.credentials), .cancel]
         case .credentialsLocked(.hostKeychain): [.retry, .openSettings, .cancel]
         case .loginExpired: [.signInAgain, .cancel]
-        case .toolMismatch: [.repair(.tools), .cancel]
-        case .xcodeComponentsIncomplete: [.repair(.xcodeComponents), .cancel]
+        case .toolMismatch: [.repair(.tools), .openConsole, .exportWork, .cancel]
+        case .xcodeComponentsIncomplete: [.repair(.xcodeComponents), .openConsole, .exportWork, .cancel]
         case .vmSlotUnavailable: [.exportWork, .deleteEnvironment, .cancel]
         case .operationOutcomeUnknown: [.inspectState, .cancel]
         case .unauthorizedCaller: [.cancel]
@@ -191,18 +192,26 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     }
 
     /// Values that can originate outside the app (CLI output, guest responses, file names)
-    /// pass through the redaction layer, are reduced to printable characters, and are bounded
-    /// in length before interpolation, so a message and its `redactedDescription` can never
-    /// carry a credential, an injected line, or raw CLI text.
+    /// are normalized, redacted, and bounded before interpolation, in that order, so a message
+    /// and its `redactedDescription` can never carry a credential, an injected line, a
+    /// bidirectional override, or an unbounded value.
+    ///
+    /// Order matters: normalization first, so a token split by a control character cannot be
+    /// reassembled after redaction; the bound is in Unicode scalars, so a run of combining
+    /// marks cannot hide behind a single `Character`.
     static func sanitize(_ value: String, limit: Int = 80) -> String {
-        let redacted = Redactor().redact(value)
-        let printable = redacted.unicodeScalars.filter { scalar in
-            scalar.properties.generalCategory != .control
-                && scalar.properties.generalCategory != .lineSeparator
-                && scalar.properties.generalCategory != .paragraphSeparator
-        }
-        let text = String(String.UnicodeScalarView(printable))
-        return text.count > limit ? String(text.prefix(limit)) + "…" : text
+        let normalized = String(String.UnicodeScalarView(value.unicodeScalars.filter { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
+                false
+            default:
+                true
+            }
+        }))
+        let redacted = Redactor().redact(fieldValue: normalized)
+        let scalars = redacted.unicodeScalars
+        guard scalars.count > limit else { return redacted }
+        return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
     }
 
     private static func formatBytes(_ bytes: UInt64) -> String {
