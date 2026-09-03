@@ -14,6 +14,7 @@ import Testing
         ("bearer", "curl -H 'Bearer abcdefghijklmnop.qrstuvwxyz'", "abcdefghijklmnop.qrstuvwxyz"),
         ("api key", "OPENAI_API_KEY is sk-proj-abcdefghijklmnopqrstuvwxyz0123", "sk-proj-abcdefghijklmnopqrstuvwxyz0123"),
         ("jwt", "session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuv", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuv"),
+        ("jwt with empty claims", "token eyJhbGciOiJIUzI1NiJ9.e30.sig", "eyJhbGciOiJIUzI1NiJ9.e30.sig"),
         ("url userinfo", "cloning https://ronald:hunter2secret@github.com/PicoMLX/Guesthouse.git", "hunter2secret"),
         ("password label", "password: hunter2secret", "hunter2secret"),
         ("passphrase label", "Passphrase=\"correct horse battery\"", "correct horse battery"),
