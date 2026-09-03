@@ -58,7 +58,10 @@ public enum IntegrationWorkspaceGenerator {
     ///   the caller, or `nil` when the project has none. It is copied unchanged so the wrapper
     ///   resolves from the same pins the app does.
     public static func generate(_ manifest: WorkspaceManifest, appResolvedPackages: Data? = nil) throws(WorkspaceValidationError) -> [GeneratedFile] {
-        try manifest.validate()
+        // Generation happens while the workspace is being set up, before every clone has
+        // recorded its base commit, so the structural rules apply and the base-SHA rule waits
+        // for the supported-workspace check.
+        try manifest.validate(stage: .setup)
         let layout = WorkspaceLayout(manifest)
         var files: [GeneratedFile] = []
         files.append(GeneratedFile(relativePath: "\(WorkspaceLayout.integrationWorkspaceName)/contents.xcworkspacedata", text: workspaceData(manifest, layout: layout)))
