@@ -107,6 +107,18 @@ import Testing
         #expect(!error.redactedDescription.contains("\n"))
     }
 
+    @Test func credentialsInUntrustedValuesAreRedactedNotJustTruncated() {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let probe = GuesthouseError.toolMismatch(tool: "gh", found: token, expected: "2.80.0")
+        #expect(!probe.userMessage.contains(token))
+        #expect(probe.userMessage.contains("[redacted:github-token]"))
+        #expect(!probe.redactedDescription.contains(token))
+
+        let header = GuesthouseError.downloadVerificationFailed(artifact: "Authorization: Bearer abcdefghijklmnop", check: .digest)
+        #expect(!header.redactedDescription.contains("abcdefghijklmnop"))
+        #expect(header.redactedDescription.contains("[redacted:authorization]"))
+    }
+
     @Test func slotAndProtocolErrorsOfferTheRealRemedy() {
         let slots = GuesthouseError.vmSlotUnavailable(maximum: 2).recoveryActions
         #expect(slots.firstIndex(of: .exportWork)! < slots.firstIndex(of: .deleteEnvironment)!)

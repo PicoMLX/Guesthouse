@@ -191,10 +191,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     }
 
     /// Values that can originate outside the app (CLI output, guest responses, file names)
-    /// are reduced to printable characters and a bounded length before interpolation, so a
-    /// message and its `redactedDescription` can never carry injected lines or raw CLI text.
+    /// pass through the redaction layer, are reduced to printable characters, and are bounded
+    /// in length before interpolation, so a message and its `redactedDescription` can never
+    /// carry a credential, an injected line, or raw CLI text.
     static func sanitize(_ value: String, limit: Int = 80) -> String {
-        let printable = value.unicodeScalars.filter { scalar in
+        let redacted = Redactor().redact(value)
+        let printable = redacted.unicodeScalars.filter { scalar in
             scalar.properties.generalCategory != .control
                 && scalar.properties.generalCategory != .lineSeparator
                 && scalar.properties.generalCategory != .paragraphSeparator
