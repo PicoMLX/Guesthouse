@@ -26,7 +26,7 @@ Copy the required proofs from the gate issue as a checklist and mark each one.
 
 ## Procedure and evidence
 
-For each step: what was done, what was observed, and where the evidence is. Log excerpts must be redacted (no tokens, device codes, passwords, or private keys). Screenshots go under `docs/phase0/evidence/<gate>/`.
+For each step: what was done, what was observed, and where the evidence is. Every piece of evidence must be redacted before it is committed: log excerpts and screenshots alike must contain no tokens, device codes, bootstrap or account passwords, private keys, or account identifiers. Review each screenshot for on-screen secrets (SSH pairing and provider sign-in screens are the usual offenders) and crop or mask them. Screenshots go under `docs/phase0/evidence/<gate>/`.
 
 1. <step>: <observation>. Evidence: <path or excerpt>.
 
@@ -44,7 +44,7 @@ For each step: what was done, what was observed, and where the evidence is. Log 
 
 ## Decision
 
-What this gate decides for the design, and what changes in the plan or issues as a result. Reference the ADR if one was written.
+What this gate decides for the design, and what changes in the plan or issues as a result. If the gate settled a design question (for example the Xcode transport, the console path, or the cold-boot authentication requirement), link the ADR written for it in `docs/decisions/`. If it did not, state explicitly: "No architectural decision resulted from this gate."
 
 ## Follow-ups
 
