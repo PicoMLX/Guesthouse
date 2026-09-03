@@ -1,6 +1,6 @@
 # Gate: <name>
 
-Issue: #<number>. Run by: <name>. Date: <YYYY-MM-DD>. Status: <in progress | passed | failed | passed with follow-ups>.
+Issue: #<number>. Run by: <name>. Date: <YYYY-MM-DD>. Status: <in progress | passed | passed with follow-ups | failed | exception approved (link the ADR)>.
 
 ## Versions
 
@@ -16,6 +16,7 @@ Issue: #<number>. Run by: <name>. Date: <YYYY-MM-DD>. Status: <in progress | pas
 | Codex CLI (guest) | <version, path> |
 | GitHub CLI (guest) | <version> |
 | Provisioning scripts | <version or commit> |
+| Guest VM configuration | <preset name; CPU count; RAM; logical disk capacity> |
 
 ## Required proofs
 
@@ -38,9 +39,12 @@ For each step: what was done, what was observed, and where the evidence is. Ever
 | Active user time | |
 | Peak host disk used | |
 | Peak guest disk used | |
+| Peak host memory used | |
+| Peak guest memory used | |
 | Peak host memory pressure | |
 | Guest-console interventions | |
-| Terminal or script use by the engineer (must become GUI operations) | |
+| Diagnostic-only commands used by the engineer (allowed by §10; no product follow-up) | |
+| Actions performed by script or Terminal that must become GUI operations before beta | |
 
 ## Decision
 
