@@ -19,8 +19,7 @@ struct ContentView: View {
                 ProgressView().accessibilityLabel("Checking environment")
                 Text("Checking environment…")
             case .ready:
-                Image(systemName: "desktopcomputer").imageScale(.large).foregroundStyle(.tint)
-                Text(model.environments.isEmpty ? "No development Mac yet" : "\(model.environments.count) development Mac\(model.environments.count == 1 ? "" : "s")")
+                DashboardView()
             case .interrupted(let interruption):
                 Image(systemName: "bolt.slash").imageScale(.large)
                 Text(interruption.userMessage)
@@ -42,8 +41,7 @@ struct ContentView: View {
                 .accessibilityLabel("Debug probe result")
             #endif
         }
-        .padding()
-        .frame(minWidth: 360, minHeight: 200)
+        .frame(minWidth: 720, minHeight: 420)
     }
 }
 

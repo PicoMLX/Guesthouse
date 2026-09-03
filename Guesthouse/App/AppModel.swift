@@ -39,11 +39,20 @@ final class AppModel {
         case terminating
     }
 
+    /// An operation this app started and is still listening to.
+    struct OperationState: Equatable {
+        var id: OperationID
+        var phase: ProgressPhase?
+    }
+
     static let gracefulStopDeadline: Duration = .seconds(60)
 
     private(set) var launchState: LaunchState = .checkingEnvironment
     private(set) var environments: [DevelopmentEnvironment] = []
     private(set) var statuses: [EnvironmentID: EnvironmentStatus] = [:]
+    private(set) var operations: [EnvironmentID: OperationState] = [:]
+    /// The last failure per environment, cleared when an operation completes.
+    private(set) var lastErrors: [EnvironmentID: GuesthouseError] = [:]
     private(set) var quitFlow: QuitFlow = .idle
     /// The user canceled during a step that must run to its end; honored when it ends.
     private(set) var quitCancelRequested = false
@@ -337,6 +346,75 @@ final class AppModel {
             if case .uncertain = statuses[$0.id]?.vm { return true }
             return false
         }
+    }
+
+    /// Re-reads one environment's status after an operation, whatever its outcome.
+    func refreshStatus(of id: EnvironmentID) async {
+        do {
+            for try await event in backend.send(.environmentStatus(id)) {
+                if case .status(let status) = event { statuses[id] = status }
+            }
+        } catch {
+            launchState = .interrupted(RuntimeConnectionInterrupted())
+        }
+    }
+
+    // MARK: - Dashboard
+
+    /// One card per environment, in creation order.
+    func cardStates() -> [EnvironmentCardState] {
+        environments.map { environment in
+            EnvironmentCardState(environment: environment, status: statuses[environment.id], operation: operations[environment.id], lastError: lastErrors[environment.id])
+        }
+    }
+
+    /// Whether a new development Mac can be created. At most two exist, stopped and
+    /// preserved ones included (MVP-PLAN.md §1).
+    var createAvailability: EnvironmentCardState.Availability {
+        guard launchState == .ready else { return .disabled(reason: "Checking environment") }
+        if environments.count >= VMSlotInventory.maximumSlots {
+            return .disabled(reason: "Guesthouse manages at most \(VMSlotInventory.maximumSlots) development Macs, including stopped and preserved ones. Export any unpublished work from one you no longer need, then delete it to make room.")
+        }
+        return .enabled
+    }
+
+    /// Starts an environment. The only dashboard action wired to the runtime so far.
+    func start(_ id: EnvironmentID) {
+        guard environments.contains(where: { $0.id == id }), operations[id] == nil else { return }
+        Task { await run(.startEnvironment(id, StartOptions()), for: id) }
+    }
+
+    private func run(_ request: RuntimeRequest, for id: EnvironmentID) async {
+        lastErrors[id] = nil
+        operations[id] = OperationState(id: OperationID(), phase: nil)
+        do {
+            for try await event in backend.send(request) {
+                switch event {
+                case .accepted(let operation): operations[id] = OperationState(id: operation, phase: nil)
+                case .progress(_, let phase): operations[id]?.phase = phase
+                case .status(let status): statuses[status.environmentID] = status
+                case .failed(_, let error): lastErrors[id] = error
+                case .completed: lastErrors[id] = nil
+                default: break
+                }
+            }
+        } catch {
+            // The outcome is unknown until the runtime is asked again; never replay.
+            launchState = .interrupted(RuntimeConnectionInterrupted())
+        }
+        operations[id] = nil
+        await refreshStatus(of: id)
+    }
+
+    /// A model over a preview scenario's environments and scripted backend, already refreshed.
+    static func preview(_ scenario: PreviewScenario) async -> AppModel {
+        await scenario.backend.setEnvironments(scenario.snapshot.environments)
+        let model = AppModel(backend: scenario.backend) { _ in }
+        await model.refresh()
+        if let request = scenario.initialRequest, case .startEnvironment(let id, _) = request {
+            model.start(id)
+        }
+        return model
     }
 
     // MARK: - Quit contract
