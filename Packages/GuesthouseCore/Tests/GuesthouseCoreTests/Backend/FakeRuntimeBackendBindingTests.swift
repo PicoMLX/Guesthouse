@@ -104,6 +104,39 @@ import Testing
         #expect(await backend.status(of: environment)?.inFlightOperation == nil, "a cancelled operation is not still in flight")
     }
 
+    @Test func anOperationCancelledDuringItsTerminalPauseReportsCancellation() async throws {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(60))
+        let environment = EnvironmentID()
+        let id = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready, inFlightOperation: id))
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        let stream = backend.send(.startEnvironment(environment, StartOptions()))
+        let collector = Task { try await acceptedID(stream) }
+        try await Task.sleep(for: .milliseconds(30))
+        for try await _ in backend.send(.cancelOperation(id)) {}
+        _ = try? await collector.value
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil)
+    }
+
+    @Test func aFailedCancellationRequestReleasesItsReservation() async throws {
+        let backend = FakeRuntimeBackend()
+        let id = OperationID()
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .hang)
+        await backend.script("cancelOperation", .fail(error: .invalidRequest(.unsupportedOperation)))
+        let stream = backend.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let consumer = Task { for try await _ in stream {} }
+        while await backend.receivedRequests.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
+        for try await _ in backend.send(.cancelOperation(id)) {}
+        consumer.cancel()
+        _ = try? await consumer.value
+        for _ in 0..<200 where await backend.receivedRequests.filter({ $0 == .cancelOperation(id) }).count < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let cancels = await backend.receivedRequests.filter { $0 == .cancelOperation(id) }
+        #expect(cancels.count == 2, "the failed request did not suppress the consumer's own cancellation")
+    }
+
     @Test func explicitCancellationIsRecordedOnceEvenWhenTheConsumerAlsoStops() async throws {
         let backend = FakeRuntimeBackend()
         let id = OperationID()
