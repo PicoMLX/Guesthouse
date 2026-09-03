@@ -245,6 +245,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
                 true
             }
         }))
+        var truncationRedacted = false
         if truncated {
             // Normalization drops scalars, so a window full of raw input can normalize to far
             // less: a run of combining marks between a device code's first and last character
@@ -261,6 +262,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             // recognized in both the spellings the redactor's own userinfo rule accepts, since a
             // URL that reached a log through JSON keeps that encoding's escaped slashes, and is
             // put back exactly as it came in.
+            let opened = normalized
             normalized = normalized.replacing(#/(:(?:\\?\/){2})[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
             // A JWT whose payload is longer than the window loses the second `.` the redactor
             // matches on, so a token that began inside the visible prefix would be emitted in
@@ -273,9 +275,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
                 guard let start = Redactor.joseHeaderStart(match.1) else { return String(match.0) }
                 return match.1[..<start] + Redactor.marker("jwt")
             }
+            truncationRedacted = normalized != opened
         }
         let redacted = Redactor().redact(fieldValue: normalized)
-        let wasRedacted = redacted != normalized
+        // The truncation-time replacement counts as redaction: a caller must not treat the
+        // result as merely bounded and attach an identity digest of the credential.
+        let wasRedacted = truncationRedacted || redacted != normalized
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return (redacted, wasRedacted) }
         return (String(String.UnicodeScalarView(scalars.prefix(limit))) + "…", wasRedacted)
