@@ -15,13 +15,14 @@ final class RuntimeService: Sendable {
         do {
             envelope = try message.decode(as: RuntimeRequestEnvelope.self)
         } catch {
-            log.error("undecodable request: \(String(describing: error), privacy: .public)")
+            // Never log the decoding error text: it can quote the raw offending value.
+            log.error("undecodable request rejected")
             return RuntimeEvent.failed(OperationID(), .invalidRequest(.malformed))
         }
         do {
             try RequestValidator.validate(envelope)
         } catch {
-            log.error("rejected request: \(String(describing: error), privacy: .public)")
+            log.error("rejected request: \(error.guesthouseError.caseName, privacy: .public)")
             return RuntimeEvent.failed(OperationID(), error.guesthouseError)
         }
         switch envelope.request {
