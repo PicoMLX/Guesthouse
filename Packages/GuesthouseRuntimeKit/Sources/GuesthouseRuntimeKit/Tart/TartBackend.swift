@@ -169,9 +169,7 @@ public struct TartBackend: Sendable {
         // A truncated capture is not a complete answer: a parser must see all of stdout
         // before its result is trusted as the runtime's own.
         guard !exit.outputTruncated else { throw TartInvocationError.unparseableOutput }
-        return Captured(stdout: stdout.joined(separator: "
-"), stderr: stderr.joined(separator: "
-"))
+        return Captured(stdout: stdout.joined(separator: "\n"), stderr: stderr.joined(separator: "\n"))
     }
 
     static func exitStatus(_ exit: ProcessExit) -> Int32 {

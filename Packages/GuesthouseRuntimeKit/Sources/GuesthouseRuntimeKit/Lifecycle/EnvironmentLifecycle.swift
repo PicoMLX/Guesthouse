@@ -490,6 +490,7 @@ public actor EnvironmentLifecycle {
         case .anotherProcessClaimsVM: "another process claims the virtual machine"
         case .recordInconsistent: "the recorded process names a different virtual machine"
         case .processUnobservable: "the recorded process exists but could not be read"
+        case .vmNameUnconfirmed: "the running process does not name this virtual machine"
         }
     }
 
