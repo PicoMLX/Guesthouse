@@ -82,6 +82,8 @@ final class AppModel {
     private(set) var reconciling: Set<EnvironmentID> = []
     /// The log of the last finished operation, for the disclosure after it ends.
     private(set) var lastLogs: [EnvironmentID: [RedactedLine]] = [:]
+    /// What the runtime reported about itself at the last refresh.
+    private(set) var runtimeInfo: RuntimeVersionInfo?
     private(set) var quitFlow: QuitFlow = .idle
     /// The user canceled during a step that must run to its end; honored when it ends.
     private(set) var quitCancelRequested = false
@@ -333,6 +335,9 @@ final class AppModel {
 
     private func reconcile() async -> ReconcileOutcome {
         do {
+            for try await event in backend.send(.runtimeVersion) {
+                if case .runtimeVersion(let info) = event { runtimeInfo = info }
+            }
             var listed: [DevelopmentEnvironment] = []
             for try await event in backend.send(.listEnvironments) {
                 switch event {
@@ -771,6 +776,30 @@ final class AppModel {
         guard let failure = cancellationFailures[id], status.inFlightOperation != failure.operation else { return }
         cancellationFailures[id] = nil
         if lastErrors[id] == failure.error { lastErrors[id] = nil }
+    }
+
+    // MARK: - Diagnostics
+
+    /// Every redacted line the app holds, oldest first, prefixed with the environment it
+    /// belongs to (by UUID, never by address).
+    var diagnosticsLines: [RedactedLine] {
+        environments.flatMap { environment -> [RedactedLine] in
+            operations[environment.id]?.logs ?? lastLogs[environment.id] ?? []
+        }
+    }
+
+    /// The bundle "Export diagnostics" writes.
+    func diagnosticsExport() -> DiagnosticsExport {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let compatibility = statuses.values.first?.observed ?? ObservedTuple()
+        return DiagnosticsExportBuilder.build(
+            appVersion: info["CFBundleShortVersionString"] as? String ?? "0",
+            appBuild: info["CFBundleVersion"] as? String ?? "0",
+            runtime: runtimeInfo,
+            compatibility: compatibility,
+            environments: environments,
+            logs: diagnosticsLines
+        )
     }
 
     // MARK: - Dashboard

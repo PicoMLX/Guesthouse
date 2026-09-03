@@ -6,6 +6,7 @@ import GuesthouseCore
 struct DashboardView: View {
     @Environment(AppModel.self) private var model
     @State private var showingWizard = false
+    @State private var showingDiagnostics = false
 
     var body: some View {
         let cards = model.cardStates()
@@ -20,7 +21,8 @@ struct DashboardView: View {
                                 state: card,
                                 start: { model.start(card.id) },
                                 cancel: { model.cancel(card.id) },
-                                recover: { model.perform($0, for: card.id) }
+                                recover: { model.perform($0, for: card.id) },
+                                openDiagnostics: { showingDiagnostics = true }
                             )
                         }
                         SlotView(availability: model.createAvailability) { showingWizard = true }
@@ -30,6 +32,7 @@ struct DashboardView: View {
             .padding(20)
         }
         .sheet(isPresented: $showingWizard) { WizardPlaceholderView() }
+        .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model) }
     }
 }
 
@@ -80,6 +83,7 @@ struct EnvironmentCardView: View {
     let start: () -> Void
     let cancel: () -> Void
     let recover: (RecoveryAction) -> Void
+    let openDiagnostics: () -> Void
     @State private var note: String?
 
     var body: some View {
@@ -165,6 +169,7 @@ struct EnvironmentCardView: View {
         Menu {
             Button(EnvironmentCardState.Action.repair.title) { perform(.repair) }
             Button(EnvironmentCardState.Action.exportWork.title) { perform(.exportWork) }
+            Button("Diagnostics…") { openDiagnostics() }
             Divider()
             Button(EnvironmentCardState.Action.delete.title, role: .destructive) { perform(.delete) }
         } label: {
