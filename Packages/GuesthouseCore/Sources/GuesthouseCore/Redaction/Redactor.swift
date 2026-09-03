@@ -82,8 +82,9 @@ public struct Redactor: Sendable {
         let githubToken = #/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/#
         /// OpenAI-style API keys.
         let apiKey = #/\bsk-[A-Za-z0-9_-]{16,}\b/#
-        /// JSON Web Tokens.
-        let jwt = #/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/#
+        /// JSON Web Tokens, matched structurally: a header that decodes to `{"…`, then two more
+        /// Base64URL segments of any length (an empty claims set is `e30`).
+        let jwt = #/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/#
         /// Credentials embedded in URLs: `https://user:secret@host`.
         let urlUserInfo = #/(:\/\/)[^\s\/@]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `api_key=...`.
