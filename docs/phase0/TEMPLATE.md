@@ -1,6 +1,6 @@
 # Gate: `<name>`
 
-Issue: `#<number>`. Run by: `<name>`. Date: `<YYYY-MM-DD>`. Status: `<in progress | passed | passed with follow-ups | failed | exception approved (link the ADR; only gates #38 and #39)>`.
+Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC). Guesthouse commit: `<git SHA of the checkout used>`. Status: `<in progress | passed | passed with follow-ups | failed | exception approved (link the ADR; only gates #38 and #39)>`.
 
 ## Versions
 
