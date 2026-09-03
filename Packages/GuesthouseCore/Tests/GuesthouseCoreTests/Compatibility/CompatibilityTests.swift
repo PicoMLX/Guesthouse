@@ -40,7 +40,7 @@ import Testing
     static func tuple(codexCLI: String = "0.50.0", host: String = "26.5.2", hostBuild: String = "25F84", path: String = "/opt/homebrew/bin/codex", installations: Int = 1, capabilities: [String] = ["remote-app-server"]) -> CompatibilityTuple {
         CompatibilityTuple(
             hostMacOSVersion: SemanticVersion(host)!, hostMacOSBuild: hostBuild,
-            codexDesktopVersion: "1.2.3", codexDesktopBuild: "1234",
+            codexDesktopVersion: "1.2.3", codexDesktopBuild: "1234", codexDesktopPath: "/Applications/Codex.app",
             runtimeProtocolVersion: 1, tartVersion: "2.36.0", guestMacOSBuild: "25F84",
             xcodeBuild: "17F113", codexCLIVersion: codexCLI, codexCLIPath: path,
             codexCLIInstallations: installations, codexCLICapabilities: capabilities,
@@ -51,7 +51,7 @@ import Testing
     static func tested(codexCLI: String = "0.50.0", verification: CompatibilityManifest.Verification? = nil) -> CompatibilityManifest.TestedTuple {
         CompatibilityManifest.TestedTuple(
             hostMacOS: VersionRange(minimum: SemanticVersion("26.4")!),
-            codexDesktopVersion: "1.2.3", codexDesktopBuild: "1234",
+            codexDesktopVersion: "1.2.3", codexDesktopBuild: "1234", codexDesktopPath: "/Applications/Codex.app",
             runtimeProtocolVersion: 1, tartVersion: "2.36.0", guestMacOSBuild: "25F84",
             xcodeBuild: "17F113", codexCLIVersion: codexCLI, codexCLIPath: "/opt/homebrew/bin/codex",
             codexCLICapabilities: ["remote-app-server"], githubCLIVersion: "2.80.0",
@@ -102,7 +102,7 @@ import Testing
         var manifest = manifest
         manifest.incompatibilities = [.init(codexCLIVersion: "0.50.0", reason: "0.50.0 cannot start the remote app-server")]
         let state = CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [record])
-        #expect(state == .incompatible(reason: "0.50.0 cannot start the remote app-server"))
+        #expect(state == .incompatible(reason: "0.50.0 cannot start the remote app-server", recoveryActions: CompatibilityManifest.KnownIncompatibility.defaultRecoveryActions))
     }
 
     @Test func incompatibilityRulesCoverHostAndProvisioningScript() {
@@ -111,10 +111,10 @@ import Testing
             .init(hostMacOS: VersionRange(minimum: SemanticVersion("26.5")!, maximum: SemanticVersion("26.5.2")!), hostMacOSBuild: "25F84", reason: "host build breaks Screen Sharing tunnels"),
             .init(provisioningScriptVersion: "0", reason: "script 0 left password SSH enabled"),
         ]
-        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [record]) == .incompatible(reason: "host build breaks Screen Sharing tunnels"))
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [record]) == .incompatible(reason: "host build breaks Screen Sharing tunnels", recoveryActions: CompatibilityManifest.KnownIncompatibility.defaultRecoveryActions))
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple(host: "26.6", hostBuild: "25G10")), manifest: manifest, history: []) == .needsValidation(.neverConnected))
         var badScript = Self.tuple(host: "26.6", hostBuild: "25G10"); badScript.provisioningScriptVersion = "0"
-        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(badScript), manifest: manifest, history: []) == .incompatible(reason: "script 0 left password SSH enabled"))
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(badScript), manifest: manifest, history: []) == .incompatible(reason: "script 0 left password SSH enabled", recoveryActions: CompatibilityManifest.KnownIncompatibility.defaultRecoveryActions))
     }
 
     @Test func incompatibilityRuleDoesNotFireOnUnknownField() {

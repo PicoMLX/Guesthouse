@@ -7,6 +7,7 @@
       "hostMacOS": { "minimum": "26.4" },
       "codexDesktopVersion": "TBD",
       "codexDesktopBuild": "TBD",
+      "codexDesktopPath": "TBD",
       "runtimeProtocolVersion": 1,
       "tartVersion": "2.36.0",
       "guestMacOSBuild": "25F84",

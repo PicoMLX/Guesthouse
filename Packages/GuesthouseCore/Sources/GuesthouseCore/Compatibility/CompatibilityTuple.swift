@@ -2,7 +2,9 @@
 /// (MVP-PLAN.md §5, "Connect-time compatibility, not only update-time checks").
 ///
 /// Host macOS is tracked as both a product version and a build: a build replacement that keeps
-/// the product version is still OS drift (§4). The Codex CLI is tracked by version, resolved
+/// the product version is still OS drift (§4). The Codex desktop app is tracked by version,
+/// build, and the selected bundle's path, so a replaced or re-selected bundle that reports the
+/// same version is still a change (§5). The Codex CLI is tracked by version, resolved
 /// login-shell path, number of competing installations, and reported capabilities, because the
 /// same version string can belong to a different executable (§5).
 public enum CompatibilityField: String, Codable, Hashable, Sendable, CaseIterable {
@@ -10,6 +12,7 @@ public enum CompatibilityField: String, Codable, Hashable, Sendable, CaseIterabl
     case hostMacOSBuild
     case codexDesktopVersion
     case codexDesktopBuild
+    case codexDesktopPath
     case runtimeProtocolVersion
     case tartVersion
     case guestMacOSBuild
@@ -28,6 +31,8 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
     public var hostMacOSBuild: String
     public var codexDesktopVersion: String
     public var codexDesktopBuild: String
+    /// The selected desktop application bundle, resolved.
+    public var codexDesktopPath: String
     public var runtimeProtocolVersion: Int
     public var tartVersion: String
     public var guestMacOSBuild: String
@@ -37,7 +42,8 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
     public var codexCLIPath: String
     /// How many `codex` executables the login shell can see. Anything but 1 is ambiguous.
     public var codexCLIInstallations: Int
-    /// Capability identifiers the CLI reports, sorted. Empty when it reports none.
+    /// Capability identifiers the CLI reports, sorted and without duplicates. Empty when it
+    /// reports none.
     public var codexCLICapabilities: [String]
     public var githubCLIVersion: String
     public var provisioningScriptVersion: String
@@ -47,6 +53,7 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
         hostMacOSBuild: String,
         codexDesktopVersion: String,
         codexDesktopBuild: String,
+        codexDesktopPath: String,
         runtimeProtocolVersion: Int,
         tartVersion: String,
         guestMacOSBuild: String,
@@ -62,6 +69,7 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
         self.hostMacOSBuild = hostMacOSBuild
         self.codexDesktopVersion = codexDesktopVersion
         self.codexDesktopBuild = codexDesktopBuild
+        self.codexDesktopPath = codexDesktopPath
         self.runtimeProtocolVersion = runtimeProtocolVersion
         self.tartVersion = tartVersion
         self.guestMacOSBuild = guestMacOSBuild
@@ -69,9 +77,37 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
         self.codexCLIVersion = codexCLIVersion
         self.codexCLIPath = codexCLIPath
         self.codexCLIInstallations = codexCLIInstallations
-        self.codexCLICapabilities = codexCLICapabilities.sorted()
+        self.codexCLICapabilities = Self.normalize(codexCLICapabilities)
         self.githubCLIVersion = githubCLIVersion
         self.provisioningScriptVersion = provisioningScriptVersion
+    }
+
+    /// Decoding goes through the initializer so a document with capabilities in another
+    /// order or listed twice compares equal to the normalized form.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            hostMacOSVersion: try c.decode(SemanticVersion.self, forKey: .hostMacOSVersion),
+            hostMacOSBuild: try c.decode(String.self, forKey: .hostMacOSBuild),
+            codexDesktopVersion: try c.decode(String.self, forKey: .codexDesktopVersion),
+            codexDesktopBuild: try c.decode(String.self, forKey: .codexDesktopBuild),
+            codexDesktopPath: try c.decode(String.self, forKey: .codexDesktopPath),
+            runtimeProtocolVersion: try c.decode(Int.self, forKey: .runtimeProtocolVersion),
+            tartVersion: try c.decode(String.self, forKey: .tartVersion),
+            guestMacOSBuild: try c.decode(String.self, forKey: .guestMacOSBuild),
+            xcodeBuild: try c.decode(String.self, forKey: .xcodeBuild),
+            codexCLIVersion: try c.decode(String.self, forKey: .codexCLIVersion),
+            codexCLIPath: try c.decode(String.self, forKey: .codexCLIPath),
+            codexCLIInstallations: try c.decode(Int.self, forKey: .codexCLIInstallations),
+            codexCLICapabilities: try c.decode([String].self, forKey: .codexCLICapabilities),
+            githubCLIVersion: try c.decode(String.self, forKey: .githubCLIVersion),
+            provisioningScriptVersion: try c.decode(String.self, forKey: .provisioningScriptVersion)
+        )
+    }
+
+    /// Sorted, without duplicates: the canonical form every comparison uses.
+    public static func normalize(_ capabilities: [String]) -> [String] {
+        Array(Set(capabilities)).sorted()
     }
 
     /// The fields whose values differ between two tuples.
@@ -81,6 +117,7 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
         if hostMacOSBuild != other.hostMacOSBuild { changed.append(.hostMacOSBuild) }
         if codexDesktopVersion != other.codexDesktopVersion { changed.append(.codexDesktopVersion) }
         if codexDesktopBuild != other.codexDesktopBuild { changed.append(.codexDesktopBuild) }
+        if codexDesktopPath != other.codexDesktopPath { changed.append(.codexDesktopPath) }
         if runtimeProtocolVersion != other.runtimeProtocolVersion { changed.append(.runtimeProtocolVersion) }
         if tartVersion != other.tartVersion { changed.append(.tartVersion) }
         if guestMacOSBuild != other.guestMacOSBuild { changed.append(.guestMacOSBuild) }
@@ -102,6 +139,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
     public var hostMacOSBuild: String?
     public var codexDesktopVersion: String?
     public var codexDesktopBuild: String?
+    public var codexDesktopPath: String?
     public var runtimeProtocolVersion: Int?
     public var tartVersion: String?
     public var guestMacOSBuild: String?
@@ -118,6 +156,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
         hostMacOSBuild: String? = nil,
         codexDesktopVersion: String? = nil,
         codexDesktopBuild: String? = nil,
+        codexDesktopPath: String? = nil,
         runtimeProtocolVersion: Int? = nil,
         tartVersion: String? = nil,
         guestMacOSBuild: String? = nil,
@@ -133,6 +172,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
         self.hostMacOSBuild = hostMacOSBuild
         self.codexDesktopVersion = codexDesktopVersion
         self.codexDesktopBuild = codexDesktopBuild
+        self.codexDesktopPath = codexDesktopPath
         self.runtimeProtocolVersion = runtimeProtocolVersion
         self.tartVersion = tartVersion
         self.guestMacOSBuild = guestMacOSBuild
@@ -140,9 +180,30 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
         self.codexCLIVersion = codexCLIVersion
         self.codexCLIPath = codexCLIPath
         self.codexCLIInstallations = codexCLIInstallations
-        self.codexCLICapabilities = codexCLICapabilities?.sorted()
+        self.codexCLICapabilities = codexCLICapabilities.map(CompatibilityTuple.normalize)
         self.githubCLIVersion = githubCLIVersion
         self.provisioningScriptVersion = provisioningScriptVersion
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            hostMacOSVersion: try c.decodeIfPresent(SemanticVersion.self, forKey: .hostMacOSVersion),
+            hostMacOSBuild: try c.decodeIfPresent(String.self, forKey: .hostMacOSBuild),
+            codexDesktopVersion: try c.decodeIfPresent(String.self, forKey: .codexDesktopVersion),
+            codexDesktopBuild: try c.decodeIfPresent(String.self, forKey: .codexDesktopBuild),
+            codexDesktopPath: try c.decodeIfPresent(String.self, forKey: .codexDesktopPath),
+            runtimeProtocolVersion: try c.decodeIfPresent(Int.self, forKey: .runtimeProtocolVersion),
+            tartVersion: try c.decodeIfPresent(String.self, forKey: .tartVersion),
+            guestMacOSBuild: try c.decodeIfPresent(String.self, forKey: .guestMacOSBuild),
+            xcodeBuild: try c.decodeIfPresent(String.self, forKey: .xcodeBuild),
+            codexCLIVersion: try c.decodeIfPresent(String.self, forKey: .codexCLIVersion),
+            codexCLIPath: try c.decodeIfPresent(String.self, forKey: .codexCLIPath),
+            codexCLIInstallations: try c.decodeIfPresent(Int.self, forKey: .codexCLIInstallations),
+            codexCLICapabilities: try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities),
+            githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
+            provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion)
+        )
     }
 
     public init(_ tuple: CompatibilityTuple) {
@@ -151,6 +212,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
             hostMacOSBuild: tuple.hostMacOSBuild,
             codexDesktopVersion: tuple.codexDesktopVersion,
             codexDesktopBuild: tuple.codexDesktopBuild,
+            codexDesktopPath: tuple.codexDesktopPath,
             runtimeProtocolVersion: tuple.runtimeProtocolVersion,
             tartVersion: tuple.tartVersion,
             guestMacOSBuild: tuple.guestMacOSBuild,
@@ -171,6 +233,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
         if hostMacOSBuild == nil { unknown.append(.hostMacOSBuild) }
         if codexDesktopVersion == nil { unknown.append(.codexDesktopVersion) }
         if codexDesktopBuild == nil { unknown.append(.codexDesktopBuild) }
+        if codexDesktopPath == nil { unknown.append(.codexDesktopPath) }
         if runtimeProtocolVersion == nil { unknown.append(.runtimeProtocolVersion) }
         if tartVersion == nil { unknown.append(.tartVersion) }
         if guestMacOSBuild == nil { unknown.append(.guestMacOSBuild) }
@@ -187,7 +250,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
     /// The fully known tuple, or `nil` if any field is unknown.
     public var exact: CompatibilityTuple? {
         guard let hostMacOSVersion, let hostMacOSBuild, let codexDesktopVersion, let codexDesktopBuild,
-              let runtimeProtocolVersion, let tartVersion, let guestMacOSBuild, let xcodeBuild,
+              let codexDesktopPath, let runtimeProtocolVersion, let tartVersion, let guestMacOSBuild, let xcodeBuild,
               let codexCLIVersion, let codexCLIPath, let codexCLIInstallations, let codexCLICapabilities,
               let githubCLIVersion, let provisioningScriptVersion
         else { return nil }
@@ -196,6 +259,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
             hostMacOSBuild: hostMacOSBuild,
             codexDesktopVersion: codexDesktopVersion,
             codexDesktopBuild: codexDesktopBuild,
+            codexDesktopPath: codexDesktopPath,
             runtimeProtocolVersion: runtimeProtocolVersion,
             tartVersion: tartVersion,
             guestMacOSBuild: guestMacOSBuild,
