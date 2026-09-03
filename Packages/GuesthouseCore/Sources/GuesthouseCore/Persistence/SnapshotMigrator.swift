@@ -52,7 +52,11 @@ public struct SnapshotMigrator: Sendable {
             }
             document = try migration.apply(document)
             let next = try Self.version(of: document)
-            guard version < next else { throw StateStoreError.migrationMissing(from: version) }
+            // Exactly one step, never past `current`: a migration that skips a version would
+            // leave the intermediate transformations unapplied.
+            guard next == SchemaVersion(version.rawValue + 1), next <= current else {
+                throw StateStoreError.migrationProducedWrongVersion(from: version, produced: next)
+            }
             version = next
         }
         return (document, original)
@@ -68,10 +72,52 @@ public struct SnapshotMigrator: Sendable {
     }
 }
 
-public enum StateStoreError: Error, Hashable, Sendable {
+/// Failures of the state store, each with a message and a recovery path (AGENTS.md: every
+/// error carries a message and a recovery action).
+public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     case insecureDirectory(reason: String)
     case corruptSnapshot
+    case inconsistentSnapshot(reason: String)
     case corruptJournal(line: Int)
+    /// A record reused an operation id with a different environment or operation.
+    case inconsistentRecord(OperationID)
     case newerSchemaVersion(found: SchemaVersion, current: SchemaVersion)
     case migrationMissing(from: SchemaVersion)
+    case migrationProducedWrongVersion(from: SchemaVersion, produced: SchemaVersion)
+    case fileUnwritable(name: String)
+
+    public var userMessage: String {
+        switch self {
+        case .insecureDirectory(let reason):
+            "Guesthouse's state folder cannot be used (\(reason)). Choose a different storage location or move the item that is in the way."
+        case .corruptSnapshot:
+            "The saved list of development Macs could not be read. Guesthouse will inspect the actual virtual machines before offering anything."
+        case .inconsistentSnapshot(let reason):
+            "The saved list of development Macs is inconsistent (\(reason)). Guesthouse will inspect the actual virtual machines before offering anything."
+        case .corruptJournal(let line):
+            "The operation journal is damaged at line \(line). Guesthouse will inspect the actual state before allowing new operations."
+        case .inconsistentRecord:
+            "A journal record disagreed with the operation it belongs to, so it was not written. This is a bug in Guesthouse, not something you did."
+        case .newerSchemaVersion(let found, let current):
+            "The saved state was written by a newer Guesthouse (format \(found.rawValue); this version reads format \(current.rawValue)). Update Guesthouse to continue."
+        case .migrationMissing(let from):
+            "The saved state (format \(from.rawValue)) cannot be upgraded by this version of Guesthouse."
+        case .migrationProducedWrongVersion(let from, let produced):
+            "Upgrading the saved state from format \(from.rawValue) produced format \(produced.rawValue), which is not the next step. This is a bug in Guesthouse."
+        case .fileUnwritable(let name):
+            "Guesthouse could not write \(name) in its state folder."
+        }
+    }
+
+    /// In preference order. Never empty.
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .insecureDirectory: [.openSettings, .cancel]
+        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord: [.inspectState, .cancel]
+        case .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion: [.reinstallApp, .cancel]
+        case .fileUnwritable: [.freeDiskSpace, .openSettings, .cancel]
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
 }

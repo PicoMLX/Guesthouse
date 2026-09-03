@@ -1,11 +1,28 @@
 import Foundation
 
+/// The closed set of operations the journal can record. A misspelled or unsupported kind is a
+/// compile error, so replay always knows which state inspection an in-flight record needs.
+public enum JournalOperation: String, Codable, Hashable, Sendable, CaseIterable {
+    case startEnvironment
+    case stopEnvironment
+    case provision
+    case importXcode
+    case deleteEnvironment
+    case exportWork
+    case repair
+}
+
 /// One line of the append-only operation journal.
 ///
 /// The journal is written before the UI learns about a change and replayed on launch to find
 /// operations that never reported a result (MVP-PLAN.md §3: "Persist operation identifiers
-/// and completed checkpoints before updating the UI").
+/// and completed checkpoints before updating the UI"). Every line carries its own format
+/// version so a later format can be migrated or refused per record instead of failing the
+/// whole journal.
 public struct JournalRecord: Codable, Hashable, Sendable {
+    /// The record format this build writes and the newest it can read.
+    public static let currentFormat = 1
+
     public enum Outcome: Codable, Hashable, Sendable {
         /// The operation was accepted. It is in flight until a later record says otherwise.
         case started
@@ -17,14 +34,15 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         case unknown
     }
 
+    public let format: Int
     public let id: OperationID
     public let environmentID: EnvironmentID
-    /// A stable operation kind such as `startEnvironment`; never free-form text.
-    public let operation: String
+    public let operation: JournalOperation
     public let timestamp: Date
     public let outcome: Outcome
 
-    public init(id: OperationID, environmentID: EnvironmentID, operation: String, timestamp: Date, outcome: Outcome) {
+    public init(id: OperationID, environmentID: EnvironmentID, operation: JournalOperation, timestamp: Date, outcome: Outcome) {
+        format = Self.currentFormat
         self.id = id
         self.environmentID = environmentID
         self.operation = operation
@@ -32,10 +50,26 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         self.outcome = outcome
     }
 
-    /// Whether this record leaves the operation in flight.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let format = try c.decode(Int.self, forKey: .format)
+        guard (1...Self.currentFormat).contains(format) else {
+            throw DecodingError.dataCorruptedError(forKey: .format, in: c, debugDescription: "journal record format \(format) is not readable by this build")
+        }
+        self.format = format
+        id = try c.decode(OperationID.self, forKey: .id)
+        environmentID = try c.decode(EnvironmentID.self, forKey: .environmentID)
+        operation = try c.decode(JournalOperation.self, forKey: .operation)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        outcome = try c.decode(Outcome.self, forKey: .outcome)
+    }
+
+    /// Whether this record leaves the operation in flight. A failure whose error says the
+    /// outcome is unknown is not terminal: the mutation's result is still unestablished.
     public var leavesInFlight: Bool {
         switch outcome {
         case .started, .checkpoint, .unknown: true
+        case .failed(.operationOutcomeUnknown): true
         case .completed, .failed: false
         }
     }
@@ -49,7 +83,7 @@ public struct JournalReplay: Hashable, Sendable {
     public var inFlight: [OperationID: JournalRecord]
     /// True when the final line was incomplete, which happens when the process died mid-write.
     /// The partial line is ignored; the operation it belonged to is still listed as in flight
-    /// by its previous record, if any.
+    /// by its previous record, if any. The next append truncates it.
     public var truncatedTail: Bool
 
     public init(records: [JournalRecord], inFlight: [OperationID: JournalRecord], truncatedTail: Bool) {
