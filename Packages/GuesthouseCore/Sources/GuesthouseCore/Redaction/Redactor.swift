@@ -50,6 +50,15 @@ public struct Redactor: Sendable {
         return RedactedLine(Self.applyPatterns(to: text))
     }
 
+    /// Redacts a single value that came from outside the app (a version string, a path, a
+    /// component name) rather than a log line. Context is absent, so the device-code pattern
+    /// applies unconditionally instead of only on lines that mention a code.
+    public func redact(fieldValue: String) -> String {
+        var state = StreamState()
+        let line = redact(line: fieldValue, state: &state).text
+        return Self.applyDeviceCodePattern(to: line)
+    }
+
     /// Convenience for a batch of lines from one stream.
     public func redact(lines: [String]) -> [RedactedLine] {
         var state = StreamState()
@@ -98,8 +107,12 @@ public struct Redactor: Sendable {
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
         text = text.replacing(p.labeledSecret) { match in "\(match.1): \(marker("secret"))" }
         if text.contains(p.mentionsCode) {
-            text = text.replacing(p.deviceCode) { match in "\(match.1)\(marker("device-code"))" }
+            text = applyDeviceCodePattern(to: text)
         }
         return text
+    }
+
+    static func applyDeviceCodePattern(to input: String) -> String {
+        input.replacing(patterns.deviceCode) { match in "\(match.1)\(marker("device-code"))" }
     }
 }
