@@ -32,6 +32,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private struct Configuration: Sendable {
         var scenarios: [String: Scenario] = [:]
         var pendingOperationIDs: [String: OperationID] = [:]
+        var nextTicket: UInt64 = 0
     }
 
     /// What one `send` bound when it was called.
@@ -45,7 +46,6 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private var versionInfo: RuntimeVersionInfo
     private var canceledOperations: Set<OperationID> = []
 
-    private nonisolated let ticketCounter = Mutex<UInt64>(0)
     private var servingTicket: UInt64 = 0
     private var waiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
 
@@ -83,15 +83,14 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     // MARK: - RuntimeBackend
 
     public nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
-        let ticket = ticketCounter.withLock { counter in
-            defer { counter += 1 }
-            return counter
-        }
-        let binding = configuration.withLock { configuration in
-            Binding(
+        // Ticket and binding are taken under one lock, so two concurrent sends cannot swap
+        // the seeded id intended for the earlier one.
+        let (ticket, binding) = configuration.withLock { configuration in
+            defer { configuration.nextTicket += 1 }
+            return (configuration.nextTicket, Binding(
                 scenario: configuration.scenarios[request.caseName] ?? .succeed(),
                 seededOperationID: configuration.pendingOperationIDs.removeValue(forKey: request.caseName)
-            )
+            ))
         }
         return AsyncThrowingStream { continuation in
             let task = Task { await self.run(request, ticket: ticket, binding: binding, continuation) }
@@ -139,8 +138,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             case .hang:
                 while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
                 continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
-            case .succeed:
+            case .succeed(_, let status):
                 canceledOperations.insert(id)
+                // The canceled operation is no longer in flight for any environment, and a
+                // scripted post-cancellation status is applied.
+                clearInFlight(id)
+                if let status { statuses[status.environmentID] = status }
                 continuation.finish()
             }
             return
@@ -177,6 +180,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 try? await Task.sleep(for: .milliseconds(5))
             }
             recordImplicitCancellation(of: id)
+            clearInFlight(id)
             continuation.yield(.failed(id, .canceled))
             continuation.finish()
 
@@ -199,6 +203,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         }
         continuation.yield(.progress(id, phase))
         return true
+    }
+
+    private func clearInFlight(_ id: OperationID) {
+        for (environment, status) in statuses where status.inFlightOperation == id {
+            statuses[environment]?.inFlightOperation = nil
+        }
     }
 
     /// A consumer that stops listening counts as one cancel request, unless the operation was
