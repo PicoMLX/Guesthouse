@@ -73,12 +73,16 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
     /// Clears the session and reports an interruption only if the session that failed is
     /// still the current one.
     private func dropSession(generation: Int, reason: String?) {
-        let handler = lock.withLock { () -> (@Sendable () -> Void)? in
-            guard self.generation == generation else { return nil }
-            if let reason { session?.cancel(reason: reason) }
+        // The generation is retired before the session is canceled, so the cancellation
+        // handler that follows reports nothing a second time.
+        let (doomed, handler) = lock.withLock { () -> (XPCSession?, (@Sendable () -> Void)?) in
+            guard self.generation == generation else { return (nil, nil) }
+            self.generation += 1
+            let doomed = session
             session = nil
-            return interrupted
+            return (reason == nil ? nil : doomed, interrupted)
         }
+        if let doomed, let reason { doomed.cancel(reason: reason) }
         handler?()
     }
 }

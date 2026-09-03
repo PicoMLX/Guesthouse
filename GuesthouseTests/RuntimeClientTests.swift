@@ -142,6 +142,33 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         #expect(id == transport.lastAcceptedID)
     }
 
+    @Test func aFloodNeverEvictsTheAcceptedEvent() async throws {
+        let flood = (0..<3_000).map { _ in RuntimeEvent.progress(OperationID(), ProgressPhase(kind: .copying)) } + [.completed(OperationID())]
+        let transport = FakeTransport(.acceptThenStream(flood))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        try await Task.sleep(for: .milliseconds(200))
+        let events = try await collect(stream)
+        #expect(events.contains { if case .accepted = $0 { true } else { false } })
+        #expect(events.last?.caseName == "completed")
+        #expect(events.count <= RuntimeClient.consumerBufferLimit + 2)
+    }
+
+    @Test func aFailedSendDoesNotLeaveAnAbandonedMarker() async throws {
+        let transport = FakeTransport(.throwOnSend)
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let consumer = Task { for try await _ in stream {} }
+        consumer.cancel()
+        _ = try? await consumer.value
+        try await Task.sleep(for: .milliseconds(50))
+        let later = FakeTransport(.acceptThenStream([.completed(OperationID())]))
+        let client2 = RuntimeClient(transport: later)
+        let events = try await collect(client2.send(.startEnvironment(EnvironmentID(), StartOptions())))
+        #expect(events.map(\.caseName) == ["accepted", "completed"])
+        #expect(later.sent.count == 1, "no cancel was sent for a fresh operation")
+    }
+
     @Test func aDiscardedClientIsReleased() async throws {
         weak var weakClient: RuntimeClient?
         do {

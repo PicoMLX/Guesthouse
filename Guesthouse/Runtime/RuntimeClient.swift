@@ -35,6 +35,12 @@ actor RuntimeClient: RuntimeBackend {
     /// Consumers that went away before their `accepted` reply arrived; the operation is
     /// canceled the moment it is accepted.
     private var abandonedBeforeAccept: Set<ObjectIdentifier> = []
+    /// Operations whose consumer left; their late events are dropped, not kept. Bounded.
+    private var retired: [OperationID] = []
+    /// Keys whose request finished without acceptance (a query reply or a failure), so a
+    /// late `consumerGone` for them is ignored. Bounded like `retired`.
+    private var settled: Set<ObjectIdentifier> = []
+    static let retiredLimit = 256
     private let inbox: AsyncStream<Inbound>
     private let inboxContinuation: AsyncStream<Inbound>.Continuation
     private var started = false
@@ -76,7 +82,9 @@ actor RuntimeClient: RuntimeBackend {
                 inboxContinuation.yield(.reply(result, continuation, key))
             }
         } catch {
-            continuation.finish(throwing: RuntimeConnectionInterrupted())
+            // The failure takes the ordered path a reply would, so a `consumerGone` queued
+            // behind this send finds its key settled instead of marking it abandoned forever.
+            inboxContinuation.yield(.reply(.failure(error), continuation, key))
         }
     }
 
@@ -120,6 +128,7 @@ actor RuntimeClient: RuntimeBackend {
                     // it is canceled right away instead of running unobserved.
                     continuation.finish()
                     pendingEvents.removeValue(forKey: id)
+                    retire(id)
                     try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
                     return
                 }
@@ -131,11 +140,32 @@ actor RuntimeClient: RuntimeBackend {
                 }
             case .runtimeVersion, .status, .completed, .failed, .progress, .log:
                 abandonedBeforeAccept.remove(key)
+                settle(key)
                 continuation.finish()
             }
         case .failure:
             abandonedBeforeAccept.remove(key)
+            settle(key)
             continuation.finish(throwing: RuntimeConnectionInterrupted())
+        }
+    }
+
+    private func settle(_ key: ObjectIdentifier) {
+        settled.insert(key)
+        if settled.count > Self.retiredLimit { settled.removeAll() }
+    }
+
+    private func retire(_ id: OperationID) {
+        retired.append(id)
+        if retired.count > Self.retiredLimit { retired.removeFirst(retired.count - Self.retiredLimit) }
+    }
+
+    /// Progress and log traffic may be evicted from a full consumer buffer; the operation's
+    /// `accepted` event never is. If the buffer drops it, it is yielded again at once, so a
+    /// consumer always learns the operation id even behind a flood.
+    private func deliver(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
+        if case .dropped(.accepted) = continuation.yield(event) {
+            continuation.yield(.accepted(id))
         }
     }
 
@@ -143,8 +173,8 @@ actor RuntimeClient: RuntimeBackend {
         switch event {
         case .progress(let id, _), .log(let id?, _):
             if let continuation = operations[id] {
-                continuation.yield(event)
-            } else {
+                deliver(event, to: continuation, id: id)
+            } else if !retired.contains(id) {
                 pendingEvents[id, default: []].append(event)
             }
         case .completed(let id), .failed(let id, _):
@@ -152,7 +182,7 @@ actor RuntimeClient: RuntimeBackend {
                 consumers = consumers.filter { $0.value != id }
                 continuation.yield(event)
                 continuation.finish()
-            } else {
+            } else if !retired.contains(id) {
                 pendingEvents[id, default: []].append(event)
             }
         case .status, .runtimeVersion, .accepted, .log(nil, _):
@@ -162,12 +192,14 @@ actor RuntimeClient: RuntimeBackend {
 
     private func consumerGone(_ key: ObjectIdentifier) {
         guard let id = consumers.removeValue(forKey: key) else {
-            // Not accepted yet (or a query): remembered until the reply says which it was.
-            abandonedBeforeAccept.insert(key)
+            // Already answered (a query or a failed send): nothing to cancel. Otherwise not
+            // accepted yet: remembered until the reply says which it was.
+            if settled.remove(key) == nil { abandonedBeforeAccept.insert(key) }
             return
         }
         guard operations.removeValue(forKey: id) != nil else { return }
         pendingEvents.removeValue(forKey: id)
+        retire(id)
         try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
     }
 
