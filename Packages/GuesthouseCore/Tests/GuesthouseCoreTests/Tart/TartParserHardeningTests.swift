@@ -35,6 +35,35 @@ import Testing
         }
     }
 
+    @Test func stateClassificationsAreAnchoredToTheVMPhrases() {
+        #expect(TartErrorClassifier.classify(stderr: #"Error: VM "guesthouse-x" is not running"#, exitStatus: 1) == .notRunning)
+        #expect(TartErrorClassifier.classify(stderr: #"Error: VM "guesthouse-x" is running"#, exitStatus: 1) == .requiresStoppedVM)
+        for unrelated in ["registry mirror is not running", "registry mirror is running", "the cache must be stopped"] {
+            if case .unknown = TartErrorClassifier.classify(stderr: unrelated, exitStatus: 1) {} else {
+                Issue.record("\(unrelated) should stay unknown")
+            }
+        }
+    }
+
+    @Test func onlyThePinnedSourceSpellingsAreAccepted() throws {
+        func entry(_ source: String) -> Data {
+            Data(#"[{"Source":"\#(source)","Name":"x","Disk":1,"Size":1,"Accessed":"2026-01-01T00:00:00Z","Running":false,"State":"stopped"}]"#.utf8)
+        }
+        #expect(try TartListParser.parse(entry("local")).first?.source == .local)
+        #expect(try TartListParser.parse(entry("OCI")).first?.source == .oci)
+        for bad in ["LOCAL", "Local", "oci"] {
+            #expect(throws: TartParseError.unknownValue(field: "Source", value: bad)) { try TartListParser.parse(entry(bad)) }
+        }
+    }
+
+    @Test func versionsAlwaysHaveThreeComponentsAndRoundTrip() throws {
+        let short = TartVersion(SemanticVersion([2, 36]))
+        #expect(short.description == "2.36.0")
+        #expect(short.matchesPin)
+        let decoded = try JSONDecoder().decode(TartVersion.self, from: try JSONEncoder().encode(short))
+        #expect(decoded == short)
+    }
+
     @Test func parserErrorsCarryNoRawValues() {
         let unknownSource = #"[{"Source":"\#(token)","Name":"x","Disk":1,"Size":1,"Accessed":"2026-01-01T00:00:00Z","Running":false,"State":"stopped"}]"#
         let parseError = #expect(throws: TartParseError.self) { try TartListParser.parse(Data(unknownSource.utf8)) }
