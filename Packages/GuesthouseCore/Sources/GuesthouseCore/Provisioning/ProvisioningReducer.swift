@@ -142,7 +142,7 @@ extension ProvisioningTransitionError: LocalizedError {
 ///   anything re-runs, so a retry can never blindly repeat a step whose real outcome is unknown
 ///   (MVP-PLAN.md §3, §4, §9). Inspection can be requested again while the outcome is unknown.
 /// - A checkpoint counts only once the journal has it (§3: "Persist ... before updating the UI").
-public enum ProvisioningReducer {
+public enum ProvisioningReducer: Sendable {
     public static func reduce(
         _ state: ProvisioningState,
         _ event: ProvisioningEvent
@@ -154,7 +154,7 @@ public enum ProvisioningReducer {
 
         switch (state.status, event) {
 
-        case (.notStarted, .startRequested(let requested)), (.resumable, .startRequested(let requested)):
+        case (.notStarted, .startRequested(let requested)), (.resumable, .startRequested(let requested)), (.startRejected, .startRequested(let requested)):
             guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
             return at(.startRequested)
 
@@ -167,8 +167,8 @@ public enum ProvisioningReducer {
             guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
             return at(.inProgress(id))
 
-        case (.startRequested, .startRequestRejected):
-            return at(.notStarted)
+        case (.startRequested, .startRequestRejected(let error)):
+            return at(.startRejected(error))
 
         case (.startRequested, .startRequestInterrupted):
             return at(.awaitingInspection, [.inspectActualState(stage)])
@@ -195,7 +195,11 @@ public enum ProvisioningReducer {
 
         case (.inProgress(let current), .userActionRequired(let id, let error)):
             try requireSame(current, id)
-            return at(.needsUserAction(error))
+            return at(.needsUserAction(id, error))
+
+        case (.needsUserAction(let current, _), .operationCanceled(let id)):
+            try requireSame(current, id)
+            return at(.canceled)
 
         case (.inProgress(let current), .connectionInterrupted(let id)):
             try requireSame(current, id)

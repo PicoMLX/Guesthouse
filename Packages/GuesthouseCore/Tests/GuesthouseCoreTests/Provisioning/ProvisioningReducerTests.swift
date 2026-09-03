@@ -40,7 +40,9 @@ import Testing
         [
             .init(name: "request first stage", from: .initial, event: .startRequested(stage: .preflight), expectedStatus: "startRequested", expectedEffects: []),
             .init(name: "runtime accepts the requested start", from: state(.preflight, .startRequested), event: .operationStarted(op, stage: .preflight), expectedStatus: "inProgress", expectedEffects: []),
-            .init(name: "runtime rejects the request: nothing ran", from: state(.preflight, .startRequested), event: .startRequestRejected(failure), expectedStatus: "notStarted", expectedEffects: []),
+            .init(name: "runtime rejects the request: error kept, nothing ran", from: state(.preflight, .startRequested), event: .startRequestRejected(failure), expectedStatus: "startRejected", expectedEffects: []),
+            .init(name: "a new request after a rejection needs no inspection", from: state(.preflight, .startRejected(failure)), event: .startRequested(stage: .preflight), expectedStatus: "startRequested", expectedEffects: []),
+            .init(name: "user cancels while a console step is pending", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .operationCanceled(op), expectedStatus: "canceled", expectedEffects: []),
             .init(name: "request interrupted: inspect", from: state(.preflight, .startRequested), event: .startRequestInterrupted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight)]),
             .init(name: "checkpoint reached waits for persistence", from: state(.preflight, .inProgress(op)), event: .checkpointReached(op, checkpoint(.preflight)), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.preflight))]),
             .init(name: "persisted checkpoint completes the stage", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight))), event: .checkpointPersisted(checkpoint(.preflight)), expectedStatus: "completed", expectedEffects: []),
@@ -56,7 +58,7 @@ import Testing
             .init(name: "user asks to check again while inspecting", from: state(.macOSInstalled, .awaitingInspection), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.macOSInstalled)]),
             .init(name: "retry after failure inspects first", from: state(.sshPaired, .recoverableFailure(failure)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired)]),
             .init(name: "retry after cancel inspects first", from: state(.sshPaired, .canceled), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired)]),
-            .init(name: "user finished console step, inspect", from: state(.needsGuestSetup, .needsUserAction(consoleNeeded)), event: .userActionCompleted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.needsGuestSetup)]),
+            .init(name: "user finished console step, inspect", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .userActionCompleted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.needsGuestSetup)]),
             .init(name: "reconciled: actually completed, persist it", from: state(.macOSInstalled, .unknownOutcome(op)), event: .reconciled(.completed(checkpoint(.macOSInstalled))), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.macOSInstalled))]),
             .init(name: "reconciled: resumable partial work", from: state(.runtimeReady, .unknownOutcome(op)), event: .reconciled(.resumable(evidence)), expectedStatus: "resumable", expectedEffects: []),
             .init(name: "reconciled: failed and needs cleanup", from: state(.runtimeReady, .awaitingInspection), event: .reconciled(.failedNeedsCleanup(failure)), expectedStatus: "cleanupRequired", expectedEffects: [.cleanUp(.runtimeReady)]),
@@ -92,7 +94,7 @@ import Testing
     }
 
     @Test func startingFromAFailureUnknownOrInspectionIsIllegal() {
-        for status in [StageStatus.recoverableFailure(failure), .unknownOutcome(op), .awaitingInspection, .cleanupRequired(failure), .needsUserAction(consoleNeeded), .startRequested, .inProgress(op)] {
+        for status in [StageStatus.recoverableFailure(failure), .unknownOutcome(op), .awaitingInspection, .cleanupRequired(failure), .needsUserAction(op, consoleNeeded), .startRequested, .inProgress(op)] {
             #expect(throws: ProvisioningTransitionError.self, Comment(rawValue: status.caseName)) {
                 try Reducer.reduce(state(.sshPaired, status), .startRequested(stage: .sshPaired))
             }
@@ -187,6 +189,16 @@ import Testing
         #expect(state == self.state(.needsGuestSetup, .inProgress(other)))
     }
 
+    @Test func resumeEvidenceIsRedactedAndBoundedAtConstruction() throws {
+        let evidence = ResumeEvidence(summary: "download resumed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\nnext", stagingPath: "downloads/\u{202E}restore.partial")
+        #expect(evidence.summary == "download resumed with token [redacted:github-token]next")
+        #expect(evidence.stagingPath == "downloads/restore.partial")
+        let long = ResumeEvidence(summary: String(repeating: "s", count: 5_000))
+        #expect(long.summary.unicodeScalars.count == 200)
+        let decoded = try JSONDecoder().decode(ResumeEvidence.self, from: Data("{\"summary\":\"password: hunter2\"}".utf8))
+        #expect(decoded.summary == "password: [redacted:secret]")
+    }
+
     @Test func transitionErrorsCarryUserFacingText() {
         for error in [ProvisioningTransitionError.illegalTransition(status: "a", event: "b"), .operationMismatch(expected: op, actual: other), .stageMismatch(expected: .preflight, actual: .ready), .checkpointMismatch(expected: checkpoint(.preflight), actual: checkpoint(.ready)), .alreadyReady] {
             #expect(error.errorDescription?.isEmpty == false)
@@ -210,8 +222,14 @@ import Testing
             #expect(try JSONDecoder().decode(ProvisioningState.self, from: data) == original)
         }
         let inconsistent = Data("""
-        {"stage":"ready","status":{"completed":{"_0":{"stage":"preflight","reachedAt":0}}}}
+        {"schemaVersion":1,"stage":"ready","status":{"completed":{"_0":{"stage":"preflight","reachedAt":0}}}}
         """.utf8)
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: inconsistent) }
+        let unversioned = Data("""
+        {"stage":"preflight","status":{"notStarted":{}}}
+        """.utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: unversioned) }
+        let encoded = String(decoding: try JSONEncoder().encode(ProvisioningState.initial), as: UTF8.self)
+        #expect(encoded.contains("\"schemaVersion\":1"))
     }
 }

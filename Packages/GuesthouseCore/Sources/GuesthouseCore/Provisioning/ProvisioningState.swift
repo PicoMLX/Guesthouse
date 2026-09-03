@@ -1,5 +1,7 @@
 /// Where one environment is in provisioning, and what is happening at that stage.
 public struct ProvisioningState: Hashable, Sendable {
+    /// Record schema, so the state store can migrate a persisted state after this type changes.
+    public var schemaVersion: SchemaVersion
     /// The checkpoint being worked toward, or the last one completed.
     public var stage: ProvisioningStage
     public var status: StageStatus
@@ -8,6 +10,7 @@ public struct ProvisioningState: Hashable, Sendable {
     /// else is a programming error, and decoding it is rejected.
     public init(stage: ProvisioningStage, status: StageStatus) {
         precondition(Self.isConsistent(stage: stage, status: status), "checkpoint stage does not match \(stage.rawValue)")
+        schemaVersion = .current
         self.stage = stage
         self.status = status
     }
@@ -37,11 +40,16 @@ public struct ProvisioningState: Hashable, Sendable {
 
 extension ProvisioningState: Codable {
     private enum CodingKeys: String, CodingKey {
-        case stage, status
+        case schemaVersion, stage, status
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decode(SchemaVersion.self, forKey: .schemaVersion)
+        guard version == SchemaVersion.current else {
+            throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "provisioning state schema \(version) is not \(SchemaVersion.current)")
+        }
+        schemaVersion = version
         let stage = try container.decode(ProvisioningStage.self, forKey: .stage)
         let status = try container.decode(StageStatus.self, forKey: .status)
         guard Self.isConsistent(stage: stage, status: status) else {
@@ -53,6 +61,7 @@ extension ProvisioningState: Codable {
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encode(stage, forKey: .stage)
         try container.encode(status, forKey: .status)
     }
@@ -62,14 +71,37 @@ extension ProvisioningState: Codable {
 /// download, an installation staging area, an unfinished copy. It is neither usable nor
 /// discardable; the next operation resumes from it (MVP-PLAN.md §9: "Keep interrupted downloads
 /// and installation staging distinct from verified usable artifacts").
-public struct ResumeEvidence: Codable, Hashable, Sendable {
-    public var summary: String
+public struct ResumeEvidence: Hashable, Sendable {
+    public let summary: String
     /// Relative path of the staging area, when there is one.
-    public var stagingPath: String?
+    public let stagingPath: String?
 
+    /// Both values may derive from guest output or file names, so they are redacted, stripped
+    /// of control characters, and bounded at construction; the journal never sees raw text.
     public init(summary: String, stagingPath: String? = nil) {
-        self.summary = summary
-        self.stagingPath = stagingPath
+        self.summary = Self.clean(summary, limit: 200)
+        self.stagingPath = stagingPath.map { Self.clean($0, limit: 400) }
+    }
+
+    static func clean(_ value: String, limit: Int) -> String {
+        let redacted = Redactor().redact(fieldValue: String(String.UnicodeScalarView(value.unicodeScalars.prefix(limit + 512))))
+        let printable = redacted.unicodeScalars.filter { $0.properties.generalCategory != .control && $0.properties.generalCategory != .format && $0.properties.generalCategory != .lineSeparator && $0.properties.generalCategory != .paragraphSeparator }
+        return String(String.UnicodeScalarView(printable.prefix(limit)))
+    }
+}
+
+extension ResumeEvidence: Codable {
+    private enum CodingKeys: String, CodingKey { case summary, stagingPath }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(summary: try container.decode(String.self, forKey: .summary), stagingPath: try container.decodeIfPresent(String.self, forKey: .stagingPath))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(summary, forKey: .summary)
+        try container.encodeIfPresent(stagingPath, forKey: .stagingPath)
     }
 }
 
@@ -92,8 +124,12 @@ public enum StageStatus: Codable, Hashable, Sendable {
     case canceled
     /// The operation failed in a way a retry or repair can address. Retrying inspects first.
     case recoverableFailure(GuesthouseError)
-    /// The user must do something outside the app (usually at the guest console).
-    case needsUserAction(GuesthouseError)
+    /// The runtime refused to start the operation before doing anything; the error says why
+    /// and what to do. Nothing ran, so a new start may be requested directly.
+    case startRejected(GuesthouseError)
+    /// The user must do something outside the app (usually at the guest console). The
+    /// operation stays identified so the user can cancel it instead of claiming completion.
+    case needsUserAction(OperationID, GuesthouseError)
     /// Contact with the runtime was lost mid-operation. The outcome is unknown until reconciled.
     case unknownOutcome(OperationID)
     /// Actual state is being inspected before anything is re-run.
@@ -109,6 +145,7 @@ public enum StageStatus: Codable, Hashable, Sendable {
         switch self {
         case .notStarted: "notStarted"
         case .startRequested: "startRequested"
+        case .startRejected: "startRejected"
         case .inProgress: "inProgress"
         case .persistingCheckpoint: "persistingCheckpoint"
         case .completed: "completed"
