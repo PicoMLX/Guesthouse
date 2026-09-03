@@ -9,13 +9,16 @@ import GuesthouseCore
 /// XPC, and it can never supply the root.
 public struct RuntimeStorage: Sendable {
     public enum Subdirectory: String, CaseIterable, Sendable {
-        /// Verified Tart bundles, one folder per version.
+        /// Verified VM runtime bundles, one folder per version.
         case runtime
-        /// The VM store. This is `TART_HOME`, so lifecycle actions can never reach unrelated
-        /// Tart machines in the user's default `~/.tart`.
+        /// The VM store. Every provider receives it explicitly, so lifecycle actions can
+        /// never reach unrelated machines in a provider's default store.
         case vms
         /// `StateStore` root: snapshot and journal.
         case state
+        /// Lume writes configuration even when a direct VM store is supplied. Pin its XDG
+        /// root here so a probe cannot create or read the user's default `~/.lume` state.
+        case lumeConfiguration = "state/lume-xdg"
         /// Maintenance SSH identities and known-hosts files. Never exported to the user's
         /// discoverable SSH configuration.
         case sshMaintenance = "ssh/maintenance"
@@ -33,7 +36,7 @@ public struct RuntimeStorage: Sendable {
         public var isExcludedFromBackup: Bool {
             switch self {
             case .staging, .downloads: true
-            case .vms, .runtime, .state, .sshMaintenance, .diagnostics: false
+            case .vms, .runtime, .state, .lumeConfiguration, .sshMaintenance, .diagnostics: false
             }
         }
     }
@@ -81,6 +84,17 @@ public struct RuntimeStorage: Sendable {
     /// rest of the service's environment are deliberately absent.
     public func environmentForTart() -> [String: String] {
         ["TART_HOME": tartHome.path]
+    }
+
+    /// Lume's VM and configuration locations are both explicit. Telemetry and update checks
+    /// stay off during the spike, and no host `HOME` or `PATH` is inherited.
+    public func environmentForLume() -> [String: String] {
+        [
+            "LUME_TELEMETRY_ENABLED": "false",
+            "LUME_UPDATE_CHECK": "false",
+            "TMPDIR": url(for: .staging).path,
+            "XDG_CONFIG_HOME": url(for: .lumeConfiguration).path,
+        ]
     }
 
     // MARK: - Verification
