@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// An IP address printed by `tart ip`, validated with `inet_pton`.
-public struct GuestIPAddress: Hashable, Sendable, Codable, CustomStringConvertible {
+public struct GuestIPAddress: Hashable, Sendable, CustomStringConvertible {
     public enum Family: String, Codable, Hashable, Sendable {
         case ipv4, ipv6
     }
@@ -29,6 +29,23 @@ public struct GuestIPAddress: Hashable, Sendable, Codable, CustomStringConvertib
     }
 
     public var description: String { rawValue }
+}
+
+/// Encoded as the bare address string; decoding re-validates, so a persisted or received value
+/// can never carry an address that `init?(_:)` would reject or a family that disagrees with it.
+extension GuestIPAddress: Codable {
+    public init(from decoder: any Decoder) throws {
+        let string = try decoder.singleValueContainer().decode(String.self)
+        guard let address = GuestIPAddress(string) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "not an IP address: \(string)"))
+        }
+        self = address
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 public enum TartIPParser {

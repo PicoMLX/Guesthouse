@@ -31,6 +31,8 @@ import Testing
         #expect(throws: TartParseError.unknownValue(field: "State", value: "hibernating")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":false,\"State\":\"hibernating\"}]") }
         #expect(throws: TartParseError.unknownValue(field: "Source", value: "cloud")) { try TartListParser.parse("[{\"Source\":\"cloud\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
         #expect(try TartListParser.parse("[]").isEmpty)
+        #expect(throws: TartParseError.unexpectedShape("Disk")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":true,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
+        #expect(throws: TartParseError.unexpectedShape("Running")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":1,\"State\":\"stopped\"}]") }
     }
 
     @Test func parsesVersionsAndComparesWithThePin() throws {
@@ -42,6 +44,9 @@ import Testing
         #expect(TartVersion(parsing: "") == nil)
         #expect(TartVersion(parsing: "tart: command not found") == nil)
         #expect(TartVersion(parsing: "2.36.0-beta") == nil)
+        #expect(TartVersion(parsing: "2.36") == nil, "two components are not the pinned form")
+        #expect(TartVersion(parsing: "2.36.0\nwarning: something") == nil, "extra lines are not a version")
+        #expect(TartVersion(parsing: "2.36.0 extra") == nil)
         #expect(TartVersion(parsing: TartPin.releaseTag) == TartPin.version)
     }
 
@@ -56,6 +61,10 @@ import Testing
         #expect(throws: TartParseError.notAnIPAddress) { try TartIPParser.parse("999.1.1.1") }
         #expect(throws: TartParseError.notAnIPAddress) { try TartIPParser.parse(fixture("ip-error.txt")) }
         #expect(GuestIPAddress("192.168.64.5 extra") == nil)
+        let encoded = try JSONEncoder().encode(v4)
+        #expect(String(decoding: encoded, as: UTF8.self) == "\"192.168.64.5\"")
+        #expect(try JSONDecoder().decode(GuestIPAddress.self, from: encoded) == v4)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(GuestIPAddress.self, from: Data("\"not-an-ip\"".utf8)) }
     }
 
     @Test func classifiesKnownFailures() throws {
@@ -68,9 +77,16 @@ import Testing
             ("VM directory is already initialized, preventing overwrite", .directoryAlreadyInitialized),
             ("VM \"guesthouse-x\" must be stopped before resizing its disk", .requiresStoppedVM),
             ("VM \"guesthouse-x\" is running", .requiresStoppedVM),
+            ("The number of VMs exceeds the system limit (other running VMs: a, b)", .virtualMachineLimitExceeded),
         ]
         for (stderr, expected) in cases {
             #expect(TartErrorClassifier.classify(stderr: stderr, exitStatus: 1) == expected, Comment(rawValue: stderr))
+        }
+    }
+
+    @Test func lookalikePhrasesStayUnknown() {
+        for stderr in ["manifest ghcr.io/x/y:latest does not exist", "failed to open lock file /x/lock: Permission denied", "registry rate limit exceeded, retry later"] {
+            guard case .unknown = TartErrorClassifier.classify(stderr: stderr, exitStatus: 1) else { Issue.record("misclassified: \(stderr)"); continue }
         }
     }
 

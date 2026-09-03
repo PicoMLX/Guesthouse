@@ -16,15 +16,17 @@ public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomString
         self.semantic = semantic
     }
 
-    /// Parses the output of `tart --version`. Accepts `2.36.0`, `v2.36.0`, and `tart 2.36.0`;
-    /// anything else is not a version and must be treated as unknown, never guessed.
+    /// Parses the output of `tart --version`. Accepts exactly one non-empty line of the form
+    /// `2.36.0`, `v2.36.0`, or `tart 2.36.0`, with all three numeric components present.
+    /// Anything else (extra lines, a two-component version, trailing text) is not a version and
+    /// must be treated as unknown, never as matching the pin.
     public init?(parsing output: String) {
-        var text = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let firstLine = text.split(whereSeparator: \.isNewline).first else { return nil }
-        text = String(firstLine)
-        if text.lowercased().hasPrefix("tart ") { text = String(text.dropFirst(5)) }
+        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard lines.count == 1 else { return nil }
+        var text = lines[0]
+        if text.lowercased().hasPrefix("tart ") { text = String(text.dropFirst(5)).trimmingCharacters(in: .whitespaces) }
         if text.hasPrefix("v") { text = String(text.dropFirst()) }
-        guard let semantic = SemanticVersion(text.trimmingCharacters(in: .whitespaces)) else { return nil }
+        guard text.wholeMatch(of: #/[0-9]+\.[0-9]+\.[0-9]+/#) != nil, let semantic = SemanticVersion(text) else { return nil }
         self.init(semantic)
     }
 

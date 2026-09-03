@@ -15,13 +15,14 @@ public enum TartFailure: Hashable, Sendable {
     case requiresStoppedVM
     /// `no IP address found, is your VM running?`
     case noIPAddress
-    /// `failed to lock ...` (another Tart process holds the VM)
+    /// `failed to lock <path>` (another Tart process holds the VM). A failure to open the lock
+    /// file is not contention and stays unknown.
     case lockHeld
     /// `VM directory is already initialized, preventing overwrite`
     case directoryAlreadyInitialized
     /// The disk image is in use elsewhere, for example mounted in Finder.
     case diskInUse
-    /// Tart could not run the VM on this host at all.
+    /// `The number of VMs exceeds the system limit`.
     case virtualMachineLimitExceeded
     case unknown(RedactedLine)
 }
@@ -31,14 +32,14 @@ public enum TartErrorClassifier {
         let text = stderr.lowercased()
         func has(_ phrase: String) -> Bool { text.contains(phrase) }
 
-        if has("does not exist") { return .vmNotFound }
+        if has("the specified vm") && has("does not exist") { return .vmNotFound }
         if has("is already running") { return .alreadyRunning }
         if has("is not running") { return .notRunning }
         if has("no ip address found") { return .noIPAddress }
-        if has("failed to lock") || has("failed to open lock file") { return .lockHeld }
+        if has("failed to lock ") { return .lockHeld }
         if has("already initialized") { return .directoryAlreadyInitialized }
         if has("disk") && has("in use") { return .diskInUse }
-        if has("virtual machine limit") || has("limit exceeded") { return .virtualMachineLimitExceeded }
+        if has("the number of vms exceeds the system limit") { return .virtualMachineLimitExceeded }
         if has("is running") || has("must be stopped") { return .requiresStoppedVM }
         let firstLine = stderr.split(whereSeparator: \.isNewline).first.map(String.init) ?? "exit status \(exitStatus)"
         return .unknown(Redactor().redact(lines: [firstLine]).first ?? RedactedLine(literal: "unknown Tart failure"))
