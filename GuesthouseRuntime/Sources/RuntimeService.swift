@@ -38,11 +38,6 @@ final class RuntimeService: Sendable {
         let envelope: RuntimeRequestEnvelope
         do {
             envelope = try message.decode(as: RuntimeRequestEnvelope.self)
-        } catch let mismatch as RuntimeRequestEnvelope.ProtocolMismatch {
-            // A version-skewed installation is not corrupt input: the client gets the
-            // protocol-mismatch error and its reinstall recovery, and the session closes.
-            log.error("protocol mismatch: client \(mismatch.client.rawValue, privacy: .public)")
-            return reply(RuntimeDispatcher.mismatch(mismatch.error), session: session)
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error("undecodable request rejected")
