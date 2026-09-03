@@ -86,8 +86,9 @@ public struct RuntimeStorage: Sendable {
         ["TART_HOME": tartHome.path]
     }
 
-    /// Lume's VM and configuration locations are both explicit. Telemetry and update checks
-    /// stay off during the spike, and no host `HOME` or `PATH` is inherited.
+    /// Lume's configuration and temporary locations are explicit. Telemetry and update checks
+    /// stay off during the spike, and no host `HOME` or `PATH` is inherited. VM lifecycle commands
+    /// must separately pass `--storage` with `url(for: .vms)`; Lume has no VM-store environment key.
     public func environmentForLume() -> [String: String] {
         [
             "LUME_TELEMETRY_ENABLED": "false",
@@ -95,6 +96,19 @@ public struct RuntimeStorage: Sendable {
             "TMPDIR": url(for: .staging).path,
             "XDG_CONFIG_HOME": url(for: .lumeConfiguration).path,
         ]
+    }
+
+    /// Physical identity captured by verification and reused by runtime coordination. Paths alone
+    /// are insufficient on macOS because distinct spellings can reach the same filesystem item.
+    struct CoordinationIdentity: Hashable, Sendable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    static func fileIdentity(of url: URL) -> CoordinationIdentity? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        return CoordinationIdentity(device: info.st_dev, inode: info.st_ino)
     }
 
     // MARK: - Verification

@@ -58,12 +58,38 @@ extension LumeVerificationError: LocalizedError {}
 /// to launch it themselves.
 public struct VerifiedLumeBundle: Hashable, Sendable {
     let bundle: LumeBundle
+    let fileIdentity: RuntimeStorage.CoordinationIdentity
     public let version: SemanticVersion
     public let teamIdentifier: String
     public let signingIdentifier: String
 
-    init(bundle: LumeBundle, version: SemanticVersion, teamIdentifier: String, signingIdentifier: String) {
+    init(
+        bundle: LumeBundle,
+        version: SemanticVersion,
+        teamIdentifier: String,
+        signingIdentifier: String
+    ) throws(LumeVerificationError) {
+        guard let fileIdentity = RuntimeStorage.fileIdentity(of: bundle.url) else {
+            throw .insecureBundleLayout
+        }
+        self.init(
+            bundle: bundle,
+            fileIdentity: fileIdentity,
+            version: version,
+            teamIdentifier: teamIdentifier,
+            signingIdentifier: signingIdentifier
+        )
+    }
+
+    fileprivate init(
+        bundle: LumeBundle,
+        fileIdentity: RuntimeStorage.CoordinationIdentity,
+        version: SemanticVersion,
+        teamIdentifier: String,
+        signingIdentifier: String
+    ) {
         self.bundle = bundle
+        self.fileIdentity = fileIdentity
         self.version = version
         self.teamIdentifier = teamIdentifier
         self.signingIdentifier = signingIdentifier
@@ -107,6 +133,9 @@ public struct LumeBundle: Hashable, Sendable {
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw .bundleMissing(path: url.path)
         }
+        guard let bundleIdentity = RuntimeStorage.fileIdentity(of: url) else {
+            throw .insecureBundleLayout
+        }
         guard Self.isUnlinkedItem(url, kind: S_IFDIR),
               Self.isUnlinkedItem(url.appending(path: "Contents"), kind: S_IFDIR),
               Self.isUnlinkedItem(url.appending(path: "Contents/MacOS"), kind: S_IFDIR),
@@ -131,7 +160,11 @@ public struct LumeBundle: Hashable, Sendable {
         var staticCode: SecStaticCode?
         let created = SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode)
         guard created == errSecSuccess, let code = staticCode else { throw .signatureInvalid(status: created) }
-        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate)
+        // Validate signed helpers/frameworks as well as the outer app. The current pin has no
+        // nested executable, but a future corrected build must not silently weaken this gate.
+        let flags = SecCSFlags(
+            rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode
+        )
         let validity = SecStaticCodeCheckValidityWithErrors(code, flags, nil, nil)
         guard validity == errSecSuccess else { throw .signatureInvalid(status: validity) }
 
@@ -164,15 +197,27 @@ public struct LumeBundle: Hashable, Sendable {
         guard signingIdentifier == LumePin.bundleIdentifier else {
             throw .signingIdentifierMismatch(found: SanitizedText(signingIdentifier, limit: 80))
         }
+        guard RuntimeStorage.fileIdentity(of: url) == bundleIdentity else {
+            throw .insecureBundleLayout
+        }
         return VerifiedLumeBundle(
             bundle: self,
+            fileIdentity: bundleIdentity,
             version: version,
             teamIdentifier: teamIdentifier,
             signingIdentifier: signingIdentifier
         )
     }
 
-    public static func verifyArchiveDigest(of file: URL, expected: String = LumePin.archiveSHA256) throws(LumeVerificationError) {
+    /// Verifies exactly the archive digest pinned by this RuntimeKit build. Production callers
+    /// cannot substitute another digest and accidentally turn the pin into caller-controlled data.
+    public static func verifyArchiveDigest(of file: URL) throws(LumeVerificationError) {
+        try verifyArchiveDigest(of: file, expected: LumePin.archiveSHA256)
+    }
+
+    /// Internal override used by tests that exercise the streaming digest implementation without
+    /// manufacturing a file whose contents match the release pin.
+    static func verifyArchiveDigest(of file: URL, expected: String) throws(LumeVerificationError) {
         let digest = try sha256(of: file, unreadable: .archiveUnreadable)
         guard digest == expected.lowercased() else { throw .digestMismatch }
     }
