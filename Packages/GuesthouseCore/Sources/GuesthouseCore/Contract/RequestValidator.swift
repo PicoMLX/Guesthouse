@@ -91,8 +91,12 @@ public enum RequestValidator: Sendable {
         }
         // A link that resolves inside the root was followed above and is fine; a dangling
         // link is not resolvable, so it must be refused: the first write through it would
-        // create the target wherever the link points.
-        guard !containsDanglingSymbolicLink(candidate, below: root) else {
+        // create the target wherever the link points. Both the path as given and the path
+        // with its existing ancestors resolved are walked, so a root reached through an
+        // alias is checked where the components actually live.
+        guard !containsDanglingSymbolicLink(candidate, below: root),
+              !containsDanglingSymbolicLink(resolvedCandidate, below: resolvedRoot)
+        else {
             throw .pathEscapesRoot
         }
         return resolvedCandidate
@@ -125,9 +129,15 @@ extension RequestValidator {
     /// what it points at; a dangling link (`root/link -> /outside/new-file`) does not exist
     /// as a file, but the first write through it would create the target.
     static func containsDanglingSymbolicLink(_ url: URL, below root: URL) -> Bool {
-        let rootCount = root.standardizedFileURL.pathComponents.count
+        let rootComponents = root.standardizedFileURL.pathComponents
+        let components = url.standardizedFileURL.pathComponents
+        // Only a path that lexically continues the root can be walked from it; anything else
+        // is already refused by the containment check above.
+        guard components.count >= rootComponents.count,
+              Array(components.prefix(rootComponents.count)) == rootComponents
+        else { return false }
         var current = root.standardizedFileURL
-        for component in url.standardizedFileURL.pathComponents.dropFirst(rootCount) {
+        for component in components.dropFirst(rootComponents.count) {
             current.append(path: component)
             var info = stat()
             guard lstat(current.path, &info) == 0 else { return false }
