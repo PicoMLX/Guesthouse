@@ -1,3 +1,5 @@
+import Foundation
+
 /// Enforces the app's own limit of two installed VM bundles (MVP-PLAN.md §1).
 ///
 /// Stopped and recovery-preserved VMs still occupy a slot; only deletion frees one. This is a
