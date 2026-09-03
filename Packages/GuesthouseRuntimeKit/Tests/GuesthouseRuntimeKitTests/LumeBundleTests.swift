@@ -160,6 +160,25 @@ private struct DummyLumeBundle {
         }
     }
 
+    @Test func verifiedTokenTracksTheCriticalMetadataAndExecutableFiles() async throws {
+        let fixture = try await DummyLumeBundle(root: root.appending(path: "identity-snapshot"))
+        let bundle = LumeBundle(url: fixture.url)
+        let verified = try VerifiedLumeBundle(
+            bundle: bundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+        #expect(verified.matchesVerifiedFiles(in: bundle))
+
+        let originalExecutable = fixture.url.appending(path: "Contents/MacOS/lume-before-replacement")
+        try FileManager.default.moveItem(at: bundle.executable, to: originalExecutable)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: bundle.executable)
+
+        #expect(!verified.matchesVerifiedFiles(in: bundle))
+        #expect(RuntimeStorage.fileIdentity(of: fixture.url) == verified.verifiedFileIdentity.bundle)
+    }
+
     @Test func adHocSignatureCannotSatisfyThePinnedDeveloperIDRequirement() async throws {
         let adHoc = try await DummyLumeBundle(root: root.appending(path: "adhoc"), sign: true)
         do {
