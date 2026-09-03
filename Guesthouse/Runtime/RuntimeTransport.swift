@@ -7,8 +7,9 @@ import XPC
 nonisolated protocol RuntimeTransport: Sendable {
     /// Sends one envelope and delivers exactly one reply or an error.
     func send(_ envelope: RuntimeRequestEnvelope, reply: @escaping @Sendable (Result<RuntimeEvent, any Error>) -> Void) throws
-    /// Called when the connection drops. Pushed events (progress, log, status) also arrive here
-    /// once the service streams them (#25).
+    /// Pushed events (progress, log, status) arrive through `incoming`; `interrupted` is called
+    /// when the connection drops or when a pushed message cannot be decoded, which means the
+    /// peer speaks a different contract and every in-flight outcome is unknown.
     func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable () -> Void)
 }
 
@@ -41,8 +42,19 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
             let created = try XPCSession(
                 xpcService: Self.serviceName,
                 incomingMessageHandler: { [weak self] (message: XPCReceivedMessage) -> (any Encodable)? in
-                    guard let self, let event = try? message.decode(as: RuntimeEvent.self) else { return nil }
-                    self.lock.withLock { self.incoming }?(event)
+                    guard let self else { return nil }
+                    if let event = try? message.decode(as: RuntimeEvent.self) {
+                        self.lock.withLock { self.incoming }?(event)
+                    } else {
+                        // An undecodable push means a contract mismatch: treat it as a lost
+                        // connection so waiting operations report an unknown outcome.
+                        let handler = self.lock.withLock { () -> (@Sendable () -> Void)? in
+                            self.session?.cancel(reason: "undecodable event")
+                            self.session = nil
+                            return self.interrupted
+                        }
+                        handler?()
+                    }
                     return nil
                 },
                 cancellationHandler: { [weak self] _ in
