@@ -12,6 +12,7 @@ Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC).
 | Guesthouse debug build | `<git SHA; launched from Xcode>` |
 | Tart | `<version, Team ID verified yes/no>` |
 | Guest macOS | `<version (build)>` |
+| Xcode (host) | `<version (build); the installation that built and signed Guesthouse>` |
 | Xcode (guest) | `<version (build)>` |
 | Simulator runtime (guest) | `<runtime version (build); destination used>` |
 | Codex desktop | `<version (build)>` |
@@ -20,6 +21,16 @@ Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC).
 | Git (guest) | `<version; executable path as resolved by the login shell>` |
 | Provisioning scripts | `<version or commit>` |
 | Guest VM configuration | `<preset name; CPU count; RAM; logical disk capacity>` |
+
+For gates whose result depends on the repositories under test (#38, #39, #42), record the exact
+input as well, so two runs with identical component versions are still comparable:
+
+| Fixture | Value |
+| --- | --- |
+| App repository | `<remote; branch; starting commit SHA>` |
+| Package repositories | `<remote; branch; starting commit SHA, one line each>` |
+| Resolved dependency graph | `<Package.resolved commit SHA or digest; whether it was regenerated during the run>` |
+| Working tree state | `<clean, or the exact uncommitted changes made during the run>` |
 
 ## Required proofs
 
