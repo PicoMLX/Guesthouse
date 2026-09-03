@@ -13,6 +13,9 @@ public struct PreflightResult: Codable, Hashable, Sendable {
         case pass(detail: String)
         /// Setup may continue; the detail says what the user should know.
         case warn(detail: String, recovery: [RecoveryAction])
+        /// The check could not be made at all. Setup does not continue on a guess: an
+        /// unanswerable question is not the same as a satisfied requirement.
+        case undetermined(detail: String, recovery: [RecoveryAction])
         /// Setup cannot continue. The error carries the message and recovery actions.
         case fail(GuesthouseError)
     }
@@ -28,6 +31,14 @@ public struct PreflightResult: Codable, Hashable, Sendable {
     public var isFailure: Bool {
         if case .fail = outcome { return true }
         return false
+    }
+
+    /// Whether this result stops setup: a failure, or a check that could not be made.
+    public var isBlocking: Bool {
+        switch outcome {
+        case .fail, .undetermined: true
+        case .pass, .warn: false
+        }
     }
 }
 
@@ -61,8 +72,8 @@ public struct PreflightReport: Codable, Hashable, Sendable {
         self.checkedAt = checkedAt
     }
 
-    /// True when no check failed. Warnings do not block.
-    public var canProceed: Bool { !results.contains(where: \.isFailure) }
+    /// True when no check failed and every check could be made. Warnings do not block.
+    public var canProceed: Bool { !results.contains(where: \.isBlocking) }
 
     public func result(_ kind: PreflightCheckKind) -> PreflightResult? {
         results.first { $0.kind == kind }
@@ -70,7 +81,7 @@ public struct PreflightReport: Codable, Hashable, Sendable {
 }
 
 /// The "Check this Mac" step. Pure given a probe; every threshold comes from `ResourcePolicy`.
-public enum PreflightCheck {
+public enum PreflightCheck: Sendable {
     public static func run(
         probe: any HostProbe,
         policy: ResourcePolicy = .standard,
@@ -82,11 +93,12 @@ public enum PreflightCheck {
 
         let architecture = probe.cpuArchitecture
         // An architecture nobody could determine is never a pass, whatever the policy asks
-        // for: the unknown case is answered before the policy is consulted.
+        // for: the unknown case is answered before the policy is consulted. The text names
+        // what was found and what is required, so a non-default policy still reads correctly.
         let architectureOutcome: PreflightResult.Outcome = switch architecture {
         case .unknown: .fail(.unsupportedHost(.architectureUnknown))
-        case policy.requiredArchitecture: .pass(detail: "Apple silicon")
-        default: .fail(.unsupportedHost(.notAppleSilicon))
+        case policy.requiredArchitecture: .pass(detail: Self.name(of: architecture))
+        default: .fail(.unsupportedHost(.wrongArchitecture(found: SanitizedText(Self.name(of: architecture)), required: Self.name(of: policy.requiredArchitecture))))
         }
         results.append(PreflightResult(kind: .architecture, outcome: architectureOutcome))
 
@@ -123,8 +135,12 @@ public enum PreflightCheck {
             } else {
                 diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
             }
+        } catch HostProbeError.volumeUnavailable(let path) {
+            // The destination's volume is not mounted: not a transient lookup failure, and
+            // never a warning, since there is no disk to check.
+            diskOutcome = .undetermined(detail: HostProbeError.volumeUnavailable(path: path).userMessage, recovery: [.retry, .openSettings])
         } catch {
-            diskOutcome = .warn(detail: "Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined.", recovery: [.retry])
+            diskOutcome = .undetermined(detail: "Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined, so Guesthouse cannot tell whether the download will fit. Check again, or choose a storage location Guesthouse can read.", recovery: [.retry, .openSettings])
         }
         results.append(PreflightResult(kind: .freeDisk, outcome: diskOutcome))
 
@@ -146,6 +162,14 @@ public enum PreflightCheck {
         return PreflightReport(results: results, storage: storage, powerSource: probe.powerSource, checkedAt: now)
     }
 
+    static func name(of architecture: CPUArchitecture) -> String {
+        switch architecture {
+        case .appleSilicon: "Apple silicon"
+        case .intel: "Intel"
+        case .unknown: "an unrecognized processor"
+        }
+    }
+
     private static func format(_ bytes: UInt64, memory: Bool = false) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: memory ? .memory : .file)
     }
@@ -153,7 +177,7 @@ public enum PreflightCheck {
 
 /// Free-space check before every download, import, or clone, not only at first launch
 /// (MVP-PLAN.md §4: "Check free space before each large operation").
-public enum LargeOperationPreflight {
+public enum LargeOperationPreflight: Sendable {
     public static func check(
         freeBytes: UInt64,
         requiredBytes: UInt64,

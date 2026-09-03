@@ -27,6 +27,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
 
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
         case notAppleSilicon
+        /// The Mac's processor is not the one the configured policy requires. `notAppleSilicon`
+        /// is the default-policy spelling of this; this case carries both sides.
+        case wrongArchitecture(found: SanitizedText, required: String)
         case macOSTooOld(found: SanitizedText, minimum: String)
         /// The processor architecture could not be determined; the check can be run again.
         case architectureUnknown
@@ -72,6 +75,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// what it means; the recovery actions say what to do.
     public var userMessage: String {
         switch self {
+        case .unsupportedHost(.wrongArchitecture(let found, let required)):
+            "This Mac has \(found.value); Guesthouse needs \(GuesthouseError.sanitize(required, limit: 40)). Development Macs cannot run here."
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
         case .unsupportedHost(.architectureUnknown):

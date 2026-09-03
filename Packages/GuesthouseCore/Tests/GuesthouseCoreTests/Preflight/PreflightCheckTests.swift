@@ -48,7 +48,7 @@ struct StubProbe: HostProbe {
         var probe = StubProbe(); probe.cpuArchitecture = .intel
         let report = run(probe)
         #expect(!report.canProceed)
-        #expect(report.result(.architecture)!.outcome == .fail(.unsupportedHost(.notAppleSilicon)))
+        #expect(report.result(.architecture)!.outcome == .fail(.unsupportedHost(.wrongArchitecture(found: SanitizedText("Intel"), required: "Apple silicon"))))
     }
 
     @Test func oldMacOSFails() {
@@ -86,7 +86,7 @@ struct StubProbe: HostProbe {
         var probe = StubProbe(); probe.free = .failure(ProbeFailure())
         let hostile = URL(fileURLWithPath: "/Volumes/Ext\u{202E}gnol/Guesthouse")
         let report = PreflightCheck.run(probe: probe, storageRoot: hostile, now: Date(timeIntervalSince1970: 1_800_000_000))
-        guard case .warn(let detail, _) = report.result(.freeDisk)!.outcome else { Issue.record("expected warn"); return }
+        guard case .undetermined(let detail, _) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
         #expect(!detail.contains("\u{202E}"))
         #expect(!report.storage.storageRootPath.contains("\u{202E}"))
     }
@@ -123,15 +123,15 @@ struct StubProbe: HostProbe {
         #expect(!detail.contains(String(repeating: "9", count: 100)))
     }
 
-    @Test func lowDiskFailsWithPreciseNumbersAndUnknownDiskWarns() {
+    @Test func lowDiskFailsWithPreciseNumbersAndUnknownDiskBlocks() {
         var probe = StubProbe()
         probe.free = .success(50 * ResourcePreset.gigabyte)
         #expect(run(probe).result(.freeDisk)!.outcome == .fail(.insufficientDisk(requiredBytes: 200 * ResourcePreset.gigabyte, availableBytes: 50 * ResourcePreset.gigabyte, volumePath: SanitizedText(root.path))))
 
         probe.free = .failure(ProbeFailure())
-        guard case .warn(_, let recovery) = run(probe).result(.freeDisk)!.outcome else { Issue.record("expected warn"); return }
-        #expect(recovery == [.retry])
-        #expect(run(probe).canProceed)
+        guard case .undetermined(_, let recovery) = run(probe).result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
+        #expect(recovery == [.retry, .openSettings])
+        #expect(!run(probe).canProceed, "a check that could not be made never counts as satisfied")
     }
 
     @Test func anUnknownArchitectureFailsEvenWhenThePolicyAsksForOne() {
@@ -156,6 +156,36 @@ struct StubProbe: HostProbe {
         guard case .insufficientDisk(let required, let available, _)? = error else { Issue.record("expected insufficientDisk"); return }
         #expect(required == UInt64.max, "the reported requirement is not the wrapped remainder")
         #expect(available == 500 * ResourcePreset.gigabyte)
+    }
+
+    @Test func anUnavailableVolumeBlocksSetup() {
+        struct UnmountedProbe: HostProbe {
+            var cpuArchitecture: CPUArchitecture = .appleSilicon
+            var operatingSystemVersion = SemanticVersion([26, 5, 2])
+            var operatingSystemBuild: String? = "25F84"
+            var physicalMemoryBytes: UInt64 = 64 * ResourcePreset.gibibyte
+            var powerSource: PowerSource = .externalPower
+            func freeBytes(at url: URL) throws -> UInt64 { throw HostProbeError.volumeUnavailable(path: "/Volumes/External/Guesthouse") }
+            func installedApplication(bundleIdentifier: String) -> InstalledApplication? { nil }
+        }
+        let report = PreflightCheck.run(probe: UnmountedProbe(), storageRoot: URL(fileURLWithPath: "/Volumes/External/Guesthouse"), now: Date(timeIntervalSince1970: 1_800_000_000))
+        guard case .undetermined(let detail, let recovery) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
+        #expect(detail.contains("not available"))
+        #expect(recovery.first == .retry)
+        #expect(!report.canProceed, "there is no disk to check, so setup does not continue")
+    }
+
+    @Test func theArchitectureTextFollowsTheConfiguredPolicy() {
+        var policy = ResourcePolicy(); policy.requiredArchitecture = .intel
+        var probe = StubProbe(); probe.cpuArchitecture = .intel
+        guard case .pass(let detail) = PreflightCheck.run(probe: probe, policy: policy, storageRoot: root, now: Date(timeIntervalSince1970: 1_800_000_000)).result(.architecture)!.outcome else { Issue.record("expected pass"); return }
+        #expect(detail == "Intel")
+        probe.cpuArchitecture = .appleSilicon
+        let failure = PreflightCheck.run(probe: probe, policy: policy, storageRoot: root, now: Date(timeIntervalSince1970: 1_800_000_000)).result(.architecture)!.outcome
+        #expect(failure == .fail(.unsupportedHost(.wrongArchitecture(found: SanitizedText("Apple silicon"), required: "Intel"))))
+        if case .fail(let error) = failure {
+            #expect(error.userMessage.contains("Apple silicon") && error.userMessage.contains("Intel"))
+        }
     }
 
     @Test func everyFailureCarriesARecoveryAction() {
