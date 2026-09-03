@@ -12,6 +12,7 @@ Issue: `#<number>`. Run by: `<name>`. Date: `<YYYY-MM-DD>`. Status: `<in progres
 | Tart | `<version, Team ID verified yes/no>` |
 | Guest macOS | `<version (build)>` |
 | Xcode (guest) | `<version (build)>` |
+| Simulator runtime (guest) | `<runtime version (build); destination used>` |
 | Codex desktop | `<version (build)>` |
 | Codex CLI (guest) | `<version, path>` |
 | GitHub CLI (guest) | `<version>` |
