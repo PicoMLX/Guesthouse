@@ -7,18 +7,30 @@ import GuesthouseCore
 /// treat in-flight work as unknown outcome (MVP-PLAN.md §3), and reconnects on the next
 /// request. Long-running operations stream their events through the transport's incoming
 /// handler and are demultiplexed by `OperationID`.
+///
+/// Every transport callback (reply, pushed event, interruption) is enqueued synchronously on
+/// one ordered inbox and applied by a single task, so callback order is preserved: an
+/// interruption that follows an `accepted` reply always finds the operation registered.
 actor RuntimeClient: RuntimeBackend {
     typealias Continuation = AsyncThrowingStream<RuntimeEvent, any Error>.Continuation
+
+    private enum Inbound: Sendable {
+        case reply(Result<RuntimeEvent, any Error>, Continuation)
+        case incoming(RuntimeEvent)
+        case interrupted
+    }
 
     private let transport: any RuntimeTransport
     private var operations: [OperationID: Continuation] = [:]
     /// Events that arrived for an operation before its `accepted` reply registered a consumer.
-    /// The reply and the pushed events travel on different paths, so either can come first.
     private var pendingEvents: [OperationID: [RuntimeEvent]] = [:]
-    private var handlersInstalled = false
+    private let inbox: AsyncStream<Inbound>
+    private let inboxContinuation: AsyncStream<Inbound>.Continuation
+    private var started = false
 
     init(transport: any RuntimeTransport = XPCRuntimeTransport()) {
         self.transport = transport
+        (inbox, inboxContinuation) = AsyncStream.makeStream(of: Inbound.self, bufferingPolicy: .unbounded)
     }
 
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
@@ -28,13 +40,34 @@ actor RuntimeClient: RuntimeBackend {
     }
 
     private func start(_ request: RuntimeRequest, _ continuation: Continuation) {
-        installHandlersIfNeeded()
+        startIfNeeded()
         do {
-            try transport.send(RuntimeRequestEnvelope(request: request)) { result in
-                Task { await self.handleReply(result, for: continuation) }
+            try transport.send(RuntimeRequestEnvelope(request: request)) { [inboxContinuation] result in
+                inboxContinuation.yield(.reply(result, continuation))
             }
         } catch {
             continuation.finish(throwing: RuntimeConnectionInterrupted())
+        }
+    }
+
+    private func startIfNeeded() {
+        guard !started else { return }
+        started = true
+        let inboxContinuation = inboxContinuation
+        transport.setHandlers(
+            incoming: { event in inboxContinuation.yield(.incoming(event)) },
+            interrupted: { inboxContinuation.yield(.interrupted) }
+        )
+        Task { await self.drain() }
+    }
+
+    private func drain() async {
+        for await item in inbox {
+            switch item {
+            case .reply(let result, let continuation): handleReply(result, for: continuation)
+            case .incoming(let event): route(event)
+            case .interrupted: connectionDropped()
+            }
         }
     }
 
@@ -55,15 +88,6 @@ actor RuntimeClient: RuntimeBackend {
         case .failure:
             continuation.finish(throwing: RuntimeConnectionInterrupted())
         }
-    }
-
-    private func installHandlersIfNeeded() {
-        guard !handlersInstalled else { return }
-        handlersInstalled = true
-        transport.setHandlers(
-            incoming: { event in Task { await self.route(event) } },
-            interrupted: { Task { await self.connectionDropped() } }
-        )
     }
 
     private func route(_ event: RuntimeEvent) {
@@ -89,6 +113,7 @@ actor RuntimeClient: RuntimeBackend {
     private func connectionDropped() {
         let pending = operations
         operations.removeAll()
+        pendingEvents.removeAll()
         for (id, continuation) in pending {
             continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
         }
