@@ -115,6 +115,18 @@ import Testing
         #expect(throws: WorkspaceValidationError.duplicateCheckoutName("sharedui")) { try manifest([app(), package(), caseClash]).validate() }
     }
 
+    @Test func packageCheckoutsMustCarryTheRepositoryDerivedIdentity() {
+        var renamed = package(); renamed.checkoutName = DirectoryName("UIWorkingCopy")!
+        #expect(throws: WorkspaceValidationError.checkoutNameDoesNotMatchRepository(checkout: "UIWorkingCopy", repository: "SharedUI")) { try manifest([app(), renamed]).validate() }
+        var appRenamed = app(); appRenamed.checkoutName = DirectoryName("TheApp")!
+        #expect(throws: Never.self) { try manifest([appRenamed]).validate() }
+        let a = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/OrgA/Common")!, checkoutName: DirectoryName("Common")!, baseBranch: BranchName("main")!, taskBranch: BranchName("t")!)
+        let b = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/OrgB/Common")!, checkoutName: DirectoryName("common")!, baseBranch: BranchName("main")!, taskBranch: BranchName("t")!)
+        #expect(throws: WorkspaceValidationError.duplicateCheckoutName("common")) { try manifest([app(), a, b]).validate() }
+        var c = b; c.checkoutName = DirectoryName("Common2")!
+        #expect(throws: WorkspaceValidationError.checkoutNameDoesNotMatchRepository(checkout: "Common2", repository: "Common")) { try manifest([app(), a, c]).validate() }
+    }
+
     @Test func unsupportedHostsAndBadBranchesAreRejected() {
         var gitlab = package(); gitlab.remote = RemoteURL("https://gitlab.com/group/thing")!
         #expect(throws: WorkspaceValidationError.unsupportedHost("gitlab.com")) { try manifest([app(), gitlab]).validate() }
@@ -123,7 +135,7 @@ import Testing
     }
 
     @Test func projectPathAndSchemeAreValidated() {
-        for bad in ["", "/abs/MyApp.xcodeproj", "../MyApp.xcodeproj", "Apps/../MyApp.xcodeproj", "MyApp", "Apps//MyApp.xcodeproj"] {
+        for bad in ["", "/abs/MyApp.xcodeproj", "../MyApp.xcodeproj", "Apps/../MyApp.xcodeproj", "MyApp", "Apps//MyApp.xcodeproj", "My\tApp.xcodeproj", "My\nApp.xcodeproj", "My\u{202E}App.xcodeproj"] {
             var m = manifest([app()]); m.appProjectPath = bad
             #expect(throws: WorkspaceValidationError.invalidAppProjectPath(bad)) { try m.validate() }
         }

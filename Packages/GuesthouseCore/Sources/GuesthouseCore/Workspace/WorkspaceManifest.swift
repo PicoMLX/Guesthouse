@@ -48,6 +48,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
 
         var seenNames: Set<String> = []
         var seenRemotes: Set<String> = []
+        var seenIdentities: Set<String> = []
         for repository in repositories {
             guard seenNames.insert(repository.checkoutName.identity).inserted else {
                 throw .duplicateCheckoutName(repository.checkoutName.rawValue)
@@ -61,6 +62,19 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
             guard repository.baseBranch != repository.taskBranch else {
                 throw .taskBranchEqualsBaseBranch(repository.checkoutName.rawValue)
             }
+            if repository.role == .package {
+                // SwiftPM derives a local package's identity from its directory name and a Git
+                // dependency's identity from the repository name, so the two must agree or the
+                // override never applies (MVP-PLAN.md §6). Two packages with one identity are
+                // ambiguous and refused.
+                let identity = repository.remote.name.lowercased()
+                guard repository.checkoutName.identity == identity else {
+                    throw .checkoutNameDoesNotMatchRepository(checkout: repository.checkoutName.rawValue, repository: repository.remote.name)
+                }
+                guard seenIdentities.insert(identity).inserted else {
+                    throw .duplicatePackageIdentity(identity)
+                }
+            }
         }
 
         guard Self.isRelativeProjectPath(appProjectPath) else { throw .invalidAppProjectPath(appProjectPath) }
@@ -69,6 +83,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
 
     static func isRelativeProjectPath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), path.hasSuffix(".xcodeproj") else { return false }
+        guard !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control || $0.properties.generalCategory == .format }) else { return false }
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
         return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
@@ -146,4 +161,6 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable {
     case taskBranchEqualsBaseBranch(String)
     case invalidAppProjectPath(String)
     case invalidScheme(String)
+    case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
+    case duplicatePackageIdentity(String)
 }
