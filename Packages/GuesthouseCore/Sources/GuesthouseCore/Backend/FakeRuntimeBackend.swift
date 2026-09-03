@@ -33,6 +33,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         var scenarios: [String: Scenario] = [:]
         var pendingOperationIDs: [String: OperationID] = [:]
         var nextTicket: UInt64 = 0
+        /// Cancellations reserved by `send` before any producer can run, so an explicit
+        /// request is never mistaken for a consumer that merely stopped listening.
+        var explicitCancellations: Set<OperationID> = []
     }
 
     /// What one `send` bound when it was called.
@@ -87,6 +90,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         // the seeded id intended for the earlier one.
         let (ticket, binding) = configuration.withLock { configuration in
             defer { configuration.nextTicket += 1 }
+            if case .cancelOperation(let id) = request { configuration.explicitCancellations.insert(id) }
             return (configuration.nextTicket, Binding(
                 scenario: configuration.scenarios[request.caseName] ?? .succeed(),
                 seededOperationID: configuration.pendingOperationIDs.removeValue(forKey: request.caseName)
@@ -161,9 +165,14 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             for phase in phases {
                 guard await progress(id, phase, continuation) else { return }
             }
+            // The operation has ended: it is no longer in flight for any environment, with or
+            // without a scripted replacement status.
+            clearInFlight(id)
+            await pause()
             if let status {
                 statuses[status.environmentID] = status
                 continuation.yield(.status(status))
+                await pause()
             }
             continuation.yield(.completed(id))
             continuation.finish()
@@ -174,6 +183,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             }
             // A failed operation is no longer in flight for any environment.
             clearInFlight(id)
+            await pause()
             continuation.yield(.failed(id, error))
             continuation.finish()
 
@@ -190,6 +200,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             for phase in phases {
                 guard await progress(id, phase, continuation) else { return }
             }
+            await pause()
             continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
         }
     }
@@ -199,6 +210,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         await pause()
         if Task.isCancelled || canceledOperations.contains(id) {
             recordImplicitCancellation(of: id)
+            // A cancelled operation is no longer in flight either, however it was cancelled.
+            clearInFlight(id)
             continuation.yield(.failed(id, .canceled))
             continuation.finish()
             return false
@@ -215,8 +228,11 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     /// A consumer that stops listening counts as one cancel request, unless the operation was
     /// already canceled explicitly: `receivedRequests` then still mirrors real `send` calls.
+    /// The explicit request reserves the id in `send`, before any producer can run, so the
+    /// two never race.
     private func recordImplicitCancellation(of id: OperationID) {
-        guard Task.isCancelled, !canceledOperations.contains(id) else { return }
+        let explicit = configuration.withLock { $0.explicitCancellations.contains(id) }
+        guard Task.isCancelled, !canceledOperations.contains(id), !explicit else { return }
         canceledOperations.insert(id)
         receivedRequests.append(.cancelOperation(id))
     }
