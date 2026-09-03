@@ -14,6 +14,9 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
     /// Git's files backend writes `refs/heads/<name>.lock`, so a component longer than this
     /// cannot be created on a file system with 255-byte names.
     public static let maximumComponentBytes = 250
+    /// Git stores a branch as `.git/refs/heads/<name>` and locks it at `<that>.lock`, which
+    /// must fit macOS's 1024-byte pathname limit with room for the repository's own path.
+    public static let maximumTotalBytes = 512
 
     static func isValid(_ name: String) -> Bool {
         guard !name.isEmpty, name != "@", name != "HEAD", !name.hasPrefix("-"), !name.hasPrefix("/"), !name.hasSuffix("/"),
@@ -29,6 +32,7 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
             default: break
             }
         }
+        guard name.utf8.count <= maximumTotalBytes else { return false }
         return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
             !$0.hasPrefix(".") && !$0.hasSuffix(".lock") && $0.utf8.count <= maximumComponentBytes
         }
