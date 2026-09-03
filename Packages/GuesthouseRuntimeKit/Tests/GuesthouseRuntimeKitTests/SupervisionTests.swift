@@ -29,9 +29,15 @@ import Testing
     @Test func recordedLaunchIsDurableAndReconcilesAsOwnedThenExited() async throws {
         let store = try ProcessIdentityStore(directory: root)
         let supervisor = OperationSupervisor(store: store)
-        let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["41"], timeout: .seconds(20)))
         let environment = EnvironmentID()
-        let identity = try await supervisor.recordLaunch(pid: run.processIdentifier, executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["41"], vmName: environment.tartVMName, environment: environment)
+        // A stand-in for `tart run <vm>`: the trailing arguments are ignored by the program
+        // but land in its argv, so the process names the VM the way a real launch does.
+        // (A shell is unusable here: `/bin/sh` is reported as `/bin/bash` moments after it
+        // starts, so its executable path is not stable.)
+        let arguments = ["-e", "sleep 41", "run", environment.tartVMName]
+        let fixture = URL(fileURLWithPath: "/usr/bin/perl")
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: fixture, arguments: arguments, timeout: .seconds(20)))
+        let identity = try await supervisor.recordLaunch(pid: run.processIdentifier, executable: fixture, arguments: arguments, vmName: environment.tartVMName, environment: environment)
         let reloaded = try ProcessIdentityStore(directory: root)
         let persisted = try #require(await reloaded.identity(for: environment), "the file is on disk before recordLaunch returns")
         #expect(persisted.pid == identity.pid)
