@@ -24,11 +24,14 @@ public struct RuntimeStorage: Sendable {
         /// Redacted logs and exports.
         case diagnostics
 
-        /// Large, regenerable, or purely transient content that Time Machine should skip.
+        /// Only regenerable or transient content is excluded from Time Machine. The VM store
+        /// is not: a guest's disk can be the only copy of unpublished work (MVP-PLAN.md §9,
+        /// "Protect unpublished work"), so it stays eligible until a proven export mechanism
+        /// exists, even though it is large.
         public var isExcludedFromBackup: Bool {
             switch self {
-            case .vms, .staging, .downloads: true
-            case .runtime, .state, .sshMaintenance, .diagnostics: false
+            case .staging, .downloads: true
+            case .vms, .runtime, .state, .sshMaintenance, .diagnostics: false
             }
         }
     }
