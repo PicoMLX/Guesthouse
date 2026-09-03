@@ -31,10 +31,8 @@ public actor EnvironmentLifecycle {
         let identity: ProcessIdentity
         var address: GuestIPAddress?
 
-        var isAlive: Bool {
-            if let run { return run.processIdentifier > 0 }
-            return kill(pid, 0) == 0
-        }
+        /// Asked of the kernel, not inferred: a process that died a moment ago is not running.
+        var isAlive: Bool { kill(pid, 0) == 0 }
     }
 
     private struct InFlight {

@@ -18,10 +18,11 @@ import Testing
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let store = try StateStore(rootURL: storage.url(for: .state))
         let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
-        // The fixture's executable is a copy of `yes`: it accepts any arguments and runs until
-        // ended, so `run` looks like a live VM process with the recorded identity.
+        // The fixture's executable is a link to `yes`: it accepts any arguments and runs until
+        // ended, so `run` looks like a live VM process with the recorded identity. (A copied
+        // system binary would be killed at launch: platform binaries only run in place.)
         try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/yes"), to: bundle.executable)
+        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/yes"))
         let identities = try ProcessIdentityStore(directory: storage.url(for: .state))
         for identity in recordedIdentities { try await identities.record(identity) }
         let supervisor = OperationSupervisor(store: identities)
@@ -55,7 +56,7 @@ import Testing
         let interrupted = try await store.begin(.startEnvironment, for: environment)
         let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
         try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/yes"), to: bundle.executable)
+        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/yes"))
         let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: storage.url(for: .state)))
         let lifecycle = EnvironmentLifecycle(dependencies: .init(backend: TartBackend(bundle: bundle, storage: storage, runner: runner), supervisor: supervisor, store: store))
         try await lifecycle.prepare()
