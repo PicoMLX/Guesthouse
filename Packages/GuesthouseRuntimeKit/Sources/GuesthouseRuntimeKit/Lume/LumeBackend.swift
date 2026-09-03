@@ -54,8 +54,8 @@ public struct LumeBackend: Sendable {
         guard Self.bundlePath(bundle, belongsTo: storage) else {
             throw LumeInvocationError.storageMismatch
         }
-        guard let currentIdentity = RuntimeStorage.fileIdentity(of: LumeBundle.expectedLocation(in: storage)),
-              bundle.fileIdentity == currentIdentity
+        guard let current = LumeBundle.locate(in: storage),
+              bundle.matchesVerifiedFiles(in: current)
         else {
             throw LumeInvocationError.bundleChanged
         }
@@ -92,7 +92,7 @@ public struct LumeBackend: Sendable {
     /// coverage without weakening or substituting the production signature gate.
     static func relocateForLaunch(_ bundle: VerifiedLumeBundle, in storage: RuntimeStorage) throws -> LumeBundle {
         guard let current = LumeBundle.locate(in: storage),
-              RuntimeStorage.fileIdentity(of: current.url) == bundle.fileIdentity
+              bundle.matchesVerifiedFiles(in: current)
         else { throw LumeInvocationError.bundleChanged }
         return current
     }

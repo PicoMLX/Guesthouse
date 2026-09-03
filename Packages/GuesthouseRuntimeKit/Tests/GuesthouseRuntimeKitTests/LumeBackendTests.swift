@@ -78,6 +78,22 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
 @Suite(.serialized) struct LumeBackendTests {
     let root = FileManager.default.temporaryDirectory.appending(path: "LumeBackendTests-\(UUID().uuidString)")
 
+    private func verifiedFixture(at url: URL) throws -> VerifiedLumeBundle {
+        let bundle = LumeBundle(url: url)
+        try FileManager.default.createDirectory(
+            at: bundle.executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("fixture metadata".utf8).write(to: url.appending(path: "Contents/Info.plist"))
+        try Data("fixture executable".utf8).write(to: bundle.executable)
+        return try VerifiedLumeBundle(
+            bundle: bundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+    }
+
     private func backend(
         runner: any ProcessRunning,
         suffix: String = UUID().uuidString,
@@ -85,14 +101,7 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
         verifyBeforeLaunch: @escaping @Sendable () throws -> Void = {}
     ) throws -> (LumeBackend, RuntimeStorage, VerifiedLumeBundle) {
         let storage = try RuntimeStorage(root: root.appending(path: suffix))
-        let bundle = LumeBundle(url: storage.url(for: .runtime).appending(path: "fixture/lume.app"))
-        try FileManager.default.createDirectory(at: bundle.url, withIntermediateDirectories: true)
-        let verified = try VerifiedLumeBundle(
-            bundle: bundle,
-            version: LumePin.version,
-            teamIdentifier: LumePin.teamIdentifier,
-            signingIdentifier: LumePin.bundleIdentifier
-        )
+        let verified = try verifiedFixture(at: storage.url(for: .runtime).appending(path: "fixture/lume.app"))
         return (
             LumeBackend(
                 bundle: verified,
@@ -100,7 +109,7 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
                 runner: runner,
                 verifyBeforeLaunch: {
                     try verifyBeforeLaunch()
-                    return resolvedExecutable ?? bundle.executable
+                    return resolvedExecutable ?? verified.executable
                 }
             ),
             storage,
@@ -205,13 +214,7 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
         let firstStorage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let secondStorage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let bundleURL = LumeBundle.expectedLocation(in: firstStorage)
-        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
-        let verified = try VerifiedLumeBundle(
-            bundle: LumeBundle(url: bundleURL),
-            version: LumePin.version,
-            teamIdentifier: LumePin.teamIdentifier,
-            signingIdentifier: LumePin.bundleIdentifier
-        )
+        let verified = try verifiedFixture(at: bundleURL)
 
         #expect(throws: LumeInvocationError.storageMismatch) {
             _ = try LumeBackend(bundle: verified, storage: secondStorage, runner: ScriptedLumeRunner(Self.successfulReplies))
@@ -227,12 +230,7 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
         let aliasedURL = alias
             .appending(path: LumePin.releaseTag)
             .appending(path: LumePin.bundleName)
-        let verified = try VerifiedLumeBundle(
-            bundle: LumeBundle(url: aliasedURL),
-            version: LumePin.version,
-            teamIdentifier: LumePin.teamIdentifier,
-            signingIdentifier: LumePin.bundleIdentifier
-        )
+        let verified = try verifiedFixture(at: aliasedURL)
 
         #expect(throws: LumeInvocationError.storageMismatch) {
             _ = try LumeBackend(bundle: verified, storage: storage, runner: ScriptedLumeRunner(Self.successfulReplies))
@@ -242,14 +240,8 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
     @Test func publicBackendReportsAChangedBundleAtTheExpectedPath() throws {
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let bundleURL = LumeBundle.expectedLocation(in: storage)
-        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
-        let verified = try VerifiedLumeBundle(
-            bundle: LumeBundle(url: bundleURL),
-            version: LumePin.version,
-            teamIdentifier: LumePin.teamIdentifier,
-            signingIdentifier: LumePin.bundleIdentifier
-        )
-        let originalIdentity = verified.fileIdentity
+        let verified = try verifiedFixture(at: bundleURL)
+        let originalIdentity = verified.verifiedFileIdentity.bundle
         try FileManager.default.removeItem(at: bundleURL)
         try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
         #expect(RuntimeStorage.fileIdentity(of: bundleURL) != originalIdentity)
@@ -262,13 +254,7 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
     @Test func launchRevalidationRejectsAReplacedManagedAncestor() async throws {
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let bundleURL = LumeBundle.expectedLocation(in: storage)
-        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
-        let verified = try VerifiedLumeBundle(
-            bundle: LumeBundle(url: bundleURL),
-            version: LumePin.version,
-            teamIdentifier: LumePin.teamIdentifier,
-            signingIdentifier: LumePin.bundleIdentifier
-        )
+        let verified = try verifiedFixture(at: bundleURL)
         let runner = ScriptedLumeRunner(Self.successfulReplies)
         let backend = try LumeBackend(bundle: verified, storage: storage, runner: runner)
 
@@ -286,22 +272,37 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
         #expect(await runner.invocations.isEmpty, "an ancestor swap is rejected before launch")
     }
 
+    @Test func launchRevalidationRejectsAReplacedExecutableInsideTheSameBundle() async throws {
+        let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
+        let bundleURL = LumeBundle.expectedLocation(in: storage)
+        let verified = try verifiedFixture(at: bundleURL)
+        let runner = ScriptedLumeRunner(Self.successfulReplies)
+        let backend = try LumeBackend(bundle: verified, storage: storage, runner: runner)
+        let outerIdentity = RuntimeStorage.fileIdentity(of: bundleURL)
+
+        let preservedExecutable = storage.url(for: .staging).appending(path: "lume-before-replacement")
+        try FileManager.default.moveItem(at: verified.executable, to: preservedExecutable)
+        try Data("replacement".utf8).write(to: verified.executable)
+
+        #expect(RuntimeStorage.fileIdentity(of: bundleURL) == outerIdentity)
+        #expect(!verified.matchesVerifiedFiles(in: LumeBundle(url: bundleURL)))
+        #expect(throws: LumeInvocationError.bundleChanged) {
+            try LumeBackend.relocateForLaunch(verified, in: storage)
+        }
+        await #expect(throws: LumeInvocationError.bundleChanged) { try await backend.probe() }
+        #expect(await runner.invocations.isEmpty, "an inner executable swap is rejected before launch")
+    }
+
     @Test func launchRevalidationRejectsAReplacementAtTheSamePath() async throws {
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let bundleURL = LumeBundle.expectedLocation(in: storage)
-        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
-        let verified = try VerifiedLumeBundle(
-            bundle: LumeBundle(url: bundleURL),
-            version: LumePin.version,
-            teamIdentifier: LumePin.teamIdentifier,
-            signingIdentifier: LumePin.bundleIdentifier
-        )
+        let verified = try verifiedFixture(at: bundleURL)
         let runner = ScriptedLumeRunner(Self.successfulReplies)
         let backend = try LumeBackend(bundle: verified, storage: storage, runner: runner)
 
         try FileManager.default.removeItem(at: bundleURL)
         try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
-        #expect(RuntimeStorage.fileIdentity(of: bundleURL) != verified.fileIdentity)
+        #expect(RuntimeStorage.fileIdentity(of: bundleURL) != verified.verifiedFileIdentity.bundle)
         #expect(throws: LumeInvocationError.bundleChanged) {
             try LumeBackend.relocateForLaunch(verified, in: storage)
         }
