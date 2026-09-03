@@ -15,8 +15,26 @@ import Testing
     }
 
     @Test func exactMatchIsOwned() {
-        let process = live(start: started.addingTimeInterval(0.4))
-        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [live(pid: 1), process], vmLockPresent: true) == .ownedRunning(process))
+        let process = live()
+        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [live(pid: 1, digest: "sha256:other"), process], vmLockPresent: true) == .ownedRunning(process))
+        // The start time is an identity: a fraction of a second off is another process.
+        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [live(start: started.addingTimeInterval(0.4))], vmLockPresent: true) == .uncertain(.pidReusedByAnotherProcess))
+    }
+
+    @Test func anotherProcessClaimingTheVMPreventsASafeStart() {
+        let sameInvocation = live(pid: 9, start: started.addingTimeInterval(5))
+        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [sameInvocation], vmLockPresent: false) == .uncertain(.anotherProcessClaimsVM))
+        let namesTheVM = LiveProcess(pid: 10, startTime: started, executablePath: recorded.executablePath, argumentsDigest: "sha256:flags", claimedVMName: environment.tartVMName)
+        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [namesTheVM], vmLockPresent: false) == .uncertain(.anotherProcessClaimsVM))
+        let unrelated = LiveProcess(pid: 11, startTime: started, executablePath: recorded.executablePath, argumentsDigest: "sha256:flags", claimedVMName: "guesthouse-other")
+        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [unrelated], vmLockPresent: false) == .exited)
+    }
+
+    @Test func anInconsistentRecordNeverGrantsOwnership() {
+        var wrong = recorded
+        wrong.vmName = EnvironmentID().tartVMName
+        #expect(!wrong.isConsistent)
+        #expect(ProcessReconciler.reconcile(recorded: wrong, observed: [live()], vmLockPresent: true) == .uncertain(.recordInconsistent))
     }
 
     @Test func pidReuseIsUncertain() {
@@ -30,7 +48,7 @@ import Testing
     }
 
     @Test func goneWithoutLockIsExitedButGoneWithLockIsUncertain() {
-        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [live(pid: 7)], vmLockPresent: false) == .exited)
+        #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [live(pid: 7, digest: "sha256:other")], vmLockPresent: false) == .exited)
         #expect(ProcessReconciler.reconcile(recorded: recorded, observed: [], vmLockPresent: true) == .uncertain(.lockHeldWithoutProcess))
     }
 
