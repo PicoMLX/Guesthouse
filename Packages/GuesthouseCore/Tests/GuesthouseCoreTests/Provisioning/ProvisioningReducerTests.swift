@@ -23,68 +23,88 @@ import Testing
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let failure = GuesthouseError.guestNotReachable(EnvironmentID())
     let consoleNeeded = GuesthouseError.credentialsLocked(.guestKeychain)
+    let evidence = ResumeEvidence(summary: "restore image 62% downloaded", stagingPath: "downloads/restore.ipsw.partial")
 
     func checkpoint(_ stage: ProvisioningStage) -> Checkpoint { Checkpoint(stage: stage, reachedAt: now) }
     func state(_ stage: ProvisioningStage, _ status: StageStatus) -> ProvisioningState { ProvisioningState(stage: stage, status: status) }
 
-    struct LegalTransition: CustomTestStringConvertible {
+    struct LegalTransition {
         let name: String
         let from: ProvisioningState
         let event: ProvisioningEvent
         let expectedStatus: String
         let expectedEffects: [ProvisioningEffect]
-        var testDescription: String { name }
     }
 
     var legalTransitions: [LegalTransition] {
         [
             .init(name: "start first stage", from: .initial, event: .operationStarted(op, stage: .preflight), expectedStatus: "inProgress", expectedEffects: []),
-            .init(name: "checkpoint completes stage and persists", from: state(.preflight, .inProgress(op)), event: .checkpointReached(op, checkpoint(.preflight)), expectedStatus: "completed", expectedEffects: [.persistCheckpoint(checkpoint(.preflight))]),
+            .init(name: "checkpoint reached waits for persistence", from: state(.preflight, .inProgress(op)), event: .checkpointReached(op, checkpoint(.preflight)), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.preflight))]),
+            .init(name: "persisted checkpoint completes the stage", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight))), event: .checkpointPersisted(checkpoint(.preflight)), expectedStatus: "completed", expectedEffects: []),
+            .init(name: "persistence failure inspects", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight))), event: .checkpointPersistenceFailed(failure), expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight)]),
             .init(name: "start next stage after completion", from: state(.preflight, .completed(checkpoint(.preflight))), event: .operationStarted(op, stage: .runtimeReady), expectedStatus: "inProgress", expectedEffects: []),
+            .init(name: "start resumes from durable partial work", from: state(.runtimeReady, .resumable(evidence)), event: .operationStarted(op, stage: .runtimeReady), expectedStatus: "inProgress", expectedEffects: []),
             .init(name: "failure is recoverable", from: state(.sshPaired, .inProgress(op)), event: .operationFailed(op, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
             .init(name: "cancel", from: state(.sshPaired, .inProgress(op)), event: .operationCanceled(op), expectedStatus: "canceled", expectedEffects: []),
             .init(name: "user action required", from: state(.needsGuestSetup, .inProgress(op)), event: .userActionRequired(op, consoleNeeded), expectedStatus: "needsUserAction", expectedEffects: []),
             .init(name: "interruption becomes unknown and inspects", from: state(.macOSInstalled, .inProgress(op)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled)]),
+            .init(name: "still disconnected: inspect again", from: state(.macOSInstalled, .unknownOutcome(op)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled)]),
+            .init(name: "user asks to check again while unknown", from: state(.macOSInstalled, .unknownOutcome(op)), event: .userRetried, expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled)]),
+            .init(name: "user asks to check again while inspecting", from: state(.macOSInstalled, .awaitingInspection), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.macOSInstalled)]),
             .init(name: "retry after failure inspects first", from: state(.sshPaired, .recoverableFailure(failure)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired)]),
             .init(name: "retry after cancel inspects first", from: state(.sshPaired, .canceled), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired)]),
             .init(name: "user finished console step, inspect", from: state(.needsGuestSetup, .needsUserAction(consoleNeeded)), event: .userActionCompleted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.needsGuestSetup)]),
-            .init(name: "reconciled: actually completed", from: state(.macOSInstalled, .unknownOutcome(op)), event: .reconciled(.completed(checkpoint(.macOSInstalled))), expectedStatus: "completed", expectedEffects: [.persistCheckpoint(checkpoint(.macOSInstalled))]),
-            .init(name: "reconciled: actually failed", from: state(.macOSInstalled, .unknownOutcome(op)), event: .reconciled(.failed(failure)), expectedStatus: "recoverableFailure", expectedEffects: []),
+            .init(name: "reconciled: actually completed, persist it", from: state(.macOSInstalled, .unknownOutcome(op)), event: .reconciled(.completed(checkpoint(.macOSInstalled))), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.macOSInstalled))]),
+            .init(name: "reconciled: resumable partial work", from: state(.runtimeReady, .unknownOutcome(op)), event: .reconciled(.resumable(evidence)), expectedStatus: "resumable", expectedEffects: []),
+            .init(name: "reconciled: failed and needs cleanup", from: state(.runtimeReady, .awaitingInspection), event: .reconciled(.failedNeedsCleanup(failure)), expectedStatus: "cleanupRequired", expectedEffects: [.cleanUp(.runtimeReady)]),
+            .init(name: "reconciled: failed, user must act", from: state(.sshPaired, .awaitingInspection), event: .reconciled(.failed(failure)), expectedStatus: "recoverableFailure", expectedEffects: []),
             .init(name: "reconciled: nothing happened, safe to start", from: state(.sshPaired, .awaitingInspection), event: .reconciled(.notStarted), expectedStatus: "notStarted", expectedEffects: []),
-            .init(name: "reconciled after inspection: completed", from: state(.sshPaired, .awaitingInspection), event: .reconciled(.completed(checkpoint(.sshPaired))), expectedStatus: "completed", expectedEffects: [.persistCheckpoint(checkpoint(.sshPaired))]),
+            .init(name: "cleanup finished, safe to start", from: state(.runtimeReady, .cleanupRequired(failure)), event: .cleanupFinished, expectedStatus: "notStarted", expectedEffects: []),
+            .init(name: "cleanup failed, back to recoverable", from: state(.runtimeReady, .cleanupRequired(failure)), event: .cleanupFailed(failure), expectedStatus: "recoverableFailure", expectedEffects: []),
         ]
     }
 
     @Test func everyLegalTransition() throws {
         for transition in legalTransitions {
             let (state, effects) = try Reducer.reduce(transition.from, transition.event)
-            #expect(state.status.caseName == transition.expectedStatus, "\(transition.name)")
-            #expect(effects == transition.expectedEffects, "\(transition.name)")
+            #expect(state.status.caseName == transition.expectedStatus, Comment(rawValue: transition.name))
+            #expect(effects == transition.expectedEffects, Comment(rawValue: transition.name))
             if case .operationStarted(_, let stage) = transition.event {
-                #expect(state.stage == stage, "\(transition.name): operationStarted moves to the requested stage")
+                #expect(state.stage == stage, Comment(rawValue: transition.name))
             } else {
-                #expect(state.stage == transition.from.stage, "\(transition.name): only operationStarted changes the stage")
+                #expect(state.stage == transition.from.stage, Comment(rawValue: transition.name))
+            }
+            #expect(state.isConsistent, Comment(rawValue: transition.name))
+        }
+    }
+
+    @Test func nothingAdvancesUntilTheCheckpointIsPersisted() {
+        let pending = state(.preflight, .persistingCheckpoint(checkpoint(.preflight)))
+        #expect(throws: ProvisioningTransitionError.illegalTransition(status: "persistingCheckpoint", event: "operationStarted")) {
+            try Reducer.reduce(pending, .operationStarted(other, stage: .runtimeReady))
+        }
+        #expect(throws: ProvisioningTransitionError.checkpointMismatch(expected: checkpoint(.preflight), actual: checkpoint(.runtimeReady))) {
+            try Reducer.reduce(pending, .checkpointPersisted(checkpoint(.runtimeReady)))
+        }
+    }
+
+    @Test func startingFromAFailureUnknownOrInspectionIsIllegal() {
+        for status in [StageStatus.recoverableFailure(failure), .unknownOutcome(op), .awaitingInspection, .cleanupRequired(failure), .needsUserAction(consoleNeeded)] {
+            #expect(throws: ProvisioningTransitionError.self, Comment(rawValue: status.caseName)) {
+                try Reducer.reduce(state(.sshPaired, status), .operationStarted(other, stage: .sshPaired))
             }
         }
     }
 
-    @Test func startingFromAFailureWithoutInspectionIsIllegal() {
-        let from = state(.sshPaired, .recoverableFailure(failure))
-        #expect(throws: ProvisioningTransitionError.illegalTransition(status: "recoverableFailure", event: "operationStarted")) {
-            try Reducer.reduce(from, .operationStarted(op, stage: .sshPaired))
-        }
-    }
-
-    @Test func startingWhileUnknownOrInspectingIsIllegal() {
-        #expect(throws: ProvisioningTransitionError.self) {
-            try Reducer.reduce(state(.sshPaired, .unknownOutcome(op)), .operationStarted(other, stage: .sshPaired))
-        }
-        #expect(throws: ProvisioningTransitionError.self) {
-            try Reducer.reduce(state(.sshPaired, .awaitingInspection), .operationStarted(other, stage: .sshPaired))
-        }
-        #expect(throws: ProvisioningTransitionError.self) {
-            try Reducer.reduce(state(.sshPaired, .inProgress(op)), .operationStarted(other, stage: .guestSecured))
-        }
+    @Test func confirmedFailureWithLeftoversReachesASafeStart() throws {
+        var state = state(.runtimeReady, .recoverableFailure(.downloadVerificationFailed(artifact: "restore image", check: .digest)))
+        state = try Reducer.reduce(state, .userRetried).state
+        let (afterInspection, effects) = try Reducer.reduce(state, .reconciled(.failedNeedsCleanup(.downloadVerificationFailed(artifact: "restore image", check: .digest))))
+        #expect(effects == [.cleanUp(.runtimeReady)])
+        let clean = try Reducer.reduce(afterInspection, .cleanupFinished).state
+        #expect(clean.status == .notStarted)
+        let started = try Reducer.reduce(clean, .operationStarted(other, stage: .runtimeReady)).state
+        #expect(started.status == .inProgress(other))
     }
 
     @Test func eventsForAnotherOperationAreRejected() {
@@ -92,7 +112,7 @@ import Testing
             try Reducer.reduce(state(.preflight, .inProgress(op)), .checkpointReached(other, checkpoint(.preflight)))
         }
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: op, actual: other)) {
-            try Reducer.reduce(state(.preflight, .inProgress(op)), .connectionInterrupted(other))
+            try Reducer.reduce(state(.preflight, .unknownOutcome(op)), .connectionInterrupted(other))
         }
     }
 
@@ -109,47 +129,65 @@ import Testing
     }
 
     @Test func retryingWhileInProgressOrCompletedIsIllegal() {
-        #expect(throws: ProvisioningTransitionError.self) {
-            try Reducer.reduce(state(.preflight, .inProgress(op)), .userRetried)
-        }
-        #expect(throws: ProvisioningTransitionError.self) {
-            try Reducer.reduce(state(.preflight, .completed(checkpoint(.preflight))), .userRetried)
-        }
-        #expect(throws: ProvisioningTransitionError.self) {
-            try Reducer.reduce(.initial, .reconciled(.notStarted))
-        }
+        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(state(.preflight, .inProgress(op)), .userRetried) }
+        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(state(.preflight, .completed(checkpoint(.preflight))), .userRetried) }
+        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(.initial, .reconciled(.notStarted)) }
+        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(.initial, .cleanupFinished) }
     }
 
-    @Test func happyPathReachesReady() throws {
+    @Test func happyPathReachesReadyOnlyAfterEveryCheckpointIsPersisted() throws {
         var state = ProvisioningState.initial
         for stage in ProvisioningStage.allCases {
             let id = OperationID()
             state = try Reducer.reduce(state, .operationStarted(id, stage: stage)).state
             state = try Reducer.reduce(state, .checkpointReached(id, checkpoint(stage))).state
+            #expect(!state.isReady)
+            state = try Reducer.reduce(state, .checkpointPersisted(checkpoint(stage))).state
         }
         #expect(state.isReady)
         #expect(state.stage == .ready)
     }
 
+    @Test func readinessRequiresTheFinalCheckpointItself() {
+        #expect(!state(.ready, .completed(checkpoint(.preflight))).isReady)
+        #expect(!state(.ready, .completed(checkpoint(.preflight))).isConsistent)
+        #expect(!state(.ready, .persistingCheckpoint(checkpoint(.ready))).isReady)
+        #expect(state(.ready, .completed(checkpoint(.ready))).isReady)
+    }
+
     @Test func interruptedThenCompletedContinuesToNextStage() throws {
         var state = state(.macOSInstalled, .inProgress(op))
         state = try Reducer.reduce(state, .connectionInterrupted(op)).state
-        #expect(state.status == .unknownOutcome(op))
         state = try Reducer.reduce(state, .reconciled(.completed(checkpoint(.macOSInstalled)))).state
+        state = try Reducer.reduce(state, .checkpointPersisted(checkpoint(.macOSInstalled))).state
         state = try Reducer.reduce(state, .operationStarted(other, stage: .needsGuestSetup)).state
         #expect(state == self.state(.needsGuestSetup, .inProgress(other)))
     }
 
-    @Test func stateRoundTripsThroughJSON() throws {
+    @Test func transitionErrorsCarryUserFacingText() {
+        for error in [ProvisioningTransitionError.illegalTransition(status: "a", event: "b"), .operationMismatch(expected: op, actual: other), .stageMismatch(expected: .preflight, actual: .ready), .checkpointMismatch(expected: checkpoint(.preflight), actual: checkpoint(.ready)), .alreadyReady] {
+            #expect(error.errorDescription?.isEmpty == false)
+            #expect(error.recoverySuggestion?.isEmpty == false)
+            #expect(!error.recoveryActions.isEmpty)
+        }
+        #expect(ProvisioningTransitionError.illegalTransition(status: "a", event: "b").recoveryActions.first == .inspectState)
+    }
+
+    @Test func stateRoundTripsThroughJSONAndRejectsInconsistentCheckpoints() throws {
         let states = [
             ProvisioningState.initial,
             state(.sshPaired, .recoverableFailure(failure)),
             state(.macOSInstalled, .unknownOutcome(op)),
+            state(.runtimeReady, .resumable(evidence)),
+            state(.runtimeReady, .cleanupRequired(failure)),
             state(.ready, .completed(checkpoint(.ready))),
         ]
         for original in states {
             let data = try JSONEncoder().encode(original)
             #expect(try JSONDecoder().decode(ProvisioningState.self, from: data) == original)
         }
+        let inconsistent = state(.ready, .completed(checkpoint(.preflight)))
+        let data = try JSONEncoder().encode(inconsistent)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: data) }
     }
 }
