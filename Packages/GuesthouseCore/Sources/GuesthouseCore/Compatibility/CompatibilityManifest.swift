@@ -53,6 +53,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
         public var hostMacOS: VersionRange
         public var codexDesktopVersion: String
         public var codexDesktopBuild: String
+        public var codexDesktopPath: String
         public var runtimeProtocolVersion: Int
         public var tartVersion: String
         public var guestMacOSBuild: String
@@ -70,6 +71,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             hostMacOS: VersionRange,
             codexDesktopVersion: String,
             codexDesktopBuild: String,
+            codexDesktopPath: String,
             runtimeProtocolVersion: Int,
             tartVersion: String,
             guestMacOSBuild: String,
@@ -84,16 +86,37 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             self.hostMacOS = hostMacOS
             self.codexDesktopVersion = codexDesktopVersion
             self.codexDesktopBuild = codexDesktopBuild
+            self.codexDesktopPath = codexDesktopPath
             self.runtimeProtocolVersion = runtimeProtocolVersion
             self.tartVersion = tartVersion
             self.guestMacOSBuild = guestMacOSBuild
             self.xcodeBuild = xcodeBuild
             self.codexCLIVersion = codexCLIVersion
             self.codexCLIPath = codexCLIPath
-            self.codexCLICapabilities = codexCLICapabilities.sorted()
+            self.codexCLICapabilities = CompatibilityTuple.normalize(codexCLICapabilities)
             self.githubCLIVersion = githubCLIVersion
             self.provisioningScriptVersion = provisioningScriptVersion
             self.verification = verification
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                hostMacOS: try c.decode(VersionRange.self, forKey: .hostMacOS),
+                codexDesktopVersion: try c.decode(String.self, forKey: .codexDesktopVersion),
+                codexDesktopBuild: try c.decode(String.self, forKey: .codexDesktopBuild),
+                codexDesktopPath: try c.decode(String.self, forKey: .codexDesktopPath),
+                runtimeProtocolVersion: try c.decode(Int.self, forKey: .runtimeProtocolVersion),
+                tartVersion: try c.decode(String.self, forKey: .tartVersion),
+                guestMacOSBuild: try c.decode(String.self, forKey: .guestMacOSBuild),
+                xcodeBuild: try c.decode(String.self, forKey: .xcodeBuild),
+                codexCLIVersion: try c.decode(String.self, forKey: .codexCLIVersion),
+                codexCLIPath: try c.decode(String.self, forKey: .codexCLIPath),
+                codexCLICapabilities: try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities) ?? [],
+                githubCLIVersion: try c.decode(String.self, forKey: .githubCLIVersion),
+                provisioningScriptVersion: try c.decode(String.self, forKey: .provisioningScriptVersion),
+                verification: try c.decodeIfPresent(Verification.self, forKey: .verification)
+            )
         }
 
         public var isVerified: Bool { verification != nil }
@@ -104,6 +127,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             hostMacOS.contains(tuple.hostMacOSVersion)
                 && codexDesktopVersion == tuple.codexDesktopVersion
                 && codexDesktopBuild == tuple.codexDesktopBuild
+                && codexDesktopPath == tuple.codexDesktopPath
                 && runtimeProtocolVersion == tuple.runtimeProtocolVersion
                 && tartVersion == tuple.tartVersion
                 && guestMacOSBuild == tuple.guestMacOSBuild
@@ -118,47 +142,89 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
     }
 
     /// A combination known not to work. Every specified field must match the observed value
-    /// for the rule to apply; an unknown observed field never triggers it.
+    /// for the rule to apply; an unknown observed field never triggers it. A rule can single
+    /// out one CLI executable, one capability set, or one desktop bundle, so a broken
+    /// installation can be blocked without blocking a working one of the same version.
     public struct KnownIncompatibility: Codable, Hashable, Sendable {
+        /// What stays available when a rule fires: the console, work export, and stopping the
+        /// environment (the persistent stop control is never an error button).
+        public static let defaultRecoveryActions: [RecoveryAction] = [.openConsole, .exportWork, .cancel]
+
         public var hostMacOS: VersionRange?
         public var hostMacOSBuild: String?
         public var codexDesktopVersion: String?
         public var codexDesktopBuild: String?
+        public var codexDesktopPath: String?
         public var runtimeProtocolVersion: Int?
         public var tartVersion: String?
         public var guestMacOSBuild: String?
         public var xcodeBuild: String?
         public var codexCLIVersion: String?
+        public var codexCLIPath: String?
+        /// Matches when the observed capability list, normalized, equals this list.
+        public var codexCLICapabilities: [String]?
         public var githubCLIVersion: String?
         public var provisioningScriptVersion: String?
         public var reason: String
+        /// What the GUI offers when this rule fires. Never empty.
+        public var recoveryActions: [RecoveryAction]
 
         public init(
             hostMacOS: VersionRange? = nil,
             hostMacOSBuild: String? = nil,
             codexDesktopVersion: String? = nil,
             codexDesktopBuild: String? = nil,
+            codexDesktopPath: String? = nil,
             runtimeProtocolVersion: Int? = nil,
             tartVersion: String? = nil,
             guestMacOSBuild: String? = nil,
             xcodeBuild: String? = nil,
             codexCLIVersion: String? = nil,
+            codexCLIPath: String? = nil,
+            codexCLICapabilities: [String]? = nil,
             githubCLIVersion: String? = nil,
             provisioningScriptVersion: String? = nil,
-            reason: String
+            reason: String,
+            recoveryActions: [RecoveryAction] = KnownIncompatibility.defaultRecoveryActions
         ) {
             self.hostMacOS = hostMacOS
             self.hostMacOSBuild = hostMacOSBuild
             self.codexDesktopVersion = codexDesktopVersion
             self.codexDesktopBuild = codexDesktopBuild
+            self.codexDesktopPath = codexDesktopPath
             self.runtimeProtocolVersion = runtimeProtocolVersion
             self.tartVersion = tartVersion
             self.guestMacOSBuild = guestMacOSBuild
             self.xcodeBuild = xcodeBuild
             self.codexCLIVersion = codexCLIVersion
+            self.codexCLIPath = codexCLIPath
+            self.codexCLICapabilities = codexCLICapabilities.map(CompatibilityTuple.normalize)
             self.githubCLIVersion = githubCLIVersion
             self.provisioningScriptVersion = provisioningScriptVersion
             self.reason = reason
+            self.recoveryActions = recoveryActions.isEmpty ? Self.defaultRecoveryActions : recoveryActions
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                hostMacOS: try c.decodeIfPresent(VersionRange.self, forKey: .hostMacOS),
+                hostMacOSBuild: try c.decodeIfPresent(String.self, forKey: .hostMacOSBuild),
+                codexDesktopVersion: try c.decodeIfPresent(String.self, forKey: .codexDesktopVersion),
+                codexDesktopBuild: try c.decodeIfPresent(String.self, forKey: .codexDesktopBuild),
+                codexDesktopPath: try c.decodeIfPresent(String.self, forKey: .codexDesktopPath),
+                runtimeProtocolVersion: try c.decodeIfPresent(Int.self, forKey: .runtimeProtocolVersion),
+                tartVersion: try c.decodeIfPresent(String.self, forKey: .tartVersion),
+                guestMacOSBuild: try c.decodeIfPresent(String.self, forKey: .guestMacOSBuild),
+                xcodeBuild: try c.decodeIfPresent(String.self, forKey: .xcodeBuild),
+                codexCLIVersion: try c.decodeIfPresent(String.self, forKey: .codexCLIVersion),
+                codexCLIPath: try c.decodeIfPresent(String.self, forKey: .codexCLIPath),
+                codexCLICapabilities: try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities),
+                githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
+                provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion),
+                reason: try c.decode(String.self, forKey: .reason),
+                recoveryActions: try c.decodeIfPresent([RecoveryAction].self, forKey: .recoveryActions) ?? Self.defaultRecoveryActions
+            )
         }
 
         public func applies(to observed: ObservedTuple) -> Bool {
@@ -178,11 +244,14 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
                 && check(hostMacOSBuild, observed.hostMacOSBuild)
                 && check(codexDesktopVersion, observed.codexDesktopVersion)
                 && check(codexDesktopBuild, observed.codexDesktopBuild)
+                && check(codexDesktopPath, observed.codexDesktopPath)
                 && check(runtimeProtocolVersion, observed.runtimeProtocolVersion)
                 && check(tartVersion, observed.tartVersion)
                 && check(guestMacOSBuild, observed.guestMacOSBuild)
                 && check(xcodeBuild, observed.xcodeBuild)
                 && check(codexCLIVersion, observed.codexCLIVersion)
+                && check(codexCLIPath, observed.codexCLIPath)
+                && check(codexCLICapabilities, observed.codexCLICapabilities)
                 && check(githubCLIVersion, observed.githubCLIVersion)
                 && check(provisioningScriptVersion, observed.provisioningScriptVersion)
         }
@@ -196,9 +265,19 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
         return try decode(from: try Data(contentsOf: url))
     }
 
+    /// Decodes a manifest and refuses any schema this build cannot interpret: a newer document
+    /// may carry a compatibility dimension this evaluator would silently ignore.
     public static func decode(from data: Data) throws -> CompatibilityManifest {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(CompatibilityManifest.self, from: data)
+        let manifest = try decoder.decode(CompatibilityManifest.self, from: data)
+        guard manifest.schemaVersion == SchemaVersion.current else {
+            throw CompatibilityManifestError.unsupportedSchema(found: manifest.schemaVersion, supported: .current)
+        }
+        return manifest
     }
+}
+
+public enum CompatibilityManifestError: Error, Hashable, Sendable {
+    case unsupportedSchema(found: SchemaVersion, supported: SchemaVersion)
 }

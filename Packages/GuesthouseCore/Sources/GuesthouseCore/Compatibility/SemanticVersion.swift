@@ -63,9 +63,21 @@ public struct VersionRange: Codable, Hashable, Sendable {
     public var minimum: SemanticVersion
     public var maximum: SemanticVersion?
 
+    /// An inverted range would contain nothing and let a rule silently never fire.
     public init(minimum: SemanticVersion, maximum: SemanticVersion? = nil) {
+        precondition(maximum.map { minimum <= $0 } ?? true, "inverted version range")
         self.minimum = minimum
         self.maximum = maximum
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let minimum = try c.decode(SemanticVersion.self, forKey: .minimum)
+        let maximum = try c.decodeIfPresent(SemanticVersion.self, forKey: .maximum)
+        if let maximum, maximum < minimum {
+            throw DecodingError.dataCorruptedError(forKey: .maximum, in: c, debugDescription: "maximum is below minimum")
+        }
+        self.init(minimum: minimum, maximum: maximum)
     }
 
     public func contains(_ version: SemanticVersion) -> Bool {

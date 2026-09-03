@@ -6,8 +6,9 @@ public enum CompatibilityState: Codable, Hashable, Sendable {
     case verified(recordedAt: Date)
     /// Handoff is allowed only after the user performs and confirms a real desktop connection.
     case needsValidation(NeedsValidationReason)
-    /// Handoff is blocked. Console access, shutdown, and work export stay available.
-    case incompatible(reason: String)
+    /// Handoff is blocked. Console access, shutdown, and work export stay available; the
+    /// rule names what else the user can do.
+    case incompatible(reason: String, recoveryActions: [RecoveryAction])
 
     public enum NeedsValidationReason: Codable, Hashable, Sendable {
         /// At least one component could not be identified. Never guess; ask for validation.
@@ -43,7 +44,7 @@ public enum CompatibilityEvaluator: Sendable {
         history: [ConnectionVerificationRecord]
     ) -> CompatibilityState {
         if let rule = manifest.incompatibilities.first(where: { $0.applies(to: observed) }) {
-            return .incompatible(reason: rule.reason)
+            return .incompatible(reason: rule.reason, recoveryActions: rule.recoveryActions)
         }
 
         let unknown = observed.unknownFields
