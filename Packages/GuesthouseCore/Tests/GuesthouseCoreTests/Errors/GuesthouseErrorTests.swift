@@ -87,6 +87,21 @@ import Testing
         )
         #expect(error.userMessage.contains("200 GB"))
         #expect(error.userMessage.contains("50 GB"))
+        #expect(error.userMessage.contains("150 GB short"))
+        let close = GuesthouseError.insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 199_999_999_999, volumePath: "/")
+        #expect(close.userMessage.contains("200,000,000,000 bytes"))
+        #expect(close.userMessage.contains("199,999,999,999 bytes"))
+        #expect(close.userMessage.contains("1 bytes short"))
+    }
+
+    @Test func sanitizerBoundsItsInputBeforeWorking() {
+        let huge = String(repeating: "x", count: 5_000_000)
+        let started = ContinuousClock.now
+        let error = GuesthouseError.toolMismatch(tool: huge, found: nil, expected: "1.0")
+        #expect(error.userMessage.unicodeScalars.count < 400)
+        #expect(ContinuousClock.now - started < .seconds(2))
+        let lateSecret = String(repeating: "x", count: 60) + " ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        #expect(!GuesthouseError.toolMismatch(tool: lateSecret, found: nil, expected: "1").userMessage.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
     }
 
     @Test func memoryMessagesUseBinaryUnits() {

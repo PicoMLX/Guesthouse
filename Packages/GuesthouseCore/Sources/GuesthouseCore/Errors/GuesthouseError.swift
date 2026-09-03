@@ -77,7 +77,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost(.insufficientMemory(let found, let minimum)):
             "This Mac has \(Self.formatMemory(found)) of memory. Guesthouse needs at least \(Self.formatMemory(minimum)) to run a development Mac alongside your other apps."
         case .insufficientDisk(let required, let available, let volume):
-            "This step needs \(Self.formatBytes(required)) free on \(Self.sanitize(volume)), but only \(Self.formatBytes(available)) is available."
+            Self.insufficientDiskMessage(required: required, available: available, volume: volume)
         case .downloadVerificationFailed(let artifact, let check):
             "The downloaded \(Self.sanitize(artifact)) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
         case .runtimeMissing:
@@ -199,8 +199,15 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// Order matters: normalization first, so a token split by a control character cannot be
     /// reassembled after redaction; the bound is in Unicode scalars, so a run of combining
     /// marks cannot hide behind a single `Character`.
+    /// Input is bounded before any work: only the first `limit + lookahead` scalars are
+    /// normalized and redacted, so an oversized value costs a bounded amount of memory and CPU.
+    /// The lookahead is longer than any credential the redactor recognizes, so a secret that
+    /// begins inside the visible prefix is always fully inside the redacted window.
+    static let sanitizeLookahead = 512
+
     static func sanitize(_ value: String, limit: Int = 80) -> String {
-        let normalized = String(String.UnicodeScalarView(value.unicodeScalars.filter { scalar in
+        let bounded = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead)
+        let normalized = String(String.UnicodeScalarView(bounded.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
                 false
@@ -212,6 +219,20 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return redacted }
         return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
+    }
+
+    /// Names the shortfall explicitly, and falls back to exact byte counts when rounding would
+    /// make the two amounts read the same.
+    static func insufficientDiskMessage(required: UInt64, available: UInt64, volume: String) -> String {
+        let shortfall = required > available ? required - available : 0
+        var requiredText = formatBytes(required)
+        var availableText = formatBytes(available)
+        if requiredText == availableText {
+            requiredText = "\(required.formatted()) bytes"
+            availableText = "\(available.formatted()) bytes"
+        }
+        let shortfallText = shortfall < 1_000_000 ? "\(shortfall.formatted()) bytes" : formatBytes(shortfall)
+        return "This step needs \(requiredText) free on \(sanitize(volume)), but only \(availableText) is available, \(shortfallText) short."
     }
 
     private static func formatBytes(_ bytes: UInt64) -> String {
