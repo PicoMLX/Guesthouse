@@ -61,7 +61,7 @@ import Testing
 
     let manifest = CompatibilityManifest(manifestVersion: 1, tested: [tested()])
     let day = Date(timeIntervalSince1970: 1_800_000_000)
-    var record: ConnectionVerificationRecord { ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .userConfirmedWorkspaceOpened) }
+    var record: ConnectionVerificationRecord { try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .userConfirmedWorkspaceOpened) }
 
     @Test func exactRecordedConnectionIsVerified() {
         let state = CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [record])
@@ -85,7 +85,7 @@ import Testing
 
     @Test func competingInstallationsNeedValidationEvenWithHistory() {
         let ambiguous = Self.tuple(installations: 2)
-        let history = [ConnectionVerificationRecord(tuple: ambiguous, verifiedAt: day, evidence: .userConfirmedWorkspaceOpened)]
+        let history = [try! ConnectionVerificationRecord(tuple: ambiguous, verifiedAt: day, evidence: .userConfirmedWorkspaceOpened)]
         let state = CompatibilityEvaluator.evaluate(observed: ObservedTuple(ambiguous), manifest: manifest, history: history)
         #expect(state == .needsValidation(.competingInstallations(count: 2)))
     }
@@ -142,7 +142,7 @@ import Testing
     @Test func manifestVerificationForTheExactHostBeatsUnrelatedHistory() {
         let verification = CompatibilityManifest.Verification(verifiedAt: day, hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
         let manifest = CompatibilityManifest(manifestVersion: 2, tested: [Self.tested(verification: verification)])
-        let unrelated = ConnectionVerificationRecord(tuple: Self.tuple(codexCLI: "0.40.0"), verifiedAt: day.addingTimeInterval(-86_400), evidence: .userConfirmedWorkspaceOpened)
+        let unrelated = try! ConnectionVerificationRecord(tuple: Self.tuple(codexCLI: "0.40.0"), verifiedAt: day.addingTimeInterval(-86_400), evidence: .userConfirmedWorkspaceOpened)
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [unrelated]) == .verified(recordedAt: day))
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple(hostBuild: "25F99")), manifest: manifest, history: [unrelated]) == .needsValidation(.changedSinceLastVerified([.hostMacOSBuild, .codexCLIVersion])))
     }
@@ -154,7 +154,7 @@ import Testing
     }
 
     @Test func newestRecordWinsForRecordedAt() {
-        let newer = ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day.addingTimeInterval(3600), evidence: .machineReadableStatus(source: "test"))
+        let newer = try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day.addingTimeInterval(3600), evidence: .machineReadableStatus(source: "test"))
         let state = CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [record, newer])
         #expect(state == .verified(recordedAt: newer.verifiedAt))
     }
@@ -167,7 +167,7 @@ import Testing
     }
 
     @Test func stateAndRecordsRoundTrip() throws {
-        let record = ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .machineReadableStatus(source: "desktop-status"))
+        let record = try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .machineReadableStatus(source: "desktop-status"))
         let data = try JSONEncoder().encode(record)
         #expect(try JSONDecoder().decode(ConnectionVerificationRecord.self, from: data) == record)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])

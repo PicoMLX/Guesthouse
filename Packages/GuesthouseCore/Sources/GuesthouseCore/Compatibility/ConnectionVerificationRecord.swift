@@ -14,12 +14,61 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
     public let verifiedAt: Date
     public let evidence: DesktopConnectionEvidence
 
-    public init(tuple: CompatibilityTuple, verifiedAt: Date, evidence: DesktopConnectionEvidence) {
+    /// - Throws: `CompatibilityRecordError.implausibleObservation` when a guest-reported string
+    ///   is empty, too long, carries control or format characters, or is something the
+    ///   redactor would change: such an observation is never written to persisted history.
+    public init(tuple: CompatibilityTuple, verifiedAt: Date, evidence: DesktopConnectionEvidence) throws(CompatibilityRecordError) {
+        try Self.validate(tuple)
         schemaVersion = .current
         self.tuple = tuple
         self.verifiedAt = verifiedAt
         self.evidence = evidence
     }
+
+    public static let maximumObservationLength = 256
+
+    /// Every string in the tuple must be a plausible version, build, or path.
+    public static func validate(_ tuple: CompatibilityTuple) throws(CompatibilityRecordError) {
+        let fields: [(CompatibilityField, [String])] = [
+            (.hostMacOSBuild, [tuple.hostMacOSBuild]), (.codexDesktopVersion, [tuple.codexDesktopVersion]),
+            (.codexDesktopBuild, [tuple.codexDesktopBuild]), (.codexDesktopPath, [tuple.codexDesktopPath]),
+            (.tartVersion, [tuple.tartVersion]), (.guestMacOSBuild, [tuple.guestMacOSBuild]), (.xcodeBuild, [tuple.xcodeBuild]),
+            (.codexCLIVersion, [tuple.codexCLIVersion]), (.codexCLIPath, [tuple.codexCLIPath]),
+            (.codexCLICapabilities, tuple.codexCLICapabilities), (.githubCLIVersion, [tuple.githubCLIVersion]),
+            (.provisioningScriptVersion, [tuple.provisioningScriptVersion]),
+        ]
+        for (field, values) in fields {
+            for value in values where !isPlausibleObservation(value) {
+                throw .implausibleObservation(field)
+            }
+        }
+    }
+
+    static func isPlausibleObservation(_ value: String) -> Bool {
+        guard !value.isEmpty, value.unicodeScalars.count <= maximumObservationLength else { return false }
+        let clean = value.unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: false
+            default: true
+            }
+        }
+        return clean && Redactor().redact(fieldValue: value) == value
+    }
+}
+
+public enum CompatibilityRecordError: Error, Hashable, Sendable, LocalizedError {
+    /// A guest-reported value did not look like a version, build, or path.
+    case implausibleObservation(CompatibilityField)
+
+    public var userMessage: String {
+        switch self {
+        case .implausibleObservation(let field):
+            "The development Mac reported a \(field.rawValue) value that does not look like a version, build, or path, so this connection was not recorded. Check the tools on the development Mac before trying again."
+        }
+    }
+
+    public var recoveryActions: [RecoveryAction] { [.inspectState, .repair(.tools), .cancel] }
+    public var errorDescription: String? { userMessage }
 }
 
 extension ConnectionVerificationRecord: Codable {
