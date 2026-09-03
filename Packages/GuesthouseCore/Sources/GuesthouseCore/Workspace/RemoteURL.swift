@@ -17,6 +17,9 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
         let text = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !text.contains(where: \.isWhitespace) else { return nil }
 
+        // Percent escapes and explicit ports are refused rather than normalized: SwiftPM keeps
+        // the URL spelling when it derives identities, and a port names a different endpoint.
+        guard !text.contains("%") else { return nil }
         var host: String
         var path: String
         if let scpRange = text.firstRange(of: #/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/#) {
@@ -24,7 +27,7 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
             host = String(prefix.split(separator: "@")[1].dropLast())
             path = String(text[scpRange.upperBound...])
         } else if let components = URLComponents(string: text), let scheme = components.scheme?.lowercased(), let urlHost = components.host {
-            guard ["https", "http", "ssh", "git"].contains(scheme) else { return nil }
+            guard ["https", "http", "ssh", "git"].contains(scheme), components.port == nil, components.user == nil || scheme != "https" else { return nil }
             host = urlHost
             path = components.path
         } else {

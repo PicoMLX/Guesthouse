@@ -31,7 +31,7 @@ import Testing
     }
 
     @Test func rejectsMalformedRemotes() {
-        for bad in ["", "github.com/PicoMLX/Guesthouse", "https://github.com/PicoMLX", "https://github.com/a/b/c", "file:///tmp/repo", "https://github.com/../x", "git@github.com:Pico MLX/Guesthouse"] {
+        for bad in ["", "github.com/PicoMLX/Guesthouse", "https://github.com/PicoMLX", "https://github.com/a/b/c", "file:///tmp/repo", "https://github.com/../x", "git@github.com:Pico MLX/Guesthouse", "https://github.com/Org/foo%2Dbar.git", "https://github.com:8443/Org/Foo.git", "ssh://git@github.com:2222/Org/Foo.git"] {
             #expect(RemoteURL(bad) == nil, Comment(rawValue: bad))
         }
     }
