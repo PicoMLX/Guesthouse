@@ -81,6 +81,9 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     case corruptJournal(line: Int)
     /// A record reused an operation id with a different environment or operation.
     case inconsistentRecord(OperationID)
+    /// A new operation was started on an environment whose earlier operation has no known
+    /// outcome yet.
+    case operationUnresolved(OperationID)
     case newerSchemaVersion(found: SchemaVersion, current: SchemaVersion)
     case migrationMissing(from: SchemaVersion)
     case migrationProducedWrongVersion(from: SchemaVersion, produced: SchemaVersion)
@@ -98,6 +101,8 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
             "The operation journal is damaged at line \(line). Guesthouse will inspect the actual state before allowing new operations."
         case .inconsistentRecord:
             "A journal record disagreed with the operation it belongs to, so it was not written. This is a bug in Guesthouse, not something you did."
+        case .operationUnresolved:
+            "An earlier operation on this development Mac has no recorded result yet. Guesthouse will check the actual state before starting another."
         case .newerSchemaVersion(let found, let current):
             "The saved state was written by a newer Guesthouse (format \(found.rawValue); this version reads format \(current.rawValue)). Update Guesthouse to continue."
         case .migrationMissing(let from):
@@ -113,7 +118,7 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     public var recoveryActions: [RecoveryAction] {
         switch self {
         case .insecureDirectory: [.openSettings, .cancel]
-        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord: [.inspectState, .cancel]
+        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord, .operationUnresolved: [.inspectState, .cancel]
         case .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion: [.reinstallApp, .cancel]
         case .fileUnwritable: [.freeDiskSpace, .openSettings, .cancel]
         }

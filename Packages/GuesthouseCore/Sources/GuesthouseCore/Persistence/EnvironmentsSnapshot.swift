@@ -59,6 +59,16 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         guard Set(provisioning.keys).isSubset(of: slotIDs) else {
             throw .inconsistentSnapshot(reason: "provisioning state for an unknown environment")
         }
+        // The values are checked the way their decoder checks them, so a snapshot is never
+        // written that the next load would call corrupt.
+        for state in provisioning.values {
+            guard state.schemaVersion == SchemaVersion.current else {
+                throw .inconsistentSnapshot(reason: "provisioning state with another schema version")
+            }
+            guard state.isConsistent else {
+                throw .inconsistentSnapshot(reason: "provisioning checkpoint does not match its stage")
+            }
+        }
     }
 }
 
