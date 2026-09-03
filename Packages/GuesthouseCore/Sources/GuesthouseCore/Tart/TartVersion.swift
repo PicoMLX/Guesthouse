@@ -10,10 +10,14 @@ public enum TartPin {
 
 /// A Tart version as printed by `tart --version`.
 public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomStringConvertible {
+    /// Always exactly three components, so the encoded string and the strict decoder agree.
     public let semantic: SemanticVersion
 
+    /// - Precondition: at most three components; fewer are padded with zeros.
     public init(_ semantic: SemanticVersion) {
-        self.semantic = semantic
+        precondition(semantic.components.count <= 3, "a Tart version has at most three components")
+        let padded = semantic.components + Array(repeating: 0, count: max(0, 3 - semantic.components.count))
+        self.semantic = SemanticVersion(padded)
     }
 
     /// Parses the output of `tart --version`. Accepts exactly one non-empty line of the form

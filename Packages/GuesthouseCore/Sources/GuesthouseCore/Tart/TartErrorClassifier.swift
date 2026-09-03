@@ -35,13 +35,13 @@ public enum TartErrorClassifier {
 
         if has("the specified vm") && has("does not exist") { return .vmNotFound }
         if text.contains(#/vm "[^"]*" is already running/#) { return .alreadyRunning }
-        if has("is not running") { return .notRunning }
+        if text.contains(#/vm "[^"]*" is not running/#) { return .notRunning }
         if has("no ip address found") { return .noIPAddress }
         if has("failed to lock ") { return .lockHeld }
         if has("vm directory is already initialized") { return .directoryAlreadyInitialized }
         if has("seems to be already in use, unmount it first") || has("already in use, try umounting it") { return .diskInUse }
         if has("the number of vms exceeds the system limit") { return .virtualMachineLimitExceeded }
-        if has("is running") || has("must be stopped") { return .requiresStoppedVM }
+        if text.contains(#/vm "[^"]*" (?:is running|must be stopped)/#) { return .requiresStoppedVM }
         let firstLine = stderr.split(whereSeparator: \.isNewline).first.map(String.init) ?? "exit status \(exitStatus)"
         return .unknown(Redactor().redact(lines: [firstLine]).first ?? RedactedLine(literal: "unknown Tart failure"))
     }

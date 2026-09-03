@@ -77,7 +77,13 @@ public enum TartListParser {
         }
         var result: [TartVMInfo] = []
         for entry in entries {
-            guard let source = TartVMInfo.Source(rawValue: entry.Source.lowercased()) else { throw .unknownValue(field: "Source", value: GuesthouseError.sanitize(entry.Source)) }
+            // Exactly the two pinned spellings; any other casing is a changed schema.
+            let source: TartVMInfo.Source
+            switch entry.Source {
+            case "local": source = .local
+            case "OCI": source = .oci
+            default: throw .unknownValue(field: "Source", value: GuesthouseError.sanitize(entry.Source))
+            }
             guard !entry.Name.isEmpty else { throw .unexpectedShape("Name") }
             guard let state = TartVMInfo.State(rawValue: entry.State) else { throw .unknownValue(field: "State", value: GuesthouseError.sanitize(entry.State)) }
             guard entry.Disk >= 0 else { throw .unknownValue(field: "Disk", value: String(entry.Disk)) }
