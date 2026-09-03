@@ -22,6 +22,7 @@ import Testing
     static let events: [RuntimeEvent] = [
         .runtimeVersion(RuntimeVersionInfo(serviceVersion: "0.1.0", serviceBuild: "12", tart: .init(version: "2.36.0", verified: true))),
         .environments([DevelopmentEnvironment(name: "Dev", createdAt: Date(timeIntervalSince1970: 1_800_000_000))]),
+        .xcodeCandidate(XcodeCandidate(version: "26.6", build: "17F113", path: "/Applications/Xcode.app", sizeEstimateBytes: 30_000_000_000)),
         .accepted(operation),
         .progress(operation, ProgressPhase(kind: .waitingForNetwork, fraction: 0.5)),
         .progress(operation, ProgressPhase(kind: .copying, fraction: nil, cancelable: false)),
@@ -95,6 +96,11 @@ import Testing
         for bad in ["", "../Xcode.app", "Applications/Xcode.app", "Xcode\n.app", String(repeating: "x", count: 256)] {
             #expect(throws: RequestValidationError.invalidDisplayName) {
                 try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: bad))
+            }
+        }
+        for bad in ["", String(repeating: "x", count: 300), "com.apple.dt.Xcode\n", "com.apple.dt.Xcode; rm"] {
+            #expect(throws: RequestValidationError.invalidDisplayName) {
+                try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app", expectedBundleIdentifier: bad))
             }
         }
     }

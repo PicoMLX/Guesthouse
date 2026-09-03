@@ -7,6 +7,9 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
     case runtimeVersion(RuntimeVersionInfo)
     /// The reply to `listEnvironments`.
     case environments([DevelopmentEnvironment])
+    /// The reply to `importXcode` while import itself is not implemented: what the service
+    /// found at the handed-off location, after validating it.
+    case xcodeCandidate(XcodeCandidate)
     /// The request was journaled and is now in flight.
     case accepted(OperationID)
     case progress(OperationID, ProgressPhase)
@@ -20,6 +23,7 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
         switch self {
         case .runtimeVersion: "runtimeVersion"
         case .environments: "environments"
+        case .xcodeCandidate: "xcodeCandidate"
         case .accepted: "accepted"
         case .progress: "progress"
         case .log: "log"
@@ -73,6 +77,23 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
                 problem: try c.decodeIfPresent(GuesthouseError.self, forKey: .problem)
             )
         }
+    }
+}
+
+/// A user-selected Xcode bundle the service has validated (MVP-PLAN.md §2, step 5).
+public struct XcodeCandidate: Codable, Hashable, Sendable {
+    public var version: String
+    public var build: String
+    /// The resolved, canonical location. Shown to the user; the authority remains the handoff.
+    public var path: String
+    /// Allocated size of the bundle on disk, or `nil` when estimation was cut short.
+    public var sizeEstimateBytes: UInt64?
+
+    public init(version: String, build: String, path: String, sizeEstimateBytes: UInt64?) {
+        self.version = version
+        self.build = build
+        self.path = path
+        self.sizeEstimateBytes = sizeEstimateBytes
     }
 }
 

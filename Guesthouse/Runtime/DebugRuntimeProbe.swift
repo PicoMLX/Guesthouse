@@ -13,6 +13,30 @@ final class DebugRuntimeProbe {
         self.backend = backend
     }
 
+    /// Debug-only: pick an Xcode and ask the service to validate it through the handoff.
+    func importXcodeCandidate() {
+        guard let handoff = XcodeSelection.chooseXcode() else { result = "Xcode selection canceled"; return }
+        result = "Validating \(handoff.displayName)…"
+        Task {
+            do {
+                var text = "No reply"
+                for try await event in backend.send(.importXcode(EnvironmentID(), handoff)) {
+                    switch event {
+                    case .xcodeCandidate(let candidate):
+                        text = "Xcode \(candidate.version) (\(candidate.build)) at \(candidate.path), about \(candidate.sizeEstimateBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "unknown size")"
+                    case .failed(_, let error):
+                        text = "Rejected: \(error.userMessage)"
+                    default:
+                        text = "Unexpected reply: \(event.caseName)"
+                    }
+                }
+                result = text
+            } catch {
+                result = "Connection interrupted: \(error)"
+            }
+        }
+    }
+
     func requestRuntimeVersion() {
         result = "Requesting…"
         Task {

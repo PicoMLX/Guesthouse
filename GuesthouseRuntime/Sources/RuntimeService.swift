@@ -193,9 +193,22 @@ final class RuntimeService: Sendable {
             let sink = SessionSink(session: session, log: log)
             Task { await self.performAsync(request, lifecycle: lifecycle, reply: reply, events: sink) }
             return nil
-        case .importXcode:
-            log.notice(Self.line("operation not implemented yet:", request.caseName))
-            return RuntimeEvent.failed(OperationID(), .invalidRequest(.unsupportedOperation))
+        case .importXcode(_, let handoff):
+            // Validation only: the transport benchmark and the copy are gate #37 and Phase 2.
+            // The request stays counted against the session's cap until the reply is sent.
+            let reply = ReplyBox(message, onReply: finished)
+            Task.detached {
+                do {
+                    let location = try XcodeImportValidator.resolve(handoff)
+                    let candidate = try XcodeImportValidator.candidate(at: location, expectedBundleIdentifier: handoff.expectedBundleIdentifier)
+                    reply.send(RuntimeEvent.xcodeCandidate(candidate))
+                } catch let error as GuesthouseError {
+                    reply.send(RuntimeEvent.failed(OperationID(), error))
+                } catch {
+                    reply.send(RuntimeEvent.failed(OperationID(), .xcodeSelectionRejected(.unresolvable)))
+                }
+            }
+            return nil
         }
     }
 
