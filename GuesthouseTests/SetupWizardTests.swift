@@ -12,7 +12,14 @@ struct StubHostProbe: HostProbe {
     var free: UInt64 = 500 * ResourcePreset.gigabyte
     var applications: [String: InstalledApplication] = ["com.openai.chat": InstalledApplication(url: URL(fileURLWithPath: "/Applications/ChatGPT.app"), version: "1.2.3", build: "456")]
 
-    func freeBytes(at url: URL) throws -> UInt64 { free }
+    var freeThrows = false
+
+    struct ProbeFailure: Error {}
+
+    func freeBytes(at url: URL) throws -> UInt64 {
+        if freeThrows { throw ProbeFailure() }
+        return free
+    }
     func installedApplication(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
 }
 
@@ -25,6 +32,40 @@ struct StubHostProbe: HostProbe {
         model.check()
         for _ in 0..<400 where model.report == nil { try? await Task.sleep(for: .milliseconds(5)) }
         return model
+    }
+
+    @Test func checkingAgainWithdrawsThePassingReportUntilTheNewOneArrives() async {
+        let model = await checked(StubHostProbe())
+        #expect(model.canProceed)
+        model.check()
+        #expect(model.isChecking)
+        #expect(!model.canProceed, "Next waits for the fresh result")
+        for _ in 0..<400 where model.isChecking { try? await Task.sleep(for: .milliseconds(5)) }
+        #expect(model.canProceed)
+    }
+
+    @Test func anUnreadableVolumeStopsSetupInsteadOfWarning() async {
+        var probe = StubHostProbe(); probe.freeThrows = true
+        let model = await checked(probe)
+        #expect(!model.canProceed, "an unanswered question is not a satisfied requirement")
+        guard let disk = model.rows.first(where: { $0.kind == .freeDisk }) else { Issue.record("no disk row"); return }
+        #expect(disk.verdict == .undetermined)
+        #expect(disk.recovery.contains { $0.action == .retry })
+    }
+
+    @Test func dismissBecomesAWorkingCloseSetupInsideACheckRow() {
+        let options = [RecoveryPresentation.option(for: .cancel, outcomeUnknown: false), RecoveryPresentation.option(for: .retry, outcomeUnknown: false)]
+        let presented = CheckThisMacModel.presentable(options)
+        #expect(presented.map(\.action) == [.cancel, .retry])
+        #expect(presented.first?.title == "Close setup")
+        #expect(presented.first?.availability == .enabled)
+    }
+
+    @Test func aCheckWithOnlyACancelActionStillOffersOne() async {
+        let model = await checked(StubHostProbe(cpuArchitecture: .intel))
+        guard let architecture = model.rows.first(where: { $0.kind == .architecture }) else { Issue.record("no architecture row"); return }
+        #expect(architecture.verdict == .fail)
+        #expect(architecture.recovery.map(\.title) == ["Close setup"])
     }
 
     @Test func allPassEnablesNextAndSummarizesStorage() async {
@@ -41,7 +82,9 @@ struct StubHostProbe: HostProbe {
     }
 
     @Test func warningsOnlyStillAllowNextAndCarryRecovery() async {
-        let model = await checked(StubHostProbe(physicalMemoryBytes: 16 * ResourcePreset.gibibyte, powerSource: .battery, applications: [:]))
+        // Above the floor (the guest's allocation plus the host's headroom) but below what
+        // Guesthouse recommends: a warning, not a refusal.
+        let model = await checked(StubHostProbe(physicalMemoryBytes: 28 * ResourcePreset.gibibyte, powerSource: .battery, applications: [:]))
         #expect(model.canProceed)
         let warnings = model.rows.filter { $0.verdict == .warn }
         #expect(warnings.map(\.kind).contains(.codexDesktop))

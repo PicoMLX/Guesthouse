@@ -56,6 +56,7 @@ struct SetupWizardView: View {
 /// One row per check with pass, warn, or fail, the download and storage summary, a re-run
 /// button, and recovery actions on failure.
 struct CheckThisMacView: View {
+    @Environment(\.dismiss) private var dismiss
     @Bindable var model: CheckThisMacModel
     @State private var note: String?
 
@@ -108,7 +109,11 @@ struct CheckThisMacView: View {
         switch option.availability {
         case .enabled:
             note = nil
-            if option.action == .retry || option.action == .inspectState { model.check() }
+            switch option.action {
+            case .retry, .inspectState: model.check()
+            case .cancel: dismiss()
+            default: break
+            }
         case .disabled(let reason):
             note = reason
         case .notImplemented(let text):
@@ -120,6 +125,7 @@ struct CheckThisMacView: View {
         switch verdict {
         case .pass: "checkmark.circle.fill"
         case .warn: "exclamationmark.triangle.fill"
+        case .undetermined: "questionmark.circle.fill"
         case .fail: "xmark.octagon.fill"
         }
     }
@@ -128,6 +134,7 @@ struct CheckThisMacView: View {
         switch verdict {
         case .pass: .green
         case .warn: .orange
+        case .undetermined: .orange
         case .fail: .red
         }
     }
@@ -136,6 +143,7 @@ struct CheckThisMacView: View {
         switch verdict {
         case .pass: "passed"
         case .warn: "warning"
+        case .undetermined: "could not be checked"
         case .fail: "failed"
         }
     }

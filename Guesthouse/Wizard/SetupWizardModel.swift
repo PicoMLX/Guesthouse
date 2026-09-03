@@ -38,7 +38,7 @@ enum SetupStage: String, CaseIterable, Codable, Identifiable {
 @MainActor
 final class CheckThisMacModel {
     struct Row: Equatable, Identifiable {
-        enum Verdict: Equatable { case pass, warn, fail }
+        enum Verdict: Equatable { case pass, warn, undetermined, fail }
         let kind: PreflightCheckKind
         let title: String
         let verdict: Verdict
@@ -76,7 +76,9 @@ final class CheckThisMacModel {
         }
     }
 
-    var canProceed: Bool { report?.canProceed ?? false }
+    /// A report that is being re-checked no longer vouches for anything: Next waits for the
+    /// fresh result.
+    var canProceed: Bool { !isChecking && (report?.canProceed ?? false) }
 
     var rows: [Row] {
         guard let report else { return [] }
@@ -85,9 +87,11 @@ final class CheckThisMacModel {
             case .pass(let detail):
                 Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .pass, detail: detail, recovery: [])
             case .warn(let detail, let recovery):
-                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .warn, detail: detail, recovery: recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) })
+                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .warn, detail: detail, recovery: Self.presentable(recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) }))
+            case .undetermined(let detail, let recovery):
+                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .undetermined, detail: detail, recovery: Self.presentable(recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) }))
             case .fail(let error):
-                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .fail, detail: error.userMessage, recovery: RecoveryPresentation(error: error).options)
+                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .fail, detail: error.userMessage, recovery: Self.presentable(RecoveryPresentation(error: error).options))
             }
         }
     }
@@ -102,6 +106,17 @@ final class CheckThisMacModel {
             "The development Mac's disk can grow to \(format(storage.guestDiskBytes)); setup needs \(format(storage.firstSetupAllowanceBytes)) free.",
             "Everything lives under \(storage.storageRootPath).",
         ] + (report?.powerSource == .battery ? ["This Mac is on battery power. Setup downloads and installs a lot; plug it in first."] : [])
+    }
+
+    /// "Dismiss" means nothing inside a check row, but the action behind it does: closing
+    /// setup. It is retitled so the button says what it will do, and the view closes the
+    /// sheet when it is chosen. Some checks (an Intel Mac) have no other action.
+    static func presentable(_ options: [RecoveryPresentation.Option]) -> [RecoveryPresentation.Option] {
+        options.map { option in
+            option.action == .cancel
+                ? RecoveryPresentation.Option(action: .cancel, title: "Close setup", availability: .enabled)
+                : option
+        }
     }
 
     static func title(for kind: PreflightCheckKind) -> String {

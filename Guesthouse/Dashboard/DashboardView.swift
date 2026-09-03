@@ -10,6 +10,9 @@ struct DashboardView: View {
     /// Which environment the sheet is about, so Export writes the failing development Mac's
     /// evidence rather than whichever environment was created first.
     @State private var diagnosticsSubject: EnvironmentID?
+    /// Owned by the dashboard, not by the sheet closure: a recomputation while the wizard is
+    /// open must not hand it a fresh model and lose the check in progress.
+    @State private var wizard = SetupWizardModel()
 
     var body: some View {
         let cards = model.cardStates()
@@ -34,7 +37,7 @@ struct DashboardView: View {
             }
             .padding(20)
         }
-        .sheet(isPresented: $showingWizard) { SetupWizardView(wizard: SetupWizardModel()) }
+        .sheet(isPresented: $showingWizard) { SetupWizardView(wizard: wizard) }
         .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model, subject: diagnosticsSubject) }
     }
 }

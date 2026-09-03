@@ -12,6 +12,9 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(DebugRuntimeProbe.self) private var debugProbe
     @State private var showingDiagnostics = false
+    @State private var showingWizard = false
+    /// Owned here so a recomputation while the sheet is open keeps the check in progress.
+    @State private var wizard = SetupWizardModel()
 
     var body: some View {
         VStack(spacing: 12) {
@@ -36,9 +39,14 @@ struct ContentView: View {
                 Image(systemName: "exclamationmark.triangle").imageScale(.large)
                 Text(error.userMessage)
                 RecoveryActionRow(actions: error.recoveryActions) { model.startRefresh() }
-                // Diagnostics stay reachable exactly when the dashboard, and with it the
-                // card's own menu item, cannot be shown.
-                Button("Diagnostics…") { showingDiagnostics = true }.accessibilityLabel("Open diagnostics")
+                HStack {
+                    // On a fresh Mac the runtime is missing, so the dashboard never appears;
+                    // setup has to be reachable from here or first launch has no way in.
+                    Button("Set Up Guesthouse…") { showingWizard = true }.accessibilityLabel("Set up Guesthouse")
+                    // Diagnostics stay reachable exactly when the dashboard, and with it the
+                    // card's own menu item, cannot be shown.
+                    Button("Diagnostics…") { showingDiagnostics = true }.accessibilityLabel("Open diagnostics")
+                }
             }
             #if DEBUG
             Text(debugProbe.result)
@@ -50,6 +58,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 720, minHeight: 420)
         .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model) }
+        .sheet(isPresented: $showingWizard) { SetupWizardView(wizard: wizard) }
     }
 }
 
