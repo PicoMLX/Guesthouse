@@ -50,10 +50,52 @@ import Testing
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(beta), manifest: manifest, history: []) == .incompatible(reason: "beta desktop", recoveryActions: defaults))
     }
 
+    @Test func implausibleObservationsAreNeverRecorded() {
+        var poisoned = Fixtures.tuple()
+        poisoned.codexCLIVersion = "0.50.0 ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.codexCLIVersion)) {
+            try ConnectionVerificationRecord(tuple: poisoned, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened)
+        }
+        var control = Fixtures.tuple()
+        control.guestMacOSBuild = "25F84\u{1B}[31m"
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.guestMacOSBuild)) {
+            try ConnectionVerificationRecord(tuple: control, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened)
+        }
+        var capability = Fixtures.tuple(capabilities: [String(repeating: "x", count: 300)])
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.codexCLICapabilities)) {
+            try ConnectionVerificationRecord(tuple: capability, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened)
+        }
+        capability.codexCLICapabilities = ["remote-app-server"]
+        #expect(throws: Never.self) { try ConnectionVerificationRecord(tuple: capability, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened) }
+        let error = CompatibilityRecordError.implausibleObservation(.codexCLIVersion)
+        #expect(!error.userMessage.isEmpty && !error.recoveryActions.isEmpty)
+    }
+
+    @Test func manifestErrorsAreActionableAndVerifiedManifestsRoundTrip() throws {
+        let error = CompatibilityManifestError.unsupportedSchema(found: SchemaVersion(9), supported: .current)
+        #expect(error.recoveryActions.first == .reinstallApp)
+        #expect(error.errorDescription == error.userMessage)
+        let verification = CompatibilityManifest.Verification(verifiedAt: Date(timeIntervalSince1970: 1_800_000_000.25), hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
+        let manifest = CompatibilityManifest(manifestVersion: 2, tested: [Fixtures.tested(verification: verification)])
+        let data = try JSONEncoder().encode(manifest)
+        #expect(String(decoding: data, as: UTF8.self).contains("2027-01-15T08:00:00.250Z"))
+        #expect(try CompatibilityManifest.decode(from: data) == manifest)
+    }
+
+    @Test func aMissingCLIIsAMissingPrerequisiteNotACompetingInstallation() {
+        let manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
+        var none = ObservedTuple(Fixtures.tuple(installations: 0))
+        #expect(CompatibilityEvaluator.evaluate(observed: none, manifest: manifest, history: []) == .needsValidation(.codexCLIMissing))
+        none.codexCLIVersion = nil
+        none.codexCLIPath = nil
+        #expect(CompatibilityEvaluator.evaluate(observed: none, manifest: manifest, history: []) == .needsValidation(.codexCLIMissing))
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Fixtures.tuple(installations: 2)), manifest: manifest, history: []) == .needsValidation(.competingInstallations(count: 2)))
+    }
+
     @Test func replacedDesktopBundleIsDrift() {
         let manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
         let day = Date(timeIntervalSince1970: 1_800_000_000)
-        let record = ConnectionVerificationRecord(tuple: Fixtures.tuple(), verifiedAt: day, evidence: .userConfirmedWorkspaceOpened)
+        let record = try! ConnectionVerificationRecord(tuple: Fixtures.tuple(), verifiedAt: day, evidence: .userConfirmedWorkspaceOpened)
         var moved = Fixtures.tuple()
         moved.codexDesktopPath = "/Users/dev/Applications/Codex.app"
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(moved), manifest: manifest, history: [record]) == .needsValidation(.changedSinceLastVerified([.codexDesktopPath])))

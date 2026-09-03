@@ -43,6 +43,34 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             self.evidence = evidence
         }
 
+        /// `verifiedAt` has one fixed representation, an ISO 8601 string with fractional
+        /// seconds, whatever encoder or decoder is used, so a manifest produced with
+        /// `JSONEncoder` reads back through `decode(from:)`.
+        private enum CodingKeys: String, CodingKey { case verifiedAt, hostMacOSVersion, hostMacOSBuild, evidence }
+        private static let dateStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let text = try c.decode(String.self, forKey: .verifiedAt)
+            guard let date = (try? Self.dateStyle.parse(text)) ?? (try? Date.ISO8601FormatStyle().parse(text)) else {
+                throw DecodingError.dataCorruptedError(forKey: .verifiedAt, in: c, debugDescription: "not an ISO 8601 date")
+            }
+            self.init(
+                verifiedAt: date,
+                hostMacOSVersion: try c.decode(SemanticVersion.self, forKey: .hostMacOSVersion),
+                hostMacOSBuild: try c.decode(String.self, forKey: .hostMacOSBuild),
+                evidence: try c.decode(String.self, forKey: .evidence)
+            )
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(Self.dateStyle.format(verifiedAt), forKey: .verifiedAt)
+            try c.encode(hostMacOSVersion, forKey: .hostMacOSVersion)
+            try c.encode(hostMacOSBuild, forKey: .hostMacOSBuild)
+            try c.encode(evidence, forKey: .evidence)
+        }
+
         public func covers(_ tuple: CompatibilityTuple) -> Bool {
             hostMacOSVersion == tuple.hostMacOSVersion && hostMacOSBuild == tuple.hostMacOSBuild
         }
@@ -268,9 +296,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
     /// Decodes a manifest and refuses any schema this build cannot interpret: a newer document
     /// may carry a compatibility dimension this evaluator would silently ignore.
     public static func decode(from data: Data) throws -> CompatibilityManifest {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(CompatibilityManifest.self, from: data)
+        let manifest = try JSONDecoder().decode(CompatibilityManifest.self, from: data)
         guard manifest.schemaVersion == SchemaVersion.current else {
             throw CompatibilityManifestError.unsupportedSchema(found: manifest.schemaVersion, supported: .current)
         }
@@ -278,6 +304,16 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
     }
 }
 
-public enum CompatibilityManifestError: Error, Hashable, Sendable {
+public enum CompatibilityManifestError: Error, Hashable, Sendable, LocalizedError {
     case unsupportedSchema(found: SchemaVersion, supported: SchemaVersion)
+
+    public var userMessage: String {
+        switch self {
+        case .unsupportedSchema(let found, let supported):
+            "The compatibility list shipped with this copy of Guesthouse uses format \(found.rawValue), which this version reads as \(supported.rawValue). The app and its resources do not match; reinstall Guesthouse."
+        }
+    }
+
+    public var recoveryActions: [RecoveryAction] { [.reinstallApp, .cancel] }
+    public var errorDescription: String? { userMessage }
 }

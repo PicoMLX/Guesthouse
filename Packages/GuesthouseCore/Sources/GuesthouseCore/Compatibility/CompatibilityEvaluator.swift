@@ -15,6 +15,9 @@ public enum CompatibilityState: Codable, Hashable, Sendable {
         case unknownFields([CompatibilityField])
         /// The guest login shell can see more than one Codex executable.
         case competingInstallations(count: Int)
+        /// The guest login shell can see no Codex executable at all: a missing prerequisite,
+        /// not something a real desktop connection could validate.
+        case codexCLIMissing
         /// A known combination, but no real connection has ever been recorded for it.
         case neverConnected
         /// The manifest records a connection for this combination, but on a different host
@@ -47,12 +50,17 @@ public enum CompatibilityEvaluator: Sendable {
             return .incompatible(reason: rule.reason, recoveryActions: rule.recoveryActions)
         }
 
+        // A probe that found no executable is decisive on its own, whatever else is unknown.
+        if observed.codexCLIInstallations == 0 {
+            return .needsValidation(.codexCLIMissing)
+        }
+
         let unknown = observed.unknownFields
         guard unknown.isEmpty, let exact = observed.exact else {
             return .needsValidation(.unknownFields(unknown))
         }
 
-        if exact.codexCLIInstallations != 1 {
+        if exact.codexCLIInstallations > 1 {
             return .needsValidation(.competingInstallations(count: exact.codexCLIInstallations))
         }
 
