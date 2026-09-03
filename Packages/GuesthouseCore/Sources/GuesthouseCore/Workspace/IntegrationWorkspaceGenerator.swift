@@ -265,7 +265,9 @@ public enum IntegrationWorkspaceGenerator {
     }
 
     /// Reads a `workspace.json` written by `generate`.
-    public static func decodeManifest(_ data: Data) throws -> WorkspaceManifest {
-        try JSONDecoder().decode(WorkspaceManifest.self, from: data)
+    /// Reads a workspace file the guest owns. Structural failures come back as
+    /// `WorkspaceValidationError.malformed`, which carries a message and recovery actions.
+    public static func decodeManifest(_ data: Data) throws(WorkspaceValidationError) -> WorkspaceManifest {
+        try WorkspaceManifest.decode(data)
     }
 }
