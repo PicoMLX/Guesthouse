@@ -59,20 +59,23 @@ public enum CompatibilityEvaluator: Sendable {
             return .verified(recordedAt: record.verifiedAt)
         }
 
+        // Official evidence for this exact combination counts regardless of what else the user
+        // connected before; only then does unrelated history mean drift.
+        let tested = manifest.tested.first(where: { $0.matches(exact) })
+        if let verification = tested?.verification, verification.covers(exact) {
+            return .verified(recordedAt: verification.verifiedAt)
+        }
+
         if let latest = history.max(by: { $0.verifiedAt < $1.verifiedAt }) {
             return .needsValidation(.changedSinceLastVerified(exact.differences(from: latest.tuple)))
         }
 
-        guard let tested = manifest.tested.first(where: { $0.matches(exact) }) else {
+        guard let tested else {
             return .needsValidation(.untestedCombination)
         }
-
-        guard let verification = tested.verification else {
+        guard tested.verification != nil else {
             return .needsValidation(.neverConnected)
         }
-        guard verification.covers(exact) else {
-            return .needsValidation(.verifiedOnDifferentHost)
-        }
-        return .verified(recordedAt: verification.verifiedAt)
+        return .needsValidation(.verifiedOnDifferentHost)
     }
 }

@@ -139,6 +139,14 @@ import Testing
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple(hostBuild: "25F99")), manifest: manifest, history: []) == .needsValidation(.verifiedOnDifferentHost))
     }
 
+    @Test func manifestVerificationForTheExactHostBeatsUnrelatedHistory() {
+        let verification = CompatibilityManifest.Verification(verifiedAt: day, hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
+        let manifest = CompatibilityManifest(manifestVersion: 2, tested: [Self.tested(verification: verification)])
+        let unrelated = ConnectionVerificationRecord(tuple: Self.tuple(codexCLI: "0.40.0"), verifiedAt: day.addingTimeInterval(-86_400), evidence: .userConfirmedWorkspaceOpened)
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [unrelated]) == .verified(recordedAt: day))
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple(hostBuild: "25F99")), manifest: manifest, history: [unrelated]) == .needsValidation(.changedSinceLastVerified([.hostMacOSBuild, .codexCLIVersion])))
+    }
+
     @Test func untestedCombinationsNeedValidation() {
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple(codexCLI: "9.9.9")), manifest: manifest, history: []) == .needsValidation(.untestedCombination))
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple(host: "26.3")), manifest: manifest, history: []) == .needsValidation(.untestedCombination))
