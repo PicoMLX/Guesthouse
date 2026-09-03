@@ -44,8 +44,13 @@ final class AppModel {
 
     /// An operation this app started and is still listening to.
     struct OperationState: Equatable {
+        static let maximumLogLines = 500
+
         var id: OperationID
+        var request: RuntimeRequest
         var phase: ProgressPhase?
+        /// Redacted lines the runtime reported for this operation, newest last, bounded.
+        var logs: [RedactedLine] = []
     }
 
     static let gracefulStopDeadline: Duration = .seconds(60)
@@ -63,6 +68,13 @@ final class AppModel {
     private var statusQueryTickets: [EnvironmentID: UInt64] = [:]
     private var publishedStatusTicket: [EnvironmentID: UInt64] = [:]
     private(set) var lastErrors: [EnvironmentID: GuesthouseError] = [:]
+    /// Operations whose connection dropped before a result arrived. Cleared only by a
+    /// successful status query; Retry is never offered while an entry exists (MVP-PLAN.md §3).
+    private(set) var unknownOutcomes: [EnvironmentID: OperationID] = [:]
+    /// What Retry re-sends.
+    private(set) var lastRequests: [EnvironmentID: RuntimeRequest] = [:]
+    /// The log of the last finished operation, for the disclosure after it ends.
+    private(set) var lastLogs: [EnvironmentID: [RedactedLine]] = [:]
     private(set) var quitFlow: QuitFlow = .idle
     /// The user canceled during a step that must run to its end; honored when it ends.
     private(set) var quitCancelRequested = false
@@ -476,6 +488,10 @@ final class AppModel {
     /// Re-reads one environment's status after an operation, whatever its outcome. A status
     /// query the runtime answers with a failure leaves no cached state behind: the card shows
     /// the error and offers nothing until a later query succeeds.
+    /// Re-reads one environment's status after an operation, whatever its outcome. A
+    /// successful answer settles an unknown outcome; a failed one leaves no cached state
+    /// behind and keeps the outcome unknown: the card shows the error and offers nothing
+    /// until a later query succeeds.
     func refreshStatus(of id: EnvironmentID) async {
         // The reconciliation this query started under. The client reports a dropped connection
         // to its observers before it throws into the streams that connection cut off, so a
@@ -525,6 +541,7 @@ final class AppModel {
                 default: break
                 }
             }
+            unknownOutcomes[id] = nil
         } catch {
             // A reconciliation that began after this query did has read the actual state
             // since, so its result stands: replacing it here would delete the status it just
@@ -565,9 +582,40 @@ final class AppModel {
                 lastError: lastErrors[environment.id],
                 statusUnread: statuses[environment.id] == nil,
                 statusCheckFailed: statusQueryFailures.contains(environment.id) && statusQueriesInFlight[environment.id] == nil,
+                unknownOutcome: unknownOutcomes[environment.id],
+                logs: operations[environment.id]?.logs ?? lastLogs[environment.id] ?? [],
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
                 runtimeVersion: runtimeVersion
             )
+        }
+    }
+
+    /// Asks the runtime to cancel the environment's in-flight operation.
+    func cancel(_ id: EnvironmentID) {
+        guard let operation = operations[id] else { return }
+        Task {
+            do {
+                for try await _ in backend.send(.cancelOperation(operation.id)) {}
+            } catch {
+                launchState = .interrupted(RuntimeConnectionInterrupted())
+            }
+        }
+    }
+
+    /// The recovery actions the GUI wires: retry re-sends the last request (never while the
+    /// outcome is unknown), inspect re-reads the status, cancel dismisses the failure. The
+    /// rest are shown as not implemented by the view.
+    func perform(_ action: RecoveryAction, for id: EnvironmentID) {
+        switch action {
+        case .retry:
+            guard unknownOutcomes[id] == nil, operations[id] == nil, let request = lastRequests[id] else { return }
+            Task { await run(request, for: id) }
+        case .inspectState:
+            Task { await refreshStatus(of: id) }
+        case .cancel:
+            lastErrors[id] = nil
+        default:
+            break
         }
     }
 
@@ -591,7 +639,7 @@ final class AppModel {
         guard launchState == .ready else { return }
         guard environments.contains(where: { $0.id == id }), operations[id] == nil, globalStartBlock == nil else { return }
         // Reserved before the first suspension, so two rapid starts cannot both pass the guard.
-        operations[id] = OperationState(id: OperationID(), phase: nil)
+        operations[id] = OperationState(id: OperationID(), request: .startEnvironment(id, StartOptions()))
         Task { await run(.startEnvironment(id, StartOptions()), for: id) }
     }
 
@@ -611,14 +659,20 @@ final class AppModel {
         // off, so a reconciliation launched by that same loss can already have read the
         // actual state by the time this stream ends.
         let generation = refreshGeneration
-        if operations[id] == nil { operations[id] = OperationState(id: OperationID(), phase: nil) }
+        lastRequests[id] = request
+        if operations[id] == nil { operations[id] = OperationState(id: OperationID(), request: request) }
         var completed = false
         var described = false
         do {
             for try await event in backend.send(request) {
                 switch event {
-                case .accepted(let operation): operations[id] = OperationState(id: operation, phase: nil)
+                case .accepted(let operation): operations[id]?.id = operation
                 case .progress(_, let phase): operations[id]?.phase = phase
+                case .log(_, let line):
+                    operations[id]?.logs.append(line)
+                    if let count = operations[id]?.logs.count, count > OperationState.maximumLogLines {
+                        operations[id]?.logs.removeFirst(count - OperationState.maximumLogLines)
+                    }
                 case .status(let status):
                     statuses[status.environmentID] = status
                     if status.environmentID == id { described = true }
@@ -634,6 +688,8 @@ final class AppModel {
             // reconciliation that began after this stream did has looked at the actual state
             // since, so its result stands rather than being overwritten by this loss.
             if generation == refreshGeneration { launchState = .interrupted(RuntimeConnectionInterrupted()) }
+            // The outcome is unknown until the runtime answers a status query; never replay.
+            unknownOutcomes[id] = operations[id]?.id
         }
         // A start that failed or was lost may already have launched the VM, so what was cached
         // before it says nothing about the state now. Nor does it after one that completed
@@ -644,7 +700,7 @@ final class AppModel {
         // seconds the inspection below takes, and let a second mutation go out over a VM that
         // is already running (AGENTS.md: never retry a mutating operation blindly).
         if !completed || !described { statuses[id] = nil }
-        operations[id] = nil
+        lastLogs[id] = operations.removeValue(forKey: id)?.logs
         await refreshStatus(of: id)
         // The runtime may still be running the operation this app stopped listening to. A
         // reconciliation that ran while the operation was still local started a poll that found

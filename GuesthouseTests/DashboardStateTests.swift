@@ -378,8 +378,8 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.operations.isEmpty && model.launchState != .ready }
-        guard case .interrupted = model.launchState else { Issue.record("expected interrupted"); return }
+        await waitUntil { model.lastRequests[environment.id] != nil && model.operations.isEmpty && model.unknownOutcomes.isEmpty }
+        #expect(model.launchState == .ready, "the status query answered, so the outcome is settled")
         let requests = await backend.receivedRequests
         #expect(requests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1, "never replayed")
         #expect(requests.last == .environmentStatus(environment.id), "re-checked after the interruption")

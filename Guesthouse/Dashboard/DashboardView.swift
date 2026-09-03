@@ -20,7 +20,8 @@ struct DashboardView: View {
                                 state: card,
                                 start: { model.start(card.id) },
                                 check: { Task { await model.refreshStatus(of: card.id) } },
-                                dismiss: { model.dismissError(card.id) }
+                                cancel: { model.cancel(card.id) },
+                                recover: { model.perform($0, for: card.id) }
                             )
                         }
                         SlotView(availability: model.createAvailability) { showingWizard = true }
@@ -80,8 +81,8 @@ struct EnvironmentCardView: View {
     let start: () -> Void
     /// Re-reads this environment's state; what the `inspectState` and `retry` recoveries do.
     let check: () -> Void
-    /// Clears the failure the card is holding; what the `cancel` recovery does.
-    let dismiss: () -> Void
+    let cancel: () -> Void
+    let recover: (RecoveryAction) -> Void
     @State private var note: String?
 
     var body: some View {
@@ -95,6 +96,15 @@ struct EnvironmentCardView: View {
                 // otherwise text with no way out once Start is disabled. A failure the status
                 // itself keeps reporting is not offered a dismissal, which would clear nothing.
                 RecoveryActionRow(actions: state.recoveryActions, check: check, dismiss: state.canDismiss ? dismiss : nil)
+            }
+            if let progress = state.progress {
+                OperationProgressView(presentation: progress, cancel: cancel)
+            }
+            if let recovery = state.recovery {
+                ErrorRecoveryView(presentation: recovery, perform: recover)
+            }
+            if !state.logs.isEmpty {
+                LogDisclosureView(lines: state.logs)
             }
             detailsGrid
             actionsRow
