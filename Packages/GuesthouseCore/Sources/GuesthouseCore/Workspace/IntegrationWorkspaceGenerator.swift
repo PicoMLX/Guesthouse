@@ -46,28 +46,41 @@ public enum IntegrationWorkspaceGenerator {
         return files
     }
 
-    /// Writes the generated files under `root`, creating directories as needed.
+    /// Writes the generated files under `root`, creating directories as needed, and removes
+    /// the generator-owned optional resolution file when this generation did not produce one,
+    /// so a stale lockfile cannot outlive the app's own.
     ///
     /// Every path is normalized first: it must be relative, contain no `.` or `..` components,
-    /// and not start with `repos/`; the resolved location must lie inside `root` and outside
-    /// `root/repos`. The repositories belong to Git, not to the generator.
+    /// and its first component must not be `repos` in any letter case (the usual macOS file
+    /// system is case-insensitive); the resolved location must lie inside `root`. The
+    /// repositories belong to Git, not to the generator.
     public static func write(_ files: [GeneratedFile], to root: URL) throws {
         let resolvedRoot = root.standardizedFileURL
-        let repositories = resolvedRoot.appending(path: "repos").path
         for file in files {
-            let components = file.relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-            guard !file.relativePath.hasPrefix("/"), !components.isEmpty,
-                  components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
-            else { throw GeneratedFileError.invalidPath(file.relativePath) }
-            var url = resolvedRoot
-            for component in components { url.append(path: component) }
-            let path = url.standardizedFileURL.path
-            guard path.hasPrefix(resolvedRoot.path + "/"),
-                  path != repositories, !path.hasPrefix(repositories + "/")
-            else { throw GeneratedFileError.pathOutsideWorkspace(file.relativePath) }
+            let url = try destination(for: file.relativePath, in: resolvedRoot)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try file.contents.write(to: url, options: .atomic)
         }
+        if !files.contains(where: { $0.relativePath == resolvedPackagesRelativePath }) {
+            let stale = try destination(for: resolvedPackagesRelativePath, in: resolvedRoot)
+            if FileManager.default.fileExists(atPath: stale.path) {
+                try FileManager.default.removeItem(at: stale)
+            }
+        }
+    }
+
+    static func destination(for relativePath: String, in resolvedRoot: URL) throws -> URL {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !relativePath.hasPrefix("/"), !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+        else { throw GeneratedFileError.invalidPath(relativePath) }
+        guard components[0].lowercased() != "repos" else { throw GeneratedFileError.pathOutsideWorkspace(relativePath) }
+        var url = resolvedRoot
+        for component in components { url.append(path: component) }
+        guard url.standardizedFileURL.path.hasPrefix(resolvedRoot.path + "/") else {
+            throw GeneratedFileError.pathOutsideWorkspace(relativePath)
+        }
+        return url
     }
 
     // MARK: - contents.xcworkspacedata
@@ -88,6 +101,8 @@ public enum IntegrationWorkspaceGenerator {
         return xml
     }
 
+    /// XML attribute escaping. Control and format characters never reach here: the manifest
+    /// rejects them in `appProjectPath`, and checkout names are restricted to a safe set.
     static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -162,10 +177,16 @@ public enum IntegrationWorkspaceGenerator {
 
     // MARK: - workspace.json
 
+    /// ISO 8601 with fractional seconds, matching the state store, so timestamps round-trip.
+    public static let dateFormat = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
     static func encodedManifest(_ manifest: WorkspaceManifest) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(Self.dateFormat.format(date))
+        }
         // A manifest that validated cannot fail to encode; every field is a plain value type.
         return (try? encoder.encode(manifest)) ?? Data()
     }

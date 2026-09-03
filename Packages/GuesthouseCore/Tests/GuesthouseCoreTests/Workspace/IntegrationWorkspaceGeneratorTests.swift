@@ -3,7 +3,7 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct IntegrationWorkspaceGeneratorTests {
-    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let now = Date(timeIntervalSince1970: 1_800_000_000.5)
 
     func manifest() -> WorkspaceManifest {
         WorkspaceManifest(
@@ -80,10 +80,14 @@ import Testing
         #expect(json.contains("\"name\" : \"feature-123\""))
         #expect(json.contains("https://github.com/PicoMLX/MyApp"))
         let decoded = try { () throws -> WorkspaceManifest in
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .custom { decoder in
+                try IntegrationWorkspaceGenerator.dateFormat.parse(try decoder.singleValueContainer().decode(String.self))
+            }
             return try decoder.decode(WorkspaceManifest.self, from: Data(json.utf8))
         }()
         #expect(decoded == manifest())
+        #expect(json.contains("08:00:00.500Z"), "fractional seconds survive")
     }
 
     @Test func regenerationIsByteIdentical() throws {
@@ -121,7 +125,7 @@ import Testing
     @Test func writingRejectsPathsThatEscapeOrEnterRepositories() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appending(path: "repos"), withIntermediateDirectories: true)
-        for bad in ["./repos/MyApp/file", "repos", "a/../repos/x", "../outside", "/abs/file", "a//b", ""] {
+        for bad in ["./repos/MyApp/file", "repos", "REPOS/MyApp/file", "Repos", "a/../repos/x", "../outside", "/abs/file", "a//b", ""] {
             #expect(throws: GeneratedFileError.self, Comment(rawValue: bad)) {
                 try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: bad, text: "x")], to: root)
             }
@@ -129,6 +133,16 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "repos").path).isEmpty)
         try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "artifacts/notes/readme.txt", text: "ok")], to: root)
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "artifacts/notes/readme.txt").path))
+    }
+
+    @Test func regenerationWithoutResolvedPackagesRemovesTheStaleCopy() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
+        try IntegrationWorkspaceGenerator.write(try IntegrationWorkspaceGenerator.generate(manifest(), appResolvedPackages: Data("pins".utf8)), to: root)
+        let resolved = root.appending(path: IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)
+        #expect(FileManager.default.fileExists(atPath: resolved.path))
+        try IntegrationWorkspaceGenerator.write(try IntegrationWorkspaceGenerator.generate(manifest()), to: root)
+        #expect(!FileManager.default.fileExists(atPath: resolved.path))
+        #expect(FileManager.default.fileExists(atPath: root.appending(path: "Integration.xcworkspace/contents.xcworkspacedata").path))
     }
 
     func snapshot(of directory: URL) throws -> [String: Data] {
