@@ -144,7 +144,7 @@ struct StubProbe: HostProbe {
 
     @Test func anImpossibleMemoryFloorIsNeverSatisfied() {
         var policy = ResourcePolicy(); policy.hostMemoryHeadroomBytes = UInt64.max - 1
-        let preset = ResourcePreset(name: "Test", memoryBytes: 16 * ResourcePreset.gibibyte, cpuCount: ResourcePreset.recommended.cpuCount, diskBytes: ResourcePreset.recommended.diskBytes, verification: .planBaseline)!
+        let preset = ResourcePreset(name: "Test", memoryBytes: 16 * ResourcePreset.gibibyte, cpuCount: 4, diskBytes: ResourcePreset.recommended.diskBytes, verification: .experimental)!
         let report = PreflightCheck.run(probe: StubProbe(), policy: policy, storageRoot: root, preset: preset, now: Date(timeIntervalSince1970: 1_800_000_000))
         #expect(report.result(.memory)!.isFailure, "a requirement that overflows can never be met")
     }
@@ -185,6 +185,32 @@ struct StubProbe: HostProbe {
         #expect(failure == .fail(.unsupportedHost(.wrongArchitecture(found: SanitizedText("Apple silicon"), required: "Intel"))))
         if case .fail(let error) = failure {
             #expect(error.userMessage.contains("Apple silicon") && error.userMessage.contains("Intel"))
+        }
+    }
+
+    @Test func aReportMissingACheckNeverProceeds() {
+        let full = PreflightCheck.run(probe: StubProbe(), storageRoot: root, now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(full.canProceed)
+        let partial = PreflightReport(results: Array(full.results.dropLast()), storage: full.storage, powerSource: full.powerSource, checkedAt: full.checkedAt)
+        #expect(!partial.canProceed, "a report that answers only some checks is not a passing report")
+        let empty = PreflightReport(results: [], storage: full.storage, powerSource: full.powerSource, checkedAt: full.checkedAt)
+        #expect(!empty.canProceed)
+    }
+
+    @Test func aDanglingOrFileDestinationIsNeverMeasuredOnAnotherDisk() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Destination-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let probe = SystemHostProbe()
+        let dangling = base.appending(path: "external")
+        try FileManager.default.createSymbolicLink(at: dangling, withDestinationURL: URL(fileURLWithPath: "/Volumes/NotMounted/Guesthouse"))
+        #expect(throws: HostProbeError.self) { try probe.freeBytes(at: dangling.appending(path: "store")) }
+        let file = base.appending(path: "file")
+        try Data("x".utf8).write(to: file)
+        #expect(throws: HostProbeError.notADirectory(path: file.path)) { try probe.freeBytes(at: file.appending(path: "store")) }
+        #expect(throws: Never.self) { _ = try probe.freeBytes(at: base.appending(path: "fresh/store")) }
+        for error in [HostProbeError.volumeUnavailable(path: "/x"), .notADirectory(path: "/x")] {
+            #expect(!error.recoveryActions.isEmpty)
+            #expect(!error.userMessage.isEmpty)
         }
     }
 

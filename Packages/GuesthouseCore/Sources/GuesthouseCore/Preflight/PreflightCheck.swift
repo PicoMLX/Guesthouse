@@ -72,8 +72,12 @@ public struct PreflightReport: Codable, Hashable, Sendable {
         self.checkedAt = checkedAt
     }
 
-    /// True when no check failed and every check could be made. Warnings do not block.
-    public var canProceed: Bool { !results.contains(where: \.isBlocking) }
+    /// True when every check was made and none of them blocks. A report missing a check is
+    /// not a passing report: warnings do not block, an absent answer does.
+    public var canProceed: Bool {
+        guard PreflightCheckKind.allCases.allSatisfy({ kind in results.contains { $0.kind == kind } }) else { return false }
+        return !results.contains(where: \.isBlocking)
+    }
 
     public func result(_ kind: PreflightCheckKind) -> PreflightResult? {
         results.first { $0.kind == kind }
@@ -135,10 +139,10 @@ public enum PreflightCheck: Sendable {
             } else {
                 diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
             }
-        } catch HostProbeError.volumeUnavailable(let path) {
-            // The destination's volume is not mounted: not a transient lookup failure, and
-            // never a warning, since there is no disk to check.
-            diskOutcome = .undetermined(detail: HostProbeError.volumeUnavailable(path: path).userMessage, recovery: [.retry, .openSettings])
+        } catch let error as HostProbeError {
+            // The destination is unusable or its volume is not there: not a transient lookup
+            // failure, and never a warning, since there is no disk to check.
+            diskOutcome = .undetermined(detail: error.userMessage, recovery: error.recoveryActions)
         } catch {
             diskOutcome = .undetermined(detail: "Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined, so Guesthouse cannot tell whether the download will fit. Check again, or choose a storage location Guesthouse can read.", recovery: [.retry, .openSettings])
         }

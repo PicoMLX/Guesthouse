@@ -111,12 +111,24 @@ public struct SystemHostProbe: HostProbe {
     public func freeBytes(at url: URL) throws -> UInt64 {
         var existing = url.standardizedFileURL
         while !FileManager.default.fileExists(atPath: existing.path) {
+            // A component that exists as a link but does not resolve names a destination on a
+            // volume that is not there; walking past it would measure the wrong disk.
+            var info = stat()
+            if lstat(existing.path, &info) == 0 {
+                throw HostProbeError.volumeUnavailable(path: existing.path)
+            }
             let parent = existing.deletingLastPathComponent()
             if parent.path == existing.path { break }
             if Self.isMountContainer(parent) {
                 throw HostProbeError.volumeUnavailable(path: existing.path)
             }
             existing = parent
+        }
+        // The destination has to be a directory: a regular file where a folder is expected is
+        // not a place a development Mac can be created.
+        var found = stat()
+        guard stat(existing.path, &found) == 0, (found.st_mode & S_IFMT) == S_IFDIR else {
+            throw HostProbeError.notADirectory(path: existing.path)
         }
         let values = try existing.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         guard let capacity = values.volumeAvailableCapacityForImportantUsage else {
@@ -141,11 +153,23 @@ public struct SystemHostProbe: HostProbe {
 public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
     /// The destination's volume is not mounted, so its free space is unknowable.
     case volumeUnavailable(path: String)
+    /// Something that is not a directory occupies the destination path.
+    case notADirectory(path: String)
 
     public var userMessage: String {
         switch self {
         case .volumeUnavailable(let path):
             "The volume that holds \(GuesthouseError.sanitize(path, limit: 200)) is not available, so Guesthouse cannot tell how much space it has. Connect the volume, or choose a storage location on this Mac."
+        case .notADirectory(let path):
+            "\(GuesthouseError.sanitize(path, limit: 200)) is not a folder, so Guesthouse cannot store a development Mac there. Choose another storage location."
+        }
+    }
+
+    /// What the user can do about it, so every presentation path has a way forward.
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .volumeUnavailable: [.retry, .openSettings, .cancel]
+        case .notADirectory: [.openSettings, .cancel]
         }
     }
 
