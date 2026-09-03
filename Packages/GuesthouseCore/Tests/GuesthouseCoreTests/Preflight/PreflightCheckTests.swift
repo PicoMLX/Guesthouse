@@ -65,8 +65,43 @@ struct StubProbe: HostProbe {
         #expect(run(probe).canProceed)
 
         probe.physicalMemoryBytes = 8 * ResourcePreset.gibibyte
-        #expect(run(probe).result(.memory)!.outcome == .fail(.unsupportedHost(.insufficientMemory(foundBytes: 8 * ResourcePreset.gibibyte, minimumBytes: 16 * ResourcePreset.gibibyte))))
+        #expect(run(probe).result(.memory)!.outcome == .fail(.unsupportedHost(.insufficientMemory(foundBytes: 8 * ResourcePreset.gibibyte, minimumBytes: 24 * ResourcePreset.gibibyte))))
         #expect(!run(probe).canProceed)
+
+        // Exactly the guest allocation leaves nothing for the host: blocked, not warned.
+        probe.physicalMemoryBytes = 16 * ResourcePreset.gibibyte
+        #expect(run(probe).result(.memory)!.isFailure)
+        probe.physicalMemoryBytes = 24 * ResourcePreset.gibibyte
+        #expect(!run(probe).result(.memory)!.isFailure)
+    }
+
+    @Test func unknownArchitectureIsNamedAndRetryable() {
+        var probe = StubProbe(); probe.cpuArchitecture = .unknown
+        let report = run(probe)
+        #expect(report.result(.architecture)!.outcome == .fail(.unsupportedHost(.architectureUnknown)))
+        #expect(GuesthouseError.unsupportedHost(.architectureUnknown).recoveryActions.first == .retry)
+    }
+
+    @Test func storagePathsAreSanitizedInWarningsAndTheSummary() {
+        var probe = StubProbe(); probe.free = .failure(ProbeFailure())
+        let hostile = URL(fileURLWithPath: "/Volumes/Ext\u{202E}gnol/Guesthouse")
+        let report = PreflightCheck.run(probe: probe, storageRoot: hostile, now: Date(timeIntervalSince1970: 1_800_000_000))
+        guard case .warn(let detail, _) = report.result(.freeDisk)!.outcome else { Issue.record("expected warn"); return }
+        #expect(!detail.contains("\u{202E}"))
+        #expect(!report.storage.storageRootPath.contains("\u{202E}"))
+    }
+
+    @Test func largeOperationRequirementsThatOverflowAreInsufficient() {
+        let probe = StubProbe()
+        _ = probe
+        #expect(throws: GuesthouseError.self) {
+            try LargeOperationPreflight.check(freeBytes: 500 * ResourcePreset.gigabyte, requiredBytes: UInt64.max - 1, volumePath: "/")
+        }
+    }
+
+    @Test func freeSpaceIsReadFromTheNearestExistingAncestor() throws {
+        let missing = FileManager.default.temporaryDirectory.appending(path: "does-not-exist-\(UUID().uuidString)/nested/Guesthouse")
+        #expect(try SystemHostProbe().freeBytes(at: missing) > 0)
     }
 
     @Test func blockingMinimumIsEvaluatedBeforeTheRecommendation() {

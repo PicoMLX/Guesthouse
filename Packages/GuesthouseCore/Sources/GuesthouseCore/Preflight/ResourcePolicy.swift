@@ -9,6 +9,9 @@ public struct ResourcePolicy: Hashable, Sendable {
     public var minimumMacOS = SemanticVersion([26, 4])
     /// Below this the host cannot run a development Mac alongside anything else.
     public var minimumMemoryBytes: UInt64 = 16 * ResourcePreset.gibibyte
+    /// What the host keeps for itself beside the guest's allocation. A Mac whose memory is
+    /// below the guest allocation plus this headroom is blocked, not warned (MVP-PLAN.md §4).
+    public var hostMemoryHeadroomBytes: UInt64 = 8 * ResourcePreset.gibibyte
     /// Below this the preflight warns; the reference Mac has 32 GB.
     public var recommendedMemoryBytes: UInt64 = 32 * ResourcePreset.gibibyte
     /// Free space needed for the first setup: runtime, restore image, temporary extraction,
