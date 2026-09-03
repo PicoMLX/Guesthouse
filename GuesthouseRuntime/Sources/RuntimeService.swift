@@ -28,17 +28,21 @@ final class RuntimeService: Sendable {
     func handle(_ message: XPCReceivedMessage, session: XPCSession, inFlight: Int) -> (any Encodable)? {
         guard message.senderSatisfies(Self.peerRequirement) else {
             log.error("message from a peer that does not satisfy the requirement; closing session")
-            session.cancel(reason: "unauthorized caller")
-            return RuntimeEvent.failed(OperationID(), .unauthorizedCaller)
+            return reply(.replyAndClose(.failed(OperationID(), .unauthorizedCaller)), session: session, reason: "unauthorized caller")
+        }
+        // The concurrency cap is applied before the decoder runs, so a peer over the cap
+        // costs nothing to refuse.
+        if let refused = RuntimeDispatcher.admit(inFlight: inFlight) {
+            return reply(refused, session: session)
         }
         let envelope: RuntimeRequestEnvelope
         do {
             envelope = try message.decode(as: RuntimeRequestEnvelope.self)
         } catch let mismatch as RuntimeRequestEnvelope.ProtocolMismatch {
             // A version-skewed installation is not corrupt input: the client gets the
-            // protocol-mismatch error and its reinstall recovery.
+            // protocol-mismatch error and its reinstall recovery, and the session closes.
             log.error("protocol mismatch: client \(mismatch.client.rawValue, privacy: .public)")
-            return RuntimeEvent.failed(OperationID(), mismatch.error)
+            return reply(RuntimeDispatcher.mismatch(mismatch.error), session: session)
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error("undecodable request rejected")
@@ -47,19 +51,26 @@ final class RuntimeService: Sendable {
         return reply(RuntimeDispatcher.decide(envelope, inFlight: inFlight), session: session)
     }
 
-    private func reply(_ decision: RuntimeDispatcher.Decision, session: XPCSession) -> (any Encodable)? {
+    private func reply(_ decision: RuntimeDispatcher.Decision, session: XPCSession, reason: String = "protocol mismatch") -> (any Encodable)? {
         switch decision {
         case .reply(let event):
             log.error("rejected request: \(event.caseName, privacy: .public)")
             return event
         case .replyAndClose(let event):
-            log.error("protocol mismatch; closing session")
-            defer { session.cancel(reason: "protocol mismatch") }
+            log.error("closing session: \(reason, privacy: .public)")
+            // The reply is only sent once this handler returns, so the session is closed
+            // afterwards: cancelling here would discard the answer the client needs.
+            Self.closeQueue.asyncAfter(deadline: .now() + .milliseconds(250)) {
+                session.cancel(reason: reason)
+            }
             return event
         case .dispatch(let request):
             return perform(request)
         }
     }
+
+    /// Where deferred session closes run, so a reply is never cancelled before it is sent.
+    private static let closeQueue = DispatchQueue(label: "\(serviceName).close")
 
     private func perform(_ request: RuntimeRequest) -> RuntimeEvent {
         switch request {

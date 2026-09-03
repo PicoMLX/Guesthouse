@@ -26,11 +26,34 @@ import Testing
         let envelope = RuntimeRequestEnvelope(request: .environmentStatus(environment))
         #expect(RuntimeDispatcher.decide(envelope, inFlight: RuntimeDispatcher.maximumInFlightRequestsPerSession - 1) == .dispatch(.environmentStatus(environment)))
         guard case .reply(.failed(_, let error)) = RuntimeDispatcher.decide(envelope, inFlight: RuntimeDispatcher.maximumInFlightRequestsPerSession) else { Issue.record("expected refusal"); return }
-        #expect(error == .invalidRequest(.oversized))
+        #expect(error == .invalidRequest(.tooManyInFlight))
     }
 
     @Test func undecodableMessagesAreMalformed() {
         guard case .reply(.failed(_, let error)) = RuntimeDispatcher.undecodable() else { Issue.record("expected reply"); return }
         #expect(error == .invalidRequest(.malformed))
+    }
+    @Test func anOverCapPeerIsRefusedBeforeAnythingIsDecoded() {
+        #expect(RuntimeDispatcher.admit(inFlight: 0) == nil)
+        guard case .reply(.failed(_, let error))? = RuntimeDispatcher.admit(inFlight: RuntimeDispatcher.maximumInFlightRequestsPerSession) else {
+            Issue.record("expected a refusal at the cap"); return
+        }
+        #expect(error == .invalidRequest(.tooManyInFlight))
+    }
+
+    @Test func anOversizedEnvelopeIsRefusedBeforeItIsDispatched() {
+        let huge = String(repeating: "a", count: RequestValidator.maximumEncodedSize)
+        let envelope = RuntimeRequestEnvelope(request: .importXcode(EnvironmentID(), FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app", expectedBundleIdentifier: huge)))
+        guard case .reply(.failed(_, let error)) = RuntimeDispatcher.decide(envelope, inFlight: 0) else {
+            Issue.record("expected a refusal"); return
+        }
+        #expect(error == .invalidRequest(.oversized))
+    }
+
+    @Test func aMismatchClosesTheSessionAfterItsReply() {
+        guard case .replyAndClose(.failed(_, let error)) = RuntimeDispatcher.mismatch(.protocolMismatch(client: 99, service: 1)) else {
+            Issue.record("expected replyAndClose"); return
+        }
+        #expect(error == .protocolMismatch(client: 99, service: 1))
     }
 }

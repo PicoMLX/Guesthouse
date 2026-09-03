@@ -50,6 +50,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
 
     public enum InvalidRequestReason: String, Codable, Hashable, Sendable {
         case oversized, pathEscapesAllowedRoot, invalidVMName, unsupportedOperation, malformed
+        /// The caller has too many requests in flight on one session.
+        case tooManyInFlight
     }
 
     /// Coarse grouping for filtering diagnostics and choosing presentation.
@@ -200,6 +202,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .invalidVMName: "the virtual machine name was not valid"
         case .unsupportedOperation: "the operation is not supported by this service version"
         case .malformed: "the request could not be decoded"
+        case .tooManyInFlight: "too many requests were in flight at once"
         }
     }
 

@@ -1,9 +1,11 @@
+import Foundation
+
 /// The service-side decision for one received message, before any operation runs.
 ///
 /// Pure, so the handshake and validation rules are unit-tested here rather than inside the
 /// XPC service bundle. The service applies the decision: it replies, and for
 /// `replyAndClose` it also cancels the session (MVP-PLAN.md §3, "Sandbox and XPC boundary").
-public enum RuntimeDispatcher {
+public enum RuntimeDispatcher: Sendable {
     public enum Decision: Hashable, Sendable {
         /// Reply with this event and keep the session.
         case reply(RuntimeEvent)
@@ -23,9 +25,25 @@ public enum RuntimeDispatcher {
         .reply(.failed(OperationID(), .invalidRequest(.malformed)))
     }
 
+    /// Decides what to do before anything is decoded: the concurrency cap costs nothing to
+    /// apply, so it is applied first, and a peer over the cap never reaches the decoder.
+    public static func admit(inFlight: Int) -> Decision? {
+        guard inFlight >= maximumInFlightRequestsPerSession else { return nil }
+        return .reply(.failed(OperationID(), .invalidRequest(.tooManyInFlight)))
+    }
+
+    /// Decides what to do with a message whose protocol version does not match this service.
+    public static func mismatch(_ error: GuesthouseError) -> Decision {
+        .replyAndClose(.failed(OperationID(), error))
+    }
+
     /// Decides what to do with a decoded envelope.
     public static func decide(_ envelope: RuntimeRequestEnvelope, inFlight: Int) -> Decision {
+        if let refused = admit(inFlight: inFlight) { return refused }
         do {
+            // The envelope is re-encoded and measured before anything acts on it: a payload
+            // beyond the declared maximum is refused rather than dispatched.
+            try RequestValidator.validateEncodedSize(RuntimeDispatcher.encoded(envelope))
             try RequestValidator.validate(envelope)
         } catch {
             if case .protocolMismatch = error {
@@ -33,9 +51,10 @@ public enum RuntimeDispatcher {
             }
             return .reply(.failed(OperationID(), error.guesthouseError))
         }
-        guard inFlight < maximumInFlightRequestsPerSession else {
-            return .reply(.failed(OperationID(), .invalidRequest(.oversized)))
-        }
         return .dispatch(envelope.request)
+    }
+
+    static func encoded(_ envelope: RuntimeRequestEnvelope) -> Data {
+        (try? JSONEncoder().encode(envelope)) ?? Data()
     }
 }
