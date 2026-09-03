@@ -114,10 +114,10 @@ import Testing
         #expect(card.availability(of: .start) == .disabled(reason: "An operation is in progress"))
     }
 
-    @Test func everyActionButStartIsVisiblyUnimplemented() async throws {
+    @Test func everyActionButStartAndStopIsVisiblyUnimplemented() async throws {
         let model = await AppModel.preview(PreviewScenarios.oneRunningEnvironment())
         let card = try #require(model.cardStates().first)
-        for action in EnvironmentCardState.Action.allCases where action != .start {
+        for action in EnvironmentCardState.Action.allCases where ![.start, .stop, .forceStop].contains(action) {
             guard case .notImplemented(let note) = card.availability(of: action), !note.isEmpty else {
                 Issue.record("\(action) should be visibly unimplemented"); continue
             }

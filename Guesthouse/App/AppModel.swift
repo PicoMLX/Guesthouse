@@ -2,6 +2,7 @@ import Foundation
 import GuesthouseCore
 import Observation
 import Synchronization
+import os
 
 /// The app's top-level state: what the runtime reports, and the Quit contract.
 ///
@@ -100,6 +101,7 @@ final class AppModel {
     let quitWarning = "Stopping a development Mac interrupts any Codex task running in it. Guesthouse cannot see those tasks; finish them first."
 
     let backend: any RuntimeBackend
+    private static let log = Logger(subsystem: "com.starlingprotocol.Guesthouse", category: "runtime")
     private let terminationDecision: @MainActor (Bool) -> Void
     private var quitTask: Task<Void, Never>?
     /// Identifies one Quit attempt. Every asynchronous step checks it, so a cancelled check
@@ -181,8 +183,8 @@ final class AppModel {
         interruptionObservation.cancel()
     }
 
-    /// Picks the real client, or the fake when the app is hosting unit tests, so a test run
-    /// never launches the runtime service.
+    /// Picks the real client, or the fake when the app is hosting unit tests or Xcode is
+    /// rendering previews, so neither launches the runtime service (MVP-PLAN.md §3).
     ///
     /// `GUESTHOUSE_FAKE_RUNTIME=1` selects the fake too, but only in a development build. In a
     /// shipped app an environment variable must not be able to replace the runtime with an
@@ -190,7 +192,9 @@ final class AppModel {
     /// conclude there is nothing to stop and approve termination with a real VM still running
     /// (MVP-PLAN.md §2).
     static func makeBackend(environment: [String: String] = ProcessInfo.processInfo.environment) -> any RuntimeBackend {
-        if environment["XCTestConfigurationFilePath"] != nil { return FakeRuntimeBackend() }
+        if environment["XCTestConfigurationFilePath"] != nil || environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
+            return FakeRuntimeBackend()
+        }
         #if DEBUG
         if environment["GUESTHOUSE_FAKE_RUNTIME"] == "1" { return FakeRuntimeBackend() }
         #endif
@@ -906,10 +910,11 @@ final class AppModel {
                 statusQueryFailure: statusQueryFailures[environment.id],
                 reconciling: reconciling.contains(environment.id),
                 logs: logs(of: environment.id),
-                retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
+                retryAvailable: retryAvailable(for: environment.id) && !reconciling.contains(environment.id),
                 retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
-                runtimeVersion: runtimeInfo
+                runtimeVersion: runtimeInfo,
+                forceStopAvailable: canForceStop(environment.id)
             )
         }
     }
@@ -976,7 +981,10 @@ final class AppModel {
                 Task { await refreshStatus(of: id) }
                 return
             }
-            guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id), let request = lastRequests[id] else { return }
+            guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id) else { return }
+            // A force-stop is destructive: Try again never resends one, so it cannot skip the
+            // warning the user accepted the first time (MVP-PLAN.md §2).
+            guard retryAvailable(for: id), let request = lastRequests[id] else { return }
             // A replayed start is one more start: the runtime still runs one operation and one
             // VM at a time, and sending past that would replace the useful original error.
             if case .startEnvironment = request, globalStartBlock != nil { return }
@@ -1010,7 +1018,7 @@ final class AppModel {
         return .enabled
     }
 
-    /// Starts an environment. The only dashboard action wired to the runtime so far.
+    /// Starts an environment.
     func start(_ id: EnvironmentID) {
         // A reconciliation in progress, or one that lost its connection, leaves the previous
         // statuses cached, and the cached snapshot is what `globalStartBlock` reads: a Start
@@ -1033,6 +1041,47 @@ final class AppModel {
         lastErrors[id] = error
         operationFailures[id] = error
         statusQueryFailures[id] = nil
+    }
+
+    /// Stops a running environment gracefully. The guest gets `gracefulStopDeadline` to shut
+    /// down; if it does not, the runtime reports `gracefulStopTimedOut` and the card offers
+    /// the warned force-stop.
+    func stop(_ id: EnvironmentID) {
+        guard canMutate(id), statuses[id]?.vm == .running, operations.isEmpty else { return }
+        Task { await run(.stopEnvironment(id, .graceful(deadline: Self.gracefulStopDeadline)), for: id) }
+    }
+
+    /// Whether a mutating request may be sent for this environment: no operation of ours in
+    /// flight, no operation the runtime reports, no unsettled outcome, and no status check
+    /// still outstanding. A state that was never verified never licenses a second mutation
+    /// (MVP-PLAN.md §3).
+    func canMutate(_ id: EnvironmentID) -> Bool {
+        operations[id] == nil
+            && unknownOutcomes[id] == nil
+            && !reconciling.contains(id)
+            && statuses[id]?.inFlightOperation == nil
+            && statuses[id] != nil
+    }
+
+    /// Whether the card may offer Retry: something to replay, and a state fresh enough to
+    /// replay it over. A force-stop is never replayed from here; it goes back through its
+    /// own warning.
+    func retryAvailable(for id: EnvironmentID) -> Bool {
+        guard let request = lastRequests[id], canMutate(id) else { return false }
+        if case .stopEnvironment(_, .force) = request { return false }
+        return true
+    }
+
+    /// The explicitly warned force-stop, offered only after a graceful stop did not finish.
+    func forceStop(_ id: EnvironmentID) {
+        guard canForceStop(id), canMutate(id) else { return }
+        Task { await run(.stopEnvironment(id, .force), for: id) }
+    }
+
+    func canForceStop(_ id: EnvironmentID) -> Bool {
+        guard operations.isEmpty, statuses[id]?.vm == .running else { return false }
+        if case .gracefulStopTimedOut? = lastErrors[id] { return true }
+        return false
     }
 
     private func run(_ request: RuntimeRequest, for id: EnvironmentID) async {
@@ -1085,6 +1134,8 @@ final class AppModel {
             // reconciliation that began after this stream did has looked at the actual state
             // since, so its result stands rather than being overwritten by this loss.
             if generation == refreshGeneration { launchState = .interrupted(RuntimeConnectionInterrupted()) }
+            // The reason is logged as fixed text: the interruption carries nothing quotable.
+            Self.log.error("runtime connection interrupted during \(request.caseName, privacy: .public); outcome unknown until inspected")
             // …and when that reconciliation has also finished, this environment's actual state
             // has been read back: that is the inspection an interrupted operation calls for,
             // so recreating an unknown marker over it, dropping the status it published and
