@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		F8ACD8A830493E2C00550943 /* VirtualMacCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* VirtualMacCore */; };
-		F8ACD8AA3049406C00550943 /* MVP-PLAN.md in Sources */ = {isa = PBXBuildFile; fileRef = F8ACD8A93049406300550943 /* MVP-PLAN.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -29,7 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		F8976E8A304933D10071C234 /* Guesthouse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Guesthouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Guesthouse Codex VM.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8976E97304933D30071C234 /* GuesthouseTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GuesthouseTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8976EA1304933D30071C234 /* GuesthouseUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GuesthouseUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8ACD8A93049406300550943 /* MVP-PLAN.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MVP-PLAN.md"; sourceTree = "<group>"; };
@@ -93,7 +92,7 @@
 		F8976E8B304933D10071C234 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				F8976E8A304933D10071C234 /* Guesthouse.app */,
+				F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */,
 				F8976E97304933D30071C234 /* GuesthouseTests.xctest */,
 				F8976EA1304933D30071C234 /* GuesthouseUITests.xctest */,
 			);
@@ -123,7 +122,7 @@
 				F8ACD8A730493E2C00550943 /* VirtualMacCore */,
 			);
 			productName = Guesthouse;
-			productReference = F8976E8A304933D10071C234 /* Guesthouse.app */;
+			productReference = F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */;
 			productType = "com.apple.product-type.application";
 		};
 		F8976E96304933D30071C234 /* GuesthouseTests */ = {
@@ -248,7 +247,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F8ACD8AA3049406C00550943 /* MVP-PLAN.md in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -427,7 +425,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.starlingprotocol.Guesthouse;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Guesthouse Codex VM";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -471,7 +469,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.starlingprotocol.Guesthouse;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Guesthouse Codex VM";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
