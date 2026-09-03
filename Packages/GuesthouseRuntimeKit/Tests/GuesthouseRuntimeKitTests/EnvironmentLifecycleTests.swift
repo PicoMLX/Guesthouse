@@ -18,11 +18,12 @@ import Testing
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let store = try StateStore(rootURL: storage.url(for: .state))
         let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
-        // The fixture's executable is a link to `yes`: it accepts any arguments and runs until
-        // ended, so `run` looks like a live VM process with the recorded identity. (A copied
-        // system binary would be killed at launch: platform binaries only run in place.)
+        // The fixture's executable is a link to the test helper: it accepts any arguments,
+        // leaves them untouched, and runs until ended, so `run` looks like a live VM process
+        // whose recorded identity keeps verifying. (A copied system binary would be killed at
+        // launch: platform binaries only run in place.)
         try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/yes"))
+        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: try TestHelper.executable())
         let identities = try ProcessIdentityStore(directory: storage.url(for: .state))
         for identity in recordedIdentities { try await identities.record(identity) }
         let supervisor = OperationSupervisor(store: identities)
@@ -56,7 +57,7 @@ import Testing
         let interrupted = try await store.begin(.startEnvironment, for: environment)
         let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
         try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/yes"))
+        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: try TestHelper.executable())
         let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: storage.url(for: .state)))
         let lifecycle = EnvironmentLifecycle(dependencies: .init(backend: TartBackend(bundle: bundle, storage: storage, runner: runner), supervisor: supervisor, store: store))
         try await lifecycle.prepare()
@@ -259,6 +260,102 @@ import Testing
         }
     }
 
+    @Test func stoppingAVMThatIsAlreadyStoppedCompletes() async throws {
+        let runner = tartLikeRunner(running: false)
+        await runner.set("stop", .init(stderr: ["vm \"\(environment.tartVMName)\" is not running"], exit: ProcessExit(reason: .status(1))))
+        let (lifecycle, store, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let events = EventCollector()
+        let stop = try await lifecycle.stop(environment, mode: .graceful(deadline: .seconds(5))) { event in events.add(event) }
+        let seen = await collect(events)
+        #expect(seen.last == .completed(stop), "the requested state was already reached")
+        #expect(try await lifecycle.status(of: environment).vm == .stopped)
+        #expect(try await store.replay().inFlight.isEmpty)
+    }
+
+    @Test func cancelDuringAProtectedPhaseIsDeferredNotApplied() async throws {
+        let runner = tartLikeRunner()
+        await runner.set("stop", .init(hangs: true))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let startEvents = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in startEvents.add(event) }
+        _ = await collect(startEvents)
+        let stopEvents = EventCollector()
+        let stop = try await lifecycle.stop(environment, mode: .graceful(deadline: .seconds(20))) { event in stopEvents.add(event) }
+        for _ in 0..<200 where stopEvents.events.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(stopEvents.events.first == .progress(stop, ProgressPhase(kind: .stoppingVM, cancelable: false)))
+        await lifecycle.cancel(stop)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(stopEvents.events.count == 1, "a protected phase keeps running after a cancel request")
+        await runner.finishHanging()
+        let seen = await collect(stopEvents)
+        #expect(!seen.contains(.failed(stop, .canceled)), "the stop reports its real outcome, never a cancellation")
+    }
+
+    @Test func anUncertainVerdictIsReconciledAgainWhenStatusIsInspected() async throws {
+        let runner = tartLikeRunner()
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        await runner.set("list", .init(stderr: ["cannot read inventory"], exit: ProcessExit(reason: .status(1))))
+        await lifecycle.reconcile()
+        await #expect(throws: GuesthouseError.vmOwnershipUncertain(environment)) {
+            _ = try await lifecycle.start(environment, options: StartOptions()) { _ in }
+        }
+        await runner.set("list", .init(stdout: [listJSON(running: false)]))
+        let status = try await lifecycle.status(of: environment)
+        #expect(status.vm == .stopped, "a readable inventory clears the uncertainty without a restart")
+        #expect(status.readiness == .ready)
+    }
+
+    @Test func aForceStopOfAnAdoptedSurvivorSignalsTheVerifiedProcess() async throws {
+        let survivor = try await ProcessRunner().run(ProcessInvocation(executable: try TestHelper.executable(), arguments: ["run", environment.tartVMName, "--no-graphics"], timeout: .seconds(60)))
+        let enumerator = LiveProcessEnumerator()
+        let live = try #require(enumerator.live(pid: survivor.processIdentifier))
+        let identity = ProcessIdentity(pid: live.pid, startTime: live.startTime, executablePath: live.executablePath, argumentsDigest: live.argumentsDigest, vmName: environment.tartVMName, environmentID: environment, recordedAt: Date())
+        let runner = tartLikeRunner(running: true)
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner, recordedIdentities: [identity])
+        try await lifecycle.prepare()
+        let adopted = try await lifecycle.status(of: environment)
+        #expect(adopted.vm == .running)
+        #expect(adopted.guestAddress != nil, "an adopted survivor's address is looked up")
+        let events = EventCollector()
+        let stop = try await lifecycle.stop(environment, mode: .force) { event in events.add(event) }
+        let seen = await collect(events)
+        #expect(seen.last == .completed(stop))
+        #expect(enumerator.live(pid: survivor.processIdentifier) == nil, "the adopted process was ended")
+        #expect(!(await runner.invocations.map(\.arguments).contains { $0.first == "stop" }), "no graceful tart stop stands in for a force-stop")
+    }
+
+    @Test func aFailureTheJournalCannotRecordStaysUnresolved() async throws {
+        let runner = tartLikeRunner()
+        // The address lookup hangs; once the start is waiting for it the journal is made
+        // unwritable and the operation is canceled, so its terminal record cannot be written.
+        await runner.set("ip", .init(hangs: true))
+        let (lifecycle, store, storage) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let events = EventCollector()
+        let state = storage.url(for: .state)
+        let start = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in events.add(event) }
+        for _ in 0..<400 where events.events.count < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(events.events.last == .progress(start, ProgressPhase(kind: .waitingForNetwork)))
+        // The journal file is replaced by a symbolic link, which the store refuses to open.
+        let journal = state.appending(path: "journal.ndjson")
+        let original = try Data(contentsOf: journal)
+        try FileManager.default.removeItem(at: journal)
+        try FileManager.default.createSymbolicLink(at: journal, withDestinationURL: URL(fileURLWithPath: "/dev/null"))
+        defer { try? FileManager.default.removeItem(at: journal); try? original.write(to: journal) }
+        await lifecycle.cancel(start)
+        let seen = await collect(events)
+        await runner.finishHanging()
+        #expect(seen.last == .failed(start, .operationOutcomeUnknown(start)), "an unrecorded failure is reported as unknown, never as a plain failure")
+        #expect(try await lifecycle.status(of: environment).readiness == .needsAttention(.operationOutcomeUnknown(start)))
+        await #expect(throws: GuesthouseError.operationOutcomeUnknown(start)) {
+            _ = try await lifecycle.start(environment, options: StartOptions()) { _ in }
+        }
+        _ = store
+    }
+
     @Test func unknownEnvironmentIsRefused() async throws {
         let (lifecycle, _, _) = try await makeLifecycle(runner: tartLikeRunner())
         try await lifecycle.prepare()
@@ -273,4 +370,22 @@ final class EventCollector: Sendable {
     private let storage = Mutex<[RuntimeEvent]>([])
     var events: [RuntimeEvent] { storage.withLock { $0 } }
     func add(_ event: RuntimeEvent) { storage.withLock { $0.append(event) } }
+}
+
+/// The fixture executable built alongside the tests (`GuesthouseKitTestHelper`): SwiftPM and
+/// Xcode both place package executables next to the test bundle.
+enum TestHelper {
+    static func executable() throws -> URL {
+        let bundle = Bundle(for: EventCollector.self).bundleURL
+        let candidates = [
+            bundle.deletingLastPathComponent().appending(path: "GuesthouseKitTestHelper"),
+            bundle.deletingLastPathComponent().deletingLastPathComponent().appending(path: "GuesthouseKitTestHelper"),
+        ]
+        guard let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+            throw TestHelperError.notBuilt(candidates.map(\.path))
+        }
+        return found
+    }
+
+    enum TestHelperError: Error { case notBuilt([String]) }
 }

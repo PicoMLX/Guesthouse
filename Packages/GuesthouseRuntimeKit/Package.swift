@@ -33,9 +33,13 @@ let package = Package(
             ],
             swiftSettings: kitSwiftSettings
         ),
+        .executableTarget(
+            name: "GuesthouseKitTestHelper",
+            path: "Sources/GuesthouseKitTestHelper"
+        ),
         .testTarget(
             name: "GuesthouseRuntimeKitTests",
-            dependencies: ["GuesthouseRuntimeKit"],
+            dependencies: ["GuesthouseRuntimeKit", "GuesthouseKitTestHelper"],
             swiftSettings: kitSwiftSettings
         ),
     ],

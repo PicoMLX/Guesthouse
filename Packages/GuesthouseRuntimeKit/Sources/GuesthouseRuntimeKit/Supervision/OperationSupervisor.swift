@@ -100,6 +100,17 @@ public final class OperationSupervisor: Sendable {
         await store.identity(for: environment)
     }
 
+    /// The live process that is exactly `identity` (same PID, start time, executable, and
+    /// arguments), or `nil`: a PID that now belongs to another process is never a match.
+    public func verify(_ identity: ProcessIdentity) -> LiveProcess? {
+        guard let live = enumerator.live(pid: identity.pid),
+              live.startTime == identity.startTime,
+              live.executablePath == identity.executablePath,
+              live.argumentsDigest == identity.argumentsDigest
+        else { return nil }
+        return live
+    }
+
     /// Forgets a process that is confirmed gone.
     public func forget(_ environment: EnvironmentID) async throws {
         try await store.remove(environment)

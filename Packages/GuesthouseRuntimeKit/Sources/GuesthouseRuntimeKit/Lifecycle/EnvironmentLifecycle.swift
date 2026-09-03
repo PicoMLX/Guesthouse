@@ -30,9 +30,6 @@ public actor EnvironmentLifecycle {
         let token: OperationSupervisor.Token
         let identity: ProcessIdentity
         var address: GuestIPAddress?
-
-        /// Asked of the kernel, not inferred: a process that died a moment ago is not running.
-        var isAlive: Bool { kill(pid, 0) == 0 }
     }
 
     private struct InFlight {
@@ -40,6 +37,9 @@ public actor EnvironmentLifecycle {
         let environment: EnvironmentID
         /// `nil` while the slot is reserved but the operation has not been journaled yet.
         var task: Task<Void, Never>?
+        /// The phase last reported; cancellation is deferred while it is not cancelable.
+        var phase: ProgressPhase?
+        var cancelRequested = false
     }
 
     private let deps: Dependencies
@@ -137,7 +137,18 @@ public actor EnvironmentLifecycle {
         guard supervised[id] == nil, let identity = await deps.supervisor.identity(for: id) else { return }
         let token = deps.supervisor.hold("vm \(identity.vmName) (adopted)")
         supervised[id] = Supervised(run: nil, pid: live.pid, token: token, identity: identity, address: nil)
-        watchExit(pid: live.pid, environment: id)
+        watchExit(identity: identity, environment: id)
+        // A recovered VM is only usable with its address; it is looked up now and again on
+        // every status read until it is known.
+        if let address = try? await deps.backend.ip(vmName: identity.vmName, wait: .seconds(1)) {
+            supervised[id]?.address = address
+        }
+    }
+
+    /// Asked of the kernel each time, and matched against the recorded identity, so a PID
+    /// reused after the process died is never taken for the VM.
+    private func isAlive(_ live: Supervised) -> Bool {
+        deps.supervisor.verify(live.identity) != nil
     }
 
     // MARK: - Queries
@@ -150,13 +161,22 @@ public actor EnvironmentLifecycle {
         guard let environment = snapshot.environments.first(where: { $0.id == id }) else {
             throw GuesthouseError.environmentNotFound(id)
         }
+        // Inspection is how an uncertain verdict clears: the process table and inventory are
+        // read again now, so an inventory that was unreadable at launch does not block the
+        // environment until the service restarts.
+        if case .uncertain? = verdicts[id], inFlight == nil {
+            await reconcile()
+        }
         let inventory = try await deps.backend.list()
         let vm: EnvironmentStatus.VMState
         var readiness: EnvironmentStatus.Readiness
-        if let live = supervised[id], live.isAlive {
+        if let live = supervised[id], isAlive(live) {
             vm = .running
+            if live.address == nil, let address = try? await deps.backend.ip(vmName: environment.tartVMName, wait: .seconds(1)) {
+                supervised[id]?.address = address
+            }
             // Running without a confirmed address is not ready: nothing guest-dependent works.
-            readiness = live.address != nil ? .ready : .needsAttention(.guestNotReachable(id))
+            readiness = supervised[id]?.address != nil ? .ready : .needsAttention(.guestNotReachable(id))
         } else if case .uncertain(let reason)? = verdicts[id] {
             vm = .uncertain(reason: Self.describe(reason))
             readiness = .needsAttention(.vmOwnershipUncertain(id))
@@ -234,7 +254,7 @@ public actor EnvironmentLifecycle {
         let id = environment.id
         let arguments = TartBackend.runArguments(vmName: environment.tartVMName, console: options.console)
         do {
-            events(.progress(operation, ProgressPhase(kind: .startingVM, cancelable: false)))
+            report(operation, ProgressPhase(kind: .startingVM, cancelable: false), events)
             let run = try await deps.backend.run(vmName: environment.tartVMName, console: options.console)
             drainOutput(of: run)
             let identity: ProcessIdentity
@@ -250,10 +270,12 @@ public actor EnvironmentLifecycle {
             let vmToken = deps.supervisor.hold("vm \(environment.tartVMName)")
             supervised[id] = Supervised(run: run, pid: run.processIdentifier, token: vmToken, identity: identity, address: nil)
             verdicts[id] = nil
-            try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .startEnvironment, timestamp: Date(), outcome: .checkpoint(.runtimeReady)))
+            // Watched before anything else can fail: a checkpoint that cannot be written
+            // fails the operation, but the process is supervised either way.
             watchExit(of: run, environment: id)
+            try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .startEnvironment, timestamp: Date(), outcome: .checkpoint(.runtimeReady)))
 
-            events(.progress(operation, ProgressPhase(kind: .waitingForNetwork)))
+            report(operation, ProgressPhase(kind: .waitingForNetwork), events)
             let address = try await deps.backend.ip(vmName: environment.tartVMName, wait: options.ipWait)
             supervised[id]?.address = address
             try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .startEnvironment, timestamp: Date(), outcome: .completed))
@@ -301,20 +323,30 @@ public actor EnvironmentLifecycle {
         do {
             switch mode {
             case .graceful(let deadline):
-                events(.progress(operation, ProgressPhase(kind: .stoppingVM, cancelable: false)))
+                report(operation, ProgressPhase(kind: .stoppingVM, cancelable: false), events)
                 do {
                     try await deps.backend.stop(vmName: environment.tartVMName, deadline: deadline)
                 } catch TartInvocationError.timedOut {
                     throw GuesthouseError.gracefulStopTimedOut(id)
+                } catch TartInvocationError.failed(.notRunning) {
+                    // Already stopped, or exited between the status read and the request: the
+                    // requested state is reached once the inventory confirms it.
+                    let inventory = try await deps.backend.list()
+                    if inventory.contains(where: { $0.name == environment.tartVMName && $0.running }) {
+                        throw TartInvocationError.failed(.notRunning)
+                    }
                 }
                 if let live = supervised[id], let run = live.run {
                     _ = await run.exit()
                 }
             case .force:
-                events(.progress(operation, ProgressPhase(kind: .forceStoppingVM, cancelable: false)))
+                report(operation, ProgressPhase(kind: .forceStoppingVM, cancelable: false), events)
                 if let live = supervised[id], let run = live.run {
                     run.terminate(gracePeriod: .seconds(5))
                     _ = await run.exit()
+                } else if let live = supervised[id] {
+                    // An adopted survivor has no run to end; its process is signaled directly.
+                    try await terminateAdopted(live, environment: id)
                 } else {
                     try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(10))
                 }
@@ -334,11 +366,45 @@ public actor EnvironmentLifecycle {
         }
     }
 
-    /// Cancels the in-flight operation if it is the one named. Phases marked non-cancelable
-    /// still run to their next checkpoint before the cancellation takes effect.
+    /// Cancels the in-flight operation if it is the one named. While the reported phase is
+    /// not cancelable the request is deferred to the next phase that is; an operation whose
+    /// remaining phases are all protected (a stop) runs to its end and reports its real
+    /// outcome, so a second stop is never attempted over an unknown one.
     public func cancel(_ operation: OperationID) {
-        guard let inFlight, inFlight.id == operation else { return }
-        inFlight.task?.cancel()
+        guard let current = inFlight, current.id == operation else { return }
+        if let phase = current.phase, !phase.cancelable {
+            inFlight?.cancelRequested = true
+            return
+        }
+        current.task?.cancel()
+    }
+
+    /// Reports a phase and honors a cancellation deferred by a protected phase before it.
+    private func report(_ operation: OperationID, _ phase: ProgressPhase, _ events: EventSink) {
+        inFlight?.phase = phase
+        events(.progress(operation, phase))
+        if phase.cancelable, inFlight?.cancelRequested == true {
+            inFlight?.task?.cancel()
+        }
+    }
+
+    /// Ends an adopted process with SIGTERM, then SIGKILL after five seconds. The identity is
+    /// verified before every signal: a PID that changed hands is left alone.
+    private func terminateAdopted(_ live: Supervised, environment: EnvironmentID) async throws {
+        guard deps.supervisor.verify(live.identity) != nil else { return }
+        kill(live.pid, SIGTERM)
+        for _ in 0..<50 where deps.supervisor.verify(live.identity) != nil {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        if deps.supervisor.verify(live.identity) != nil {
+            kill(live.pid, SIGKILL)
+            for _ in 0..<50 where deps.supervisor.verify(live.identity) != nil {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        guard deps.supervisor.verify(live.identity) == nil else {
+            throw GuesthouseError.runtimeStateUnavailable(reason: SanitizedText("the virtual machine process did not end", limit: 200))
+        }
     }
 
     // MARK: - Internals
@@ -366,12 +432,15 @@ public actor EnvironmentLifecycle {
         }
     }
 
-    private func watchExit(pid: Int32, environment: EnvironmentID) {
+    /// Polls an adopted process by identity, not by PID alone: once the PID no longer
+    /// carries the recorded start time, executable, and arguments, the VM process is gone.
+    private func watchExit(identity: ProcessIdentity, environment: EnvironmentID) {
+        let supervisor = deps.supervisor
         Task { [weak self] in
-            while kill(pid, 0) == 0 {
+            while supervisor.verify(identity) != nil {
                 try? await Task.sleep(for: .seconds(2))
             }
-            await self?.processExited(environment, pid: pid)
+            await self?.processExited(environment, pid: identity.pid)
         }
     }
 
@@ -391,7 +460,16 @@ public actor EnvironmentLifecycle {
     /// Journals the failure under the operation's own kind (the journal refuses a record whose
     /// kind differs from its `started` record), then reports it.
     private func fail(_ operation: OperationID, kind: JournalOperation, environment: EnvironmentID, with error: GuesthouseError, events: EventSink) async {
-        try? await deps.store.append(JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .failed(error)))
+        do {
+            try await deps.store.append(JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .failed(error)))
+        } catch {
+            // The journal still says "in flight". Until the actual state is inspected the
+            // environment stays blocked and the client is told the outcome is unknown, not
+            // that the operation failed: an unrecorded result must not license a retry.
+            unresolved[environment] = JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .started)
+            events(.failed(operation, .operationOutcomeUnknown(operation)))
+            return
+        }
         events(.failed(operation, error))
     }
 
@@ -409,6 +487,9 @@ public actor EnvironmentLifecycle {
         case .multipleCandidates: "more than one process matches the record"
         case .unrecordedLaunch: "the virtual machine is running but no launch was recorded"
         case .inventoryUnavailable: "the virtual machine inventory could not be read"
+        case .anotherProcessClaimsVM: "another process claims the virtual machine"
+        case .recordInconsistent: "the recorded process names a different virtual machine"
+        case .processUnobservable: "the recorded process exists but could not be read"
         }
     }
 
