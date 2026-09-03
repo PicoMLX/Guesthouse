@@ -54,7 +54,7 @@ import Testing
         let guide = try file(files, "AGENTS.md")
         #expect(guide.hasPrefix("# Workspace feature-123"))
         #expect(guide.contains("| `repos/MyApp` | app | https://github.com/PicoMLX/MyApp | `main` | `feature/123` |"))
-        #expect(guide.contains("xcodebuild -workspace Integration.xcworkspace -scheme MyApp -destination 'platform=macOS' test"))
+        #expect(guide.contains("xcodebuild -workspace Integration.xcworkspace -scheme MyApp -destination 'platform=macOS' -derivedDataPath artifacts/DerivedData -clonedSourcePackagesDirPath artifacts/SourcePackages test"))
         #expect(guide.contains("- `repos/ModelKit` overrides the dependency on https://github.com/PicoMLX/ModelKit (package identity `modelkit`)."))
         #expect(guide.contains("Do not push, force-push, or open pull requests yourself."))
         #expect(guide.contains("One pull request per changed repository."))
@@ -116,6 +116,19 @@ import Testing
         #expect(try Data(contentsOf: root.appending(path: IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)) == Data("pins".utf8))
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "AGENTS.md").path))
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "workspace.json").path))
+    }
+
+    @Test func writingRejectsPathsThatEscapeOrEnterRepositories() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appending(path: "repos"), withIntermediateDirectories: true)
+        for bad in ["./repos/MyApp/file", "repos", "a/../repos/x", "../outside", "/abs/file", "a//b", ""] {
+            #expect(throws: GeneratedFileError.self, Comment(rawValue: bad)) {
+                try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: bad, text: "x")], to: root)
+            }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "repos").path).isEmpty)
+        try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "artifacts/notes/readme.txt", text: "ok")], to: root)
+        #expect(FileManager.default.fileExists(atPath: root.appending(path: "artifacts/notes/readme.txt").path))
     }
 
     func snapshot(of directory: URL) throws -> [String: Data] {

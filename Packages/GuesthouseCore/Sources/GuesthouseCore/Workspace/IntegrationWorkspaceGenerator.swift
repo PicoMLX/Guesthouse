@@ -22,6 +22,11 @@ public struct GeneratedFile: Hashable, Sendable {
 /// regenerating an unchanged manifest yields byte-identical files. The committed app project
 /// and package manifests are never edited; the override happens because the wrapper workspace
 /// contains both the app project and the local package directories.
+public enum GeneratedFileError: Error, Hashable, Sendable {
+    case invalidPath(String)
+    case pathOutsideWorkspace(String)
+}
+
 public enum IntegrationWorkspaceGenerator {
     public static let resolvedPackagesRelativePath = "\(WorkspaceLayout.integrationWorkspaceName)/xcshareddata/swiftpm/Package.resolved"
 
@@ -41,12 +46,25 @@ public enum IntegrationWorkspaceGenerator {
         return files
     }
 
-    /// Writes the generated files under `root`, creating directories as needed. Refuses to write
-    /// anything under `repos/`; the repositories belong to Git, not to the generator.
+    /// Writes the generated files under `root`, creating directories as needed.
+    ///
+    /// Every path is normalized first: it must be relative, contain no `.` or `..` components,
+    /// and not start with `repos/`; the resolved location must lie inside `root` and outside
+    /// `root/repos`. The repositories belong to Git, not to the generator.
     public static func write(_ files: [GeneratedFile], to root: URL) throws {
+        let resolvedRoot = root.standardizedFileURL
+        let repositories = resolvedRoot.appending(path: "repos").path
         for file in files {
-            precondition(!file.relativePath.hasPrefix("repos/") && !file.relativePath.contains("/../"), "generated files never go into repositories")
-            let url = root.appending(path: file.relativePath)
+            let components = file.relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard !file.relativePath.hasPrefix("/"), !components.isEmpty,
+                  components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+            else { throw GeneratedFileError.invalidPath(file.relativePath) }
+            var url = resolvedRoot
+            for component in components { url.append(path: component) }
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(resolvedRoot.path + "/"),
+                  path != repositories, !path.hasPrefix(repositories + "/")
+            else { throw GeneratedFileError.pathOutsideWorkspace(file.relativePath) }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try file.contents.write(to: url, options: .atomic)
         }
@@ -105,8 +123,10 @@ public enum IntegrationWorkspaceGenerator {
         Always build through the integration workspace, never through the app project alone. The workspace contains the app project and every package directory above, so the app resolves those packages from the local checkouts instead of the versions pinned in its `Package.resolved`:
 
         ```bash
-        xcodebuild -workspace \(WorkspaceLayout.integrationWorkspaceName) -scheme \(manifest.sharedScheme) -destination '\(manifest.testDestination.specifier)' test
+        xcodebuild -workspace \(WorkspaceLayout.integrationWorkspaceName) -scheme \(manifest.sharedScheme) -destination '\(manifest.testDestination.specifier)' -derivedDataPath artifacts/DerivedData -clonedSourcePackagesDirPath artifacts/SourcePackages test
         ```
+
+        Build state and downloaded package sources stay under `artifacts/` so a workspace can be cleaned or exported as a unit and nothing lands in Xcode's shared defaults.
 
         A green result here means the app builds against the sibling package changes in this workspace. It does not mean the app's own pull request will pass its CI, which builds against the published package versions. Both results matter.
 
