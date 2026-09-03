@@ -69,10 +69,29 @@ struct StubProbe: HostProbe {
         #expect(!run(probe).canProceed)
     }
 
+    @Test func blockingMinimumIsEvaluatedBeforeTheRecommendation() {
+        var policy = ResourcePolicy()
+        policy.minimumMemoryBytes = 48 * ResourcePreset.gibibyte
+        policy.recommendedMemoryBytes = 32 * ResourcePreset.gibibyte
+        #expect(!policy.isWellFormed)
+        #expect(ResourcePolicy.standard.isWellFormed)
+        let report = PreflightCheck.run(probe: StubProbe(), policy: policy, storageRoot: root)
+        #expect(report.result(.memory)!.isFailure, "32 GB is above the recommendation but below the contradictory minimum")
+    }
+
+    @Test func applicationMetadataIsSanitizedBeforePresentation() {
+        var probe = StubProbe()
+        probe.applications["com.openai.chat"] = InstalledApplication(url: URL(fileURLWithPath: "/Applications/Chat\u{202E}GPT.app"), version: "1.2\n.3", build: String(repeating: "9", count: 300))
+        guard case .pass(let detail) = run(probe).result(.codexDesktop)!.outcome else { Issue.record("expected pass"); return }
+        #expect(!detail.contains("\u{202E}"))
+        #expect(!detail.contains("\n"))
+        #expect(!detail.contains(String(repeating: "9", count: 100)))
+    }
+
     @Test func lowDiskFailsWithPreciseNumbersAndUnknownDiskWarns() {
         var probe = StubProbe()
         probe.free = .success(50 * ResourcePreset.gigabyte)
-        #expect(run(probe).result(.freeDisk)!.outcome == .fail(.insufficientDisk(requiredBytes: 200 * ResourcePreset.gigabyte, availableBytes: 50 * ResourcePreset.gigabyte, volumePath: root.path)))
+        #expect(run(probe).result(.freeDisk)!.outcome == .fail(.insufficientDisk(requiredBytes: 200 * ResourcePreset.gigabyte, availableBytes: 50 * ResourcePreset.gigabyte, volumePath: SanitizedText(root.path))))
 
         probe.free = .failure(ProbeFailure())
         guard case .warn(_, let recovery) = run(probe).result(.freeDisk)!.outcome else { Issue.record("expected warn"); return }

@@ -89,19 +89,19 @@ public enum PreflightCheck {
         let build = probe.operatingSystemBuild.map { " (\($0))" } ?? ""
         results.append(PreflightResult(kind: .macOSVersion, outcome: version >= policy.minimumMacOS
             ? .pass(detail: "macOS \(version)\(build)")
-            : .fail(.unsupportedHost(.macOSTooOld(found: version.description, minimum: policy.minimumMacOS.description)))))
+            : .fail(.unsupportedHost(.macOSTooOld(found: SanitizedText(version.description), minimum: policy.minimumMacOS.description)))))
 
         let memory = probe.physicalMemoryBytes
         let memoryOutcome: PreflightResult.Outcome
-        if memory >= policy.recommendedMemoryBytes {
+        if memory < policy.minimumMemoryBytes {
+            memoryOutcome = .fail(.unsupportedHost(.insufficientMemory(foundBytes: memory, minimumBytes: policy.minimumMemoryBytes)))
+        } else if memory >= policy.recommendedMemoryBytes {
             memoryOutcome = .pass(detail: "\(format(memory, memory: true)) of memory")
-        } else if memory >= policy.minimumMemoryBytes {
+        } else {
             memoryOutcome = .warn(
                 detail: "\(format(memory, memory: true)) of memory. \(format(policy.recommendedMemoryBytes, memory: true)) is recommended; with less, run one development Mac at a time and expect memory pressure during large builds.",
                 recovery: []
             )
-        } else {
-            memoryOutcome = .fail(.unsupportedHost(.insufficientMemory(foundBytes: memory, minimumBytes: policy.minimumMemoryBytes)))
         }
         results.append(PreflightResult(kind: .memory, outcome: memoryOutcome))
 
@@ -111,7 +111,7 @@ public enum PreflightCheck {
             if free >= policy.firstSetupAllowanceBytes {
                 diskOutcome = .pass(detail: "\(format(free)) free on the volume that will hold the development Mac")
             } else {
-                diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: storageRoot.path))
+                diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
             }
         } catch {
             diskOutcome = .warn(detail: "Free space on \(storageRoot.path) could not be determined.", recovery: [.retry])
@@ -120,8 +120,10 @@ public enum PreflightCheck {
 
         let codex = policy.codexDesktopBundleIdentifiers.lazy.compactMap(probe.installedApplication(bundleIdentifier:)).first
         results.append(PreflightResult(kind: .codexDesktop, outcome: codex.map { app in
-            let version = [app.version, app.build.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
-            return .pass(detail: "Codex desktop \(version.isEmpty ? "found" : version) at \(app.url.path)")
+            // Bundle metadata and paths come from another app on disk: normalize and bound them
+            // before they become UI text, as every externally sourced value is.
+            let version = [app.version.map { GuesthouseError.sanitize($0) }, app.build.map { "(\(GuesthouseError.sanitize($0)))" }].compactMap { $0 }.joined(separator: " ")
+            return .pass(detail: "Codex desktop \(version.isEmpty ? "found" : version) at \(GuesthouseError.sanitize(app.url.path, limit: 200))")
         } ?? .warn(detail: "Codex desktop is not installed. Guesthouse can prepare a development Mac without it, but you will need it to open a workspace in Codex.", recovery: [])))
 
         let storage = StorageSummary(
@@ -150,7 +152,7 @@ public enum LargeOperationPreflight {
     ) throws(GuesthouseError) {
         let needed = requiredBytes &+ policy.largeOperationMarginBytes
         guard freeBytes >= needed else {
-            throw .insufficientDisk(requiredBytes: needed, availableBytes: freeBytes, volumePath: volumePath)
+            throw .insufficientDisk(requiredBytes: needed, availableBytes: freeBytes, volumePath: SanitizedText(volumePath))
         }
     }
 }
