@@ -41,8 +41,16 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     public var appRepository: WorkspaceRepository? { repositories.first { $0.role == .app } }
     public var packageRepositories: [WorkspaceRepository] { repositories.filter { $0.role == .package } }
 
+    public enum ValidationStage: Sendable {
+        /// The workspace is being created: clones have not happened, so base commits are absent.
+        case setup
+        /// The workspace is offered as supported: every repository has its recorded base commit.
+        case supported
+    }
+
     /// Every rule a manifest must satisfy before it is shown as a supported workspace.
-    public func validate() throws(WorkspaceValidationError) {
+    public func validate(stage: ValidationStage = .supported) throws(WorkspaceValidationError) {
+        guard schemaVersion == SchemaVersion.current else { throw .unsupportedSchemaVersion(schemaVersion.rawValue) }
         let apps = repositories.filter { $0.role == .app }
         guard apps.count == 1 else { throw .appRepositoryCount(apps.count) }
 
@@ -59,8 +67,11 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
             guard repository.remote.isSupportedHost else {
                 throw .unsupportedHost(repository.remote.host)
             }
-            guard repository.baseBranch != repository.taskBranch else {
-                throw .taskBranchEqualsBaseBranch(repository.checkoutName.rawValue)
+            guard !repository.baseBranch.collides(with: repository.taskBranch) else {
+                throw .taskBranchCollidesWithBaseBranch(repository.checkoutName.rawValue)
+            }
+            if let pullRequest = repository.draftPullRequest {
+                guard pullRequest.isValid(for: repository.remote) else { throw .invalidPullRequestReference(repository.checkoutName.rawValue) }
             }
             if repository.role == .package {
                 // SwiftPM derives a local package's identity from its directory name and a Git
@@ -78,14 +89,23 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         }
 
         guard Self.isRelativeProjectPath(appProjectPath) else { throw .invalidAppProjectPath(appProjectPath) }
-        guard !sharedScheme.isEmpty, !sharedScheme.contains(where: { $0.isNewline || $0 == "/" }) else { throw .invalidScheme(sharedScheme) }
+        guard !sharedScheme.isEmpty, !sharedScheme.contains("/"), !Self.containsControlCharacters(sharedScheme) else { throw .invalidScheme(sharedScheme) }
+        guard testDestination.isValid else { throw .invalidTestDestination(testDestination.specifier) }
+        // Last, so a structural problem is reported before an incomplete clone is.
+        if stage == .supported, let unclone = repositories.first(where: { $0.baseSHA == nil }) {
+            throw .missingBaseSHA(unclone.checkoutName.rawValue)
+        }
     }
 
     static func isRelativeProjectPath(_ path: String) -> Bool {
-        guard !path.isEmpty, !path.hasPrefix("/"), path.hasSuffix(".xcodeproj") else { return false }
-        guard !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control || $0.properties.generalCategory == .format }) else { return false }
+        guard !path.isEmpty, !path.hasPrefix("/"), path.hasSuffix(".xcodeproj"), !containsControlCharacters(path) else { return false }
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
         return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
+    /// Control and format characters (NUL included) cannot travel in an argument vector.
+    static func containsControlCharacters(_ text: String) -> Bool {
+        text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.generalCategory == .format }
     }
 }
 
@@ -108,7 +128,7 @@ public struct WorkspaceRepository: Codable, Hashable, Sendable {
     public init(role: Role, remote: RemoteURL, checkoutName: DirectoryName? = nil, baseBranch: BranchName, baseSHA: CommitSHA? = nil, taskBranch: BranchName, draftPullRequest: PullRequestReference? = nil) {
         self.role = role
         self.remote = remote
-        self.checkoutName = checkoutName ?? DirectoryName(remote.name) ?? DirectoryName("repo")!
+        self.checkoutName = checkoutName ?? DirectoryName.derived(from: remote.name)
         self.baseBranch = baseBranch
         self.baseSHA = baseSHA
         self.taskBranch = taskBranch
@@ -127,6 +147,14 @@ public struct PullRequestReference: Codable, Hashable, Sendable {
         self.url = url
         self.headSHA = headSHA
     }
+
+    /// A positive number, and if a link is recorded, the HTTPS pull-request page of exactly
+    /// this repository; a guest-owned manifest is never allowed to point anywhere else.
+    public func isValid(for remote: RemoteURL) -> Bool {
+        guard number > 0 else { return false }
+        guard let url else { return true }
+        return url.absoluteString.lowercased() == "\(remote.canonical.lowercased())/pull/\(number)"
+    }
 }
 
 /// An `xcodebuild -destination` specifier, kept structured so it is never assembled from
@@ -144,6 +172,14 @@ public struct TestDestination: Codable, Hashable, Sendable {
 
     public static let macOS = TestDestination(platform: "macOS")
 
+    /// Non-empty platform, and no value that would add or change a key in the specifier.
+    public var isValid: Bool {
+        guard !platform.isEmpty else { return false }
+        return [platform, name ?? "x", os ?? "x"].allSatisfy { value in
+            !value.isEmpty && !value.contains(",") && !value.contains("=") && !WorkspaceManifest.containsControlCharacters(value)
+        }
+    }
+
     /// The `-destination` argument value.
     public var specifier: String {
         var parts = ["platform=\(platform)"]
@@ -153,14 +189,60 @@ public struct TestDestination: Codable, Hashable, Sendable {
     }
 }
 
-public enum WorkspaceValidationError: Error, Hashable, Sendable {
+public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError {
+    case unsupportedSchemaVersion(Int)
     case appRepositoryCount(Int)
     case duplicateCheckoutName(String)
     case duplicateRemote(String)
     case unsupportedHost(String)
-    case taskBranchEqualsBaseBranch(String)
+    case taskBranchCollidesWithBaseBranch(String)
+    case missingBaseSHA(String)
+    case invalidPullRequestReference(String)
     case invalidAppProjectPath(String)
     case invalidScheme(String)
+    case invalidTestDestination(String)
     case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
     case duplicatePackageIdentity(String)
+
+    public var userMessage: String {
+        switch self {
+        case .unsupportedSchemaVersion(let version):
+            "This workspace was saved by a newer Guesthouse (format \(version)). Update Guesthouse to open it."
+        case .appRepositoryCount(let count):
+            "A workspace needs exactly one app repository; this one has \(count)."
+        case .duplicateCheckoutName(let name):
+            "Two repositories would be checked out as \(GuesthouseError.sanitize(name)). Give one of them another folder name."
+        case .duplicateRemote(let remote):
+            "The repository \(GuesthouseError.sanitize(remote)) is listed twice."
+        case .unsupportedHost(let host):
+            "Repositories on \(GuesthouseError.sanitize(host)) are not supported yet; only github.com is."
+        case .taskBranchCollidesWithBaseBranch(let name):
+            "The task branch for \(GuesthouseError.sanitize(name)) cannot exist alongside its base branch. Choose a branch name that is not the base branch, its case variant, or a prefix of it."
+        case .missingBaseSHA(let name):
+            "The repository \(GuesthouseError.sanitize(name)) has not been cloned yet, so the workspace cannot be used until setup finishes."
+        case .invalidPullRequestReference(let name):
+            "The draft pull request recorded for \(GuesthouseError.sanitize(name)) does not belong to that repository, so it was ignored. Publishing will create a fresh draft."
+        case .invalidAppProjectPath(let path):
+            "\(GuesthouseError.sanitize(path)) is not a project path inside the app repository."
+        case .invalidScheme(let scheme):
+            "\(GuesthouseError.sanitize(scheme)) is not a valid scheme name."
+        case .invalidTestDestination(let destination):
+            "\(GuesthouseError.sanitize(destination)) is not a valid test destination."
+        case .checkoutNameDoesNotMatchRepository(let checkout, let repository):
+            "The package repository \(GuesthouseError.sanitize(repository)) must be checked out as \(GuesthouseError.sanitize(repository)), not \(GuesthouseError.sanitize(checkout)), or Xcode will not use the local copy."
+        case .duplicatePackageIdentity(let identity):
+            "Two package repositories share the identity \(GuesthouseError.sanitize(identity)); Xcode could not tell them apart."
+        }
+    }
+
+    /// In preference order. Never empty.
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .unsupportedSchemaVersion: [.reinstallApp, .cancel]
+        case .missingBaseSHA: [.inspectState, .retry, .cancel]
+        default: [.openSettings, .cancel]
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
 }

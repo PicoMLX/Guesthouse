@@ -90,7 +90,7 @@ import Testing
 
     @Test func validManifestRoundTrips() throws {
         let original = manifest([app(), package(), package("ModelKit")])
-        try original.validate()
+        try original.validate(stage: .setup)
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(WorkspaceManifest.self, from: data)
         #expect(decoded == original)
@@ -131,7 +131,7 @@ import Testing
         var gitlab = package(); gitlab.remote = RemoteURL("https://gitlab.com/group/thing")!
         #expect(throws: WorkspaceValidationError.unsupportedHost("gitlab.com")) { try manifest([app(), gitlab]).validate() }
         var sameBranch = app(); sameBranch.taskBranch = sameBranch.baseBranch
-        #expect(throws: WorkspaceValidationError.taskBranchEqualsBaseBranch("MyApp")) { try manifest([sameBranch]).validate() }
+        #expect(throws: WorkspaceValidationError.taskBranchCollidesWithBaseBranch("MyApp")) { try manifest([sameBranch]).validate() }
     }
 
     @Test func projectPathAndSchemeAreValidated() {

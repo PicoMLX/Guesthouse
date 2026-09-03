@@ -11,8 +11,12 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
 
     public var description: String { rawValue }
 
+    /// Git's files backend writes `refs/heads/<name>.lock`, so a component longer than this
+    /// cannot be created on a file system with 255-byte names.
+    public static let maximumComponentBytes = 250
+
     static func isValid(_ name: String) -> Bool {
-        guard !name.isEmpty, name != "@", !name.hasPrefix("-"), !name.hasPrefix("/"), !name.hasSuffix("/"),
+        guard !name.isEmpty, name != "@", name != "HEAD", !name.hasPrefix("-"), !name.hasPrefix("/"), !name.hasSuffix("/"),
               !name.hasSuffix("."), !name.hasSuffix(".lock"), !name.contains(".."), !name.contains("@{"),
               !name.contains("//")
         else { return false }
@@ -20,7 +24,19 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
             if scalar.value < 0x20 || scalar.value == 0x7F { return false }
             if " ~^:?*[\\".unicodeScalars.contains(scalar) { return false }
         }
-        return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.hasPrefix(".") && !$0.hasSuffix(".lock") }
+        return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+            !$0.hasPrefix(".") && !$0.hasSuffix(".lock") && $0.utf8.count <= maximumComponentBytes
+        }
+    }
+
+    /// Case-insensitive identity: the guest file system is, so `main` and `MAIN` collide.
+    public var identity: String { rawValue.lowercased() }
+
+    /// Whether one name is a slash-component prefix of the other, which Git cannot store as
+    /// two refs (`release` and `release/feature`), or the two are the same name in another case.
+    public func collides(with other: BranchName) -> Bool {
+        let mine = identity, theirs = other.identity
+        return mine == theirs || mine.hasPrefix(theirs + "/") || theirs.hasPrefix(mine + "/")
     }
 }
 
@@ -56,6 +72,18 @@ public struct DirectoryName: Hashable, Sendable, CustomStringConvertible {
         return name.allSatisfy { ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "." || $0 == "_" || $0 == "-" }
     }
 
+    /// A deterministic safe name derived from a repository name that is not itself valid: a
+    /// leading dot is dropped and the name is cut to the limit, so nothing silently becomes
+    /// a constant that could collide with another repository.
+    public static func derived(from repositoryName: String) -> DirectoryName {
+        if let direct = DirectoryName(repositoryName) { return direct }
+        var trimmed = String(repositoryName.drop(while: { $0 == "." }).prefix(64))
+        while trimmed.hasPrefix(".") { trimmed.removeFirst() }
+        if let name = DirectoryName(trimmed) { return name }
+        let digest = repositoryName.unicodeScalars.reduce(UInt64(1_469_598_103_934_665_603)) { ($0 ^ UInt64($1.value)) &* 1_099_511_628_211 }
+        return DirectoryName("repo-\(String(digest, radix: 16))")!
+    }
+
     /// Case-insensitive identity, because the guest file system usually is.
     public var identity: String { rawValue.lowercased() }
 }
@@ -81,7 +109,8 @@ public struct CommitSHA: Hashable, Sendable, Codable, CustomStringConvertible {
 
     public init?(_ rawValue: String) {
         let lowered = rawValue.lowercased()
-        guard lowered.count == 40, lowered.allSatisfy(\.isHexDigit) else { return nil }
+        // ASCII hexadecimal only: `Character.isHexDigit` also accepts full-width digits.
+        guard lowered.count == 40, lowered.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
         self.rawValue = lowered
     }
 

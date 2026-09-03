@@ -4,8 +4,8 @@ import Foundation
 /// user or `git remote -v` supplied (MVP-PLAN.md §6: "canonical remotes").
 ///
 /// Accepted forms: `https://host/owner/name(.git)`, `ssh://git@host/owner/name(.git)`, and
-/// `git@host:owner/name(.git)`. Owner and name keep their case; comparisons ignore it because
-/// GitHub does.
+/// `git@host:owner/name(.git)`. Owner and name are ASCII letters, digits, `-`, `_`, and `.`
+/// (GitHub's own alphabet) and keep their case; comparisons ignore it because GitHub does.
 public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
     public let host: String
     public let owner: String
@@ -27,7 +27,11 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
             host = String(prefix.split(separator: "@")[1].dropLast())
             path = String(text[scpRange.upperBound...])
         } else if let components = URLComponents(string: text), let scheme = components.scheme?.lowercased(), let urlHost = components.host {
-            guard ["https", "http", "ssh", "git"].contains(scheme), components.port == nil, components.user == nil || scheme != "https" else { return nil }
+            // Only the documented transports, and nothing the canonical form would drop: a
+            // port, query, fragment, or user other than SSH's `git` names something else.
+            guard ["https", "ssh"].contains(scheme), components.port == nil, components.query == nil, components.fragment == nil,
+                  components.password == nil, components.user == nil || (scheme == "ssh" && components.user == "git")
+            else { return nil }
             host = urlHost
             path = components.path
         } else {
@@ -57,7 +61,7 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
     public func hash(into hasher: inout Hasher) { hasher.combine(identity) }
 
     private static func isValidComponent(_ component: String) -> Bool {
-        !component.isEmpty && component != "." && component != ".." && component.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." }
+        !component.isEmpty && component != "." && component != ".." && component.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ".") }
     }
 }
 
