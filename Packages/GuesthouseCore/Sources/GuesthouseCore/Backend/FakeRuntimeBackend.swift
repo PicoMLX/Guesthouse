@@ -5,8 +5,10 @@ import Synchronization
 ///
 /// Scenarios are keyed by request case name and apply to queries as well as operations.
 /// Requests are recorded in the order `send` was called, not in scheduler order. Each `send`
-/// records the request and emits `accepted` under a turn ticket; the rest of the scenario
-/// runs concurrently so a hanging operation never blocks the `cancelOperation` that ends it.
+/// binds its scenario and any seeded operation id at the moment it is called, so a later
+/// `script` or `useOperationID` cannot change a request already sent. It records the request
+/// and emits `accepted` under a turn ticket; the rest of the scenario runs concurrently so a
+/// hanging operation never blocks the `cancelOperation` that ends it.
 public actor FakeRuntimeBackend: RuntimeBackend {
     public enum Scenario: Sendable {
         /// `accepted`, the given phases, an optional status, then `completed`. For queries, the
@@ -26,11 +28,22 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     public var delay: Duration
     public private(set) var receivedRequests: [RuntimeRequest] = []
 
-    private var scenarios: [String: Scenario] = [:]
+    /// Read synchronously by `send`, so configuration and requests keep their call order.
+    private struct Configuration: Sendable {
+        var scenarios: [String: Scenario] = [:]
+        var pendingOperationIDs: [String: OperationID] = [:]
+    }
+
+    /// What one `send` bound when it was called.
+    private struct Binding: Sendable {
+        let scenario: Scenario
+        let seededOperationID: OperationID?
+    }
+
+    private nonisolated let configuration = Mutex(Configuration())
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
     private var canceledOperations: Set<OperationID> = []
-    private var pendingOperationIDs: [String: OperationID] = [:]
 
     private nonisolated let ticketCounter = Mutex<UInt64>(0)
     private var servingTicket: UInt64 = 0
@@ -45,7 +58,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     /// Sets the scenario for every request whose `caseName` matches, for example `"startEnvironment"`.
     public func script(_ caseName: String, _ scenario: Scenario) {
-        scenarios[caseName] = scenario
+        configuration.withLock { $0.scenarios[caseName] = scenario }
     }
 
     /// The status returned for `environmentStatus(id)`.
@@ -64,7 +77,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     /// Makes the next request with this case name use `id` as its operation id, so a preview
     /// or test can correlate a pre-seeded `EnvironmentStatus.inFlightOperation` with the events.
     public func useOperationID(_ id: OperationID, forNext caseName: String) {
-        pendingOperationIDs[caseName] = id
+        configuration.withLock { $0.pendingOperationIDs[caseName] = id }
     }
 
     // MARK: - RuntimeBackend
@@ -74,16 +87,22 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             defer { counter += 1 }
             return counter
         }
+        let binding = configuration.withLock { configuration in
+            Binding(
+                scenario: configuration.scenarios[request.caseName] ?? .succeed(),
+                seededOperationID: configuration.pendingOperationIDs.removeValue(forKey: request.caseName)
+            )
+        }
         return AsyncThrowingStream { continuation in
-            let task = Task { await self.run(request, ticket: ticket, continuation) }
+            let task = Task { await self.run(request, ticket: ticket, binding: binding, continuation) }
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    private func run(_ request: RuntimeRequest, ticket: UInt64, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async {
+    private func run(_ request: RuntimeRequest, ticket: UInt64, binding: Binding, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async {
         await waitForTurn(ticket)
         receivedRequests.append(request)
-        let scenario = scenarios[request.caseName] ?? .succeed()
+        let scenario = binding.scenario
 
         switch request {
         case .runtimeVersion, .environmentStatus:
@@ -130,7 +149,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             break
         }
 
-        let id = pendingOperationIDs.removeValue(forKey: request.caseName) ?? OperationID()
+        let id = binding.seededOperationID ?? OperationID()
         continuation.yield(.accepted(id))
         advanceTurn()
 
@@ -157,7 +176,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             while !Task.isCancelled, !canceledOperations.contains(id) {
                 try? await Task.sleep(for: .milliseconds(5))
             }
-            if Task.isCancelled { receivedRequests.append(.cancelOperation(id)) }
+            recordImplicitCancellation(of: id)
             continuation.yield(.failed(id, .canceled))
             continuation.finish()
 
@@ -173,13 +192,21 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private func progress(_ id: OperationID, _ phase: ProgressPhase, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async -> Bool {
         await pause()
         if Task.isCancelled || canceledOperations.contains(id) {
-            if Task.isCancelled { receivedRequests.append(.cancelOperation(id)) }
+            recordImplicitCancellation(of: id)
             continuation.yield(.failed(id, .canceled))
             continuation.finish()
             return false
         }
         continuation.yield(.progress(id, phase))
         return true
+    }
+
+    /// A consumer that stops listening counts as one cancel request, unless the operation was
+    /// already canceled explicitly: `receivedRequests` then still mirrors real `send` calls.
+    private func recordImplicitCancellation(of id: OperationID) {
+        guard Task.isCancelled, !canceledOperations.contains(id) else { return }
+        canceledOperations.insert(id)
+        receivedRequests.append(.cancelOperation(id))
     }
 
     private func waitForTurn(_ ticket: UInt64) async {
