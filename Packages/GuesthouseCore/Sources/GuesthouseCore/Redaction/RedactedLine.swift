@@ -1,0 +1,30 @@
+/// A line of text that has passed through `Redactor`.
+///
+/// Log sinks, the XPC event stream, and diagnostics exports accept only this type, so an
+/// unredacted `String` cannot reach them by accident. The only ways to obtain one are
+/// `Redactor` and a compile-time string literal.
+public struct RedactedLine: Hashable, Sendable, CustomStringConvertible {
+    public let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    /// For fixed messages that contain nothing to redact, such as `"Started"`.
+    public init(literal: StaticString) {
+        text = literal.description
+    }
+
+    public var description: String { text }
+}
+
+extension RedactedLine: Codable {
+    public init(from decoder: any Decoder) throws {
+        text = try decoder.singleValueContainer().decode(String.self)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(text)
+    }
+}
