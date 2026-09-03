@@ -1,4 +1,6 @@
+import Darwin
 import Foundation
+import GuesthouseCore
 
 /// The runtime-managed directory tree under the service user's Application Support
 /// (MVP-PLAN.md §3, "Local storage"): runtime downloads, VM data, maintenance SSH files,
@@ -82,33 +84,91 @@ public struct RuntimeStorage: Sendable {
     private static func prepare(_ url: URL, backupExcluded: Bool, createIntermediates: Bool) throws {
         let manager = FileManager.default
         if !manager.fileExists(atPath: url.path) {
-            try manager.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: [.posixPermissions: directoryPermissions])
+            do {
+                try manager.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: [.posixPermissions: directoryPermissions])
+            } catch {
+                throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
+            }
         }
         try verify(url)
-        try manager.setAttributes([.posixPermissions: directoryPermissions], ofItemAtPath: url.path)
-        if backupExcluded {
-            var mutable = url
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
+        do {
+            try manager.setAttributes([.posixPermissions: directoryPermissions], ofItemAtPath: url.path)
+        } catch {
+            throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
+        }
+        try removeAccessControlEntries(url)
+        // Always written, so a stale exclusion on a directory that must be backed up is cleared.
+        var mutable = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = backupExcluded
+        do {
             try mutable.setResourceValues(values)
+        } catch {
+            throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
         }
     }
 
+    /// A real directory owned by the current user, not a link. Read with `lstat`, so a missing
+    /// or unrepresentable owner is a refusal, never a pass.
     static func verify(_ url: URL) throws {
-        let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .fileResourceIdentifierKey])
-        if values.isSymbolicLink == true {
-            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "symbolic link")
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
         }
-        guard values.isDirectory == true else {
-            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "not a directory")
+        switch info.st_mode & S_IFMT {
+        case S_IFLNK: throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "symbolic link")
+        case S_IFDIR: break
+        default: throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "not a directory")
         }
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        if let owner = attributes[.ownerAccountID] as? UInt32, owner != getuid() {
+        guard info.st_uid == getuid() else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "owned by another user")
         }
     }
+
+    /// POSIX mode `0700` does not remove access control entries an existing or inherited
+    /// directory may carry. Any entries are removed, and the directory is refused if they
+    /// cannot be.
+    static func removeAccessControlEntries(_ url: URL) throws {
+        guard hasAccessControlEntries(url) else { return }
+        guard let empty = acl_init(0) else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "access control entries could not be removed")
+        }
+        defer { acl_free(UnsafeMutableRawPointer(empty)) }
+        guard acl_set_link_np(url.path, ACL_TYPE_EXTENDED, empty) == 0, !hasAccessControlEntries(url) else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "carries access control entries that could not be removed")
+        }
+    }
+
+    static func hasAccessControlEntries(_ url: URL) -> Bool {
+        guard let acl = acl_get_link_np(url.path, ACL_TYPE_EXTENDED) else { return false }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        return acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry) == 0
+    }
 }
 
-public enum RuntimeStorageError: Error, Hashable, Sendable {
+/// Storage failures block every runtime operation, so each names what happened and what the
+/// user can do (AGENTS.md: every error carries a message and a recovery action).
+public enum RuntimeStorageError: Error, Hashable, Sendable, LocalizedError {
     case insecureDirectory(path: String, reason: String)
+    case unwritable(path: String, reason: SanitizedText)
+
+    public var userMessage: String {
+        switch self {
+        case .insecureDirectory(let path, let reason):
+            "Guesthouse cannot use its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason)). Move or remove the item that is in the way, or choose a different storage location in Settings."
+        case .unwritable(let path, let reason):
+            "Guesthouse cannot write to its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason.value)). Free disk space or choose a different storage location in Settings."
+        }
+    }
+
+    /// In preference order. Never empty.
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .insecureDirectory: [.openSettings, .cancel]
+        case .unwritable: [.freeDiskSpace, .openSettings, .retry, .cancel]
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
 }
