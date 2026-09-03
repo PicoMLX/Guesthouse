@@ -28,8 +28,12 @@ public struct LiveProcessEnumerator: Sendable {
 
     /// The identity of one running process, or `nil` if it does not exist or cannot be read.
     public func live(pid: Int32) -> LiveProcess? {
-        guard let startTime = startTime(pid: pid), let path = executablePath(pid: pid) else { return nil }
-        return LiveProcess(pid: pid, startTime: startTime, executablePath: path, argumentsDigest: Self.digest(of: arguments(pid: pid) ?? []))
+        guard let first = startTime(pid: pid), let path = executablePath(pid: pid) else { return nil }
+        let digest = Self.digest(of: arguments(pid: pid) ?? [])
+        // The fields came from separate calls; if the PID was reused in between, the start
+        // time has changed and the observation describes two processes, so it is discarded.
+        guard startTime(pid: pid) == first else { return nil }
+        return LiveProcess(pid: pid, startTime: first, executablePath: path, argumentsDigest: digest)
     }
 
     /// The digest `ProcessIdentity` records for a launch: SHA-256 over the arguments joined by

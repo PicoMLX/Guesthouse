@@ -79,6 +79,12 @@ public enum OwnershipVerdict: Hashable, Sendable {
         /// The live process does not name the recorded virtual machine, so it cannot be
         /// proven to be this environment's VM.
         case vmNameUnconfirmed
+        /// The VM appears to be running but no launch was ever recorded for it: the service
+        /// was interrupted between spawning Tart and persisting the identity, or something
+        /// else started the VM.
+        case unrecordedLaunch
+        /// The VM inventory could not be read, so nothing about the VM's lock is known.
+        case inventoryUnavailable
     }
 }
 

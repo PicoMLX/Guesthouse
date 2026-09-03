@@ -59,10 +59,15 @@ public final class OperationSupervisor: Sendable {
         }
     }
 
-    /// Records a launched process durably before the caller reports it as started.
+    /// Records a launched process durably before the caller reports it as started. The
+    /// observed process must be the one described: same executable and arguments, so a PID
+    /// reused by another process between launch and observation is never recorded as ours.
     public func recordLaunch(pid: Int32, executable: URL, arguments: [String], vmName: String, environment: EnvironmentID) async throws -> ProcessIdentity {
         guard let live = enumerator.live(pid: pid) else {
             throw SupervisionError.processNotObservable(pid: pid)
+        }
+        guard live.executablePath == executable.path, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
+            throw SupervisionError.processMismatch(pid: pid)
         }
         // Dates are rounded to milliseconds so the persisted record reads back exactly; the
         // reconciler's one-second start-time tolerance covers the lost microseconds.
@@ -84,15 +89,43 @@ public final class OperationSupervisor: Sendable {
         try await store.remove(environment)
     }
 
-    /// Reconciles every recorded identity against the live process table.
-    /// - Parameter vmLockPresent: whether the VM's lock is held, per environment, as observed
-    ///   by the caller; unknown lock state is treated as present so the verdict errs toward
-    ///   uncertainty.
-    public func reconcile(vmLockPresent: (EnvironmentID) -> Bool?) async -> [EnvironmentID: OwnershipVerdict] {
+    /// What the caller knows about a VM's lock.
+    public enum LockObservation: Sendable {
+        case present
+        case absent
+        /// The inventory could not be read.
+        case unknown
+    }
+
+    /// Reconciles every known environment against the live process table.
+    ///
+    /// Environments with a recorded identity get the reconciler's verdict; an environment
+    /// without one whose VM lock is held is `uncertain(.unrecordedLaunch)` (the service died
+    /// between spawning Tart and persisting the identity, or someone else started the VM);
+    /// an unknown lock state is `uncertain(.inventoryUnavailable)`. An environment with no
+    /// record and no lock has no verdict.
+    public func reconcile(environments: [EnvironmentID], vmLock: (EnvironmentID) -> LockObservation) async -> [EnvironmentID: OwnershipVerdict] {
         var verdicts: [EnvironmentID: OwnershipVerdict] = [:]
-        for (environment, recorded) in await store.all {
-            let observed = enumerator.candidates(executable: URL(fileURLWithPath: recorded.executablePath), pid: recorded.pid)
-            verdicts[environment] = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: vmLockPresent(environment) ?? true)
+        let recordedIdentities = await store.all
+        for environment in Set(environments).union(recordedIdentities.keys) {
+            let lock = vmLock(environment)
+            if let recorded = recordedIdentities[environment] {
+                let observed = enumerator.candidates(executable: URL(fileURLWithPath: recorded.executablePath), pid: recorded.pid)
+                switch lock {
+                case .unknown:
+                    // Without the inventory, "no process" cannot become "exited".
+                    let verdict = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: true)
+                    verdicts[environment] = verdict == .uncertain(.lockHeldWithoutProcess) ? .uncertain(.inventoryUnavailable) : verdict
+                case .present, .absent:
+                    verdicts[environment] = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: lock == .present)
+                }
+            } else {
+                switch lock {
+                case .present: verdicts[environment] = .uncertain(.unrecordedLaunch)
+                case .unknown: verdicts[environment] = .uncertain(.inventoryUnavailable)
+                case .absent: break
+                }
+            }
         }
         return verdicts
     }
@@ -110,6 +143,23 @@ extension OperationSupervisor {
     }
 }
 
-public enum SupervisionError: Error, Hashable, Sendable {
+/// Failures while recording a launch. Each leaves the outcome unknown until the caller
+/// inspects the actual state, and says so.
+public enum SupervisionError: Error, Hashable, Sendable, LocalizedError {
+    /// The launched process could not be read from the process table.
     case processNotObservable(pid: Int32)
+    /// The process with that PID is not the one that was launched.
+    case processMismatch(pid: Int32)
+
+    public var userMessage: String {
+        switch self {
+        case .processNotObservable:
+            "Guesthouse started the development Mac's virtual machine but could not observe the process afterwards. Guesthouse will inspect the actual state before offering anything else."
+        case .processMismatch:
+            "The process Guesthouse started for the development Mac was replaced by another process before it could be recorded. Guesthouse will inspect the actual state before offering anything else."
+        }
+    }
+
+    public var recoveryActions: [RecoveryAction] { [.inspectState, .cancel] }
+    public var errorDescription: String? { userMessage }
 }
