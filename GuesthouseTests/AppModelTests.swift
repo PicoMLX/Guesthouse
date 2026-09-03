@@ -173,10 +173,17 @@ import Testing
         await model.refresh()
         _ = model.handleQuitRequest()
         model.confirmStopAndQuit()
-        await waitUntil { model.quitFlow == .stopping(environment.id, phase) }
+        // Either protected phase will do: the point is that a cancel during one of them is
+        // recorded rather than applied.
+        func stoppingPhase() -> ProgressPhase? {
+            if case .stopping(_, let reported) = model.quitFlow { return reported }
+            return nil
+        }
+        await waitUntil { stoppingPhase()?.cancelable == false }
+        let observed = stoppingPhase()
         model.cancelQuit()
         #expect(model.quitCancelRequested)
-        #expect(model.quitFlow == .stopping(environment.id, phase), "the step is allowed to end")
+        #expect(model.quitFlow == .stopping(environment.id, observed), "the step is allowed to end")
         await waitUntil { model.quitFlow == .idle }
         #expect(decision.values == [false])
         let cancels = await backend.receivedRequests.filter { if case .cancelOperation = $0 { return true }; return false }
