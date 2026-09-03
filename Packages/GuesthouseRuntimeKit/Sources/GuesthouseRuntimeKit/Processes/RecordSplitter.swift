@@ -3,12 +3,12 @@ import Foundation
 /// Splits a byte stream into records for redaction: a record ends at `\n` or `\r` (a `\r\n`
 /// pair is one ending, even across two reads), or when it reaches `maximumRecordBytes`.
 ///
-/// A forced split happens at the last ASCII separator inside the final `splitSearchBytes` of
-/// the record when there is one, so a token (which contains no separator) is never cut in
-/// two; otherwise at a UTF-8 scalar boundary, so no scalar is ever torn.
+/// A forced split happens at the last ASCII separator anywhere in the record when there is
+/// one, so a token (which contains no separator) is never cut in two however long it is;
+/// otherwise at a UTF-8 scalar boundary, so no scalar is ever torn, and a scalar whose
+/// remaining bytes have not arrived yet is held for the next read.
 struct RecordSplitter {
     static let maximumRecordBytes = 64 << 10
-    static let splitSearchBytes = 1 << 10
 
     private var pending = Data()
     private var previousWasCarriageReturn = false
@@ -49,12 +49,11 @@ struct RecordSplitter {
         return pending.isEmpty ? nil : pending
     }
 
-    /// The index to cut a record that reached the limit: after the last separator in the search
-    /// window, else at the last UTF-8 scalar boundary at or before the limit.
+    /// The index to cut a record that reached the limit: after the last separator in the
+    /// record, else at the last UTF-8 scalar boundary at or before the limit.
     static func forcedCut(in data: Data, from start: Data.Index, through last: Data.Index) -> Data.Index {
-        let windowStart = max(start + 1, last - splitSearchBytes)
         var index = last
-        while index >= windowStart {
+        while index > start {
             if isSeparator(data[index]) { return index + 1 }
             index -= 1
         }
@@ -62,7 +61,24 @@ struct RecordSplitter {
         while boundary > start + 1, boundary < data.endIndex, data[boundary] & 0xC0 == 0x80 {
             boundary -= 1
         }
-        return boundary
+        if boundary == data.endIndex {
+            // The limit fell on the end of what has arrived: an unfinished scalar there is
+            // kept back, so its continuation bytes in the next read complete it.
+            var lead = boundary - 1
+            while lead > start, data[lead] & 0xC0 == 0x80 { lead -= 1 }
+            if boundary - lead < scalarLength(leadByte: data[lead]) { boundary = lead }
+        }
+        return max(boundary, start + 1)
+    }
+
+    static func scalarLength(leadByte: UInt8) -> Int {
+        switch leadByte {
+        case 0x00...0x7F: 1
+        case 0xC0...0xDF: 2
+        case 0xE0...0xEF: 3
+        case 0xF0...0xF7: 4
+        default: 1
+        }
     }
 
     /// ASCII whitespace or punctuation that never occurs inside a credential token.
