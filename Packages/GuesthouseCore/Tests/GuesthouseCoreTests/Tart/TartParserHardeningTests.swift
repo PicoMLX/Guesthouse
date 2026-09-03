@@ -14,6 +14,16 @@ import Testing
         #expect(encoded == #""2.36.0""#, "\(encoded)")
     }
 
+    @Test func leadingZerosAndBareDeviceCodesDoNotSlipThrough() {
+        #expect(TartVersion(parsing: "02.036.000") == nil)
+        #expect(TartVersion(parsing: "2.36.00") == nil)
+        #expect(TartVersion(parsing: "0.36.0") != nil)
+        guard case .unknown(let line) = TartErrorClassifier.classify(stderr: "ABCD-EFGH\u{1B}[0m " + String(repeating: "x", count: 500), exitStatus: 1) else { Issue.record("expected unknown"); return }
+        #expect(line.text.hasPrefix("[redacted:device-code]"))
+        #expect(!line.text.contains("\u{1B}"))
+        #expect(line.text.unicodeScalars.count <= 201)
+    }
+
     @Test func prefixesAreMutuallyExclusive() {
         #expect(TartVersion(parsing: "tart v2.36.0") == nil)
         #expect(TartVersion(parsing: "vv2.36.0") == nil)
