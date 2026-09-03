@@ -81,7 +81,7 @@ extension VMSlotError: LocalizedError {
     public var recoveryMessage: String {
         switch self {
         case .inventoryFull:
-            "Delete or export an existing development Mac to make room for another."
+            "Export any unpublished work from a development Mac you no longer need, then delete it to make room. Exporting alone does not free a slot."
         case .unknownEnvironment:
             "Check the environment list; the record may have been removed by a repair or deletion."
         }
