@@ -4,18 +4,15 @@ import XPC
 // The embedded, non-sandboxed runtime service. It answers named operations from the
 // sandboxed GUI and nothing else (MVP-PLAN.md §3, "Sandbox and XPC boundary").
 //
-// Only the `runtimeVersion` operation is implemented here (issue #19). Caller
-// authentication and request validation follow in #20; process execution and Tart in #21
-// onward. Every other operation is refused with `unsupportedOperation`.
+// Sessions are accepted only from a peer signed by this team with the app's signing
+// identifier; the same requirement is re-checked per message in `RuntimeService`.
 
 let service = RuntimeService()
 let listener: XPCListener
 do {
-    listener = try XPCListener(service: RuntimeService.serviceName) { request in
-        request.accept { (message: XPCReceivedMessage) -> (any Encodable)? in
-            service.handle(message)
-        } cancellationHandler: { error in
-            service.sessionEnded(error)
+    listener = try XPCListener(service: RuntimeService.serviceName, requirement: RuntimeService.peerRequirement) { request in
+        request.accept { session in
+            service.acceptSession(session)
         }
     }
 } catch {
