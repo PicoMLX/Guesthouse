@@ -50,6 +50,16 @@ final class AppModel {
     let backend: any RuntimeBackend
     private let terminationDecision: @MainActor (Bool) -> Void
     private var quitTask: Task<Void, Never>?
+    /// Identifies one Quit attempt. Every asynchronous step checks it, so a cancelled check
+    /// can never rejoin a later attempt.
+    private var quitGeneration: UInt64 = 0
+    /// Environments whose graceful stop failed. Only these are force-stopped.
+    private var gracefulFailures: Set<EnvironmentID> = []
+    /// The model's own reconciliation task, so closing a window cannot cancel it.
+    private var refreshTask: Task<Void, Never>?
+    /// Set when a reconciliation ended `unavailable`: further connection drops no longer
+    /// reconnect on their own, so the app stays on the recovery the error prescribes.
+    private var automaticReconciliationSuspended = false
     /// The idle-loss observation; canceled from `deinit`, which is not actor-isolated.
     private let interruptionObservation = CancelOnDeinit()
     /// Bumped by every `refresh()`; a refresh whose generation is no longer current does not
@@ -88,6 +98,16 @@ final class AppModel {
     /// Re-reads everything from the runtime. Never trusts a cached Ready: a refresh that was
     /// canceled or overtaken by a newer one publishes nothing, leaving "Checking environment"
     /// to the refresh that replaced it.
+    /// Starts a reconciliation owned by the model. A window that closes cannot cancel it, so
+    /// the menu bar and any surviving window still leave "Checking environment".
+    func startRefresh() {
+        automaticReconciliationSuspended = false
+        refreshTask = Task { [weak self] in
+            guard let self else { return }
+            await self.refresh()
+        }
+    }
+
     func refresh() async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
@@ -101,6 +121,9 @@ final class AppModel {
             launchState = .ready
         case .unavailable(let error):
             launchState = .unavailable(error)
+            // An unavailable runtime is not something reconnecting fixes: the error carries
+            // its own recovery, and the app stays on it until the user asks again.
+            automaticReconciliationSuspended = true
         case .interrupted(let interruption):
             launchState = .interrupted(interruption)
         }
@@ -141,9 +164,37 @@ final class AppModel {
     /// loss; here the cached state is dropped and reconciliation starts again. During a quit
     /// the stop stream itself reports the loss.
     func connectionInterrupted(_ interruption: RuntimeConnectionInterrupted) {
-        guard quitFlow == .idle else { return }
+        switch quitFlow {
+        case .idle:
+            break
+        case .confirming, .stopFailed:
+            // The sheet is open on state that is now stale: nothing is offered again until
+            // the environments have been read back.
+            quitGeneration &+= 1
+            quitFlow = .checking
+            let generation = quitGeneration
+            quitTask = Task { [weak self] in
+                guard let self else { return }
+                await self.reconcileForQuit(generation: generation)
+            }
+        case .checking, .stopping, .forceStopping, .terminating:
+            // A stop stream reports its own loss; nothing to do here.
+            return
+        }
         launchState = .interrupted(interruption)
-        Task { await refresh() }
+        guard !automaticReconciliationSuspended else { return }
+        refreshTask = Task { [weak self] in
+            guard let self else { return }
+            await self.refresh()
+        }
+    }
+
+    /// Re-reads the environments for an interrupted Quit sheet and returns it to its options,
+    /// or shows why it could not.
+    private func reconcileForQuit(generation: UInt64) async {
+        await refresh()
+        guard generation == quitGeneration, case .checking = quitFlow else { return }
+        quitFlow = launchState == .ready ? .confirming : .stopFailed(launchStateError())
     }
 
     var runningEnvironments: [DevelopmentEnvironment] {
@@ -175,18 +226,23 @@ final class AppModel {
     func confirmStopAndQuit() {
         guard case .confirming = quitFlow else { return }
         quitCancelRequested = false
+        quitGeneration &+= 1
+        let generation = quitGeneration
         quitFlow = launchState == .ready ? .stopping(nil, nil) : .checking
-        quitTask = Task { await stopAllAfterReconciling(mode: .graceful(deadline: Self.gracefulStopDeadline)) }
+        quitTask = Task { await stopAllAfterReconciling(mode: .graceful(deadline: Self.gracefulStopDeadline), generation: generation) }
     }
 
     /// Whether the failure the sheet shows may be answered with a force-stop. After an unknown
     /// outcome or on uncertain ownership the state must be checked first: force-stopping a VM
     /// the app may not own, or one that may already have stopped, is never offered blind.
+    /// A force-stop is offered only when the failure itself sanctions repeating the stop:
+    /// an error whose recovery is inspection (an operation still in flight, an unknown
+    /// outcome, uncertain ownership) is checked first, never forced past.
     var canForceStop: Bool {
         guard case .stopFailed(let error) = quitFlow else { return false }
         switch error {
         case .operationOutcomeUnknown, .vmOwnershipUncertain: return false
-        default: return true
+        default: return error.recoveryActions.contains(.retry)
         }
     }
 
@@ -194,20 +250,20 @@ final class AppModel {
     func forceStopAndQuit() {
         guard canForceStop else { return }
         quitCancelRequested = false
+        quitGeneration &+= 1
+        let generation = quitGeneration
         quitFlow = .forceStopping(nil)
-        quitTask = Task { await stopAll(mode: .force) }
+        quitTask = Task { await stopAll(mode: .force, generation: generation) }
     }
 
     /// After an unknown outcome or uncertain ownership the sheet offers a check: reconcile, then
     /// return to the confirmation with the real state, or show why the check failed.
     func inspectAndContinueQuit() {
         guard case .stopFailed = quitFlow, !canForceStop else { return }
+        quitGeneration &+= 1
+        let generation = quitGeneration
         quitFlow = .checking
-        quitTask = Task {
-            await refresh()
-            guard case .checking = quitFlow else { return }
-            quitFlow = launchState == .ready ? .confirming : .stopFailed(launchStateError())
-        }
+        quitTask = Task { await reconcileForQuit(generation: generation) }
     }
 
     /// The user canceled. A stop in a cancelable phase is abandoned at once; a phase the runtime
@@ -220,14 +276,21 @@ final class AppModel {
             return
         case .stopping(_, let phase?) where !phase.cancelable:
             quitCancelRequested = true
+        case .stopping(.some, nil):
+            // A stop the runtime has accepted but not yet described may already be in a
+            // phase it will not interrupt; the cancellation waits for its outcome.
+            quitCancelRequested = true
         case .forceStopping:
             quitCancelRequested = true
         case .confirming:
             quitFlow = .idle
             terminationDecision(false)
         case .checking:
-            // The check itself keeps running and lands on its own; only the quit is dropped.
+            // The check itself keeps running and lands on its own; only the quit is dropped,
+            // and its generation is retired so it cannot rejoin a later attempt.
+            quitGeneration &+= 1
             quitFlow = .idle
+            quitTask = nil
             terminationDecision(false)
         case .stopping, .stopFailed:
             quitTask?.cancel()
@@ -237,6 +300,7 @@ final class AppModel {
 
     private func finishCancel(reconcile: Bool) {
         guard quitFlow != .idle else { return }
+        quitGeneration &+= 1
         quitCancelRequested = false
         quitTask = nil
         quitFlow = .idle
@@ -250,35 +314,52 @@ final class AppModel {
     }
 
     /// Stop targets come from reconciled state, never from what was cached before the sheet.
-    private func stopAllAfterReconciling(mode: StopMode) async {
+    private func stopAllAfterReconciling(mode: StopMode, generation: UInt64) async {
         if launchState != .ready {
             await refresh()
-            guard case .checking = quitFlow else { return }
+            guard generation == quitGeneration, case .checking = quitFlow else { return }
             guard launchState == .ready else {
                 quitFlow = .stopFailed(launchStateError())
                 return
             }
             quitFlow = .stopping(nil, nil)
         }
-        await stopAll(mode: mode)
+        // An operation the runtime still reports is unresolved, whatever the VM state says:
+        // quitting over it could leave a VM the app never saw start.
+        if let busy = statuses.values.first(where: { $0.inFlightOperation != nil }), let operation = busy.inFlightOperation {
+            quitFlow = .stopFailed(.operationOutcomeUnknown(operation))
+            return
+        }
+        await stopAll(mode: mode, generation: generation)
     }
 
-    private func stopAll(mode: StopMode) async {
+    /// Stops every running environment. `mode` is `.force` only for the environments whose
+    /// graceful stop already failed: the rest are always asked to shut down first, so a
+    /// second VM is never hard-stopped without being asked (MVP-PLAN.md §2).
+    private func stopAll(mode: StopMode, generation: UInt64) async {
         if let uncertain = uncertainEnvironments.first {
             quitFlow = .stopFailed(.vmOwnershipUncertain(uncertain.id))
             return
         }
         for environment in runningEnvironments {
+            guard generation == quitGeneration else { return }
             if Task.isCancelled || quitCancelRequested { finishCancel(reconcile: true); return }
-            quitFlow = mode == .force ? .forceStopping(environment.id) : .stopping(environment.id, nil)
+            let force = mode == .force && gracefulFailures.contains(environment.id)
+            let effective: StopMode = force ? .force : .graceful(deadline: Self.gracefulStopDeadline)
+            quitFlow = force ? .forceStopping(environment.id) : .stopping(environment.id, nil)
             do {
-                for try await event in backend.send(.stopEnvironment(environment.id, mode)) {
+                for try await event in backend.send(.stopEnvironment(environment.id, effective)) {
+                    guard generation == quitGeneration else { return }
                     switch event {
                     case .progress(_, let phase):
                         if case .stopping = quitFlow { quitFlow = .stopping(environment.id, phase) }
                     case .status(let status):
                         statuses[status.environmentID] = status
                     case .failed(_, let error):
+                        gracefulFailures.insert(environment.id)
+                        // A cancellation deferred by a protected phase is honored here too:
+                        // the user asked to stay, and the outcome is now known.
+                        if quitCancelRequested { finishCancel(reconcile: true); return }
                         quitFlow = .stopFailed(error)
                         return
                     default:
@@ -287,13 +368,15 @@ final class AppModel {
                 }
             } catch {
                 launchState = .interrupted(RuntimeConnectionInterrupted())
+                if quitCancelRequested { finishCancel(reconcile: true); return }
                 quitFlow = .stopFailed(.operationOutcomeUnknown(OperationID()))
                 return
             }
+            gracefulFailures.remove(environment.id)
         }
         // The user may have canceled while the last stop was finishing; AppKit is told to
         // terminate only when the decision still stands.
-        guard !Task.isCancelled, !quitCancelRequested else { finishCancel(reconcile: true); return }
+        guard generation == quitGeneration, !Task.isCancelled, !quitCancelRequested else { finishCancel(reconcile: true); return }
         quitFlow = .terminating
         terminationDecision(true)
     }

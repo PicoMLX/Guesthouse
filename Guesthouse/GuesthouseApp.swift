@@ -59,7 +59,9 @@ struct MainWindow: View {
             .task {
                 delegate.openMainWindow = { openWindow(id: "main") }
                 delegate.model = model
-                await model.refresh()
+                // Reconciliation belongs to the model, not to this window: closing the window
+                // that started it must not leave the app on "Checking environment".
+                model.startRefresh()
             }
             .sheet(isPresented: Binding(get: { model.quitFlow != .idle }, set: { _ in })) {
                 QuitSheet(model: model).interactiveDismissDisabled()

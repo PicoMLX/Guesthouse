@@ -23,6 +23,10 @@ import Testing
         return environment
     }
 
+    func waitUntil(_ condition: @MainActor () async -> Bool) async {
+        for _ in 0..<400 where await !condition() { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
     func waitUntil(_ condition: @MainActor () -> Bool) async {
         for _ in 0..<400 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
     }
@@ -226,6 +230,87 @@ import Testing
         delegate.model = model
         #expect(model.quitFlow == .confirming)
         model.cancelQuit()
+    }
+
+    @Test func onlyTheEnvironmentWhoseGracefulStopFailedIsForced() async {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "One", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Two", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        for environment in [first, second] {
+            await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        }
+        await backend.script("stopEnvironment", .fail(error: .gracefulStopTimedOut(first.id)))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        #expect(model.canForceStop)
+        await backend.script("stopEnvironment", .succeed(status: EnvironmentStatus(environmentID: first.id, vm: .stopped, readiness: .ready)))
+        model.forceStopAndQuit()
+        await waitUntil { model.quitFlow == .terminating }
+        let stops = await backend.receivedRequests.compactMap { request -> (EnvironmentID, StopMode)? in
+            if case .stopEnvironment(let id, let mode) = request { return (id, mode) }
+            return nil
+        }
+        #expect(stops.filter { $0.1 == .force }.map(\.0) == [first.id], "only the failed environment is forced")
+        #expect(stops.contains { $0.0 == second.id && $0.1 != .force }, "the other environment is still asked to shut down")
+    }
+
+    @Test func anInspectionOnlyFailureNeverOffersAForceStop() async {
+        let backend = FakeRuntimeBackend()
+        _ = await runningEnvironment(backend)
+        await backend.script("stopEnvironment", .fail(error: .operationInFlight(OperationID())))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        #expect(!model.canForceStop, "the error asks for inspection, so forcing past it is not offered")
+    }
+
+    @Test func aQuitConfirmationWaitsForAnOperationTheRuntimeReports() async {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let recovered = OperationID()
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: recovered))
+        let (model, decision) = makeModel(backend)
+        await model.refresh()
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        #expect(model.quitFlow == .stopFailed(.operationOutcomeUnknown(recovered)))
+        #expect(decision.values.isEmpty, "a quit never terminates over an operation the runtime still reports")
+    }
+
+    @Test func anInterruptionWhileTheSheetIsOpenReconcilesBeforeOfferingAgain() async {
+        let backend = FakeRuntimeBackend()
+        _ = await runningEnvironment(backend)
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        _ = model.handleQuitRequest()
+        #expect(model.quitFlow == .confirming)
+        model.connectionInterrupted(RuntimeConnectionInterrupted())
+        #expect(model.quitFlow == .checking, "the cached state is not offered again unchecked")
+        await waitUntil { model.quitFlow == .confirming }
+        #expect(model.launchState == .ready)
+    }
+
+    @Test func anUnavailableRuntimeStopsAutomaticReconnection() async {
+        let backend = FakeRuntimeBackend()
+        await backend.script("listEnvironments", .fail(error: .runtimeMissing))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        #expect(model.launchState == .unavailable(.runtimeMissing))
+        let before = await backend.receivedRequests.count
+        model.connectionInterrupted(RuntimeConnectionInterrupted())
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(await backend.receivedRequests.count == before, "the app stays on the error instead of reconnecting in a loop")
+        model.startRefresh()
+        await waitUntil { await backend.receivedRequests.count > before }
+        #expect(await backend.receivedRequests.count > before, "an explicit check still reconnects")
     }
 
     @Test func fakeBackendIsChosenFromTheEnvironment() {
