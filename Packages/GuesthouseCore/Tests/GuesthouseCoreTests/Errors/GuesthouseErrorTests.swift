@@ -119,6 +119,37 @@ import Testing
         #expect(header.redactedDescription.contains("[redacted:authorization]"))
     }
 
+    @Test func splitTokensBidiControlsAndBareDeviceCodesAreNeutralized() {
+        let split = GuesthouseError.toolMismatch(tool: "gh", found: "ghp_\nABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab", expected: "2.80.0")
+        #expect(!split.redactedDescription.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
+        #expect(split.redactedDescription.contains("[redacted:github-token]"))
+
+        let bidi = GuesthouseError.downloadVerificationFailed(artifact: "Tart\u{202E}gnp.evil", check: .digest)
+        #expect(!bidi.userMessage.contains("\u{202E}"))
+        #expect(bidi.userMessage.contains("Tartgnp.evil"))
+
+        let code = GuesthouseError.toolMismatch(tool: "codex", found: "AB12-CD34", expected: "1.0")
+        #expect(!code.redactedDescription.contains("AB12-CD34"))
+        #expect(code.redactedDescription.contains("[redacted:device-code]"))
+    }
+
+    @Test func sanitizedValuesAreBoundedInUnicodeScalars() {
+        let combining = "a" + String(repeating: "\u{0301}", count: 500)
+        let error = GuesthouseError.toolMismatch(tool: combining, found: nil, expected: "1.0")
+        #expect(error.userMessage.unicodeScalars.count < 400)
+        #expect(error.userMessage.contains("…"))
+    }
+
+    @Test func hostAndToolErrorsOfferActionableRoutes() {
+        #expect(GuesthouseError.unsupportedHost(.macOSTooOld(found: "26.0", minimum: "26.4")).recoveryActions.first == .openSettings)
+        #expect(GuesthouseError.unsupportedHost(.notAppleSilicon).recoveryActions == [.cancel])
+        for error in [GuesthouseError.toolMismatch(tool: "codex", found: "1", expected: "2"), .xcodeComponentsIncomplete(missing: ["x"])] {
+            #expect(error.recoveryActions.contains(.openConsole))
+            #expect(error.recoveryActions.contains(.exportWork))
+        }
+        #expect(GuesthouseError.runtimeIncompatible(found: "1", required: "2").recoveryActions.contains(.exportWork))
+    }
+
     @Test func slotAndProtocolErrorsOfferTheRealRemedy() {
         let slots = GuesthouseError.vmSlotUnavailable(maximum: 2).recoveryActions
         #expect(slots.firstIndex(of: .exportWork)! < slots.firstIndex(of: .deleteEnvironment)!)
