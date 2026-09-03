@@ -67,6 +67,6 @@ Issues labeled `agent-ready` are self-contained and CI-verifiable; pick one whos
 
 - Tests cover the new logic and the package or app test command above passes locally.
 - CI is green and the automated review has no unaddressed findings.
-- No new warnings, no new dependencies, no secrets in code, logs, or tests.
+- No new warnings, no new third-party dependencies (local packages and system frameworks are fine when an issue calls for them), no secrets in code, logs, or tests.
 - The pull request links its issue and cites the `MVP-PLAN.md` section it implements.
 - Keep a pull request under roughly 500 changed lines; split it otherwise.

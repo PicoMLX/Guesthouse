@@ -3,7 +3,7 @@
 ///
 /// This package performs no process execution and no host operations; those live in the
 /// runtime service. See `AGENTS.md` and `MVP-PLAN.md` §3.
-public enum CoreInfo {
+public enum CoreInfo: Sendable {
     /// Identifies this module in diagnostics and version reports.
     public static let moduleName = "GuesthouseCore"
 }
