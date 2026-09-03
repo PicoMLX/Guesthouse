@@ -73,6 +73,48 @@ import Testing
         guard case .cancelOperation = requests[1] else { Issue.record("no cancelOperation recorded: \(requests)"); return }
     }
 
+    @Test func cancelOperationRequestEndsAHangingOperation() async throws {
+        let backend = FakeRuntimeBackend()
+        await backend.script("startEnvironment", .hang)
+        let stream = backend.send(.startEnvironment(environment, StartOptions()))
+        var iterator = stream.makeAsyncIterator()
+        guard case .accepted(let id) = try await iterator.next() else { Issue.record("no accepted"); return }
+        _ = try await collect(backend.send(.cancelOperation(id)))
+        let last = try await iterator.next()
+        #expect(last == .failed(id, .canceled))
+        #expect(try await iterator.next() == nil)
+        #expect(await backend.receivedRequests == [.startEnvironment(environment, StartOptions()), .cancelOperation(id)])
+    }
+
+    @Test func scriptedFailuresApplyToQueries() async throws {
+        let backend = FakeRuntimeBackend()
+        await backend.script("environmentStatus", .disconnect())
+        await #expect(throws: RuntimeConnectionInterrupted.self) {
+            for try await _ in backend.send(.environmentStatus(environment)) {}
+        }
+        await backend.script("runtimeVersion", .fail(error: .unauthorizedCaller))
+        let events = try await collect(backend.send(.runtimeVersion))
+        guard case .failed(_, let error) = events.first! else { Issue.record("expected failed"); return }
+        #expect(error == .unauthorizedCaller)
+    }
+
+    @Test func requestsAreRecordedInSendOrder() async throws {
+        let backend = FakeRuntimeBackend()
+        var streams: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        let requests: [RuntimeRequest] = (0..<20).map { $0.isMultiple(of: 2) ? .startEnvironment(environment, StartOptions()) : .stopEnvironment(environment, .force) }
+        for request in requests { streams.append(backend.send(request)) }
+        for stream in streams { _ = try await collect(stream) }
+        #expect(await backend.receivedRequests == requests)
+    }
+
+    @Test func interruptionCarriesRecoveryGuidance() {
+        let error = RuntimeConnectionInterrupted(operationID: OperationID())
+        #expect(error.recoveryActions.first == .inspectState)
+        #expect(error.errorDescription?.isEmpty == false)
+        #expect(error.guesthouseError?.caseName == "operationOutcomeUnknown")
+        #expect(RuntimeConnectionInterrupted().guesthouseError == nil)
+    }
+
     @Test func queriesReplyWithoutOperationIDs() async throws {
         let backend = FakeRuntimeBackend()
         let status = EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready)
@@ -106,6 +148,14 @@ import Testing
         }
         let full = await PreviewScenarios.bothSlotsFull()
         #expect(full.snapshot.slots.isFull)
+        let running = await PreviewScenarios.oneRunningEnvironment()
+        let runningID = running.snapshot.environments[0].id
+        _ = try await collect(running.backend.send(.stopEnvironment(runningID, .graceful(deadline: .seconds(30)))))
+        #expect(await running.backend.status(of: runningID)?.vm == .stopped)
+        let inProgress = await PreviewScenarios.operationInProgress()
+        let progressID = inProgress.snapshot.environments[0].id
+        #expect(await inProgress.backend.status(of: progressID)?.inFlightOperation != nil)
+        #expect(inProgress.initialRequest == .startEnvironment(progressID, StartOptions()))
         let repair = await PreviewScenarios.environmentNeedingRepair()
         let id = repair.snapshot.environments[0].id
         let events = try await collect(repair.backend.send(.startEnvironment(id, StartOptions())))

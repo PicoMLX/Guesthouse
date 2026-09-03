@@ -7,15 +7,19 @@ public struct PreviewScenario: Sendable {
     public let snapshot: EnvironmentsSnapshot
     /// A fake backend scripted to match.
     public let backend: FakeRuntimeBackend
+    /// A request the preview should send on appear so an in-flight operation is really in
+    /// flight; `nil` when the scenario starts idle.
+    public let initialRequest: RuntimeRequest?
 
-    public init(name: String, snapshot: EnvironmentsSnapshot, backend: FakeRuntimeBackend) {
+    public init(name: String, snapshot: EnvironmentsSnapshot, backend: FakeRuntimeBackend, initialRequest: RuntimeRequest? = nil) {
         self.name = name
         self.snapshot = snapshot
         self.backend = backend
+        self.initialRequest = initialRequest
     }
 }
 
-public enum PreviewScenarios {
+public enum PreviewScenarios: Sendable {
     public static let all: [@Sendable () async -> PreviewScenario] = [
         { await freshMac() }, { await oneRunningEnvironment() }, { await environmentNeedingRepair() },
         { await bothSlotsFull() }, { await operationInProgress() },
@@ -36,7 +40,7 @@ public enum PreviewScenarios {
             observed: ObservedTuple(hostMacOSVersion: SemanticVersion("26.5.2"), tartVersion: "2.36.0", guestMacOSBuild: "25F84", xcodeBuild: "17F113"),
             reconciledAt: date
         ))
-        await backend.script("stopEnvironment", .succeed(phases: [ProgressPhase(kind: .stoppingVM)]))
+        await backend.script("stopEnvironment", .succeed(phases: [ProgressPhase(kind: .stoppingVM)], status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, reconciledAt: date)))
         return PreviewScenario(name: "One running environment", snapshot: snapshot, backend: backend)
     }
 
@@ -65,16 +69,19 @@ public enum PreviewScenarios {
         return PreviewScenario(name: "Both slots full", snapshot: snapshot, backend: backend)
     }
 
-    /// A start operation that keeps reporting progress, for progress UI.
+    /// A start operation that keeps reporting progress, for progress UI. The status already
+    /// names an in-flight operation, and `initialRequest` is the start the preview should send so
+    /// the progress events actually flow.
     public static func operationInProgress() async -> PreviewScenario {
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: date)
         let snapshot = try! snapshot(for: [environment], provisioning: [environment.id: ProvisioningState(stage: .ready, status: .completed(Checkpoint(stage: .ready, reachedAt: date)))])
         let backend = FakeRuntimeBackend(delay: .milliseconds(800))
-        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, reconciledAt: date))
+        let inFlight = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: inFlight, reconciledAt: date))
         await backend.script("startEnvironment", .succeed(phases: [
             ProgressPhase(kind: .verifyingRuntime), ProgressPhase(kind: .startingVM), ProgressPhase(kind: .waitingForNetwork, fraction: 0.3), ProgressPhase(kind: .waitingForNetwork, fraction: 0.9),
         ], status: EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready, reconciledAt: date)))
-        return PreviewScenario(name: "Operation in progress", snapshot: snapshot, backend: backend)
+        return PreviewScenario(name: "Operation in progress", snapshot: snapshot, backend: backend, initialRequest: .startEnvironment(environment.id, StartOptions()))
     }
 
     private static let date = Date(timeIntervalSince1970: 1_800_000_000)

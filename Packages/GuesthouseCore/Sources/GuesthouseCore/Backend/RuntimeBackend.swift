@@ -1,3 +1,5 @@
+import Foundation
+
 /// The one seam between the GUI and whatever executes host operations.
 ///
 /// The real implementation is the XPC `RuntimeClient` (issue #19); the fake below drives
@@ -13,10 +15,31 @@ public protocol RuntimeBackend: Sendable {
 }
 
 /// Thrown by a backend when the connection dropped before the operation reported a result.
-public struct RuntimeConnectionInterrupted: Error, Hashable, Sendable {
+///
+/// Carries the same presentation contract as `GuesthouseError`: the user is told the outcome
+/// is unknown and offered an inspection, never a blind retry (MVP-PLAN.md §3).
+public struct RuntimeConnectionInterrupted: Error, Hashable, Sendable, LocalizedError {
     public let operationID: OperationID?
 
     public init(operationID: OperationID? = nil) {
         self.operationID = operationID
+    }
+
+    public var userMessage: String {
+        "Guesthouse lost contact with its runtime service. The operation may or may not have completed."
+    }
+
+    public var recoveryMessage: String {
+        "Check the environment before doing anything else."
+    }
+
+    public var recoveryActions: [RecoveryAction] { [.inspectState, .cancel] }
+
+    public var errorDescription: String? { userMessage }
+    public var recoverySuggestion: String? { recoveryMessage }
+
+    /// The equivalent structured error when the interrupted operation is known.
+    public var guesthouseError: GuesthouseError? {
+        operationID.map { .operationOutcomeUnknown($0) }
     }
 }
