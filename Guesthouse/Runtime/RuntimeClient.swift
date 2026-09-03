@@ -2,7 +2,9 @@ import Foundation
 import GuesthouseCore
 
 /// Identity for one consumer stream, so its termination can be matched to the operation.
-nonisolated final class ContinuationKey: Sendable {
+nonisolated final class ContinuationKey: Hashable, Sendable {
+    static func == (lhs: ContinuationKey, rhs: ContinuationKey) -> Bool { lhs === rhs }
+    func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
 }
 
 /// The GUI's `RuntimeBackend` over XPC.
@@ -19,35 +21,42 @@ actor RuntimeClient: RuntimeBackend {
     typealias Continuation = AsyncThrowingStream<RuntimeEvent, any Error>.Continuation
 
     private enum Inbound: Sendable {
-        case send(RuntimeRequest, Continuation, ObjectIdentifier)
-        case reply(Result<RuntimeEvent, any Error>, Continuation, ObjectIdentifier)
+        case send(RuntimeRequest, Continuation, ContinuationKey)
+        case reply(Result<RuntimeEvent, any Error>, Continuation, ContinuationKey)
         case incoming(RuntimeEvent)
         case interrupted
-        case consumerGone(ObjectIdentifier)
+        case consumerGone(ContinuationKey)
     }
 
     private let transport: any RuntimeTransport
     private var operations: [OperationID: Continuation] = [:]
     /// Events that arrived for an operation before its `accepted` reply registered a consumer.
     private var pendingEvents: [OperationID: [RuntimeEvent]] = [:]
-    /// Which accepted operation each consumer stream owns, keyed by the stream's identity.
-    private var consumers: [ObjectIdentifier: OperationID] = [:]
+    /// Which accepted operation each consumer stream owns. The key object itself is held, so
+    /// an address freed and reused by a later stream can never be mistaken for this one.
+    private var consumers: [ContinuationKey: OperationID] = [:]
     /// Consumers that went away before their `accepted` reply arrived; the operation is
     /// canceled the moment it is accepted.
-    private var abandonedBeforeAccept: Set<ObjectIdentifier> = []
-    /// Operations whose consumer left; their late events are dropped, not kept. Bounded.
-    private var retired: [OperationID] = []
+    private var abandonedBeforeAccept: Set<ContinuationKey> = []
+    /// Operations that have ended or whose consumer left: their late events are dropped, not
+    /// kept. Held for the session, since an id is small and a forgotten one would let late
+    /// guest output accumulate again.
+    private var retired: Set<OperationID> = []
     /// Keys whose request finished without acceptance (a query reply or a failure), so a
-    /// late `consumerGone` for them is ignored. Bounded like `retired`.
-    private var settled: Set<ObjectIdentifier> = []
-    static let retiredLimit = 256
+    /// late `consumerGone` for them is ignored.
+    private var settled: Set<ContinuationKey> = []
+    /// Buffered events per operation that has not been accepted yet, bounded so a runtime
+    /// that streams before its reply cannot grow this without limit.
+    static let pendingEventLimit = 256
     private let inbox: AsyncStream<Inbound>
     private let inboxContinuation: AsyncStream<Inbound>.Continuation
     private var started = false
 
-    /// Events buffered for one consumer before it reads them. Progress and log traffic beyond
-    /// this drops the oldest entries; the terminal event is always the newest, so it survives.
+    /// Progress and log events held for one consumer that is not reading. The client drops
+    /// its own excess rather than letting the stream evict, so control events (`accepted` and
+    /// the terminal event) are never lost and never reordered behind droppable traffic.
     static let consumerBufferLimit = 1_024
+    private var bufferedTraffic: [OperationID: Int] = [:]
 
     init(transport: any RuntimeTransport = XPCRuntimeTransport()) {
         self.transport = transport
@@ -64,19 +73,24 @@ actor RuntimeClient: RuntimeBackend {
     /// consumer stops reading an accepted operation, the client unregisters it and asks the
     /// runtime to cancel it, so a host mutation never keeps running unobserved.
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
-        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(Self.consumerBufferLimit)) { continuation in
+        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             let key = ContinuationKey()
+            // The termination closure holds the client, so a caller that keeps only the
+            // stream still has a producer: the client is released when the stream ends.
+            let owner = self
             continuation.onTermination = { [inboxContinuation] termination in
-                if case .cancelled = termination {
-                    inboxContinuation.yield(.consumerGone(ObjectIdentifier(key)))
+                withExtendedLifetime(owner) {
+                    if case .cancelled = termination {
+                        inboxContinuation.yield(.consumerGone(key))
+                    }
                 }
             }
-            inboxContinuation.yield(.send(request, continuation, ObjectIdentifier(key)))
+            inboxContinuation.yield(.send(request, continuation, key))
             Task { await self.startIfNeeded() }
         }
     }
 
-    private func start(_ request: RuntimeRequest, _ continuation: Continuation, key: ObjectIdentifier) {
+    private func start(_ request: RuntimeRequest, _ continuation: Continuation, key: ContinuationKey) {
         do {
             try transport.send(RuntimeRequestEnvelope(request: request)) { [inboxContinuation] result in
                 inboxContinuation.yield(.reply(result, continuation, key))
@@ -98,6 +112,10 @@ actor RuntimeClient: RuntimeBackend {
         )
         // The loop borrows `self` per item only, so a client nobody holds is released while
         // the loop waits, and `deinit` then ends the inbox.
+        // The loop borrows the client per item only, so a client with no live streams is
+        // released while the loop waits and `deinit` then ends the inbox. A live stream keeps
+        // the client alive on its own (see `send`), so an accepted operation always has a
+        // producer to finish it.
         let inbox = inbox
         Task { [weak self] in
             for await item in inbox {
@@ -117,7 +135,7 @@ actor RuntimeClient: RuntimeBackend {
         }
     }
 
-    private func handleReply(_ result: Result<RuntimeEvent, any Error>, for continuation: Continuation, key: ObjectIdentifier) {
+    private func handleReply(_ result: Result<RuntimeEvent, any Error>, for continuation: Continuation, key: ContinuationKey) {
         switch result {
         case .success(let event):
             continuation.yield(event)
@@ -150,23 +168,27 @@ actor RuntimeClient: RuntimeBackend {
         }
     }
 
-    private func settle(_ key: ObjectIdentifier) {
+    /// How many events are held for an operation that has not been accepted. Test seam.
+    func pendingEventCount(for id: OperationID) -> Int { pendingEvents[id]?.count ?? 0 }
+
+    private func settle(_ key: ContinuationKey) {
         settled.insert(key)
-        if settled.count > Self.retiredLimit { settled.removeAll() }
     }
 
     private func retire(_ id: OperationID) {
-        retired.append(id)
-        if retired.count > Self.retiredLimit { retired.removeFirst(retired.count - Self.retiredLimit) }
+        retired.insert(id)
+        pendingEvents.removeValue(forKey: id)
+        bufferedTraffic.removeValue(forKey: id)
     }
 
-    /// Progress and log traffic may be evicted from a full consumer buffer; the operation's
-    /// `accepted` event never is. If the buffer drops it, it is yielded again at once, so a
-    /// consumer always learns the operation id even behind a flood.
+    /// Droppable traffic. The stream itself buffers without limit, so the control events
+    /// (`accepted` and the terminal event) can never be evicted or reordered; the excess that
+    /// a consumer is not reading is dropped here instead, and counted.
     private func deliver(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
-        if case .dropped(.accepted) = continuation.yield(event) {
-            continuation.yield(.accepted(id))
-        }
+        let buffered = bufferedTraffic[id, default: 0]
+        guard buffered < Self.consumerBufferLimit else { return }
+        bufferedTraffic[id] = buffered + 1
+        continuation.yield(event)
     }
 
     private func route(_ event: RuntimeEvent) {
@@ -175,22 +197,33 @@ actor RuntimeClient: RuntimeBackend {
             if let continuation = operations[id] {
                 deliver(event, to: continuation, id: id)
             } else if !retired.contains(id) {
-                pendingEvents[id, default: []].append(event)
+                append(event, for: id)
             }
         case .completed(let id), .failed(let id, _):
             if let continuation = operations.removeValue(forKey: id) {
                 consumers = consumers.filter { $0.value != id }
                 continuation.yield(event)
                 continuation.finish()
+                // The operation is over: anything that arrives for it afterwards is dropped
+                // rather than buffered for an acceptance that will never come again.
+                retire(id)
             } else if !retired.contains(id) {
-                pendingEvents[id, default: []].append(event)
+                append(event, for: id)
             }
         case .status, .runtimeVersion, .accepted, .log(nil, _):
             for continuation in operations.values { continuation.yield(event) }
         }
     }
 
-    private func consumerGone(_ key: ObjectIdentifier) {
+    /// Buffers an event for an operation that has not been accepted yet, bounded.
+    private func append(_ event: RuntimeEvent, for id: OperationID) {
+        var events = pendingEvents[id] ?? []
+        guard events.count < Self.pendingEventLimit else { return }
+        events.append(event)
+        pendingEvents[id] = events
+    }
+
+    private func consumerGone(_ key: ContinuationKey) {
         guard let id = consumers.removeValue(forKey: key) else {
             // Already answered (a query or a failed send): nothing to cancel. Otherwise not
             // accepted yet: remembered until the reply says which it was.

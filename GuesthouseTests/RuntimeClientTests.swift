@@ -73,6 +73,29 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         return events
     }
 
+    @Test func theAcceptedEventArrivesBeforeAnyTraffic() async throws {
+        let flood = (0..<(RuntimeClient.consumerBufferLimit * 2)).map { index in RuntimeEvent.log(OperationID(), Redactor().redact(lines: ["line \(index)"])[0]) } + [.completed(OperationID())]
+        let transport = FakeTransport(.acceptThenStream(flood))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        try await Task.sleep(for: .milliseconds(200))
+        let events = try await collect(stream)
+        #expect(events.first?.caseName == "accepted", "the operation id is learned before any traffic")
+        #expect(events.last?.caseName == "completed")
+        #expect(events.count <= RuntimeClient.consumerBufferLimit + 2, "the excess was dropped, not buffered")
+    }
+
+    @Test func lateEventsForAFinishedOperationAreDropped() async throws {
+        let transport = FakeTransport(.acceptThenStream([.completed(OperationID())]))
+        let client = RuntimeClient(transport: transport)
+        let events = try await collect(client.send(.startEnvironment(EnvironmentID(), StartOptions())))
+        guard case .accepted(let id)? = events.first else { Issue.record("no accepted event"); return }
+        let incoming = transport.lock.withLock { transport.incoming }
+        for index in 0..<10 { incoming?(.log(id, Redactor().redact(lines: ["late \(index)"])[0])) }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await client.pendingEventCount(for: id) == 0, "a finished operation buffers nothing")
+    }
+
     @Test func runtimeVersionReplyBecomesOneEventAndFinishes() async throws {
         let info = RuntimeVersionInfo(serviceVersion: "1.0", serviceBuild: "7")
         let transport = FakeTransport(.reply(.runtimeVersion(info)))

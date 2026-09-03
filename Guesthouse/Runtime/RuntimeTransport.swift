@@ -52,7 +52,11 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
                 incomingMessageHandler: { [weak self] (message: XPCReceivedMessage) -> (any Encodable)? in
                     guard let self else { return nil }
                     if let event = try? message.decode(as: RuntimeEvent.self) {
-                        self.lock.withLock { self.incoming }?(event)
+                        // The generation is re-checked under the lock: an event decoded by a
+                        // session that has since been replaced is dropped, never delivered
+                        // into the operations of its replacement.
+                        let handler = self.lock.withLock { self.generation == mine ? self.incoming : nil }
+                        handler?(event)
                     } else {
                         // An undecodable push means a contract mismatch: treat it as a lost
                         // connection so waiting operations report an unknown outcome.
