@@ -26,6 +26,8 @@ public final class ProcessRun: @unchecked Sendable {
     private var standardInputFailed = false
     private var outputTruncated = false
     private var killTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var standardInputChannel: DispatchIO?
     /// Self-reference held from launch until `finish`, so the run outlives its callers.
     private var retainedWhileRunning: ProcessRun?
 
@@ -67,6 +69,27 @@ public final class ProcessRun: @unchecked Sendable {
         lock.withLock { standardInputFailed = true }
     }
 
+    /// The deadline task is canceled with the run, so a short command does not keep its
+    /// process graph alive until a long timeout would have fired.
+    func armTimeout(_ task: Task<Void, Never>) {
+        let alreadyFinished: Bool = lock.withLock {
+            timeoutTask = task
+            return exitResult != nil
+        }
+        if alreadyFinished { task.cancel() }
+    }
+
+    func attachStandardInput(_ channel: DispatchIO) {
+        lock.withLock { standardInputChannel = channel }
+    }
+
+    /// Stops a delivery nobody is reading: the channel's pending write ends with
+    /// `ECANCELED`, and the descriptor is closed, so no writer stays blocked forever.
+    func abandonStandardInput() {
+        let channel: DispatchIO? = lock.withLock { standardInputChannel }
+        channel?.close(flags: .stop)
+    }
+
     func markOutputTruncated() {
         lock.withLock { outputTruncated = true }
     }
@@ -82,15 +105,23 @@ public final class ProcessRun: @unchecked Sendable {
         guard started else { return }
         let pid = process.processIdentifier
         // Helpers the program forked are signaled too, so a timeout cannot leave a
-        // descendant modifying the host or the VM after the exit is reported.
-        let descendants = Self.descendants(of: pid)
+        // descendant modifying the host or the VM after the exit is reported. Each one is
+        // captured with its start time: a PID reused during the grace period is not ours.
+        var captured: [pid_t: Date] = [:]
+        for child in Self.descendants(of: pid) {
+            captured[child] = Self.startTime(of: child)
+        }
         process.terminate()
-        for child in descendants { kill(child, SIGTERM) }
+        for child in captured.keys { kill(child, SIGTERM) }
         let task = Task { [self] in
             try? await Task.sleep(for: gracePeriod)
             // Descendants are escalated on their own: a helper that ignored SIGTERM must not
-            // outlive a parent that exited on it.
-            for child in Set(descendants + Self.descendants(of: pid)) where kill(child, 0) == 0 {
+            // outlive a parent that exited on it. A captured PID is signaled only while it
+            // still belongs to the process seen before the grace period.
+            for (child, start) in captured where Self.startTime(of: child) == start {
+                kill(child, SIGKILL)
+            }
+            for child in Self.descendants(of: pid) where captured[child] == nil {
                 kill(child, SIGKILL)
             }
             if self.process.isRunning { kill(pid, SIGKILL) }
@@ -103,6 +134,8 @@ public final class ProcessRun: @unchecked Sendable {
         process.terminationHandler = nil
         let (waiters, exit): ([CheckedContinuation<ProcessExit, Never>], ProcessExit) = lock.withLock {
             killTask?.cancel()
+            timeoutTask?.cancel()
+            timeoutTask = nil
             let exit = ProcessExit(reason: reason, timedOut: timedOut, terminated: terminationRequested, standardInputFailed: standardInputFailed, outputTruncated: outputTruncated)
             exitResult = exit
             let pending = exitWaiters
@@ -112,6 +145,17 @@ public final class ProcessRun: @unchecked Sendable {
         }
         outputContinuation.finish()
         for waiter in waiters { waiter.resume(returning: exit) }
+    }
+
+    /// The kernel's start time for `pid`, the identity that tells a reused PID from the
+    /// process that was captured; `nil` when the process cannot be read.
+    static func startTime(of pid: pid_t) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&name, UInt32(name.count), &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid else { return nil }
+        let start = info.kp_proc.p_starttime
+        return Date(timeIntervalSince1970: TimeInterval(start.tv_sec) + TimeInterval(start.tv_usec) / 1_000_000)
     }
 
     /// Every live descendant of `pid`, deepest last. `proc_listchildpids` reports counts of
@@ -141,11 +185,8 @@ public actor ProcessRunner: ProcessRunning {
     /// that never reads cannot stall another run's delivery; a child that exits early
     /// produces an error instead of a signal.
     private static let standardInputQueue = DispatchQueue(label: "GuesthouseRuntimeKit.ProcessRunner.stdin", qos: .utility, attributes: .concurrent)
-    private static let ignoreBrokenPipes: Void = { signal(SIGPIPE, SIG_IGN) }()
 
-    public init() {
-        _ = Self.ignoreBrokenPipes
-    }
+    public init() {}
 
     public func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
         guard FileManager.default.isExecutableFile(atPath: invocation.executable.path) else {
@@ -191,7 +232,10 @@ public actor ProcessRunner: ProcessRunning {
             // Output still arriving after the drain wait expires is lost, and input still
             // undelivered after its wait is a failure; both are reported, never assumed fine.
             if readers.waitUntilDrained() == .timedOut { run.markOutputTruncated() }
-            if standardInputDelivery.wait(timeout: .now() + 5) == .timedOut { run.markStandardInputFailed() }
+            if standardInputDelivery.wait(timeout: .now() + 5) == .timedOut {
+                run.markStandardInputFailed()
+                run.abandonStandardInput()
+            }
             let reason: ProcessExit.Reason = process.terminationReason == .uncaughtSignal
                 ? .signal(process.terminationStatus)
                 : .status(process.terminationStatus)
@@ -212,21 +256,26 @@ public actor ProcessRunner: ProcessRunning {
         // reads it is still ended at the deadline.
         let grace = invocation.terminationGracePeriod
         let timeout = invocation.timeout
-        Task { [run] in
+        run.armTimeout(Task { [weak run] in
             try? await Task.sleep(for: timeout)
-            run.timeOut(gracePeriod: grace)
-        }
+            run?.timeOut(gracePeriod: grace)
+        })
 
         if case .data(let data) = invocation.standardInput, let stdin {
             let handle = stdin.fileHandleForWriting
-            Self.standardInputQueue.async { [run] in
-                defer { standardInputDelivery.leave() }
-                do {
-                    try handle.write(contentsOf: data)
-                    try handle.close()
-                } catch {
-                    run.markStandardInputFailed()
-                    try? handle.close()
+            // SIGPIPE is suppressed on this descriptor alone; the process-wide disposition,
+            // which children would inherit across exec, is left as it is.
+            _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+            let channel = DispatchIO(type: .stream, fileDescriptor: handle.fileDescriptor, queue: Self.standardInputQueue) { _ in
+                try? handle.close()
+            }
+            run.attachStandardInput(channel)
+            let bytes = data.withUnsafeBytes { DispatchData(bytes: $0) }
+            channel.write(offset: 0, data: bytes, queue: Self.standardInputQueue) { [run] done, _, error in
+                if error != 0 { run.markStandardInputFailed() }
+                if done {
+                    channel.close()
+                    standardInputDelivery.leave()
                 }
             }
         }
@@ -316,8 +365,12 @@ private final class OutputReaders: @unchecked Sendable {
             truncated()
             return
         }
-        if case .dropped = continuation.yield(kind == .stdout ? .stdout(redacted) : .stderr(redacted)) {
-            truncated()
+        // A line the stream did not take, because the consumer fell behind or stopped
+        // listening, is missing from what anyone awaiting the exit will have seen.
+        switch continuation.yield(kind == .stdout ? .stdout(redacted) : .stderr(redacted)) {
+        case .enqueued: break
+        case .dropped, .terminated: truncated()
+        @unknown default: truncated()
         }
     }
 }

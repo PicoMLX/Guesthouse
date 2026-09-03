@@ -122,6 +122,40 @@ import Testing
         #expect(result.lines == ["[redacted:device-code]"])
     }
 
+    @Test func aLongTokenFarFromTheLastSeparatorIsNotCut() {
+        var splitter = RecordSplitter()
+        var input = Data(repeating: UInt8(ascii: "a"), count: 60 << 10)
+        input.append(UInt8(ascii: " "))
+        let token = Data(repeating: UInt8(ascii: "t"), count: 6 << 10)
+        input.append(token)
+        input.append(UInt8(ascii: "\n"))
+        let records = splitter.consume(input)
+        #expect(records.count == 2)
+        #expect(records.first?.count == (60 << 10) + 1)
+        #expect(records.last == token, "the cut goes back to the separator, however far it is")
+    }
+
+    @Test func anUnfinishedScalarAtTheLimitWaitsForTheNextRead() {
+        var splitter = RecordSplitter()
+        var input = Data(repeating: UInt8(ascii: "a"), count: RecordSplitter.maximumRecordBytes - 1)
+        input.append(0xE2)
+        let first = splitter.consume(input)
+        #expect(first.count == 1)
+        #expect(first.first?.count == RecordSplitter.maximumRecordBytes - 1)
+        var rest = Data([0x82, 0xAC])
+        rest.append(UInt8(ascii: "\n"))
+        #expect(splitter.consume(rest) == [Data([0xE2, 0x82, 0xAC])])
+    }
+
+    @Test func outputAfterTheConsumerStopsListeningIsReportedTruncated() async throws {
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/yes"), arguments: [], timeout: .seconds(20)))
+        await Task { for await _ in run.output { break } }.value
+        try await Task.sleep(for: .milliseconds(100))
+        run.terminate(gracePeriod: .milliseconds(200))
+        let exit = await run.exit()
+        #expect(exit.outputTruncated, "lines the stream no longer accepted are missing from what the awaiting owner saw")
+    }
+
     @Test func launchErrorsAreActionable() {
         for error in [ProcessLaunchError.executableNotFound("tart"), .launchFailed(executable: "tart", reason: SanitizedText("EPERM"))] {
             #expect(!error.userMessage.isEmpty)
