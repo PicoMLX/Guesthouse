@@ -1,7 +1,15 @@
 // swift-tools-version: 6.3
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
+
+// Concurrency posture: this package keeps the nonisolated default. Its types are shared
+// between the sandboxed GUI (which opts into MainActor default isolation) and the
+// GuesthouseRuntime XPC service, so they must be Sendable and must not assume any actor.
+// MemberImportVisibility matches the app target so warnings are consistent across targets.
+let coreSwiftSettings: [SwiftSetting] = [
+    .defaultIsolation(nil),
+    .enableUpcomingFeature("MemberImportVisibility"),
+]
 
 let package = Package(
     name: "GuesthouseCore",
@@ -9,21 +17,20 @@ let package = Package(
         .macOS(.v26)
     ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "GuesthouseCore",
             targets: ["GuesthouseCore"]
         ),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "GuesthouseCore"
+            name: "GuesthouseCore",
+            swiftSettings: coreSwiftSettings
         ),
         .testTarget(
             name: "GuesthouseCoreTests",
-            dependencies: ["GuesthouseCore"]
+            dependencies: ["GuesthouseCore"],
+            swiftSettings: coreSwiftSettings
         ),
     ],
     swiftLanguageModes: [.v6]
