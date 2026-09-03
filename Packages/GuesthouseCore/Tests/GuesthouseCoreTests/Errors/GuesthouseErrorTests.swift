@@ -26,6 +26,9 @@ import Testing
         .toolMismatch(tool: "codex", found: nil, expected: "0.50.0"),
         .xcodeComponentsIncomplete(missing: ["iOS 26.4 Simulator"]),
         .vmSlotUnavailable(maximum: 2),
+        .environmentNotFound(EnvironmentID()),
+        .environmentAlreadyRunning(EnvironmentID()),
+        .operationInFlight(OperationID()),
         .operationOutcomeUnknown(OperationID()),
         .unauthorizedCaller,
         .protocolMismatch(client: 2, service: 1),
@@ -39,7 +42,7 @@ import Testing
         "runtimeVerificationFailed", "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
-        "canceled",
+        "canceled", "environmentNotFound", "environmentAlreadyRunning", "operationInFlight",
     ]
 
     @Test func samplesCoverEveryCase() {

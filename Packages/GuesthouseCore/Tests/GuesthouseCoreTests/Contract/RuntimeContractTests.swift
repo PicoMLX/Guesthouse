@@ -8,6 +8,7 @@ import Testing
 
     static let requests: [RuntimeRequest] = [
         .runtimeVersion,
+        .listEnvironments,
         .environmentStatus(environment),
         .startEnvironment(environment, StartOptions()),
         .startEnvironment(environment, StartOptions(console: .native, ipWait: .seconds(120))),
@@ -20,6 +21,7 @@ import Testing
 
     static let events: [RuntimeEvent] = [
         .runtimeVersion(RuntimeVersionInfo(serviceVersion: "0.1.0", serviceBuild: "12", tart: .init(version: "2.36.0", verified: true))),
+        .environments([DevelopmentEnvironment(name: "Dev", createdAt: Date(timeIntervalSince1970: 1_800_000_000))]),
         .accepted(operation),
         .progress(operation, ProgressPhase(kind: .waitingForNetwork, fraction: 0.5)),
         .progress(operation, ProgressPhase(kind: .copying, fraction: nil, cancelable: false)),

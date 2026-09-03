@@ -27,6 +27,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case toolMismatch(tool: SanitizedText, found: SanitizedText?, expected: SanitizedText)
     case xcodeComponentsIncomplete(missing: MissingComponents)
     case vmSlotUnavailable(maximum: Int)
+    case environmentNotFound(EnvironmentID)
+    case environmentAlreadyRunning(EnvironmentID)
+    case operationInFlight(OperationID)
     case operationOutcomeUnknown(OperationID)
     case unauthorizedCaller
     case protocolMismatch(client: Int, service: Int)
@@ -100,7 +103,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .guestNotReachable, .hostKeyChanged: .guest
         case .credentialsLocked, .loginExpired: .credentials
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
-        case .vmSlotUnavailable, .operationOutcomeUnknown: .workflow
+        case .vmSlotUnavailable, .environmentNotFound, .environmentAlreadyRunning, .operationInFlight, .operationOutcomeUnknown: .workflow
         case .unauthorizedCaller, .protocolMismatch, .invalidRequest: .ipc
         case .canceled: .user
         }
@@ -150,6 +153,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "Xcode is installed on the development Mac but is missing required components: \(Self.list(missing))."
         case .vmSlotUnavailable(let maximum):
             "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones. Export any unpublished work from one you no longer need, then delete it to make room."
+        case .environmentNotFound(let id):
+            "No development Mac with the identifier \(id) is registered on this Mac."
+        case .environmentAlreadyRunning(let id):
+            "The development Mac \(id.tartVMName) is already running."
+        case .operationInFlight:
+            "Another operation is still running. Guesthouse runs one lifecycle operation at a time."
         case .operationOutcomeUnknown:
             "Guesthouse lost contact with its runtime before this operation reported a result. The operation may or may not have completed."
         case .unauthorizedCaller:
@@ -186,6 +195,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .toolMismatch: [.repair(.tools), .openConsole, .exportWork, .cancel]
         case .xcodeComponentsIncomplete: [.repair(.xcodeComponents), .openConsole, .exportWork, .cancel]
         case .vmSlotUnavailable: [.exportWork, .deleteEnvironment, .cancel]
+        case .environmentNotFound: [.inspectState, .cancel]
+        case .environmentAlreadyRunning: [.inspectState, .cancel]
+        case .operationInFlight: [.inspectState, .cancel]
         case .operationOutcomeUnknown: [.inspectState, .cancel]
         case .unauthorizedCaller: [.cancel]
         case .protocolMismatch: [.reinstallApp, .cancel]
@@ -227,6 +239,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .toolMismatch: "toolMismatch"
         case .xcodeComponentsIncomplete: "xcodeComponentsIncomplete"
         case .vmSlotUnavailable: "vmSlotUnavailable"
+        case .environmentNotFound: "environmentNotFound"
+        case .environmentAlreadyRunning: "environmentAlreadyRunning"
+        case .operationInFlight: "operationInFlight"
         case .operationOutcomeUnknown: "operationOutcomeUnknown"
         case .unauthorizedCaller: "unauthorizedCaller"
         case .protocolMismatch: "protocolMismatch"
