@@ -44,8 +44,12 @@ public struct RuntimeStorage: Sendable {
 
     /// The default root for the service's user: `~/Library/Application Support/Guesthouse`.
     public static func defaultRoot() throws -> URL {
-        try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appending(path: "Guesthouse")
+        do {
+            return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                .appending(path: "Guesthouse")
+        } catch {
+            throw RuntimeStorageError.unwritable(path: "~/Library/Application Support", reason: SanitizedText(error.localizedDescription, limit: 120))
+        }
     }
 
     /// Prepares the whole tree. Every directory is created `0700` if missing, and every
@@ -129,21 +133,37 @@ public struct RuntimeStorage: Sendable {
     /// directory may carry. Any entries are removed, and the directory is refused if they
     /// cannot be.
     static func removeAccessControlEntries(_ url: URL) throws {
-        guard hasAccessControlEntries(url) else { return }
+        guard try hasAccessControlEntries(url) else { return }
         guard let empty = acl_init(0) else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "access control entries could not be removed")
         }
         defer { acl_free(UnsafeMutableRawPointer(empty)) }
-        guard acl_set_link_np(url.path, ACL_TYPE_EXTENDED, empty) == 0, !hasAccessControlEntries(url) else {
+        guard acl_set_link_np(url.path, ACL_TYPE_EXTENDED, empty) == 0, try !hasAccessControlEntries(url) else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "carries access control entries that could not be removed")
         }
     }
 
-    static func hasAccessControlEntries(_ url: URL) -> Bool {
-        guard let acl = acl_get_link_np(url.path, ACL_TYPE_EXTENDED) else { return false }
+    /// Whether the directory carries access control entries. "No ACL" (`ENOENT`) is the only
+    /// answer taken as none; any other failure to inspect is refused, never assumed clean.
+    static func hasAccessControlEntries(_ url: URL) throws -> Bool {
+        // `ENOENT` from the ACL call means "no ACL" only for a path that exists.
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
+        }
+        guard let acl = acl_get_link_np(url.path, ACL_TYPE_EXTENDED) else {
+            if errno == ENOENT { return false }
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "access control entries could not be inspected")
+        }
         defer { acl_free(UnsafeMutableRawPointer(acl)) }
         var entry: acl_entry_t?
-        return acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry) == 0
+        let status = acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry)
+        if status == 0 { return true }
+        // -1 with EINVAL means the list is empty; anything else is an inspection failure.
+        guard errno == EINVAL || errno == 0 else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "access control entries could not be inspected")
+        }
+        return false
     }
 }
 
