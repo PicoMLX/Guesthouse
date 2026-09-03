@@ -36,6 +36,11 @@ public enum ProvisioningEvent: Hashable, Sendable {
     case userRetried
     /// The user reports the out-of-app step is done.
     case userActionCompleted
+    /// The coordinator (or the user through a recovery action) asks for the actual state to be
+    /// inspected from any status where the reducer cannot know what happened: a stale or
+    /// mismatched callback, a lost effect, a relaunch. Illegal only while already inspecting or
+    /// while the outcome is being reconciled.
+    case inspectionRequested
 
     public var caseName: String {
         switch self {
@@ -55,6 +60,7 @@ public enum ProvisioningEvent: Hashable, Sendable {
         case .cleanupFailed: "cleanupFailed"
         case .userRetried: "userRetried"
         case .userActionCompleted: "userActionCompleted"
+        case .inspectionRequested: "inspectionRequested"
         }
     }
 }
@@ -63,6 +69,9 @@ public enum ProvisioningEvent: Hashable, Sendable {
 public enum ReconciledOutcome: Hashable, Sendable {
     /// The stage's checkpoint was in fact reached. It still has to be persisted.
     case completed(Checkpoint)
+    /// The runtime still has the operation in flight (the connection came back while it was
+    /// running). Monitoring resumes under the same identity; nothing is restarted.
+    case stillRunning(OperationID)
     /// Durable partial work exists; the next start resumes from it.
     case resumable(ResumeEvidence)
     /// The attempt failed and left state that must be removed before starting again.
@@ -182,7 +191,13 @@ public enum ProvisioningReducer: Sendable {
             guard pending == persisted else { throw .checkpointMismatch(expected: pending, actual: persisted) }
             return at(.completed(persisted))
 
-        case (.persistingCheckpoint, .checkpointPersistenceFailed):
+        case (.persistingCheckpoint, .checkpointPersistenceFailed(let error)):
+            // Reality is ahead of the journal. The failure is shown with its recovery actions;
+            // the user's retry inspects, finds the checkpoint reached, and persists it again.
+            return at(.recoverableFailure(error))
+
+        case (.persistingCheckpoint, .connectionInterrupted), (.persistingCheckpoint, .userRetried):
+            // The write's result is unknown; the journal is inspected before anything else.
             return at(.awaitingInspection, [.inspectActualState(stage)])
 
         case (.inProgress(let current), .operationFailed(let id, let error)):
@@ -201,6 +216,10 @@ public enum ProvisioningReducer: Sendable {
             try requireSame(current, id)
             return at(.canceled)
 
+        case (.needsUserAction(let current, _), .connectionInterrupted(let id)):
+            try requireSame(current, id)
+            return at(.unknownOutcome(id), [.inspectActualState(stage)])
+
         case (.inProgress(let current), .connectionInterrupted(let id)):
             try requireSame(current, id)
             return at(.unknownOutcome(id), [.inspectActualState(stage)])
@@ -209,8 +228,23 @@ public enum ProvisioningReducer: Sendable {
             try requireSame(current, id)
             return at(.unknownOutcome(id), [.inspectActualState(stage)])
 
-        case (.unknownOutcome, .userRetried), (.awaitingInspection, .userRetried):
+        case (.unknownOutcome, .userRetried):
             return at(state.status, [.inspectActualState(stage)])
+
+        case (.awaitingInspection, .userRetried):
+            // One inspection at a time: a second request while one is pending issues nothing,
+            // so a stale response can never be taken for a newer inspection.
+            return at(state.status)
+
+        case (.cleanupRequired, .connectionInterrupted), (.cleanupRequired, .userRetried):
+            // The cleanup's result is unknown; inspect rather than clean up blindly again.
+            return at(.awaitingInspection, [.inspectActualState(stage)])
+
+        case (.awaitingInspection, .inspectionRequested), (.unknownOutcome, .inspectionRequested):
+            throw .illegalTransition(status: state.status.caseName, event: event.caseName)
+
+        case (_, .inspectionRequested):
+            return at(.awaitingInspection, [.inspectActualState(stage)])
 
         case (.recoverableFailure, .userRetried), (.canceled, .userRetried):
             return at(.awaitingInspection, [.inspectActualState(stage)])
@@ -223,6 +257,8 @@ public enum ProvisioningReducer: Sendable {
             case .completed(let checkpoint):
                 guard checkpoint.stage == stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
                 return at(.persistingCheckpoint(checkpoint), [.persistCheckpoint(checkpoint)])
+            case .stillRunning(let id):
+                return at(.inProgress(id))
             case .resumable(let evidence):
                 return at(.resumable(evidence))
             case .failedNeedsCleanup(let error):
