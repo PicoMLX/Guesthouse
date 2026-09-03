@@ -79,6 +79,8 @@ public enum TartListParser {
             guard let source = TartVMInfo.Source(rawValue: entry.Source.lowercased()) else { throw .unknownValue(field: "Source", value: entry.Source) }
             guard !entry.Name.isEmpty else { throw .unexpectedShape("Name") }
             guard let state = TartVMInfo.State(rawValue: entry.State) else { throw .unknownValue(field: "State", value: entry.State) }
+            guard entry.Disk >= 0 else { throw .unknownValue(field: "Disk", value: String(entry.Disk)) }
+            guard entry.Size >= 0 else { throw .unknownValue(field: "Size", value: String(entry.Size)) }
             let accessed = entry.Accessed.flatMap { try? Date($0, strategy: .iso8601) }
             result.append(TartVMInfo(source: source, name: entry.Name, diskGigabytes: entry.Disk, sizeGigabytes: entry.Size, accessed: accessed, running: entry.Running, state: state))
         }
