@@ -1,10 +1,13 @@
+import Darwin
 import Foundation
 import GuesthouseCore
 
-/// Start, stop, and status for the app-managed VMs, with one lifecycle operation in flight at
-/// a time (MVP-PLAN.md §10, Phase 1). Every step is journaled before it is reported, every
-/// running VM process is supervised with a held transaction, and a start is refused whenever
-/// ownership of the VM is uncertain (§4).
+/// Start, stop, and status for the app-managed VMs, with one lifecycle operation and one
+/// running VM at a time (MVP-PLAN.md §4, §6, §10 Phase 1). Every step is journaled before it
+/// is reported, every running VM process is supervised with a held transaction, an
+/// interrupted operation found in the journal at launch blocks its environment until the
+/// actual state settles it, and nothing is started or stopped while ownership of the VM is
+/// uncertain (§4).
 public actor EnvironmentLifecycle {
     public typealias EventSink = @Sendable (RuntimeEvent) -> Void
 
@@ -21,22 +24,32 @@ public actor EnvironmentLifecycle {
     }
 
     private struct Supervised {
-        let run: ProcessRun
+        /// `nil` for a survivor adopted after a relaunch; its exit is polled instead.
+        let run: ProcessRun?
+        let pid: Int32
         let token: OperationSupervisor.Token
         let identity: ProcessIdentity
         var address: GuestIPAddress?
+
+        var isAlive: Bool {
+            if let run { return run.processIdentifier > 0 }
+            return kill(pid, 0) == 0
+        }
     }
 
     private struct InFlight {
         let id: OperationID
         let environment: EnvironmentID
-        let task: Task<Void, Never>
+        /// `nil` while the slot is reserved but the operation has not been journaled yet.
+        var task: Task<Void, Never>?
     }
 
     private let deps: Dependencies
     private var snapshot: EnvironmentsSnapshot = .empty
     private var supervised: [EnvironmentID: Supervised] = [:]
     private var verdicts: [EnvironmentID: OwnershipVerdict] = [:]
+    /// Journal records an interrupted service left in flight, until the actual state settles them.
+    private var unresolved: [EnvironmentID: JournalRecord] = [:]
     private var inFlight: InFlight?
     private var reconciledAt: Date?
 
@@ -46,11 +59,15 @@ public actor EnvironmentLifecycle {
 
     // MARK: - Launch
 
-    /// Loads state, adopts app-managed VMs found in the store, and reconciles recorded
-    /// processes. Call once when the service starts.
+    /// Loads state, adopts app-managed VMs found in the store, replays the journal, and
+    /// reconciles recorded processes. Call once when the service starts.
     public func prepare() async throws {
         snapshot = try await deps.store.loadSnapshot()
         try await adoptExistingVMs()
+        let replay = try await deps.store.replay()
+        for record in replay.inFlight.values {
+            unresolved[record.environmentID] = record
+        }
         await reconcile()
     }
 
@@ -75,15 +92,54 @@ public actor EnvironmentLifecycle {
         if changed { try await deps.store.saveSnapshot(snapshot) }
     }
 
-    /// Re-derives ownership of every recorded process from the live process table and the
-    /// VM inventory. An `uncertain` verdict blocks `start` until a repair clears it.
+    /// Re-derives ownership of every environment from the live process table and the VM
+    /// inventory. A confirmed exit forgets the identity and settles an interrupted operation;
+    /// an owned survivor is adopted back under supervision; an `uncertain` verdict blocks
+    /// start and stop until a repair clears it. An unreadable inventory makes everything
+    /// uncertain rather than assumed absent.
     public func reconcile() async {
-        let running = Set((try? await deps.backend.list())?.filter(\.running).map(\.name) ?? [])
+        let inventory = try? await deps.backend.list()
+        let running = Set(inventory?.filter(\.running).map(\.name) ?? [])
         let byEnvironment = Dictionary(uniqueKeysWithValues: snapshot.environments.map { ($0.id, $0) })
-        verdicts = await deps.supervisor.reconcile { id in
-            byEnvironment[id].map { running.contains($0.tartVMName) }
+        var verdicts = await deps.supervisor.reconcile(environments: Array(byEnvironment.keys)) { id in
+            guard inventory != nil else { return .unknown }
+            guard let environment = byEnvironment[id] else { return .absent }
+            return running.contains(environment.tartVMName) ? .present : .absent
+        }
+        for (id, verdict) in verdicts {
+            switch verdict {
+            case .exited:
+                try? await deps.supervisor.forget(id)
+                verdicts[id] = nil
+                await settleInterruptedOperation(id)
+            case .ownedRunning(let live):
+                await adoptSurvivor(id, live: live)
+                await settleInterruptedOperation(id)
+            case .uncertain:
+                break
+            }
+        }
+        self.verdicts = verdicts
+        if inventory != nil {
+            for id in unresolved.keys where verdicts[id] == nil && supervised[id] == nil {
+                await settleInterruptedOperation(id)
+            }
         }
         reconciledAt = Date()
+    }
+
+    private func settleInterruptedOperation(_ id: EnvironmentID) async {
+        guard let record = unresolved.removeValue(forKey: id) else { return }
+        try? await deps.store.append(JournalRecord(id: record.id, environmentID: id, operation: record.operation, timestamp: Date(), outcome: .reconciled))
+    }
+
+    /// A process proven ours after a relaunch is supervised again: a transaction is held and
+    /// its exit is watched, so the service does not idle out with the VM running.
+    private func adoptSurvivor(_ id: EnvironmentID, live: LiveProcess) async {
+        guard supervised[id] == nil, let identity = await deps.supervisor.identity(for: id) else { return }
+        let token = deps.supervisor.hold("vm \(identity.vmName) (adopted)")
+        supervised[id] = Supervised(run: nil, pid: live.pid, token: token, identity: identity, address: nil)
+        watchExit(pid: live.pid, environment: id)
     }
 
     // MARK: - Queries
@@ -98,20 +154,29 @@ public actor EnvironmentLifecycle {
         }
         let inventory = try await deps.backend.list()
         let vm: EnvironmentStatus.VMState
-        if let live = supervised[id], live.run.processIdentifier > 0, verdicts[id] == nil || isOwned(verdicts[id]) {
+        var readiness: EnvironmentStatus.Readiness
+        if let live = supervised[id], live.isAlive {
             vm = .running
+            // Running without a confirmed address is not ready: nothing guest-dependent works.
+            readiness = live.address != nil ? .ready : .needsAttention(.guestNotReachable(id))
         } else if case .uncertain(let reason)? = verdicts[id] {
-            vm = .uncertain(reason: String(describing: reason))
+            vm = .uncertain(reason: Self.describe(reason))
+            readiness = .needsAttention(.vmOwnershipUncertain(id))
         } else if let info = inventory.first(where: { $0.name == environment.tartVMName }) {
-            vm = info.running ? .running : .stopped
+            if info.running {
+                // Running according to Tart with no supervised process and no owned verdict.
+                vm = .uncertain(reason: "running without a recorded owner")
+                readiness = .needsAttention(.vmOwnershipUncertain(id))
+            } else {
+                vm = .stopped
+                readiness = .ready
+            }
         } else {
             vm = .notFound
+            readiness = .needsAttention(.environmentNotFound(id))
         }
-        let readiness: EnvironmentStatus.Readiness
-        switch vm {
-        case .uncertain: readiness = .needsAttention(.operationOutcomeUnknown(supervisedOperation(for: id) ?? OperationID()))
-        case .notFound: readiness = .needsAttention(.environmentNotFound(id))
-        case .running, .stopped: readiness = .ready
+        if let record = unresolved[id] {
+            readiness = .needsAttention(.operationOutcomeUnknown(record.id))
         }
         return EnvironmentStatus(
             environmentID: id,
@@ -130,32 +195,57 @@ public actor EnvironmentLifecycle {
     /// result arrive through `events`.
     public func start(_ id: EnvironmentID, options: StartOptions, events: @escaping EventSink) async throws -> OperationID {
         guard let environment = snapshot.environments.first(where: { $0.id == id }) else { throw GuesthouseError.environmentNotFound(id) }
-        if let inFlight { throw GuesthouseError.operationInFlight(inFlight.id) }
-        if case .uncertain? = verdicts[id] { throw GuesthouseError.operationOutcomeUnknown(supervisedOperation(for: id) ?? OperationID()) }
+        try refuseIfBlocked(id)
+        guard snapshot.slots.state(of: id) == .active else { throw GuesthouseError.environmentPreserved(id) }
         if supervised[id] != nil { throw GuesthouseError.environmentAlreadyRunning(id) }
-        if let info = try await deps.backend.list().first(where: { $0.name == environment.tartVMName }), info.running {
-            throw GuesthouseError.environmentAlreadyRunning(id)
-        }
+        if let other = supervised.keys.first(where: { $0 != id }) { throw GuesthouseError.anotherEnvironmentRunning(other) }
 
-        let operation = try await deps.store.begin(.startEnvironment, for: id)
+        // The slot is taken before the first suspension, so two simultaneous starts cannot
+        // both pass the checks and launch two instances against one disk.
+        let operation = OperationID()
+        inFlight = InFlight(id: operation, environment: id, task: nil)
+        do {
+            let inventory = try await deps.backend.list()
+            if let info = inventory.first(where: { $0.name == environment.tartVMName }), info.running {
+                throw GuesthouseError.environmentAlreadyRunning(id)
+            }
+            let runningNames = Set(inventory.filter(\.running).map(\.name))
+            if let other = snapshot.environments.first(where: { $0.id != id && runningNames.contains($0.tartVMName) }) {
+                throw GuesthouseError.anotherEnvironmentRunning(other.id)
+            }
+            _ = try await deps.store.begin(.startEnvironment, for: id, id: operation)
+        } catch {
+            inFlight = nil
+            throw error
+        }
         let token = deps.supervisor.hold("startEnvironment \(operation)")
-        let task = Task { [weak self] () async -> Void in
+        inFlight?.task = Task { [weak self] () async -> Void in
             guard let self else { return }
             await self.performStart(operation, environment: environment, options: options, token: token, events: events)
         }
-        inFlight = InFlight(id: operation, environment: id, task: task)
         return operation
     }
 
     private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, token: OperationSupervisor.Token, events: EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
+        let arguments = TartBackend.runArguments(vmName: environment.tartVMName, console: options.console)
         do {
             events(.progress(operation, ProgressPhase(kind: .startingVM, cancelable: false)))
             let run = try await deps.backend.run(vmName: environment.tartVMName, console: options.console)
-            let identity = try await deps.supervisor.recordLaunch(pid: run.processIdentifier, executable: deps.backend.bundle.executable, arguments: ["run", environment.tartVMName], vmName: environment.tartVMName, environment: id)
+            drainOutput(of: run)
+            let identity: ProcessIdentity
+            do {
+                identity = try await deps.supervisor.recordLaunch(pid: run.processIdentifier, executable: deps.backend.bundle.executable, arguments: arguments, vmName: environment.tartVMName, environment: id)
+            } catch {
+                // Without a durable identity the VM would be an orphan after a relaunch: it is
+                // ended before the failure is reported.
+                run.terminate(gracePeriod: .seconds(30))
+                _ = await run.exit()
+                throw GuesthouseError.runtimeStateUnavailable(reason: SanitizedText(Self.describe(error), limit: 200))
+            }
             let vmToken = deps.supervisor.hold("vm \(environment.tartVMName)")
-            supervised[id] = Supervised(run: run, token: vmToken, identity: identity, address: nil)
+            supervised[id] = Supervised(run: run, pid: run.processIdentifier, token: vmToken, identity: identity, address: nil)
             verdicts[id] = nil
             try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .startEnvironment, timestamp: Date(), outcome: .checkpoint(.runtimeReady)))
             watchExit(of: run, environment: id)
@@ -164,7 +254,8 @@ public actor EnvironmentLifecycle {
             let address = try await deps.backend.ip(vmName: environment.tartVMName, wait: options.ipWait)
             supervised[id]?.address = address
             try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .startEnvironment, timestamp: Date(), outcome: .completed))
-            events(.status(try await status(of: id)))
+            // The operation is complete whatever a best-effort status refresh does now.
+            if let status = try? await status(of: id) { events(.status(status)) }
             events(.completed(operation))
         } catch is CancellationError {
             await fail(operation, kind: .startEnvironment, environment: id, with: .canceled, events: events)
@@ -173,22 +264,31 @@ public actor EnvironmentLifecycle {
         } catch let error as TartInvocationError {
             await fail(operation, kind: .startEnvironment, environment: id, with: Self.map(error, environment: id), events: events)
         } catch {
-            await fail(operation, kind: .startEnvironment, environment: id, with: .guestNotReachable(id), events: events)
+            await fail(operation, kind: .startEnvironment, environment: id, with: .runtimeStateUnavailable(reason: SanitizedText(Self.describe(error), limit: 200)), events: events)
         }
     }
 
-    /// Graceful stop through Tart, then a warned force-stop only when the request says so.
+    /// Graceful stop through Tart, or the explicitly warned force-stop. Force-stopping needs
+    /// ownership evidence: a supervised process or an owned reconciliation verdict.
     public func stop(_ id: EnvironmentID, mode: StopMode, events: @escaping EventSink) async throws -> OperationID {
         guard let environment = snapshot.environments.first(where: { $0.id == id }) else { throw GuesthouseError.environmentNotFound(id) }
-        if let inFlight { throw GuesthouseError.operationInFlight(inFlight.id) }
-        if case .uncertain? = verdicts[id] { throw GuesthouseError.operationOutcomeUnknown(supervisedOperation(for: id) ?? OperationID()) }
-        let operation = try await deps.store.begin(.stopEnvironment, for: id)
+        try refuseIfBlocked(id)
+        if mode == .force, supervised[id] == nil, !isOwned(verdicts[id]) {
+            throw GuesthouseError.vmOwnershipUncertain(id)
+        }
+        let operation = OperationID()
+        inFlight = InFlight(id: operation, environment: id, task: nil)
+        do {
+            _ = try await deps.store.begin(.stopEnvironment, for: id, id: operation)
+        } catch {
+            inFlight = nil
+            throw error
+        }
         let token = deps.supervisor.hold("stopEnvironment \(operation)")
-        let task = Task { [weak self] () async -> Void in
+        inFlight?.task = Task { [weak self] () async -> Void in
             guard let self else { return }
             await self.performStop(operation, environment: environment, mode: mode, token: token, events: events)
         }
-        inFlight = InFlight(id: operation, environment: id, task: task)
         return operation
     }
 
@@ -199,22 +299,26 @@ public actor EnvironmentLifecycle {
             switch mode {
             case .graceful(let deadline):
                 events(.progress(operation, ProgressPhase(kind: .stoppingVM, cancelable: false)))
-                try await deps.backend.stop(vmName: environment.tartVMName, deadline: deadline)
-                if let live = supervised[id] {
-                    _ = await live.run.exit()
+                do {
+                    try await deps.backend.stop(vmName: environment.tartVMName, deadline: deadline)
+                } catch TartInvocationError.timedOut {
+                    throw GuesthouseError.gracefulStopTimedOut(id)
+                }
+                if let live = supervised[id], let run = live.run {
+                    _ = await run.exit()
                 }
             case .force:
                 events(.progress(operation, ProgressPhase(kind: .forceStoppingVM, cancelable: false)))
-                if let live = supervised[id] {
-                    live.run.terminate(gracePeriod: .seconds(5))
-                    _ = await live.run.exit()
+                if let live = supervised[id], let run = live.run {
+                    run.terminate(gracePeriod: .seconds(5))
+                    _ = await run.exit()
                 } else {
-                    try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(1))
+                    try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(10))
                 }
             }
             await release(id)
             try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .stopEnvironment, timestamp: Date(), outcome: .completed))
-            events(.status(try await status(of: id)))
+            if let status = try? await status(of: id) { events(.status(status)) }
             events(.completed(operation))
         } catch is CancellationError {
             await fail(operation, kind: .stopEnvironment, environment: id, with: .canceled, events: events)
@@ -223,7 +327,7 @@ public actor EnvironmentLifecycle {
         } catch let error as TartInvocationError {
             await fail(operation, kind: .stopEnvironment, environment: id, with: Self.map(error, environment: id), events: events)
         } catch {
-            await fail(operation, kind: .stopEnvironment, environment: id, with: .guestNotReachable(id), events: events)
+            await fail(operation, kind: .stopEnvironment, environment: id, with: .runtimeStateUnavailable(reason: SanitizedText(Self.describe(error), limit: 200)), events: events)
         }
     }
 
@@ -231,20 +335,45 @@ public actor EnvironmentLifecycle {
     /// still run to their next checkpoint before the cancellation takes effect.
     public func cancel(_ operation: OperationID) {
         guard let inFlight, inFlight.id == operation else { return }
-        inFlight.task.cancel()
+        inFlight.task?.cancel()
     }
 
     // MARK: - Internals
 
-    private func watchExit(of run: ProcessRun, environment: EnvironmentID) {
-        Task { [weak self] in
-            _ = await run.exit()
-            await self?.processExited(environment, run: run)
+    /// The checks every operation shares: one at a time, no interrupted operation left
+    /// unresolved, and no uncertain ownership.
+    private func refuseIfBlocked(_ id: EnvironmentID) throws {
+        if let inFlight { throw GuesthouseError.operationInFlight(inFlight.id) }
+        if let record = unresolved[id] { throw GuesthouseError.operationOutcomeUnknown(record.id) }
+        if case .uncertain? = verdicts[id] { throw GuesthouseError.vmOwnershipUncertain(id) }
+    }
+
+    /// Tart's output over a VM's lifetime is already redacted and is not kept: the stream is
+    /// consumed so the bounded buffer never fills.
+    private func drainOutput(of run: ProcessRun) {
+        Task.detached {
+            for await _ in run.output {}
         }
     }
 
-    private func processExited(_ id: EnvironmentID, run: ProcessRun) async {
-        guard let live = supervised[id], live.run === run else { return }
+    private func watchExit(of run: ProcessRun, environment: EnvironmentID) {
+        Task { [weak self] in
+            _ = await run.exit()
+            await self?.processExited(environment, pid: run.processIdentifier)
+        }
+    }
+
+    private func watchExit(pid: Int32, environment: EnvironmentID) {
+        Task { [weak self] in
+            while kill(pid, 0) == 0 {
+                try? await Task.sleep(for: .seconds(2))
+            }
+            await self?.processExited(environment, pid: pid)
+        }
+    }
+
+    private func processExited(_ id: EnvironmentID, pid: Int32) async {
+        guard let live = supervised[id], live.pid == pid else { return }
         await release(id)
     }
 
@@ -268,13 +397,31 @@ public actor EnvironmentLifecycle {
         return false
     }
 
-    private func supervisedOperation(for id: EnvironmentID) -> OperationID? {
-        inFlight?.environment == id ? inFlight?.id : nil
+    static func describe(_ reason: OwnershipVerdict.UncertaintyReason) -> String {
+        switch reason {
+        case .pidReusedByAnotherProcess: "the recorded process id now belongs to another process"
+        case .executableMismatch: "the recorded process runs a different program"
+        case .argumentsMismatch: "the recorded process runs with different arguments"
+        case .lockHeldWithoutProcess: "the virtual machine is locked but no recorded process holds it"
+        case .multipleCandidates: "more than one process matches the record"
+        case .unrecordedLaunch: "the virtual machine is running but no launch was recorded"
+        case .inventoryUnavailable: "the virtual machine inventory could not be read"
+        }
     }
 
-    static func map(_ error: TartInvocationError, environment: EnvironmentID) -> GuesthouseError {
+    /// Error text safe for a user-facing reason: the error's case name only.
+    static func describe(_ error: any Error) -> String {
+        if let error = error as? SupervisionError { return error.userMessage }
+        if let error = error as? ProcessIdentityStoreError { return error.userMessage }
+        if let error = error as? StateStoreError { return error.userMessage }
+        let text = String(describing: error)
+        return String(text.prefix { $0 != "(" && $0 != ":" })
+    }
+
+    public static func map(_ error: TartInvocationError, environment: EnvironmentID) -> GuesthouseError {
         switch error {
-        case .unparseableOutput: .toolMismatch(tool: "tart", found: nil, expected: TartPin.releaseTag)
+        case .unparseableOutput: .runtimeIncompatible(found: nil, required: TartPin.releaseTag)
+        case .timedOut: .guestNotReachable(environment)
         case .failed(let failure):
             switch failure {
             case .vmNotFound: .environmentNotFound(environment)

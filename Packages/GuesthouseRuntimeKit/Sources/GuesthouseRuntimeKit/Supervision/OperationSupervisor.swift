@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GuesthouseCore
 import Synchronization
@@ -66,7 +67,10 @@ public final class OperationSupervisor: Sendable {
         guard let live = enumerator.live(pid: pid) else {
             throw SupervisionError.processNotObservable(pid: pid)
         }
-        guard live.executablePath == executable.path, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
+        // The kernel reports the real path (`/private/var/…`, not `/var/…`); the recorded path
+        // is the same form, so the reconciler compares like with like.
+        let resolvedExecutable = Self.realPath(of: executable)
+        guard live.executablePath == resolvedExecutable, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
             throw SupervisionError.processMismatch(pid: pid)
         }
         // The process must name the VM the caller says it launched, and that VM must be the
@@ -81,7 +85,7 @@ public final class OperationSupervisor: Sendable {
         let identity = ProcessIdentity(
             pid: pid,
             startTime: live.startTime,
-            executablePath: executable.path,
+            executablePath: resolvedExecutable,
             argumentsDigest: LiveProcessEnumerator.digest(of: arguments),
             vmName: vmName,
             environmentID: environment,
@@ -89,6 +93,11 @@ public final class OperationSupervisor: Sendable {
         )
         try await store.record(identity)
         return identity
+    }
+
+    /// The recorded identity for an environment, if any.
+    public func identity(for environment: EnvironmentID) async -> ProcessIdentity? {
+        await store.identity(for: environment)
     }
 
     /// Forgets a process that is confirmed gone.
@@ -185,6 +194,16 @@ public final class OperationSupervisor: Sendable {
     /// recorded identity against a supplied observation.
     public static func verdict(recorded: ProcessIdentity, observed: [LiveProcess], vmLockPresent: Bool) -> OwnershipVerdict {
         ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: vmLockPresent)
+    }
+}
+
+extension OperationSupervisor {
+    /// `realpath(3)`: every symbolic link resolved, including the `/var` → `/private/var`
+    /// prefix that Foundation's URL resolution keeps.
+    static func realPath(of url: URL) -> String {
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard let resolved = realpath(url.path, &buffer) else { return url.path }
+        return String(cString: resolved)
     }
 }
 

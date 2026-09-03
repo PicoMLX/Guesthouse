@@ -15,6 +15,8 @@ import Testing
         .runtimeStateUnavailable(reason: "the operation journal could not be opened"),
         .runtimeStorageUnavailable(reason: "the storage folder is full", problem: .unwritable),
         .runtimeStorageUnavailable(reason: "a containing folder can be changed by other users", problem: .unsafeLocation),
+        .runtimeStarting,
+        .runtimeStateUnavailable(reason: "disk full"),
         .runtimeVerificationFailed(check: .signature),
         .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
         .guestNotReachable(EnvironmentID()),
@@ -34,6 +36,7 @@ import Testing
         .protocolMismatch(client: 2, service: 1),
         .invalidRequest(.pathEscapesAllowedRoot),
         .canceled,
+        .anotherEnvironmentRunning(EnvironmentID()), .environmentPreserved(EnvironmentID()), .vmOwnershipUncertain(EnvironmentID()), .gracefulStopTimedOut(EnvironmentID()),
     ]
 
     static let expectedCaseNames: Set<String> = [
@@ -43,6 +46,7 @@ import Testing
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
         "canceled", "environmentNotFound", "environmentAlreadyRunning", "operationInFlight",
+        "runtimeStarting", "runtimeStateUnavailable", "anotherEnvironmentRunning", "environmentPreserved", "vmOwnershipUncertain", "gracefulStopTimedOut",
     ]
 
     @Test func samplesCoverEveryCase() {

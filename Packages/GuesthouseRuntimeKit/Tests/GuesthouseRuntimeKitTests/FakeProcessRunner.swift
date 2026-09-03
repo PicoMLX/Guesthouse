@@ -44,7 +44,12 @@ actor FakeProcessRunner: ProcessRunning {
         invocations.append(invocation)
         let reply = invocation.arguments.first.flatMap { script[$0] } ?? fixed
         if reply.hangs {
-            let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["600"], timeout: .seconds(600)))
+            // A real process, so the supervisor can record a pid and a start time. When the
+            // invocation's executable exists (a fixture bundle whose binary is a copy of
+            // `yes`), it runs with the invocation's own arguments so identity checks hold.
+            let executable = FileManager.default.isExecutableFile(atPath: invocation.executable.path) ? invocation.executable : URL(fileURLWithPath: "/bin/sleep")
+            let arguments = executable == invocation.executable ? invocation.arguments : ["600"]
+            let run = try await ProcessRunner().run(ProcessInvocation(executable: executable, arguments: arguments, timeout: min(invocation.timeout, .seconds(600)), terminationGracePeriod: .milliseconds(500), maximumOutputBytes: 64 << 10))
             hanging.append(run)
             return run
         }

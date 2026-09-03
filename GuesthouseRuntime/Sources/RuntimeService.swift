@@ -59,8 +59,17 @@ final class RuntimeService: Sendable {
     /// attempt keeps running; this only stops a wedged host from holding the session's message
     /// queue. `version()` carries its own 15-second timeout, so this is the backstop.
     static let rediscoveryWait: DispatchTimeInterval = .seconds(25)
+
+
+    /// Where the lifecycle is: initializing, ready, or failed for a reason of its own that is
+    /// never confused with the runtime's compatibility.
+    enum LifecycleState: Sendable {
+        case initializing
+        case ready(EnvironmentLifecycle)
+        case failed(GuesthouseError)
+    }
     /// Lifecycle operations, available once a verified runtime bundle exists.
-    private let lifecycle = Mutex<EnvironmentLifecycle?>(nil)
+    private let lifecycleState = Mutex<LifecycleState>(.initializing)
 
     /// Accepts a session and returns a per-session handler that tracks in-flight requests.
     func acceptSession(_ session: XPCSession) -> SessionHandler {
@@ -71,8 +80,10 @@ final class RuntimeService: Sendable {
     /// Returns a synchronous reply, or `nil` when the reply is sent later through `message.reply`.
     ///
     /// `refusal` is read rather than passed in, because another request on the same session can
-    /// refuse it while this one is still being decoded.
-    func handle(_ message: XPCReceivedMessage, session: XPCSession, inFlight: Int, refusal: () -> RuntimeEvent?, refuse: @escaping (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
+    /// refuse it while this one is still being decoded. `finished` is called when a reply the
+    /// service sends later, from an operation, has been handed to the transport: a synchronous
+    /// answer is finished by the caller instead.
+    func handle(_ message: XPCReceivedMessage, session: XPCSession, inFlight: Int, refusal: () -> RuntimeEvent?, finished: @escaping @Sendable () -> Void = {}, refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
         // A message that asks for no reply is never decoded or dispatched. An operation whose
         // ID, acceptance, and terminal event have nowhere to go is a host mutation the client
         // could neither follow nor cancel, and the client would have no record that it ran.
@@ -97,14 +108,14 @@ final class RuntimeService: Sendable {
         }
         guard message.senderSatisfies(Self.peerRequirement) else {
             log.error(RedactedLine(literal: "message from a peer that does not satisfy the requirement; closing session"))
-            return reply(.replyAndClose(.failed(OperationID(), .unauthorizedCaller)), session: session, message: message, reason: "unauthorized caller", refuse: refuse)
+            return reply(.replyAndClose(.failed(OperationID(), .unauthorizedCaller)), session: session, message: message, finished: finished, reason: "unauthorized caller", refuse: refuse)
         }
         // The concurrency cap is applied before the request is decoded, so a peer over the cap
         // costs nothing to refuse. Only its version header is read, and only at the cap, so
         // that the refusal is one the peer's own protocol version can decode.
         let clientVersion = { try? message.decode(as: RuntimeRequestEnvelope.Header.self).protocolVersion }
         if let refused = RuntimeDispatcher.admit(inFlight: inFlight, clientVersion: clientVersion) {
-            return reply(refused, session: session, message: message, reason: "protocol mismatch over the request cap", refuse: refuse)
+            return reply(refused, session: session, message: message, finished: finished, reason: "protocol mismatch over the request cap", refuse: refuse)
         }
         let envelope: RuntimeRequestEnvelope
         do {
@@ -113,10 +124,11 @@ final class RuntimeService: Sendable {
             // A version-skewed installation is not corrupt input: the client gets the
             // protocol-mismatch error and its reinstall recovery, and the session closes.
             log.error(Self.line("protocol mismatch: client", "\(mismatch.client.rawValue)"))
-            return reply(RuntimeDispatcher.mismatch(mismatch.error), session: session, message: message, refuse: refuse)
+            return reply(RuntimeDispatcher.mismatch(mismatch.error), session: session, message: message, finished: finished, refuse: refuse)
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error(RedactedLine(literal: "undecodable request rejected"))
+            finished()
             if case .reply(let event) = RuntimeDispatcher.undecodable() { return event }
             return RuntimeEvent.failed(OperationID(), .invalidRequest(.malformed))
         }
@@ -125,13 +137,14 @@ final class RuntimeService: Sendable {
         // evaluate the refusal before it, honoring an answer that is already stale by the time
         // the decision is acted on.
         let decision = RuntimeDispatcher.decide(envelope, inFlight: inFlight)
-        return reply(RuntimeDispatcher.honoring(refusal(), decision), session: session, message: message)
+        return reply(RuntimeDispatcher.honoring(refusal(), decision), session: session, message: message, finished: finished)
     }
 
-    private func reply(_ decision: RuntimeDispatcher.Decision, session: XPCSession, message: XPCReceivedMessage, reason: String = "protocol mismatch", refuse: @escaping (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
+    private func reply(_ decision: RuntimeDispatcher.Decision, session: XPCSession, message: XPCReceivedMessage, finished: @escaping @Sendable () -> Void, reason: String = "protocol mismatch", refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
         switch decision {
         case .reply(let event):
             log.error(Self.line("rejected request:", event.caseName))
+            finished()
             return event
         case .replyAndClose(let event):
             log.error(Self.line("refusing session:", reason))
@@ -139,13 +152,14 @@ final class RuntimeService: Sendable {
             // rejection has been handed to the transport would discard the very answer the
             // client needs. `SessionHandler` closes it once the session owes nothing more.
             refuse(event)
+            finished()
             return event
         case .dispatch(let request):
-            return perform(request, message: message, session: session)
+            return perform(request, message: message, session: session, finished: finished)
         }
     }
 
-    private func perform(_ request: RuntimeRequest, message: XPCReceivedMessage, session: XPCSession) -> (any Encodable)? {
+    private func perform(_ request: RuntimeRequest, message: XPCReceivedMessage, session: XPCSession, finished: @escaping @Sendable () -> Void) -> (any Encodable)? {
         switch request {
         case .runtimeVersion:
             // Discovery ran once at launch. A problem the user was told they could retry —
@@ -156,16 +170,26 @@ final class RuntimeService: Sendable {
             rediscoverIfRetryable()
             return RuntimeEvent.runtimeVersion(versionInfo)
         case .listEnvironments, .environmentStatus, .startEnvironment, .stopEnvironment, .cancelOperation:
-            guard let lifecycle = lifecycle.withLock({ $0 }) else {
+            let lifecycle: EnvironmentLifecycle
+            switch lifecycleState.withLock({ $0 }) {
+            case .ready(let ready):
+                lifecycle = ready
+            case .failed(let error):
+                finished()
+                return RuntimeEvent.failed(OperationID(), error)
+            case .initializing:
+                // A verified runtime still bringing up its state is not incompatible with itself.
                 let info = tartInfo.withLock { $0 }
-                return RuntimeEvent.failed(OperationID(), info?.problem ?? .runtimeMissing)
+                finished()
+                return RuntimeEvent.failed(OperationID(), info?.problem ?? .runtimeStarting)
             }
-            let reply = ReplyBox(message)
+            let reply = ReplyBox(message, onReply: finished)
             let sink = SessionSink(session: session, log: log)
             Task { await self.performAsync(request, lifecycle: lifecycle, reply: reply, events: sink) }
             return nil
         case .importXcode:
             log.notice(Self.line("operation not implemented yet:", request.caseName))
+            finished()
             return RuntimeEvent.failed(OperationID(), .invalidRequest(.unsupportedOperation))
         }
     }
@@ -192,9 +216,31 @@ final class RuntimeService: Sendable {
         } catch let error as GuesthouseError {
             reply.send(RuntimeEvent.failed(OperationID(), error))
         } catch {
-            log.error("operation failed: \(request.caseName, privacy: .public)")
-            reply.send(RuntimeEvent.failed(OperationID(), .invalidRequest(.malformed)))
+            // A dependency failure (Tart, the state store, supervision) is reported as the
+            // runtime problem it is, with its recovery actions; never as a malformed request.
+            log.error("operation failed: \(request.caseName, privacy: .public) \(Self.describe(error), privacy: .public)")
+            reply.send(RuntimeEvent.failed(OperationID(), Self.mapDependencyFailure(error, request: request)))
         }
+    }
+
+    static func mapDependencyFailure(_ error: any Error, request: RuntimeRequest) -> GuesthouseError {
+        let environment: EnvironmentID? = switch request {
+        case .environmentStatus(let id), .startEnvironment(let id, _), .stopEnvironment(let id, _), .importXcode(let id, _): id
+        default: nil
+        }
+        if let error = error as? TartInvocationError, let environment {
+            return EnvironmentLifecycle.map(error, environment: environment)
+        }
+        if let error = error as? StateStoreError {
+            return .runtimeStateUnavailable(reason: SanitizedText(error.userMessage, limit: 200))
+        }
+        if let error = error as? SupervisionError {
+            return .runtimeStateUnavailable(reason: SanitizedText(error.userMessage, limit: 200))
+        }
+        if let error = error as? ProcessIdentityStoreError {
+            return .runtimeStateUnavailable(reason: SanitizedText(error.userMessage, limit: 200))
+        }
+        return .runtimeStateUnavailable(reason: SanitizedText("an unexpected \(describe(error)) failure", limit: 200))
     }
 
     func sessionEnded(_ error: XPCRichError) {
@@ -247,6 +293,10 @@ final class RuntimeService: Sendable {
     /// after launch; until it finishes, `runtimeVersion` reports the runtime as not located
     /// and lifecycle requests fail with `runtimeMissing`.
     func discoverTart() async {
+        // Discovery and lifecycle bring-up hold a transaction, so launchd cannot idle the
+        // service out while it verifies the bundle, asks for its version, and loads state.
+        xpc_transaction_begin()
+        defer { xpc_transaction_end() }
         let storage: RuntimeStorage
         do {
             storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
@@ -320,12 +370,13 @@ final class RuntimeService: Sendable {
             let store = try StateStore(rootURL: storage.url(for: .state))
             let lifecycle = EnvironmentLifecycle(dependencies: .init(backend: backend, supervisor: supervisor, store: store))
             try await lifecycle.prepare()
-            self.lifecycle.withLock { $0 = lifecycle }
+            lifecycleState.withLock { $0 = .ready(lifecycle) }
             let count = await lifecycle.environments().count
             log.notice(Self.line("lifecycle ready; environments:", "\(count)"))
         } catch {
+            // The runtime itself is fine; its state is not. The two are reported apart.
             log.error(Self.line("lifecycle could not start:", Self.describe(error)))
-            tartInfo.withLock { $0 = .init(version: version.description, verified: true, problem: .operationOutcomeUnknown(OperationID())) }
+            lifecycleState.withLock { $0 = .failed(Self.mapDependencyFailure(error, request: .listEnvironments)) }
         }
     }
 
@@ -365,13 +416,19 @@ final class RuntimeService: Sendable {
             self.session = session
         }
 
+        /// The count is released when the request is answered, synchronously or later, so
+        /// asynchronous lifecycle requests keep counting against the cap until their reply.
         func handleIncomingRequest(_ message: XPCReceivedMessage) -> (any Encodable)? {
             // The count taken here excludes this message, so it says how much else the
             // session still owes an answer for. A session whose close has already been taken
             // admits nothing: answering here would race that cancel and hand the peer a
             // connection interruption in place of the rejection it is owed.
             guard let others = lock.withLock({ lifetime.began() }) else { return nil }
-            let answer = service.handle(message, inFlight: others, refusal: { self.refusalEvent }) { [weak self] event in
+            let finished: @Sendable () -> Void = { [weak self] in
+                guard let self else { return }
+                if self.lock.withLock({ self.lifetime.finished() }) { self.session.cancel(reason: "session refused") }
+            }
+            let answer = service.handle(message, session: session, inFlight: others, refusal: { self.refusalEvent }, finished: finished) { [weak self] event in
                 self?.markRefused(with: event)
             }
             // The reply is handed to the transport here rather than by returning it: a
@@ -382,10 +439,9 @@ final class RuntimeService: Sendable {
             if let answer { message.reply(answer) }
             // A refused session closes as soon as it owes nothing further. Waiting instead for
             // another message would keep an incompatible connection open for as long as the
-            // app runs, because a client that has been told to stop sends nothing more.
-            if lock.withLock({ lifetime.finished() }) {
-                session.cancel(reason: "session refused")
-            }
+            // app runs, because a client that has been told to stop sends nothing more. A
+            // request whose reply is sent later keeps counting until then, and finishes itself.
+            if answer != nil { finished() }
             return nil
         }
 
@@ -410,8 +466,12 @@ final class RuntimeService: Sendable {
 final class ReplyBox: @unchecked Sendable {
     private let message: XPCReceivedMessage
     private let replied = Mutex(false)
+    private let onReply: @Sendable () -> Void
 
-    init(_ message: XPCReceivedMessage) { self.message = message }
+    init(_ message: XPCReceivedMessage, onReply: @escaping @Sendable () -> Void = {}) {
+        self.message = message
+        self.onReply = onReply
+    }
 
     func send(_ event: RuntimeEvent) {
         let first = replied.withLock { flag -> Bool in
@@ -421,6 +481,17 @@ final class ReplyBox: @unchecked Sendable {
         }
         guard first else { return }
         message.reply(event)
+        onReply()
+    }
+
+    deinit {
+        // A reply that never happened still releases its place in the session's count.
+        let unreplied = replied.withLock { flag -> Bool in
+            if flag { return false }
+            flag = true
+            return true
+        }
+        if unreplied { onReply() }
     }
 }
 

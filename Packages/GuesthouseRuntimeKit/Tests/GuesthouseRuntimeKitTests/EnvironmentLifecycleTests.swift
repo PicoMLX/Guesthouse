@@ -18,6 +18,10 @@ import Testing
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let store = try StateStore(rootURL: storage.url(for: .state))
         let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
+        // The fixture's executable is a copy of `yes`: it accepts any arguments and runs until
+        // ended, so `run` looks like a live VM process with the recorded identity.
+        try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/yes"), to: bundle.executable)
         let identities = try ProcessIdentityStore(directory: storage.url(for: .state))
         for identity in recordedIdentities { try await identities.record(identity) }
         let supervisor = OperationSupervisor(store: identities)
@@ -42,6 +46,88 @@ import Testing
             try? await Task.sleep(for: .milliseconds(5))
         }
         return events.events
+    }
+
+    @Test func anInterruptedOperationIsSettledOnceTheVMIsConfirmedStopped() async throws {
+        let runner = tartLikeRunner()
+        let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
+        let store = try StateStore(rootURL: storage.url(for: .state))
+        let interrupted = try await store.begin(.startEnvironment, for: environment)
+        let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
+        try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/yes"), to: bundle.executable)
+        let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: storage.url(for: .state)))
+        let lifecycle = EnvironmentLifecycle(dependencies: .init(backend: TartBackend(bundle: bundle, storage: storage, runner: runner), supervisor: supervisor, store: store))
+        try await lifecycle.prepare()
+        let replay = try await store.replay()
+        #expect(replay.inFlight.isEmpty, "the interrupted start was closed by reconciliation")
+        #expect(replay.records.last?.id == interrupted)
+        #expect(replay.records.last?.outcome == .reconciled)
+        #expect(try await lifecycle.status(of: environment).readiness == .ready)
+    }
+
+    @Test func aRunningVMWithoutOwnershipEvidenceBlocksStartAndForceStop() async throws {
+        let runner = tartLikeRunner(running: true)
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let status = try await lifecycle.status(of: environment)
+        guard case .uncertain = status.vm else { Issue.record("expected uncertain, got \(status.vm)"); return }
+        #expect(status.readiness == .needsAttention(.vmOwnershipUncertain(environment)))
+        await #expect(throws: GuesthouseError.vmOwnershipUncertain(environment)) {
+            _ = try await lifecycle.start(environment, options: StartOptions()) { _ in }
+        }
+        await #expect(throws: GuesthouseError.vmOwnershipUncertain(environment)) {
+            _ = try await lifecycle.stop(environment, mode: .force) { _ in }
+        }
+    }
+
+    @Test func aSecondVMIsRefusedWhileOneRuns() async throws {
+        let other = EnvironmentID()
+        let runner = FakeProcessRunner(script: [
+            "list": .init(stdout: [listJSON(running: false, extra: [other.tartVMName])]),
+            "run": .init(hangs: true), "ip": .init(stdout: ["192.168.64.9"]), "stop": .init(),
+        ])
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        #expect(await lifecycle.environments().count == 2)
+        let events = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in events.add(event) }
+        _ = await collect(events)
+        await #expect(throws: GuesthouseError.anotherEnvironmentRunning(environment)) {
+            _ = try await lifecycle.start(other, options: StartOptions()) { _ in }
+        }
+        await runner.finishHanging()
+    }
+
+    @Test func aPreservedEnvironmentIsRefused() async throws {
+        let runner = tartLikeRunner()
+        let (lifecycle, store, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        var snapshot = try await store.loadSnapshot()
+        try snapshot.slots.markPreserved(environment)
+        try await store.saveSnapshot(snapshot)
+        try await lifecycle.prepare()
+        await #expect(throws: GuesthouseError.environmentPreserved(environment)) {
+            _ = try await lifecycle.start(environment, options: StartOptions()) { _ in }
+        }
+    }
+
+    @Test func aGracefulStopThatMissesItsDeadlineIsReportedNotForced() async throws {
+        let runner = tartLikeRunner()
+        await runner.set("stop", .init(hangs: true))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let startEvents = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in startEvents.add(event) }
+        _ = await collect(startEvents)
+        let stopEvents = EventCollector()
+        let stop = try await lifecycle.stop(environment, mode: .graceful(deadline: .milliseconds(300))) { event in stopEvents.add(event) }
+        let seen = await collect(stopEvents)
+        #expect(seen.last == .failed(stop, .gracefulStopTimedOut(environment)))
+        #expect(try await lifecycle.status(of: environment).vm == .running, "the guest was not force-stopped")
+        let stopInvocation = await runner.invocations.last { $0.arguments.first == "stop" }
+        #expect(stopInvocation?.arguments == ["stop", environment.tartVMName, "--timeout", String(TartBackend.neverForceSeconds)])
+        await runner.finishHanging()
     }
 
     @Test func adoptsOnlyAppManagedVMsIntoFreeSlots() async throws {
@@ -139,7 +225,7 @@ import Testing
         #expect(seen.map(\.caseName) == ["progress", "status", "completed"])
         guard let statusEvent = seen.first(where: { if case .status = $0 { true } else { false } }), case .status(let status) = statusEvent else { Issue.record("no status in \(seen)"); return }
         #expect(status.vm == .stopped)
-        #expect(await runner.invocations.map(\.arguments).contains(["stop", environment.tartVMName, "--timeout", "20"]))
+        #expect(await runner.invocations.map(\.arguments).contains(["stop", environment.tartVMName, "--timeout", String(TartBackend.neverForceSeconds)]), "Tart's own force-stop is never reached by a graceful request")
         #expect(try await store.replay().inFlight.isEmpty)
         _ = stop
     }
@@ -165,7 +251,7 @@ import Testing
         try await lifecycle.prepare()
         let status = try await lifecycle.status(of: environment)
         guard case .uncertain = status.vm else { Issue.record("expected uncertain, got \(status.vm)"); return }
-        guard case .needsAttention(let error) = status.readiness, error.caseName == "operationOutcomeUnknown" else { Issue.record("expected needsAttention"); return }
+        #expect(status.readiness == .needsAttention(.vmOwnershipUncertain(environment)))
         await #expect(throws: GuesthouseError.self) {
             _ = try await lifecycle.start(environment, options: StartOptions()) { _ in }
         }

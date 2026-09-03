@@ -48,6 +48,8 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         /// nothing: `completed` would claim it succeeded, and every "unknown" outcome leaves the
         /// environment blocked against the new operation recovery is there to allow.
         case notApplied
+        /// After a relaunch the coordinator inspected the actual state and closed the operation.
+        case reconciled
     }
 
     /// Whether this build can read a record written in `format`.
@@ -94,7 +96,7 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         switch outcome {
         case .started, .checkpoint, .unknown: true
         case .failed(.operationOutcomeUnknown), .failed(.canceled): true
-        case .completed, .notApplied, .failed: false
+        case .completed, .notApplied, .failed, .reconciled: false
         }
     }
 
