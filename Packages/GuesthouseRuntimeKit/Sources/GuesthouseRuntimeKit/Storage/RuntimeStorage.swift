@@ -176,17 +176,17 @@ public enum RuntimeStorageError: Error, Hashable, Sendable, LocalizedError {
     public var userMessage: String {
         switch self {
         case .insecureDirectory(let path, let reason):
-            "Guesthouse cannot use its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason)). Move or remove the item that is in the way, or choose a different storage location in Settings."
+            "Guesthouse cannot use its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason)). In Finder, move or remove the item at the listed path, then try again."
         case .unwritable(let path, let reason):
-            "Guesthouse cannot write to its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason.value)). Free disk space or choose a different storage location in Settings."
+            "Guesthouse cannot write to its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason.value)). Free disk space or correct access to the listed path, then try again."
         }
     }
 
     /// In preference order. Never empty.
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .insecureDirectory: [.openSettings, .cancel]
-        case .unwritable: [.freeDiskSpace, .openSettings, .retry, .cancel]
+        case .insecureDirectory: [.retry, .cancel]
+        case .unwritable: [.freeDiskSpace, .retry, .cancel]
         }
     }
 
