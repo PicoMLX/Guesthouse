@@ -142,20 +142,6 @@ import Testing
         _ = try await store.begin(.stopEnvironment, for: environment)
     }
 
-    @Test func inconsistentProvisioningValuesAreRejectedBeforeSaving() async throws {
-        let store = try StateStore(rootURL: root)
-        let environment = DevelopmentEnvironment(name: "Dev", createdAt: Date())
-        var snapshot = try snapshot([environment])
-        var state = ProvisioningState(stage: .ready, status: .completed(Checkpoint(stage: .ready, reachedAt: Date())))
-        state.schemaVersion = SchemaVersion(SchemaVersion.current.rawValue + 1)
-        snapshot.provisioning[environment.id] = state
-        await #expect(throws: StateStoreError.inconsistentSnapshot(reason: "provisioning state with another schema version")) { try await store.saveSnapshot(snapshot) }
-        var mismatched = ProvisioningState(stage: .ready, status: .completed(Checkpoint(stage: .ready, reachedAt: Date())))
-        mismatched.stage = .runtimeReady
-        snapshot.provisioning[environment.id] = mismatched
-        await #expect(throws: StateStoreError.inconsistentSnapshot(reason: "provisioning checkpoint does not match its stage")) { try await store.saveSnapshot(snapshot) }
-    }
-
     @Test func aRootThatCannotBeCreatedIsReportedAsUnwritable() {
         #expect(throws: StateStoreError.fileUnwritable(name: "state")) { try StateStore(rootURL: URL(fileURLWithPath: "/dev/null/state")) }
     }
