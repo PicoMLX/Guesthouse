@@ -25,6 +25,9 @@ let package = Package(
     targets: [
         .target(
             name: "GuesthouseCore",
+            resources: [
+                .copy("Resources/compatibility-manifest.json")
+            ],
             swiftSettings: coreSwiftSettings
         ),
         .testTarget(
