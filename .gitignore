@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Package Manager
+.build/
+**/.swiftpm/configuration/registries.json
+**/.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+
+# Playgrounds
+*.playground/**/timeline.xctimeline
