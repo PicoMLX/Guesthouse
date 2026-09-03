@@ -66,15 +66,20 @@ public actor StateStore {
         guard FileManager.default.createFile(atPath: tempURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
             throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
         }
-        let handle = try FileHandle(forWritingTo: tempURL)
+        guard let handle = try? FileHandle(forWritingTo: tempURL) else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
+        }
         do {
             try handle.write(contentsOf: data)
             try handle.synchronize()
             try handle.close()
         } catch {
+            // A full volume or a failed sync is a storage problem with a recovery path, never
+            // a raw Foundation error.
             try? handle.close()
             try? FileManager.default.removeItem(at: tempURL)
-            throw error
+            throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
         }
         guard rename(tempURL.path, snapshotURL.path) == 0 else {
             try? FileManager.default.removeItem(at: tempURL)
@@ -170,6 +175,11 @@ public actor StateStore {
         let started = replay.records.first { $0.id == record.id }
         switch (record.outcome, started) {
         case (.started, nil):
+            // A new mutation on an environment whose earlier one has no known outcome would be
+            // a blind retry; the earlier one must be reconciled first.
+            if let unresolved = replay.inFlight.values.first(where: { $0.environmentID == record.environmentID }) {
+                throw StateStoreError.operationUnresolved(unresolved.id)
+            }
             return
         case (.started, .some):
             throw StateStoreError.inconsistentRecord(record.id)
@@ -226,9 +236,20 @@ public actor StateStore {
             let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
             if values.isSymbolicLink == true { throw StateStoreError.insecureDirectory(reason: "symbolic link") }
         } else {
-            try manager.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            do {
+                try manager.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            } catch {
+                throw StateStoreError.fileUnwritable(name: url.lastPathComponent)
+            }
+            // The new entry in the parent is made durable too; otherwise a power loss could
+            // lose the whole state directory after `begin` has reported a journal record.
+            try synchronizeDirectory(url.deletingLastPathComponent())
         }
-        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        do {
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        } catch {
+            throw StateStoreError.fileUnwritable(name: url.lastPathComponent)
+        }
     }
 
     private func removeStaleTempFiles() {
