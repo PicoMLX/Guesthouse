@@ -57,6 +57,17 @@ import Testing
         #expect(await backend.status(of: environment)?.inFlightOperation == nil)
     }
 
+    @Test func aScriptedFailureClearsTheSeededInFlightOperation() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = EnvironmentID()
+        let id = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready, inFlightOperation: id))
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(environment)))
+        for try await _ in backend.send(.startEnvironment(environment, StartOptions())) {}
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil)
+    }
+
     @Test func concurrentSendsKeepTheirSeededIDs() async throws {
         let backend = FakeRuntimeBackend()
         let ids = (0..<8).map { _ in OperationID() }

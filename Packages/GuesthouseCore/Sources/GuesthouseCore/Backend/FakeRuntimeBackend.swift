@@ -172,6 +172,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             for phase in phases {
                 guard await progress(id, phase, continuation) else { return }
             }
+            // A failed operation is no longer in flight for any environment.
+            clearInFlight(id)
             continuation.yield(.failed(id, error))
             continuation.finish()
 
