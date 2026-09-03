@@ -34,6 +34,25 @@ public struct RuntimeRequestEnvelope: Codable, Hashable, Sendable {
         self.protocolVersion = protocolVersion
         self.request = request
     }
+
+    private enum CodingKeys: String, CodingKey { case protocolVersion, request }
+
+    /// The version header is read first; a peer on another protocol is reported as
+    /// `ProtocolMismatch` before its version-specific payload is decoded, so a request case
+    /// this build does not know yields the actionable mismatch, never a malformed request.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decode(RuntimeProtocolVersion.self, forKey: .protocolVersion)
+        guard version == .current else { throw ProtocolMismatch(client: version) }
+        protocolVersion = version
+        request = try container.decode(RuntimeRequest.self, forKey: .request)
+    }
+
+    /// Thrown by `init(from:)` before the payload is decoded.
+    public struct ProtocolMismatch: Error, Hashable, Sendable {
+        public let client: RuntimeProtocolVersion
+        public var error: GuesthouseError { .protocolMismatch(client: client.rawValue, service: RuntimeProtocolVersion.current.rawValue) }
+    }
 }
 
 public struct StartOptions: Codable, Hashable, Sendable {
