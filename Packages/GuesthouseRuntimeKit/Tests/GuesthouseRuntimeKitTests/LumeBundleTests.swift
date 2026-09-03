@@ -176,7 +176,40 @@ private struct DummyLumeBundle {
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: bundle.executable)
 
         #expect(!verified.matchesVerifiedFiles(in: bundle))
-        #expect(RuntimeStorage.fileIdentity(of: fixture.url) == verified.verifiedFileIdentity.bundle)
+        #expect(RuntimeStorage.fileIdentity(of: fixture.url) == verified.verifiedFileIdentity.bundle.coordination)
+    }
+
+    @Test func verifiedTokenRejectsInPlaceWritesThatKeepTheSameInode() async throws {
+        let executableFixture = try await DummyLumeBundle(root: root.appending(path: "in-place-executable"))
+        let executableBundle = LumeBundle(url: executableFixture.url)
+        let executableToken = try VerifiedLumeBundle(
+            bundle: executableBundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+        let executableIdentity = RuntimeStorage.fileIdentity(of: executableBundle.executable)
+        let executableHandle = try FileHandle(forWritingTo: executableBundle.executable)
+        try executableHandle.write(contentsOf: Data([0]))
+        try executableHandle.close()
+        #expect(RuntimeStorage.fileIdentity(of: executableBundle.executable) == executableIdentity)
+        #expect(!executableToken.matchesVerifiedFiles(in: executableBundle))
+
+        let plistFixture = try await DummyLumeBundle(root: root.appending(path: "in-place-plist"))
+        let plistBundle = LumeBundle(url: plistFixture.url)
+        let plistToken = try VerifiedLumeBundle(
+            bundle: plistBundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+        let plistURL = plistFixture.url.appending(path: "Contents/Info.plist")
+        let plistIdentity = RuntimeStorage.fileIdentity(of: plistURL)
+        let plistHandle = try FileHandle(forWritingTo: plistURL)
+        try plistHandle.write(contentsOf: Data([0]))
+        try plistHandle.close()
+        #expect(RuntimeStorage.fileIdentity(of: plistURL) == plistIdentity)
+        #expect(!plistToken.matchesVerifiedFiles(in: plistBundle))
     }
 
     @Test func adHocSignatureCannotSatisfyThePinnedDeveloperIDRequirement() async throws {

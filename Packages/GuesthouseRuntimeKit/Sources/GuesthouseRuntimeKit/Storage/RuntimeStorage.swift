@@ -105,10 +105,36 @@ public struct RuntimeStorage: Sendable {
         let inode: ino_t
     }
 
+    /// A point-in-time filesystem identity for verified runtime files. Device and inode detect
+    /// replacement; size plus nanosecond modification/status-change times also detect an
+    /// unprivileged in-place write that keeps the same inode. This is a coherence signal, not a
+    /// substitute for the full signature and digest verification performed at each launch.
+    struct VerificationIdentity: Hashable, Sendable {
+        let coordination: CoordinationIdentity
+        let byteCount: off_t
+        let modificationSeconds: Int64
+        let modificationNanoseconds: Int64
+        let statusChangeSeconds: Int64
+        let statusChangeNanoseconds: Int64
+    }
+
     static func fileIdentity(of url: URL) -> CoordinationIdentity? {
         var info = stat()
         guard lstat(url.path, &info) == 0 else { return nil }
         return CoordinationIdentity(device: info.st_dev, inode: info.st_ino)
+    }
+
+    static func verificationIdentity(of url: URL) -> VerificationIdentity? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        return VerificationIdentity(
+            coordination: CoordinationIdentity(device: info.st_dev, inode: info.st_ino),
+            byteCount: info.st_size,
+            modificationSeconds: Int64(info.st_mtimespec.tv_sec),
+            modificationNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+            statusChangeSeconds: Int64(info.st_ctimespec.tv_sec),
+            statusChangeNanoseconds: Int64(info.st_ctimespec.tv_nsec)
+        )
     }
 
     // MARK: - Verification

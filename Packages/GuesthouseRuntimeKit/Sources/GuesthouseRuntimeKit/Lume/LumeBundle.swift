@@ -52,14 +52,15 @@ public enum LumeVerificationError: Error, Hashable, Sendable {
 
 extension LumeVerificationError: LocalizedError {}
 
-/// Files whose identity must stay coherent across static verification. The outer app inode alone
-/// is insufficient because a replacement below `Contents` does not change it.
+/// Files whose identity and change state must stay coherent across static verification. The
+/// outer app inode alone is insufficient because replacement or an in-place write below
+/// `Contents` does not change it.
 struct LumeBundleFileIdentity: Hashable, Sendable {
-    let bundle: RuntimeStorage.CoordinationIdentity
-    let contents: RuntimeStorage.CoordinationIdentity
-    let executables: RuntimeStorage.CoordinationIdentity
-    let infoPlist: RuntimeStorage.CoordinationIdentity
-    let executable: RuntimeStorage.CoordinationIdentity
+    let bundle: RuntimeStorage.VerificationIdentity
+    let contents: RuntimeStorage.VerificationIdentity
+    let executables: RuntimeStorage.VerificationIdentity
+    let infoPlist: RuntimeStorage.VerificationIdentity
+    let executable: RuntimeStorage.VerificationIdentity
 }
 
 /// Snapshot returned after pinned static verification. This is deliberately not durable launch
@@ -134,11 +135,11 @@ public struct LumeBundle: Hashable, Sendable {
               Self.isUnlinkedItem(executables, kind: S_IFDIR),
               Self.isUnlinkedItem(infoPlist, kind: S_IFREG),
               Self.isUnlinkedItem(executable, kind: S_IFREG),
-              let bundleIdentity = RuntimeStorage.fileIdentity(of: url),
-              let contentsIdentity = RuntimeStorage.fileIdentity(of: contents),
-              let executablesIdentity = RuntimeStorage.fileIdentity(of: executables),
-              let infoPlistIdentity = RuntimeStorage.fileIdentity(of: infoPlist),
-              let executableIdentity = RuntimeStorage.fileIdentity(of: executable)
+              let bundleIdentity = RuntimeStorage.verificationIdentity(of: url),
+              let contentsIdentity = RuntimeStorage.verificationIdentity(of: contents),
+              let executablesIdentity = RuntimeStorage.verificationIdentity(of: executables),
+              let infoPlistIdentity = RuntimeStorage.verificationIdentity(of: infoPlist),
+              let executableIdentity = RuntimeStorage.verificationIdentity(of: executable)
         else { return nil }
         return LumeBundleFileIdentity(
             bundle: bundleIdentity,
