@@ -76,6 +76,9 @@ public enum OwnershipVerdict: Hashable, Sendable {
         case anotherProcessClaimsVM
         /// The record names a VM that is not the environment's own.
         case recordInconsistent
+        /// The live process does not name the recorded virtual machine, so it cannot be
+        /// proven to be this environment's VM.
+        case vmNameUnconfirmed
     }
 }
 
@@ -99,11 +102,12 @@ public enum ProcessReconciler {
         if samePID.count > 1 {
             return .uncertain(.multipleCandidates)
         }
+        // Any other live process that claims this VM, by the same invocation or by naming it,
+        // leaves ownership unproven: the lock evidence does not say which process holds it.
+        let claimants = observed.filter { $0.pid != recorded.pid && ($0.argumentsDigest == recorded.argumentsDigest || $0.claimedVMName == recorded.vmName) }
         guard let candidate = samePID.first else {
             if vmLockPresent { return .uncertain(.lockHeldWithoutProcess) }
-            // Another process with the same invocation, or one whose arguments name this VM,
-            // may be about to take the lock; nothing is safe to start under it.
-            let claimants = observed.filter { $0.argumentsDigest == recorded.argumentsDigest || $0.claimedVMName == recorded.vmName }
+            // A competing process may be about to take the lock; nothing is safe to start.
             return claimants.isEmpty ? .exited : .uncertain(.anotherProcessClaimsVM)
         }
         guard candidate.startTime == recorded.startTime else {
@@ -114,6 +118,15 @@ public enum ProcessReconciler {
         }
         guard candidate.argumentsDigest == recorded.argumentsDigest else {
             return .uncertain(.argumentsMismatch)
+        }
+        // The process must name the recorded VM itself. A record that paired this environment
+        // with another VM's invocation, or a process whose arguments cannot be read as a VM
+        // launch, never grants ownership.
+        guard candidate.claimedVMName == recorded.vmName else {
+            return .uncertain(.vmNameUnconfirmed)
+        }
+        guard claimants.isEmpty else {
+            return .uncertain(.anotherProcessClaimsVM)
         }
         return .ownedRunning(candidate)
     }
