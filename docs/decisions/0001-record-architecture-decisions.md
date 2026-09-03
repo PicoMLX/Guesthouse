@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-`MVP-PLAN.md` leaves several choices to be settled by phase-0 experiments, and it warns that a gate result may change the architecture. Those outcomes need a durable place that is separate from the plan and from issue threads, so that later work can see what was decided, when, and on what evidence.
+`MVP-PLAN.md` §10 ("Deliver in six phases") leaves several choices to be settled by the phase-0 gates, such as the Xcode import transport, the console path, and the cold-boot authentication requirement, and it warns that a gate result may require re-estimating or changing the architecture. Those outcomes need a durable place that is separate from the plan and from issue threads, so that later work can see what was decided, when, and on what evidence.
 
 ## Decision
 
