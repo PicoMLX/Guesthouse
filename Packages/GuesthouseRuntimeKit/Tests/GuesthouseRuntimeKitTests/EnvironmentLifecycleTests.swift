@@ -1204,6 +1204,19 @@ import Testing
         try repairJournal(in: storage, with: original)
     }
 
+    @Test func tartOutputDuringAnOperationReachesItsEventStream() async throws {
+        let runner = tartLikeRunner()
+        await runner.set("run", .init(stdout: ["Booting virtual machine", "token=abcdef0123456789abcdef0123456789"], exit: ProcessExit(reason: .status(1))))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let events = EventCollector()
+        let start = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in events.add(event) }
+        let seen = await collect(events)
+        let logs = seen.compactMap { event -> (OperationID?, RedactedLine)? in if case .log(let id, let line) = event { return (id, line) } else { return nil } }
+        #expect(logs.contains { $0.1.text == "Booting virtual machine" }, "Tart's lines are forwarded as log events")
+        #expect(logs.allSatisfy { $0.0 == start })
+        #expect(!logs.contains { $0.1.text.contains("abcdef0123456789") }, "forwarded lines are the redacted ones")    }
+
     @Test func unknownEnvironmentIsRefused() async throws {
         let (lifecycle, _, _) = try await makeLifecycle(runner: tartLikeRunner())
         try await lifecycle.prepare()

@@ -59,6 +59,11 @@ public actor EnvironmentLifecycle {
     /// client believing the work is still in flight (MVP-PLAN.md §2).
     static let statusRefreshBudget = Duration.seconds(2)
 
+    /// Where a VM process's output goes while an operation on its environment is in flight:
+    /// the operation's own event stream, as `log` events. Between operations nobody listens
+    /// and the lines are dropped, never buffered.
+    private var outputSinks: [EnvironmentID: (operation: OperationID, events: EventSink)] = [:]
+
     public init(dependencies: Dependencies) {
         deps = dependencies
     }
@@ -469,9 +474,11 @@ public actor EnvironmentLifecycle {
         }
     }
 
-    private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, inventory: [TartVMInfo], token: OperationSupervisor.Token, events: EventSink) async {
+    private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, inventory: [TartVMInfo], token: OperationSupervisor.Token, events: @escaping EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
+        outputSinks[id] = (operation, events)
+        defer { token.end(); inFlight = nil; outputSinks[id] = nil }
         let arguments = TartBackend.runArguments(vmName: environment.tartVMName, console: options.console)
         do {
             report(operation, ProgressPhase(kind: .startingVM, cancelable: false), events)
@@ -483,7 +490,7 @@ public actor EnvironmentLifecycle {
             // list` would let a hanging inventory hold up a launch it cannot inform.
             try await refuseIfAnySlotIsClaimed(startingFor: id, inventory: inventory)
             let run = try await deps.backend.run(vmName: environment.tartVMName, console: options.console)
-            drainOutput(of: run)
+            drainOutput(of: run, environment: id)
             let identity: ProcessIdentity
             do {
                 identity = try await deps.supervisor.recordLaunch(pid: run.processIdentifier, executable: deps.backend.bundle.executable, arguments: arguments, vmName: environment.tartVMName, environment: id)
@@ -598,9 +605,11 @@ public actor EnvironmentLifecycle {
         }
     }
 
-    private func performStop(_ operation: OperationID, environment: DevelopmentEnvironment, mode: StopMode, token: OperationSupervisor.Token, events: EventSink) async {
+    private func performStop(_ operation: OperationID, environment: DevelopmentEnvironment, mode: StopMode, token: OperationSupervisor.Token, events: @escaping EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
+        outputSinks[id] = (operation, events)
+        defer { token.end(); inFlight = nil; outputSinks[id] = nil }
         do {
             // Ownership was proven before the journal write suspended, and that answer only
             // described the instant it was taken: the owned process can have exited since and
@@ -848,11 +857,23 @@ public actor EnvironmentLifecycle {
         if case .uncertain? = verdicts[id] { throw GuesthouseError.vmOwnershipUncertain(id) }
     }
 
-    /// Tart's output over a VM's lifetime is already redacted and is not kept: the stream is
-    /// consumed so the bounded buffer never fills.
-    private func drainOutput(of run: ProcessRun) {
-        Task.detached {
-            for await _ in run.output {}
+    /// Tart's output over a VM's lifetime is already redacted. While an operation on the
+    /// environment is in flight each line is forwarded to it as a `log` event, so the GUI's
+    /// diagnostics see what Tart said; otherwise the stream is consumed so the bounded buffer
+    /// never fills.
+    private func drainOutput(of run: ProcessRun, environment id: EnvironmentID) {
+        Task { [weak self] in
+            for await output in run.output {
+                await self?.forward(output, from: id)
+            }
+        }
+    }
+
+    private func forward(_ output: ProcessOutput, from id: EnvironmentID) {
+        guard let sink = outputSinks[id] else { return }
+        switch output {
+        case .stdout(let line), .stderr(let line):
+            sink.events(.log(sink.operation, line))
         }
     }
 

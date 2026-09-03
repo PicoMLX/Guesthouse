@@ -84,6 +84,7 @@ final class AppModel {
     private(set) var lastLogs: [EnvironmentID: [RedactedLine]] = [:]
     /// What the runtime reported about itself at the last refresh.
     private(set) var runtimeInfo: RuntimeVersionInfo?
+    private let redactor = Redactor()
     private(set) var quitFlow: QuitFlow = .idle
     /// The user canceled during a step that must run to its end; honored when it ends.
     private(set) var quitCancelRequested = false
@@ -336,7 +337,11 @@ final class AppModel {
     private func reconcile() async -> ReconcileOutcome {
         do {
             for try await event in backend.send(.runtimeVersion) {
-                if case .runtimeVersion(let info) = event { runtimeInfo = info }
+                switch event {
+                case .runtimeVersion(let info): runtimeInfo = info
+                case .failed(_, let error): return .unavailable(error)
+                default: break
+                }
             }
             var listed: [DevelopmentEnvironment] = []
             for try await event in backend.send(.listEnvironments) {
@@ -780,11 +785,13 @@ final class AppModel {
 
     // MARK: - Diagnostics
 
-    /// Every redacted line the app holds, oldest first, prefixed with the environment it
-    /// belongs to (by UUID, never by address).
+    /// Every redacted line the app holds, oldest first, each prefixed with the environment it
+    /// belongs to (by UUID, never by address), so two development Macs' lines stay apart.
     var diagnosticsLines: [RedactedLine] {
         environments.flatMap { environment -> [RedactedLine] in
-            operations[environment.id]?.logs ?? lastLogs[environment.id] ?? []
+            let lines = operations[environment.id]?.logs ?? lastLogs[environment.id] ?? []
+            // Prefixing goes back through the redactor: `RedactedLine` is only ever made there.
+            return redactor.redact(lines: lines.map { "\(environment.id.uuid.uuidString) \($0.text)" })
         }
     }
 

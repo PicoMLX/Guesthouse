@@ -62,7 +62,9 @@ struct DiagnosticsView: View {
     private func copyVisible() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(visibleLines.map(\.text).joined(separator: "\n"), forType: .string)
+        // The pasteboard is shared with every other application: what leaves the sheet is
+        // scrubbed exactly like the written bundle.
+        pasteboard.setString(visibleLines.map { DiagnosticsExportBuilder.scrub($0.text) }.joined(separator: "\n"), forType: .string)
         exportNote = "\(visibleLines.count) lines copied."
     }
 
@@ -75,7 +77,7 @@ struct DiagnosticsView: View {
         panel.showsTagField = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try DiagnosticsExportBuilder.write(model.diagnosticsExport(), to: url)
+            try DiagnosticsExportWriter.write(model.diagnosticsExport(), to: url)
             exportNote = "Exported to \(url.lastPathComponent): manifest.json, log.txt, and excluded.txt."
         } catch {
             exportNote = "The export could not be written (\(GuesthouseError.sanitize(error.localizedDescription, limit: 120))). Choose another location or free disk space."

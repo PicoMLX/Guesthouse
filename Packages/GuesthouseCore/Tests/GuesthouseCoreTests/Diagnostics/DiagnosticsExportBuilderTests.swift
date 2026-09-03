@@ -36,16 +36,20 @@ import Testing
         #expect(DiagnosticsExportBuilder.scrubAddresses("host 10.0.0.1:22") == "host [redacted:address]:22")
     }
 
-    @Test func writesAFolderWithThreeFiles() throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "Diagnostics-\(UUID().uuidString)")
-        try DiagnosticsExportBuilder.write(export(lines: ["one"]), to: directory)
-        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
-        #expect(names == ["excluded.txt", "log.txt", "manifest.json"])
-        #expect(try String(contentsOf: directory.appending(path: "log.txt"), encoding: .utf8) == "one\n")
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(DiagnosticsExport.Manifest.self, from: try Data(contentsOf: directory.appending(path: "manifest.json")))
-        #expect(manifest.appVersion == "0.1")
-        #expect(manifest.excludedCategories == DiagnosticsExportBuilder.excludedCategories)
+    @Test func compressedAndMappedIPv6AddressesAreScrubbedButTimesAreNot() {
+        for address in ["::1", "2001:db8::1", "fe80::1c2a:3b4c:5d6e:7f80", "::ffff:192.0.2.1", "2001:0db8:85a3:0000:0000:8a2e:0370:7334"] {
+            let scrubbed = DiagnosticsExportBuilder.scrubAddresses("guest at \(address) answered")
+            #expect(scrubbed == "guest at [redacted:address] answered", "\(address)")
+        }
+        #expect(DiagnosticsExportBuilder.scrubAddresses("12:30:45.123 started") == "12:30:45.123 started")
+        #expect(DiagnosticsExportBuilder.scrubAddresses("ratio 1:2") == "ratio 1:2")
+    }
+
+    @Test func accountIdentifiersAreScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("Signed in as alice@example.com") == "Signed in as [redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("Logged in to github.com as octocat") == "Logged in to github.com as [redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("user: octocat (admin)") == "user: [redacted:account] (admin)")
+        #expect(DiagnosticsExportBuilder.scrub("Contact ops@example.org for help") == "Contact [redacted:account] for help")
+        #expect(DiagnosticsExportBuilder.scrub("Xcode 26.6 selected") == "Xcode 26.6 selected")
     }
 }

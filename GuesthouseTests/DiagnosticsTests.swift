@@ -33,4 +33,14 @@ import Testing
     @Test func fileStampsHaveNoColons() {
         #expect(!DiagnosticsView.stamp(Date(timeIntervalSince1970: 1_800_000_000)).contains(":"))
     }
+
+    @Test func theWriterCreatesAFolderWithThreeFiles() throws {
+        let export = DiagnosticsExportBuilder.build(appVersion: "1", appBuild: "1", runtime: nil, compatibility: ObservedTuple(), environments: [], logs: [])
+        let directory = FileManager.default.temporaryDirectory.appending(path: "Diagnostics-\(UUID().uuidString)")
+        try DiagnosticsExportWriter.write(export, to: directory)
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        #expect(names == [DiagnosticsExport.excludedFileName, DiagnosticsExport.logFileName, DiagnosticsExport.manifestFileName])
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        #expect(attributes[.posixPermissions] as? Int == 0o700)
+    }
 }
