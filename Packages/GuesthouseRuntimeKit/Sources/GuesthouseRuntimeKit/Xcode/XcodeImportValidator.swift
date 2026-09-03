@@ -33,17 +33,20 @@ public enum XcodeImportValidator {
         }
     }
 
-    public static func resolve(_ handoff: FileHandoff) throws(GuesthouseError) -> ResolvedLocation {
+    /// Whether a bookmark must carry a usable security scope. Production requires it: a
+    /// bookmark that resolves without one is not a grant from the sandboxed app. Tests, which
+    /// make plain bookmarks, turn it off through `resolve(_:requireSecurityScope:)`.
+    public static func resolve(_ handoff: FileHandoff, requireSecurityScope: Bool = true) throws(GuesthouseError) -> ResolvedLocation {
         switch handoff.kind {
         case .securityScopedBookmark(let data):
             var stale = false
-            // The scope is started here and kept for the validation; a bookmark without a
-            // scope (a plain one made in tests) is simply used as a location.
-            if let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI, .withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL {
-                let scoped = url.startAccessingSecurityScopedResource()
-                return ResolvedLocation(url: url, scoped: scoped)
+            if let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI, .withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL,
+               url.startAccessingSecurityScopedResource() {
+                return ResolvedLocation(url: url, scoped: true)
             }
-            guard let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL else {
+            guard !requireSecurityScope,
+                  let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL
+            else {
                 throw .xcodeSelectionRejected(.unresolvable)
             }
             return ResolvedLocation(url: url, scoped: false)
@@ -61,15 +64,16 @@ public enum XcodeImportValidator {
               resolved.pathExtension == "app"
         else { throw .xcodeSelectionRejected(.notAnApplication) }
 
-        guard let info = try plist(resolved.appending(path: "Contents/Info.plist")) else { throw .xcodeSelectionRejected(.notAnApplication) }
+        guard let info = try plist(resolved.appending(path: "Contents/Info.plist"), within: resolved) else { throw .xcodeSelectionRejected(.notAnApplication) }
         let identifier = info["CFBundleIdentifier"] as? String ?? ""
         guard identifier == xcodeBundleIdentifier, identifier == (expectedBundleIdentifier ?? identifier) else {
             throw .xcodeSelectionRejected(.notXcode)
         }
-        guard let version = info["CFBundleShortVersionString"] as? String, !version.isEmpty else { throw .xcodeComponentsIncomplete(missing: ["Info.plist version"]) }
-        let versionPlist = try plist(resolved.appending(path: "Contents/version.plist")) ?? [:]
+        // Missing host metadata is a selection problem on this Mac, never a guest tool problem.
+        guard let version = info["CFBundleShortVersionString"] as? String, !version.isEmpty else { throw .xcodeSelectionRejected(.metadataUnreadable) }
+        let versionPlist = try plist(resolved.appending(path: "Contents/version.plist"), within: resolved) ?? [:]
         guard let build = (versionPlist["ProductBuildVersion"] as? String) ?? (info["DTXcodeBuild"] as? String), !build.isEmpty else {
-            throw .xcodeComponentsIncomplete(missing: ["ProductBuildVersion"])
+            throw .xcodeSelectionRejected(.metadataUnreadable)
         }
         return XcodeCandidate(
             version: GuesthouseError.sanitize(version),
@@ -95,8 +99,12 @@ public enum XcodeImportValidator {
         return total
     }
 
-    /// A metadata file is read only if it is a contained regular file of bounded size.
-    private static func plist(_ url: URL) throws(GuesthouseError) -> [String: Any]? {
+    /// A metadata file is read only if it is a regular file of bounded size whose real path,
+    /// every ancestor resolved, still lies inside the bundle (a `Contents` link elsewhere
+    /// would otherwise let a wrapper folder pass as Xcode).
+    private static func plist(_ url: URL, within bundle: URL) throws(GuesthouseError) -> [String: Any]? {
+        let real = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard real.path.hasPrefix(bundle.path + "/") else { throw .xcodeSelectionRejected(.metadataUnreadable) }
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else { return nil }
         guard values.isSymbolicLink != true, values.isRegularFile == true else { return nil }
         guard let size = values.fileSize, size <= maximumMetadataBytes else { throw .xcodeSelectionRejected(.metadataUnreadable) }

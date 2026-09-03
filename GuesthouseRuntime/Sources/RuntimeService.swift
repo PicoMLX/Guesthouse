@@ -199,8 +199,9 @@ final class RuntimeService: Sendable {
             let reply = ReplyBox(message, onReply: finished)
             Task.detached {
                 do {
-                    let location = try XcodeImportValidator.resolve(handoff)
-                    let candidate = try XcodeImportValidator.candidate(at: location, expectedBundleIdentifier: handoff.expectedBundleIdentifier)
+                    let location = try XcodeImportValidator.resolve(handoff, requireSecurityScope: true)
+                    let candidate = try XcodeImportValidator.candidate(at: location.url, expectedBundleIdentifier: handoff.expectedBundleIdentifier)
+                    withExtendedLifetime(location) {}
                     reply.send(RuntimeEvent.xcodeCandidate(candidate))
                 } catch let error as GuesthouseError {
                     reply.send(RuntimeEvent.failed(OperationID(), error))

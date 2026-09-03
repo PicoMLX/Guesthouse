@@ -32,10 +32,13 @@ import Testing
     @Test func bookmarksResolveAndDescriptorsAreNotYetSupported() throws {
         let url = try bundle(name: "Marked.app")
         let bookmark = try url.bookmarkData()
-        let resolved = try XcodeImportValidator.resolve(FileHandoff(kind: .securityScopedBookmark(bookmark), displayName: "Marked.app"))
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.unresolvable)) {
+            try XcodeImportValidator.resolve(FileHandoff(kind: .securityScopedBookmark(bookmark), displayName: "Marked.app"))
+        }
+        let resolved = try XcodeImportValidator.resolve(FileHandoff(kind: .securityScopedBookmark(bookmark), displayName: "Marked.app"), requireSecurityScope: false)
         #expect(resolved.url.standardizedFileURL.path == url.standardizedFileURL.path)
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.unresolvable)) {
-            try XcodeImportValidator.resolve(FileHandoff(kind: .securityScopedBookmark(Data([1, 2, 3])), displayName: "x.app"))
+            try XcodeImportValidator.resolve(FileHandoff(kind: .securityScopedBookmark(Data([1, 2, 3])), displayName: "x.app"), requireSecurityScope: false)
         }
         #expect(throws: GuesthouseError.invalidRequest(.unsupportedOperation)) {
             try XcodeImportValidator.resolve(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "x.app"))
@@ -48,7 +51,7 @@ import Testing
         let expectedMismatch = try bundle(name: "Xcode2.app")
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.notXcode)) { try XcodeImportValidator.candidate(at: expectedMismatch, expectedBundleIdentifier: "com.example.Else") }
         let noBuild = try bundle(name: "NoBuild.app", build: nil)
-        #expect(throws: GuesthouseError.xcodeComponentsIncomplete(missing: ["ProductBuildVersion"])) { try XcodeImportValidator.candidate(at: noBuild) }
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: noBuild) }
         let file = root.appending(path: "file.app")
         try Data("x".utf8).write(to: file)
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.notAnApplication)) { try XcodeImportValidator.candidate(at: file) }
@@ -66,10 +69,18 @@ import Testing
         let real = linked.appending(path: "Contents/Info.plist")
         try FileManager.default.moveItem(at: real, to: root.appending(path: "elsewhere.plist"))
         try FileManager.default.createSymbolicLink(at: real, withDestinationURL: root.appending(path: "elsewhere.plist"))
-        #expect(throws: GuesthouseError.xcodeSelectionRejected(.notAnApplication)) { try XcodeImportValidator.candidate(at: linked) }
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: linked) }
         let deep = root.appending(path: "deep")
         for index in 0..<40 { try FileManager.default.createDirectory(at: deep.appending(path: "d\(index)"), withIntermediateDirectories: true) }
         #expect(XcodeImportValidator.estimateSize(of: deep) == 0, "directories count as entries but add no bytes")
+    }
+
+    @Test func metadataReachedThroughALinkedAncestorIsRefused() throws {
+        let real = try bundle(name: "Real.app")
+        let wrapper = root.appending(path: "Wrapper.app")
+        try FileManager.default.createDirectory(at: wrapper, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: wrapper.appending(path: "Contents"), withDestinationURL: real.appending(path: "Contents"))
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: wrapper) }
     }
 
     @Test func symlinksAreResolvedToTheRealBundle() throws {
