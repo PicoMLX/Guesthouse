@@ -65,6 +65,42 @@ import Testing
         #expect(throws: RequestValidationError.pathEscapesRoot) { try RequestValidator.validateContainment(of: dangling.appending(path: "x"), within: dangling) }
     }
 
+    @Test func aDanglingAncestorOfTheRootIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Ancestor-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: base.appending(path: "link"), withDestinationURL: URL(fileURLWithPath: "/nonexistent/outside"))
+        let root = base.appending(path: "link/subroot")
+        #expect(throws: RequestValidationError.pathEscapesRoot) { try RequestValidator.validateContainment(of: root, within: root) }
+        #expect(throws: RequestValidationError.pathEscapesRoot) { try RequestValidator.validateContainment(of: root.appending(path: "Xcode.app"), within: root) }
+    }
+
+    @Test func aForgedIdentityMarkerCannotImpersonateAnotherValue() {
+        let long = String(repeating: "a", count: 400)
+        let shortened = ObservedTuple(codexCLIPath: long).sanitizedForWire().codexCLIPath ?? ""
+        // A CLI that reports the shortened text verbatim must not produce the same value.
+        let forged = ObservedTuple(codexCLIPath: shortened).sanitizedForWire().codexCLIPath
+        #expect(forged != shortened, "the shortened text of one observation is not the identity of another")
+        // A short value that carries the marker literally keeps it neutralized and unchanged
+        // otherwise, so it can never be read as an identity this type produced.
+        let literal = ObservedTuple(codexCLIPath: "/opt/tool [exact:0123456789ab]").sanitizedForWire().codexCLIPath
+        #expect(literal == "/opt/tool [exact\u{FFFD}:0123456789ab]")
+    }
+
+    @Test func capabilityDigestsDistinguishSeparatorPlacement() {
+        let base = (0..<63).map { "cap\($0)" }
+        let first = ObservedTuple(codexCLICapabilities: base + ["a", "b\u{0}c"]).sanitizedForWire().codexCLICapabilities
+        let second = ObservedTuple(codexCLICapabilities: base + ["a\u{0}b", "c"]).sanitizedForWire().codexCLICapabilities
+        #expect(first != second, "the digest is over a length-prefixed encoding, so the separator cannot move")
+    }
+
+    @Test func aDisplayNameIsBoundedByScalarsNotCharacters() {
+        let oneCharacter = "👩" + String(repeating: "\u{1F3FB}", count: 5_000)
+        #expect(oneCharacter.count == 1)
+        #expect(throws: RequestValidationError.invalidDisplayName) {
+            try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: oneCharacter))
+        }
+    }
+
     @Test func aCappedCapabilityListKeepsItsIdentity() {
         let many = (0..<200).map { "cap\($0)" }
         var other = many; other[199] = "different"

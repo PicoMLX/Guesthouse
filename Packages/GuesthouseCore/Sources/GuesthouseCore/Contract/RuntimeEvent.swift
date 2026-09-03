@@ -135,7 +135,9 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
     public var readiness: Readiness
     public var inFlightOperation: OperationID?
     /// Versions observed on the host and guest, with unknowns left `nil`.
-    public var observed: ObservedTuple
+    /// Only this type sets it, and only through `sanitizedForWire()`: a raw probe value can
+    /// never be assigned into a status and encoded unchanged.
+    public private(set) var observed: ObservedTuple
     public var reconciledAt: Date?
 
     public init(
@@ -183,6 +185,9 @@ extension ObservedTuple {
     /// carries a digest of the exact observation, so two different observations never
     /// collapse into one verified compatibility tuple.
     static func bounded(_ value: String, limit: Int) -> String {
+        // A value that already contains the identity marker is neutralized first, so untrusted
+        // text cannot forge the suffix this function appends and impersonate another value.
+        let value = value.replacingOccurrences(of: identityMarker, with: "[exact\u{FFFD}:")
         let (sanitized, wasRedacted) = GuesthouseError.sanitizeReporting(value, limit: limit)
         // A redacted value stands for a secret: it gets no digest, since that would let a
         // guess be confirmed. Whether redaction happened comes from the sanitizer itself, not
@@ -190,11 +195,12 @@ extension ObservedTuple {
         // normalized carries a digest, counted against the same limit.
         guard sanitized != value, !wasRedacted else { return sanitized }
         let room = max(16, limit - identitySuffixLength)
-        return "\(GuesthouseError.sanitize(value, limit: room)) [exact:\(digest(of: value))]"
+        return "\(GuesthouseError.sanitize(value, limit: room)) \(identityMarker)\(digest(of: value))]"
     }
 
     /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
     static let identitySuffixLength = 22
+    static let identityMarker = "[exact:"
     static let maximumCapabilities = 64
 
     /// The first `maximumCapabilities` entries, each bounded; when entries are dropped, one
@@ -204,7 +210,19 @@ extension ObservedTuple {
         guard values.count > maximumCapabilities else { return values.map { bounded($0, limit: 128) } }
         let kept = values.prefix(maximumCapabilities - 1).map { bounded($0, limit: 128) }
         let omitted = values.count - kept.count
-        return kept + ["[\(omitted) more; exact:\(digest(of: values.joined(separator: "\u{0}")))]"]
+        return kept + ["[\(omitted) more; exact:\(digest(ofList: values))]"]
+    }
+
+    /// A digest over a length-prefixed encoding, so no two different lists can produce the
+    /// same input: a value containing the separator cannot be mistaken for two values.
+    static func digest(ofList values: [String]) -> String {
+        var data = Data()
+        for value in values {
+            let bytes = Data(value.utf8)
+            withUnsafeBytes(of: UInt64(bytes.count).bigEndian) { data.append(contentsOf: $0) }
+            data.append(bytes)
+        }
+        return SHA256.hash(data: data).prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
     static func digest(of value: String) -> String {

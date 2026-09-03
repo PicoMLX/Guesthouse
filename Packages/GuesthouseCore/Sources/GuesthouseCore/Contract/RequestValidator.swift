@@ -48,7 +48,8 @@ public enum RequestValidator: Sendable {
             }
         }
         guard !handoff.displayName.isEmpty,
-              handoff.displayName.count <= maximumDisplayNameLength,
+              handoff.displayName.unicodeScalars.count <= maximumDisplayNameLength,
+              handoff.displayName.utf8.count <= maximumDisplayNameLength * 4,
               !handoff.displayName.contains("/"),
               !handoff.displayName.unicodeScalars.contains(where: { scalar in
                   switch scalar.properties.generalCategory {
@@ -80,13 +81,9 @@ public enum RequestValidator: Sendable {
     public static func validateContainment(of candidate: URL, within root: URL) throws(RequestValidationError) -> URL {
         guard candidate.isFileURL, root.isFileURL else { throw .invalidPath }
         guard !candidate.pathComponents.contains("..") else { throw .pathEscapesRoot }
-        // The root itself must be a real directory, not a link to one and not a dangling
-        // link: a write to the root would otherwise land wherever the link points.
-        var rootInfo = stat()
-        if lstat(root.standardizedFileURL.path, &rootInfo) == 0, (rootInfo.st_mode & S_IFMT) == S_IFLNK {
-            var target = stat()
-            guard stat(root.standardizedFileURL.path, &target) == 0 else { throw .pathEscapesRoot }
-        }
+        // The root and every one of its ancestors must resolve: a dangling link anywhere in
+        // the chain would send a later create through it, outside the allowed location.
+        guard !containsDanglingSymbolicLink(root, below: URL(fileURLWithPath: "/")) else { throw .pathEscapesRoot }
         let resolvedRoot = resolveThroughExistingAncestors(root)
         let resolvedCandidate = resolveThroughExistingAncestors(candidate)
         let rootComponents = resolvedRoot.pathComponents
