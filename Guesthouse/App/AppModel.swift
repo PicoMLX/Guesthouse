@@ -375,11 +375,19 @@ final class AppModel {
         }
     }
 
-    /// Re-reads one environment's status after an operation, whatever its outcome.
+    /// Re-reads one environment's status after an operation, whatever its outcome. A status
+    /// query the runtime answers with a failure leaves no cached state behind: the card shows
+    /// the error and offers nothing until a later query succeeds.
     func refreshStatus(of id: EnvironmentID) async {
         do {
             for try await event in backend.send(.environmentStatus(id)) {
-                if case .status(let status) = event { statuses[id] = status }
+                switch event {
+                case .status(let status): statuses[id] = status
+                case .failed(_, let error):
+                    statuses[id] = nil
+                    lastErrors[id] = error
+                default: break
+                }
             }
         } catch {
             launchState = .interrupted(RuntimeConnectionInterrupted())
@@ -415,12 +423,14 @@ final class AppModel {
     /// Starts an environment. The only dashboard action wired to the runtime so far.
     func start(_ id: EnvironmentID) {
         guard environments.contains(where: { $0.id == id }), operations[id] == nil, globalStartBlock == nil else { return }
+        // Reserved before the first suspension, so two rapid starts cannot both pass the guard.
+        operations[id] = OperationState(id: OperationID(), phase: nil)
         Task { await run(.startEnvironment(id, StartOptions()), for: id) }
     }
 
     private func run(_ request: RuntimeRequest, for id: EnvironmentID) async {
         lastErrors[id] = nil
-        operations[id] = OperationState(id: OperationID(), phase: nil)
+        if operations[id] == nil { operations[id] = OperationState(id: OperationID(), phase: nil) }
         do {
             for try await event in backend.send(request) {
                 switch event {
@@ -446,7 +456,10 @@ final class AppModel {
         let model = AppModel(backend: scenario.backend) { _ in }
         await model.refresh()
         if let request = scenario.initialRequest, case .startEnvironment(let id, _) = request {
-            model.start(id)
+            // A preview's seeded status may already name the operation, which the dashboard's
+            // own guard would refuse; the scripted stream is attached to it regardless so the
+            // progress UI has something to show. The guard itself is covered by tests.
+            Task { await model.run(request, for: id) }
         }
         return model
     }
@@ -633,13 +646,16 @@ final class AppModel {
         await stopAll(mode: mode, generation: generation)
     }
 
+    /// Waits until neither this app nor the runtime reports an operation in flight: a start
+    /// this app made moments ago, or one recovered after a relaunch that only the status
+    /// names, must reach a terminal state before stop targets are chosen.
     private func waitForOperations() async {
-        while !operations.isEmpty, !Task.isCancelled {
-            quitFlow = .stopping(operations.keys.first, nil)
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-        for environment in environments where !Task.isCancelled {
-            await refreshStatus(of: environment.id)
+        while !Task.isCancelled {
+            for environment in environments { await refreshStatus(of: environment.id) }
+            let busy = operations.keys.first ?? statuses.values.first(where: { $0.inFlightOperation != nil })?.environmentID
+            guard let busy else { return }
+            quitFlow = .stopping(busy, nil)
+            try? await Task.sleep(for: .milliseconds(200))
         }
     }
 

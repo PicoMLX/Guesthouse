@@ -11,6 +11,15 @@ import Testing
         for _ in 0..<600 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
     }
 
+    @Test func aPreservedEnvironmentCannotBeStartedEvenWhenStopped() {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let status = EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.environmentPreserved(environment.id)))
+        let card = EnvironmentCardState(environment: environment, status: status, operation: nil, lastError: nil)
+        guard case .disabled = card.availability(of: .start) else { Issue.record("expected Start disabled for a preserved slot"); return }
+        let retried = EnvironmentCardState(environment: environment, status: status, operation: nil, lastError: .environmentPreserved(environment.id))
+        guard case .disabled = retried.availability(of: .start) else { Issue.record("expected Start disabled after the preserved failure"); return }
+    }
+
     @Test func freshMacOffersCreationAndNoCards() async {
         let model = await AppModel.preview(PreviewScenarios.freshMac())
         #expect(model.cardStates().isEmpty)

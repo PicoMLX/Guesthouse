@@ -99,7 +99,12 @@ struct EnvironmentCardView: View {
             Text(state.name).font(.title3).bold()
             Spacer()
             if state.isBusy {
-                ProgressView().controlSize(.small).accessibilityLabel("Busy")
+                // A phase that measures itself shows how far it is; the rest stay indeterminate.
+                if let fraction = state.phase?.fraction {
+                    ProgressView(value: fraction).controlSize(.small).frame(width: 60).accessibilityLabel("Busy, \(Int(fraction * 100)) percent")
+                } else {
+                    ProgressView().controlSize(.small).accessibilityLabel("Busy")
+                }
             }
             Text(state.statusText).foregroundStyle(state.attention == nil ? .secondary : .primary)
         }

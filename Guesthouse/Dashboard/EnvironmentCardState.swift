@@ -141,6 +141,9 @@ struct EnvironmentCardState: Equatable, Identifiable {
         guard let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
         if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
         if let blockedElsewhere { return .disabled(reason: blockedElsewhere) }
+        // A preserved slot is never startable, whatever the VM's state: the runtime refuses it
+        // until the slot is repaired.
+        if case .environmentPreserved? = attention { return .disabled(reason: attention?.userMessage ?? "This development Mac is preserved") }
         // A failed start does not lock Start forever: once the status re-check reports a
         // stopped, ready VM, Start is a retry and the runtime's own recovery actions apply.
         if let attention, status.readiness != .ready || status.vm != .stopped { return .disabled(reason: attention.userMessage) }
