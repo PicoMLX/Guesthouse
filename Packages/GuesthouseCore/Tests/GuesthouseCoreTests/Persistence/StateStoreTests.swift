@@ -27,7 +27,7 @@ import Testing
     @Test func directoryAndFilesAreRestricted() async throws {
         let store = try StateStore(rootURL: root)
         try await store.saveSnapshot(sampleSnapshot())
-        _ = try await store.begin("startEnvironment", for: EnvironmentID())
+        _ = try await store.begin(.startEnvironment, for: EnvironmentID())
         #expect(try permissions(root) == 0o700)
         #expect(try permissions(await store.snapshotURL) == 0o600)
         #expect(try permissions(await store.journalURL) == 0o600)
@@ -78,7 +78,7 @@ import Testing
     @Test func beginReturnsOnlyAfterTheStartedRecordIsDurable() async throws {
         let store = try StateStore(rootURL: root)
         let environment = EnvironmentID()
-        let id = try await store.begin("startEnvironment", for: environment)
+        let id = try await store.begin(.startEnvironment, for: environment)
         let replay = try await store.replay()
         #expect(replay.inFlight[id]?.outcome == .started)
         #expect(replay.inFlight[id]?.environmentID == environment)
@@ -89,13 +89,13 @@ import Testing
         let store = try StateStore(rootURL: root)
         let environment = EnvironmentID()
         let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let done = try await store.begin("startEnvironment", for: environment, at: now)
-        try await store.append(JournalRecord(id: done, environmentID: environment, operation: "startEnvironment", timestamp: now, outcome: .checkpoint(.runtimeReady)))
-        try await store.append(JournalRecord(id: done, environmentID: environment, operation: "startEnvironment", timestamp: now, outcome: .completed))
-        let failed = try await store.begin("importXcode", for: environment, at: now)
-        try await store.append(JournalRecord(id: failed, environmentID: environment, operation: "importXcode", timestamp: now, outcome: .failed(.canceled)))
-        let lost = try await store.begin("stopEnvironment", for: environment, at: now)
-        try await store.append(JournalRecord(id: lost, environmentID: environment, operation: "stopEnvironment", timestamp: now, outcome: .unknown))
+        let done = try await store.begin(.startEnvironment, for: environment, at: now)
+        try await store.append(JournalRecord(id: done, environmentID: environment, operation: .startEnvironment, timestamp: now, outcome: .checkpoint(.runtimeReady)))
+        try await store.append(JournalRecord(id: done, environmentID: environment, operation: .startEnvironment, timestamp: now, outcome: .completed))
+        let failed = try await store.begin(.importXcode, for: environment, at: now)
+        try await store.append(JournalRecord(id: failed, environmentID: environment, operation: .importXcode, timestamp: now, outcome: .failed(.canceled)))
+        let lost = try await store.begin(.stopEnvironment, for: environment, at: now)
+        try await store.append(JournalRecord(id: lost, environmentID: environment, operation: .stopEnvironment, timestamp: now, outcome: .unknown))
 
         let replay = try await store.replay()
         #expect(replay.records.count == 7)
@@ -106,7 +106,7 @@ import Testing
     @Test func truncatedLastLineIsToleratedAndReported() async throws {
         let store = try StateStore(rootURL: root)
         let environment = EnvironmentID()
-        let id = try await store.begin("startEnvironment", for: environment)
+        let id = try await store.begin(.startEnvironment, for: environment)
         let handle = try FileHandle(forWritingTo: await store.journalURL)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data("{\"id\":\"half-written".utf8))
@@ -120,12 +120,15 @@ import Testing
 
     @Test func corruptMiddleLineIsRejected() async throws {
         let store = try StateStore(rootURL: root)
-        _ = try await store.begin("startEnvironment", for: EnvironmentID())
+        _ = try await store.begin(.startEnvironment, for: EnvironmentID())
         let handle = try FileHandle(forWritingTo: await store.journalURL)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data("not json\n".utf8))
         try handle.close()
-        _ = try await store.begin("stopEnvironment", for: EnvironmentID())
+        // Nothing is appended onto a damaged journal; the damage is reported instead.
+        await #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+            try await store.begin(.stopEnvironment, for: EnvironmentID())
+        }
         await #expect(throws: StateStoreError.corruptJournal(line: 2)) {
             try await store.replay()
         }
