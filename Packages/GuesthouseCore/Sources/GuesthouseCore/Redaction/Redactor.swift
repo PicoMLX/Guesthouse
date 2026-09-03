@@ -12,6 +12,8 @@ public struct Redactor: Sendable {
     /// removed in full.
     public struct StreamState: Hashable, Sendable {
         var insidePEMBlock = false
+        /// The previous line was a bare `Authorization:` label; the value follows on this line.
+        var expectingAuthorizationValue = false
 
         public init() {}
     }
@@ -29,7 +31,20 @@ public struct Redactor: Sendable {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     public func redact(line: String, state: inout StreamState) -> RedactedLine {
-        var text = line
+        // Terminal styling is dropped first so an escape sequence can never sit between a word
+        // boundary and a token.
+        var text = line.replacing(Self.patterns.terminalEscape, with: "")
+
+        if state.expectingAuthorizationValue {
+            state.expectingAuthorizationValue = false
+            if text.wholeMatch(of: Self.patterns.bareCredentialLine) != nil {
+                return RedactedLine(Self.marker("authorization"))
+            }
+        }
+        if text.wholeMatch(of: Self.patterns.authorizationLabelOnly) != nil {
+            state.expectingAuthorizationValue = true
+            return RedactedLine("Authorization: \(Self.marker("authorization"))")
+        }
 
         if state.insidePEMBlock {
             if text.contains(Self.patterns.pemEnd) {
@@ -72,6 +87,13 @@ public struct Redactor: Sendable {
     /// Compiled patterns. `Regex` is an immutable value type but is not declared `Sendable`,
     /// so this container vouches for it: nothing here is ever mutated after initialization.
     private struct Patterns: @unchecked Sendable {
+        /// ANSI CSI and other escape sequences.
+        let terminalEscape = #/\u{1B}(?:\[[0-9;?]*[ -\/]*[@-~]|[@-Z\\-_])/#
+        /// A folded header: the label alone on a line, value on the next.
+        let authorizationLabelOnly = #/\s*authorization:\s*/#.ignoresCase()
+        /// The continuation of a folded header: leading whitespace (folding requires it) and
+        /// one or two tokens, the first of which is not itself a header name.
+        let bareCredentialLine = #/\s+(?!\S+:)\S+(?:\s+\S+)?\s*/#
         let pemBegin = #/-----BEGIN [A-Z0-9 ]+-----/#
         let pemEnd = #/-----END [A-Z0-9 ]+-----/#
         /// `Authorization: Basic xyz`, `Authorization: token xyz`, `Authorization: Bearer xyz`.
@@ -84,11 +106,12 @@ public struct Redactor: Sendable {
         let apiKey = #/\bsk-[A-Za-z0-9_-]{16,}\b/#
         /// JSON Web Tokens, matched structurally: a header that decodes to `{"…`, then two more
         /// Base64URL segments of any length (an empty claims set is `e30`).
-        let jwt = #/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/#
-        /// Credentials embedded in URLs: `https://user:secret@host`.
-        let urlUserInfo = #/(:\/\/)[^\s\/@]+@/#
+        let jwt = #/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/#
+        /// Credentials embedded in URLs: `https://user:secret@host`. The authority ends at the
+        /// last `@` before a slash or whitespace, so a password containing `@` is fully covered.
+        let urlUserInfo = #/(:\/\/)[^\s\/]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `api_key=...`.
-        let labeledSecret = #/\b(password|passphrase|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/#.ignoresCase()
+        let labeledSecret = #/\b(password|passphrase|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D`, only on lines that mention a code, and never when
         /// the match is part of a longer hyphenated identifier such as a UUID.
         let mentionsCode = #/\bcodes?\b/#.ignoresCase()

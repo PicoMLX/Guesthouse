@@ -15,6 +15,10 @@ import Testing
         ("api key", "OPENAI_API_KEY is sk-proj-abcdefghijklmnopqrstuvwxyz0123", "sk-proj-abcdefghijklmnopqrstuvwxyz0123"),
         ("jwt", "session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuv", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuv"),
         ("jwt with empty claims", "token eyJhbGciOiJIUzI1NiJ9.e30.sig", "eyJhbGciOiJIUzI1NiJ9.e30.sig"),
+        ("unsecured jwt with empty signature", "value eyJhbGciOiJub25lIn0.e30. ok", "eyJhbGciOiJub25lIn0.e30."),
+        ("password with escaped quote", "password: \"correct\\\"horse battery\"", "horse battery"),
+        ("url password containing at", "cloning https://user:p@ss@example.com/repo.git", "p@ss"),
+        ("token wrapped in ansi color", "\u{1B}[31mghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\u{1B}[0m", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"),
         ("url userinfo", "cloning https://ronald:hunter2secret@github.com/PicoMLX/Guesthouse.git", "hunter2secret"),
         ("password label", "password: hunter2secret", "hunter2secret"),
         ("passphrase label", "Passphrase=\"correct horse battery\"", "correct horse battery"),
@@ -89,6 +93,25 @@ import Testing
         let data = try JSONEncoder().encode(literal)
         #expect(String(decoding: data, as: UTF8.self) == "\"Started\"")
         #expect(try JSONDecoder().decode(RedactedLine.self, from: data) == literal)
+    }
+
+    @Test func foldedAuthorizationHeaderIsRedactedAcrossLines() {
+        var state = Redactor.StreamState()
+        let first = redactor.redact(line: "Authorization:", state: &state).text
+        let second = redactor.redact(line: " Basic dXNlcjpwYXNz", state: &state).text
+        let third = redactor.redact(line: "Accept: */*", state: &state).text
+        #expect(first == "Authorization: [redacted:authorization]")
+        #expect(second == "[redacted:authorization]")
+        #expect(third == "Accept: */*")
+        #expect(state == Redactor.StreamState())
+        var fresh = Redactor.StreamState()
+        _ = redactor.redact(line: "Authorization:", state: &fresh)
+        #expect(redactor.redact(line: "Accept: */*", state: &fresh).text == "Accept: */*", "a non-credential continuation is left alone")
+    }
+
+    @Test func urlUserInfoCoversTheWholeAuthority() {
+        #expect(redactor.redact("https://user:p@ss@example.com/repo.git") == "https://[redacted:userinfo]@example.com/repo.git")
+        #expect(redactor.redact("https://example.com/a@b/c") == "https://example.com/a@b/c", "an @ in the path is not userinfo")
     }
 
     @Test func fieldValuesRedactBareDeviceCodes() {
