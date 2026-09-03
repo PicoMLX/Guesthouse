@@ -70,6 +70,25 @@ import Testing
         #expect(Redactor.stripTerminalEscapes("\u{1B}[1mbold\u{1B}[0m \u{1B}Pdcs\u{1B}\\x") == "bold x")
     }
 
+    @Test func continuationAfterAPartialAuthorizationValueIsRemoved() {
+        let out = redactor.redact(lines: ["Authorization: Digest username=\"u\",", "  nonce=\"n\", response=\"abc123\"", "Accept: */*"]).map(\.text)
+        #expect(out == ["Authorization: [redacted:authorization]", "[redacted:authorization]", "Accept: */*"])
+    }
+
+    @Test func aFooterLineThatOpensAnotherBlockKeepsRedacting() {
+        let lines = ["-----BEGIN PRIVATE KEY-----", "AAA", "-----END PRIVATE KEY----- -----BEGIN RSA PRIVATE KEY-----", "BBB", "-----END RSA PRIVATE KEY-----", "after"]
+        let out = redactor.redact(lines: lines).map(\.text)
+        #expect(out.dropLast().allSatisfy { !$0.contains("AAA") && !$0.contains("BBB") })
+        #expect(out[2] == "[redacted:private-key] [redacted:private-key]")
+        #expect(out[3] == "[redacted:private-key]")
+        #expect(out.last == "after")
+    }
+
+    @Test func deviceCodeContextSurvivesBlankLines() {
+        let out = redactor.redact(lines: ["Your one-time code is:", "", "\u{1B}[0m", "AB12-CD34", "AB12-CD34"]).map(\.text)
+        #expect(out == ["Your one-time code is:", "", "", "[redacted:device-code]", "AB12-CD34"])
+    }
+
     @Test func decodedRedactedLinesAreRedactedAgain() throws {
         let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""password: hunter2""#.utf8))
         #expect(line.text == "password: [redacted:secret]")
