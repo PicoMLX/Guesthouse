@@ -23,6 +23,14 @@ public struct PackageIdentity: Hashable, Sendable, Codable, CustomStringConverti
         rawValue = remote.name.lowercased()
     }
 
+    /// An identity exactly as `Package.resolved` spells it. SwiftPM has already canonicalized
+    /// it, so no location rules (such as dropping `.git`) are applied again.
+    public init?(resolvedIdentity: String) {
+        let text = resolvedIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.contains("/"), text != ".", text != "..", text.unicodeScalars.allSatisfy({ $0.isASCII && $0.value > 0x20 && $0.value < 0x7F }) else { return nil }
+        rawValue = text.lowercased()
+    }
+
     public var description: String { rawValue }
 }
 
@@ -59,7 +67,7 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
         guard let rawPins = object["pins"] as? [[String: Any]] else { throw .malformed("pins") }
         var pins: [Pin] = []
         for raw in rawPins {
-            guard let identityRaw = raw["identity"] as? String, let identity = PackageIdentity(location: identityRaw) else { throw .malformed("identity") }
+            guard let identityRaw = raw["identity"] as? String, let identity = PackageIdentity(resolvedIdentity: identityRaw) else { throw .malformed("identity") }
             guard let kindRaw = raw["kind"] as? String else { throw .malformed("kind") }
             guard let kind = Pin.Kind(rawValue: kindRaw) else { throw .unknownKind(kindRaw) }
             guard let location = raw["location"] as? String else { throw .malformed("location") }
@@ -70,12 +78,32 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
     }
 }
 
-public enum ResolvedPackagesError: Error, Hashable, Sendable {
+public enum ResolvedPackagesError: Error, Hashable, Sendable, LocalizedError {
     case notJSON
     case missingVersion
     case unsupportedVersion(Int)
     case unknownKind(String)
     case malformed(String)
+
+    public var userMessage: String {
+        switch self {
+        case .notJSON: "The app's Package.resolved is not valid JSON. Resolve packages in Xcode and commit the file, then try again."
+        case .missingVersion: "The app's Package.resolved has no version field. Resolve packages in Xcode and commit the file, then try again."
+        case .unsupportedVersion(let version): "The app's Package.resolved uses format \(version), which this version of Guesthouse does not read. Update Guesthouse, or resolve packages with the Xcode version Guesthouse supports."
+        case .unknownKind(let kind): "The app's Package.resolved pins a dependency of kind \(GuesthouseError.sanitize(kind)), which Guesthouse does not understand. Update Guesthouse."
+        case .malformed(let field): "The app's Package.resolved has an unreadable \(GuesthouseError.sanitize(field)) entry. Resolve packages in Xcode and commit the file, then try again."
+        }
+    }
+
+    /// In preference order. Never empty.
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .unsupportedVersion, .unknownKind: [.reinstallApp, .retry, .cancel]
+        default: [.retry, .cancel]
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
 }
 
 /// Decides, for each package repository the user selected, whether it can safely override one
@@ -94,9 +122,20 @@ public enum LocalOverrideMatcher {
         case unsupportedKind(identity: PackageIdentity, kind: ResolvedPackagesFile.Pin.Kind)
         /// Same identity, different repository. Overriding would silently substitute code.
         case remoteMismatch(identity: PackageIdentity, expected: String, selected: String)
+        /// The checkout directory's basename would give SwiftPM a different local identity,
+        /// so the override would never apply.
+        case checkoutNameMismatch(identity: PackageIdentity, checkout: String)
+        /// The checkout's actual `origin` is not the selected repository.
+        case originMismatch(identity: PackageIdentity, expected: String, observed: String)
     }
 
-    public static func match(selected: [WorkspaceRepository], resolved: ResolvedPackagesFile) -> [MatchResult] {
+    /// - Parameters:
+    ///   - selected: the repositories the workspace names.
+    ///   - resolved: the app's `Package.resolved`.
+    ///   - observedOrigins: the `origin` remote of each existing checkout, keyed by checkout
+    ///     name, as read from the clone by the caller; a checkout whose origin differs from the
+    ///     selected repository is refused rather than trusted.
+    public static func match(selected: [WorkspaceRepository], resolved: ResolvedPackagesFile, observedOrigins: [DirectoryName: RemoteURL] = [:]) -> [MatchResult] {
         let packages = selected.filter { $0.role == .package }
         var results: [MatchResult] = []
         let selectedIdentities = Dictionary(grouping: packages, by: { PackageIdentity(remote: $0.remote) })
@@ -123,6 +162,17 @@ public enum LocalOverrideMatcher {
             }
             guard let pinned = RemoteURL(pin.location), pinned == repository.remote else {
                 results.append(.remoteMismatch(identity: identity, expected: pin.location, selected: repository.remote.canonical))
+                continue
+            }
+            // SwiftPM derives the local package's identity from the directory name, so the
+            // checkout must carry the repository's name (or its derived safe form).
+            let derived = DirectoryName.derived(from: repository.remote.name).identity
+            guard repository.checkoutName.identity == identity.rawValue || repository.checkoutName.identity == derived else {
+                results.append(.checkoutNameMismatch(identity: identity, checkout: repository.checkoutName.rawValue))
+                continue
+            }
+            if let origin = observedOrigins[repository.checkoutName], origin != repository.remote {
+                results.append(.originMismatch(identity: identity, expected: repository.remote.canonical, observed: origin.canonical))
                 continue
             }
             results.append(.matched(identity: identity, location: pin.location))
