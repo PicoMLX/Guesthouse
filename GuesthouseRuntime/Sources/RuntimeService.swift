@@ -176,7 +176,14 @@ final class RuntimeService: Sendable {
         } catch {
             log.error("Tart bundle failed verification: \(Self.describe(error), privacy: .public)")
             let claimed = bundle.claimedVersion?.description
-            tartInfo.withLock { $0 = .init(version: claimed, verified: false, problem: .runtimeIncompatible(found: claimed.map { SanitizedText($0) }, required: TartPin.releaseTag)) }
+            // A version mismatch is an incompatibility; anything else is a failed check on the
+            // bundle itself and is named as such.
+            let problem: GuesthouseError = if case .versionMismatch = error {
+                .runtimeIncompatible(found: claimed.map { SanitizedText($0) }, required: TartPin.releaseTag)
+            } else {
+                .runtimeVerificationFailed(check: Self.check(for: error))
+            }
+            tartInfo.withLock { $0 = .init(version: claimed, verified: false, problem: problem) }
             return
         }
         let backend = TartBackend(bundle: bundle, storage: storage, runner: ProcessRunner())
@@ -185,7 +192,9 @@ final class RuntimeService: Sendable {
             version = try await backend.version()
         } catch {
             log.error("verified Tart bundle could not report its version: \(Self.describe(error), privacy: .public)")
-            tartInfo.withLock { $0 = .init(version: bundle.claimedVersion?.description, verified: true, problem: .toolMismatch(tool: "tart", found: nil, expected: TartPin.releaseTag)) }
+            // A host-runtime failure: the bundle verified but did not answer, so its version is
+            // unknown and repair reinstalls it. Never a guest tool problem.
+            tartInfo.withLock { $0 = .init(version: bundle.claimedVersion?.description, verified: true, problem: .runtimeIncompatible(found: nil, required: TartPin.releaseTag)) }
             return
         }
         guard version == TartPin.version else {
@@ -195,6 +204,18 @@ final class RuntimeService: Sendable {
         }
         tartInfo.withLock { $0 = .init(version: version.description, verified: true) }
         log.notice("Tart \(version.description, privacy: .public) located and verified")
+    }
+
+    /// Which bundle check a verification error names, for the user-facing error.
+    static func check(for error: any Error) -> GuesthouseError.RuntimeVerificationCheck {
+        switch error as? TartVerificationError {
+        case .bundleMissing, .infoPlistUnreadable, .executableMissing: .layout
+        case .bundleIdentifierMismatch: .identity
+        case .signatureInvalid, .requirementNotMet: .signature
+        case .entitlementMissing: .entitlements
+        case .digestMismatch, .archiveUnreadable: .digest
+        case .versionMismatch, .none: .signature
+        }
     }
 
     /// Error text for the log: the error's case name only, never its payload, which can hold

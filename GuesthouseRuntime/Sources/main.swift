@@ -8,14 +8,6 @@ import XPC
 // identifier; the same requirement is re-checked per message in `RuntimeService`.
 
 let service = RuntimeService()
-// Discovery (signature check plus one `tart --version`) completes before the listener
-// activates, so the very first `runtimeVersion` reply already reflects the installed runtime.
-let discovery = DispatchSemaphore(value: 0)
-Task {
-    await service.discoverTart()
-    discovery.signal()
-}
-discovery.wait()
 let listener: XPCListener
 do {
     listener = try XPCListener(service: RuntimeService.serviceName, requirement: RuntimeService.peerRequirement) { request in
@@ -28,10 +20,17 @@ do {
     FileHandle.standardError.write(Data("GuesthouseRuntime: cannot create the XPC listener\n".utf8))
     exit(EXIT_FAILURE)
 }
-do {
-    try listener.activate()
-} catch {
-    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot activate the XPC listener\n".utf8))
-    exit(EXIT_FAILURE)
+// Discovery (signature check plus one `tart --version`) completes before the listener
+// activates, so the very first `runtimeVersion` reply already reflects the installed runtime.
+// It runs off the main thread: the main queue belongs to `dispatchMain()` and is never
+// blocked waiting for work that may itself need it.
+Task.detached {
+    await service.discoverTart()
+    do {
+        try listener.activate()
+    } catch {
+        FileHandle.standardError.write(Data("GuesthouseRuntime: cannot activate the XPC listener\n".utf8))
+        exit(EXIT_FAILURE)
+    }
 }
 dispatchMain()

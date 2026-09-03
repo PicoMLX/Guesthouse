@@ -12,6 +12,7 @@ import Testing
         .insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 50_000_000_000, volumePath: "/"),
         .downloadVerificationFailed(artifact: "Tart 2.36.0", check: .digest),
         .runtimeMissing,
+        .runtimeVerificationFailed(check: .signature),
         .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
         .guestNotReachable(EnvironmentID()),
         .hostKeyChanged(EnvironmentID()),
@@ -31,7 +32,7 @@ import Testing
 
     static let expectedCaseNames: Set<String> = [
         "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeMissing",
-        "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
+        "runtimeVerificationFailed", "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
         "canceled",
