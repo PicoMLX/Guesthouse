@@ -1,8 +1,9 @@
+import Darwin
 import Foundation
 
 /// Pure checks the service applies to every message before acting on it
 /// (MVP-PLAN.md §3: "validate message sizes and paths, reject symlink escapes").
-public enum RequestValidator {
+public enum RequestValidator: Sendable {
     /// Larger than any legitimate message (a security-scoped bookmark is a few kilobytes).
     public static let maximumEncodedSize = 64 * 1024
     public static let maximumBookmarkSize = 16 * 1024
@@ -49,7 +50,12 @@ public enum RequestValidator {
         guard !handoff.displayName.isEmpty,
               handoff.displayName.count <= maximumDisplayNameLength,
               !handoff.displayName.contains("/"),
-              !handoff.displayName.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+              !handoff.displayName.unicodeScalars.contains(where: { scalar in
+                  switch scalar.properties.generalCategory {
+                  case .control, .format, .lineSeparator, .paragraphSeparator: true
+                  default: false
+                  }
+              })
         else {
             throw .invalidDisplayName
         }
@@ -83,6 +89,12 @@ public enum RequestValidator {
         else {
             throw .pathEscapesRoot
         }
+        // A link that resolves inside the root was followed above and is fine; a dangling
+        // link is not resolvable, so it must be refused: the first write through it would
+        // create the target wherever the link points.
+        guard !containsDanglingSymbolicLink(candidate, below: root) else {
+            throw .pathEscapesRoot
+        }
         return resolvedCandidate
     }
 }
@@ -106,6 +118,22 @@ extension RequestValidator {
             resolved.append(path: component)
         }
         return resolved
+    }
+
+    /// Whether any component of `url` below `root` is a symbolic link whose target does not
+    /// exist. Each component is examined with `lstat`, so the link itself is seen rather than
+    /// what it points at; a dangling link (`root/link -> /outside/new-file`) does not exist
+    /// as a file, but the first write through it would create the target.
+    static func containsDanglingSymbolicLink(_ url: URL, below root: URL) -> Bool {
+        let rootCount = root.standardizedFileURL.pathComponents.count
+        var current = root.standardizedFileURL
+        for component in url.standardizedFileURL.pathComponents.dropFirst(rootCount) {
+            current.append(path: component)
+            var info = stat()
+            guard lstat(current.path, &info) == 0 else { return false }
+            if (info.st_mode & S_IFMT) == S_IFLNK, stat(current.path, &info) != 0 { return true }
+        }
+        return false
     }
 }
 

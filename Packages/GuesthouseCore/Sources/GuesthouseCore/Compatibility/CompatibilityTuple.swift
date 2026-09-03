@@ -236,6 +236,8 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
             githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
             provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion)
         )
+        // A decoded observation is untrusted: it came from another process or from disk.
+        self = sanitizedForWire()
     }
 
     public init(_ tuple: CompatibilityTuple) {

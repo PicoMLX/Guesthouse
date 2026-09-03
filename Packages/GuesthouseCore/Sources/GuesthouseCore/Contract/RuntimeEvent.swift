@@ -73,10 +73,25 @@ public struct ProgressPhase: Codable, Hashable, Sendable {
     /// False for phases that must not be interrupted (for example a rename after a copy).
     public var cancelable: Bool
 
+    /// A fraction that is not finite or not within `0...1` is dropped, so a backend that
+    /// divides by zero yields an indeterminate phase rather than an event that cannot be
+    /// encoded.
     public init(kind: Kind, fraction: Double? = nil, cancelable: Bool = true) {
         self.kind = kind
-        self.fraction = fraction
+        self.fraction = Self.valid(fraction)
         self.cancelable = cancelable
+    }
+
+    private enum CodingKeys: String, CodingKey { case kind, fraction, cancelable }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(kind: try c.decode(Kind.self, forKey: .kind), fraction: try c.decodeIfPresent(Double.self, forKey: .fraction), cancelable: try c.decodeIfPresent(Bool.self, forKey: .cancelable) ?? true)
+    }
+
+    static func valid(_ fraction: Double?) -> Double? {
+        guard let fraction, fraction.isFinite, (0...1).contains(fraction) else { return nil }
+        return fraction
     }
 }
 
@@ -119,7 +134,31 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
         self.vm = vm
         self.readiness = readiness
         self.inFlightOperation = inFlightOperation
-        self.observed = observed
+        // Observations come from guest and CLI probes: every string is bounded and redacted
+        // before it crosses XPC, at construction and again when decoded.
+        self.observed = observed.sanitizedForWire()
         self.reconciledAt = reconciledAt
+    }
+}
+
+
+extension ObservedTuple {
+    /// Every string bounded and redacted; capabilities capped in number and length.
+    public func sanitizedForWire() -> ObservedTuple {
+        func clean(_ value: String?) -> String? { value.map { GuesthouseError.sanitize($0, limit: 256) } }
+        var copy = self
+        copy.hostMacOSBuild = clean(hostMacOSBuild)
+        copy.codexDesktopVersion = clean(codexDesktopVersion)
+        copy.codexDesktopBuild = clean(codexDesktopBuild)
+        copy.codexDesktopPath = clean(codexDesktopPath)
+        copy.tartVersion = clean(tartVersion)
+        copy.guestMacOSBuild = clean(guestMacOSBuild)
+        copy.xcodeBuild = clean(xcodeBuild)
+        copy.codexCLIVersion = clean(codexCLIVersion)
+        copy.codexCLIPath = clean(codexCLIPath)
+        copy.codexCLICapabilities = codexCLICapabilities.map { Array($0.prefix(64)).map { GuesthouseError.sanitize($0, limit: 128) } }
+        copy.githubCLIVersion = clean(githubCLIVersion)
+        copy.provisioningScriptVersion = clean(provisioningScriptVersion)
+        return copy
     }
 }
