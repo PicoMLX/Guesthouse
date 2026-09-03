@@ -39,9 +39,8 @@ import Testing
         #expect(persisted.argumentsDigest == identity.argumentsDigest)
         #expect(persisted.vmName == identity.vmName)
         #expect(persisted.environmentID == identity.environmentID)
-        #expect(abs(persisted.startTime.timeIntervalSince(identity.startTime)) < 0.001, "millisecond precision survives the file")
-        // Recorded dates are rounded to milliseconds when persisted; the difference is at most one.
-        #expect(abs(persisted.recordedAt.timeIntervalSince(identity.recordedAt)) <= 0.0015)
+        #expect(persisted.startTime == identity.startTime, "the start time is an identity and survives the file exactly")
+        #expect(persisted.recordedAt == identity.recordedAt)
         let owned = await supervisor.reconcile(environments: []) { _ in .present }
         guard case .ownedRunning(let live)? = owned[environment] else { Issue.record("expected owned, got \(String(describing: owned[environment]))"); return }
         #expect(live.pid == run.processIdentifier)
@@ -115,6 +114,47 @@ import Testing
         #expect(await store.all.count == 1)
         let error = ProcessIdentityStoreError.unwritable(path: "/x", reason: "ENOSPC")
         #expect(error.recoveryActions.first == .inspectState && !error.userMessage.isEmpty)
+    }
+
+    @Test func absentAndUnobservableProcessesAreDifferentAnswers() async throws {
+        let enumerator = LiveProcessEnumerator()
+        #expect(enumerator.observe(pid: 2_000_000_000) == .absent)
+        #expect(enumerator.observe(pid: 0) == .absent)
+        // launchd exists but its arguments are not readable by an ordinary user.
+        guard case .unavailable = enumerator.observe(pid: 1) else { Issue.record("expected launchd to be unobservable"); return }
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["39"], timeout: .seconds(20)))
+        defer { run.terminate(gracePeriod: .milliseconds(100)) }
+        guard case .present(let live) = enumerator.observe(pid: run.processIdentifier) else { Issue.record("expected the spawned process"); return }
+        #expect(live.claimedVMName == nil)
+    }
+
+    @Test func anUnobservableRecordedProcessIsUncertainNotExited() async throws {
+        let store = try ProcessIdentityStore(directory: root)
+        let environment = EnvironmentID()
+        try await store.record(ProcessIdentity(pid: 1, startTime: Date(timeIntervalSince1970: 0), executablePath: "/sbin/launchd", argumentsDigest: "sha256:0", vmName: environment.tartVMName, environmentID: environment, recordedAt: Date()))
+        let verdicts = await OperationSupervisor(store: store).reconcile(environments: []) { _ in .absent }
+        #expect(verdicts[environment] == .uncertain(.processUnobservable))
+    }
+
+    @Test func theClaimedVMNameIsTheFirstPositionalAfterRunAndMustBeAppManaged() {
+        let name = EnvironmentID().tartVMName
+        #expect(LiveProcessEnumerator.claimedVMName(in: ["run", name, "--no-graphics"]) == name)
+        #expect(LiveProcessEnumerator.claimedVMName(in: ["run", "--no-graphics", name]) == name)
+        #expect(LiveProcessEnumerator.claimedVMName(in: ["--vnc", name]) == nil)
+        #expect(LiveProcessEnumerator.claimedVMName(in: ["run", "ubuntu"]) == nil)
+        #expect(LiveProcessEnumerator.claimedVMName(in: ["run"]) == nil)
+        #expect(LiveProcessEnumerator.claimedVMName(in: ["stop", name]) == nil)
+    }
+
+    @Test func anUnreadableRecordIsActionable() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "Supervision-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: directory.appending(path: ProcessIdentityStore.fileName))
+        let error = #expect(throws: ProcessIdentityStoreError.self) { try ProcessIdentityStore(directory: directory) }
+        guard case .unreadable(let path, _)? = error else { Issue.record("expected unreadable, got \(String(describing: error))"); return }
+        #expect(path.hasSuffix(ProcessIdentityStore.fileName))
+        #expect(error?.recoveryActions.first == .inspectState)
+        #expect(error?.userMessage.contains("inspect") == true)
     }
 
     @Test func transactionsAreCountedAndEndedOnce() {

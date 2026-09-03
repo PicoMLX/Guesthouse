@@ -85,6 +85,9 @@ public enum OwnershipVerdict: Hashable, Sendable {
         case unrecordedLaunch
         /// The VM inventory could not be read, so nothing about the VM's lock is known.
         case inventoryUnavailable
+        /// The recorded process exists but could not be read from the process table (for
+        /// example it now belongs to another user), so it cannot be matched or ruled out.
+        case processUnobservable
     }
 }
 

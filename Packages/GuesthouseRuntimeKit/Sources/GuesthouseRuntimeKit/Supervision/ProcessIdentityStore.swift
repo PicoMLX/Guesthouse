@@ -12,23 +12,30 @@ public actor ProcessIdentityStore {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    /// Dates are stored as `Date`'s own value (seconds since the reference date, full double
+    /// precision), so a start time reads back bit-for-bit: the reconciler compares it for
+    /// equality with the kernel's value. Converting to another epoch would round.
     public init(directory: URL) throws {
         url = directory.appending(path: Self.fileName)
-        let style = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
         encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        encoder.dateEncodingStrategy = .custom { date, encoder in
-            var container = encoder.singleValueContainer()
-            try container.encode(style.format(date))
-        }
+        encoder.dateEncodingStrategy = .deferredToDate
         decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            try style.parse(try decoder.singleValueContainer().decode(String.self))
-        }
-        if FileManager.default.fileExists(atPath: url.path) {
-            identities = try decoder.decode([EnvironmentID: ProcessIdentity].self, from: try Data(contentsOf: url))
-        } else {
+        decoder.dateDecodingStrategy = .deferredToDate
+        guard FileManager.default.fileExists(atPath: url.path) else {
             identities = [:]
+            return
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw ProcessIdentityStoreError.unreadable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120).value)
+        }
+        do {
+            identities = try decoder.decode([EnvironmentID: ProcessIdentity].self, from: data)
+        } catch {
+            throw ProcessIdentityStoreError.unreadable(path: url.path, reason: "the file is not a valid process record")
         }
     }
 
@@ -83,18 +90,28 @@ public actor ProcessIdentityStore {
     }
 }
 
-/// A process identity could not be persisted. The launched VM may still be running, so the
-/// outcome is unknown until the state is inspected.
+/// A process identity could not be persisted or read back. Either way a launched VM may be
+/// running, so the outcome is unknown until the state is inspected.
 public enum ProcessIdentityStoreError: Error, Hashable, Sendable, LocalizedError {
     case unwritable(path: String, reason: String)
+    /// The record exists but could not be read or decoded; nothing it described can be
+    /// trusted, and the service must not start VMs over ones it may have launched.
+    case unreadable(path: String, reason: String)
 
     public var userMessage: String {
         switch self {
         case .unwritable(let path, let reason):
             "Guesthouse could not record the development Mac's process in \(GuesthouseError.sanitize(path, limit: 200)) (\(GuesthouseError.sanitize(reason))). The virtual machine may still be running; Guesthouse will inspect the actual state. Free disk space or check the storage location in Settings if this persists."
+        case .unreadable(let path, let reason):
+            "Guesthouse could not read its record of launched development Macs at \(GuesthouseError.sanitize(path, limit: 200)) (\(GuesthouseError.sanitize(reason))). A development Mac started earlier may still be running. Guesthouse will inspect the actual state before starting anything; if the file is damaged, move it aside and check again."
         }
     }
 
-    public var recoveryActions: [RecoveryAction] { [.inspectState, .freeDiskSpace, .openSettings, .cancel] }
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .unwritable: [.inspectState, .freeDiskSpace, .openSettings, .cancel]
+        case .unreadable: [.inspectState, .openSettings, .cancel]
+        }
+    }
     public var errorDescription: String? { userMessage }
 }

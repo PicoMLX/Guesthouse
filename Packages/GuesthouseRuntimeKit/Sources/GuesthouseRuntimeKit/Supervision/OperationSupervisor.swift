@@ -69,16 +69,16 @@ public final class OperationSupervisor: Sendable {
         guard live.executablePath == executable.path, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
             throw SupervisionError.processMismatch(pid: pid)
         }
-        // Dates are rounded to milliseconds so the persisted record reads back exactly; the
-        // reconciler's one-second start-time tolerance covers the lost microseconds.
+        // The start time is stored exactly as observed: the reconciler compares it for
+        // equality, and the store persists dates losslessly.
         let identity = ProcessIdentity(
             pid: pid,
-            startTime: Self.millisecondPrecision(live.startTime),
+            startTime: live.startTime,
             executablePath: executable.path,
             argumentsDigest: LiveProcessEnumerator.digest(of: arguments),
             vmName: vmName,
             environmentID: environment,
-            recordedAt: Self.millisecondPrecision(Date())
+            recordedAt: Date()
         )
         try await store.record(identity)
         return identity
@@ -110,6 +110,11 @@ public final class OperationSupervisor: Sendable {
         for environment in Set(environments).union(recordedIdentities.keys) {
             let lock = vmLock(environment)
             if let recorded = recordedIdentities[environment] {
+                // A process that exists but cannot be read is neither matched nor ruled out.
+                if case .unavailable = enumerator.observe(pid: recorded.pid) {
+                    verdicts[environment] = .uncertain(.processUnobservable)
+                    continue
+                }
                 let observed = enumerator.candidates(executable: URL(fileURLWithPath: recorded.executablePath), pid: recorded.pid)
                 switch lock {
                 case .unknown:
@@ -134,12 +139,6 @@ public final class OperationSupervisor: Sendable {
     /// recorded identity against a supplied observation.
     public static func verdict(recorded: ProcessIdentity, observed: [LiveProcess], vmLockPresent: Bool) -> OwnershipVerdict {
         ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: vmLockPresent)
-    }
-}
-
-extension OperationSupervisor {
-    static func millisecondPrecision(_ date: Date) -> Date {
-        Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded() / 1000)
     }
 }
 

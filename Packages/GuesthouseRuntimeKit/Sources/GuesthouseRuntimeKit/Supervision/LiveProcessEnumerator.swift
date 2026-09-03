@@ -26,14 +26,40 @@ public struct LiveProcessEnumerator: Sendable {
         return result
     }
 
-    /// The identity of one running process, or `nil` if it does not exist or cannot be read.
-    public func live(pid: Int32) -> LiveProcess? {
-        guard let first = startTime(pid: pid), let path = executablePath(pid: pid) else { return nil }
-        let digest = Self.digest(of: arguments(pid: pid) ?? [])
+    /// What the process table says about one PID. "Absent" and "unreadable" are different
+    /// answers: a process that exists but cannot be read (another user's, or a transient
+    /// failure) must not be mistaken for one that exited.
+    public enum Observation: Hashable, Sendable {
+        case absent
+        case present(LiveProcess)
+        case unavailable(reason: String)
+    }
+
+    public func observe(pid: Int32) -> Observation {
+        guard pid > 0 else { return .absent }
+        if kill(pid, 0) != 0, errno == ESRCH { return .absent }
+        guard let first = startTime(pid: pid) else { return .unavailable(reason: "start time unreadable") }
+        guard let path = executablePath(pid: pid) else { return .unavailable(reason: "executable path unreadable") }
+        guard let arguments = arguments(pid: pid) else { return .unavailable(reason: "arguments unreadable") }
         // The fields came from separate calls; if the PID was reused in between, the start
         // time has changed and the observation describes two processes, so it is discarded.
-        guard startTime(pid: pid) == first else { return nil }
-        return LiveProcess(pid: pid, startTime: first, executablePath: path, argumentsDigest: digest)
+        guard startTime(pid: pid) == first else { return .unavailable(reason: "process replaced during observation") }
+        return .present(LiveProcess(pid: pid, startTime: first, executablePath: path, argumentsDigest: Self.digest(of: arguments), claimedVMName: Self.claimedVMName(in: arguments)))
+    }
+
+    /// The identity of one running process, or `nil` if it does not exist or cannot be read.
+    public func live(pid: Int32) -> LiveProcess? {
+        if case .present(let process) = observe(pid: pid) { return process }
+        return nil
+    }
+
+    /// The VM a `tart run <name> …` invocation names, if it is an app-managed VM name; any
+    /// other argument shape yields `nil`. Only the first positional argument after `run`
+    /// counts, so a flag value can never be taken for a name.
+    public static func claimedVMName(in arguments: [String]) -> String? {
+        guard let run = arguments.firstIndex(of: "run") else { return nil }
+        guard let name = arguments[arguments.index(after: run)...].first(where: { !$0.hasPrefix("-") }) else { return nil }
+        return (try? RequestValidator.validateVMName(name)) == nil ? nil : name
     }
 
     /// The digest `ProcessIdentity` records for a launch: SHA-256 over the arguments joined by
