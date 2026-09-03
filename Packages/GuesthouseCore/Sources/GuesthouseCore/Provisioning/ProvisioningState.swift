@@ -1,13 +1,15 @@
 /// Where one environment is in provisioning, and what is happening at that stage.
 public struct ProvisioningState: Hashable, Sendable {
     /// Record schema, so the state store can migrate a persisted state after this type changes.
-    public var schemaVersion: SchemaVersion
+    public private(set) var schemaVersion: SchemaVersion
     /// The checkpoint being worked toward, or the last one completed.
-    public var stage: ProvisioningStage
-    public var status: StageStatus
+    public private(set) var stage: ProvisioningStage
+    public private(set) var status: StageStatus
 
     /// A status that carries a checkpoint must carry one for `stage`; constructing anything
-    /// else is a programming error, and decoding it is rejected.
+    /// else is a programming error, and decoding it is rejected. The fields are read-only
+    /// afterwards: the only way to change a state is `ProvisioningReducer.reduce`, so the
+    /// checkpoint-ordering invariant cannot be broken by assignment.
     public init(stage: ProvisioningStage, status: StageStatus) {
         precondition(Self.isConsistent(stage: stage, status: status), "checkpoint stage does not match \(stage.rawValue)")
         schemaVersion = .current
@@ -83,10 +85,11 @@ public struct ResumeEvidence: Hashable, Sendable {
         self.stagingPath = stagingPath.map { Self.clean($0, limit: 400) }
     }
 
+    /// The same normalize-then-redact-then-bound pipeline errors use: separators and marks
+    /// are dropped before the redactor runs, so a split token is reassembled and removed, and
+    /// a URL authority left open by the bound is redacted rather than kept.
     static func clean(_ value: String, limit: Int) -> String {
-        let redacted = Redactor().redact(fieldValue: String(String.UnicodeScalarView(value.unicodeScalars.prefix(limit + 512))))
-        let printable = redacted.unicodeScalars.filter { $0.properties.generalCategory != .control && $0.properties.generalCategory != .format && $0.properties.generalCategory != .lineSeparator && $0.properties.generalCategory != .paragraphSeparator }
-        return String(String.UnicodeScalarView(printable.prefix(limit)))
+        GuesthouseError.sanitize(value, limit: limit)
     }
 }
 

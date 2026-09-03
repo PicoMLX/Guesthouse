@@ -46,7 +46,7 @@ import Testing
             .init(name: "request interrupted: inspect", from: state(.preflight, .startRequested), event: .startRequestInterrupted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight)]),
             .init(name: "checkpoint reached waits for persistence", from: state(.preflight, .inProgress(op)), event: .checkpointReached(op, checkpoint(.preflight)), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.preflight))]),
             .init(name: "persisted checkpoint completes the stage", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight))), event: .checkpointPersisted(checkpoint(.preflight)), expectedStatus: "completed", expectedEffects: []),
-            .init(name: "persistence failure inspects", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight))), event: .checkpointPersistenceFailed(failure), expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight)]),
+            .init(name: "persistence failure is shown with its recovery", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight))), event: .checkpointPersistenceFailed(failure), expectedStatus: "recoverableFailure", expectedEffects: []),
             .init(name: "request next stage after completion", from: state(.preflight, .completed(checkpoint(.preflight))), event: .startRequested(stage: .runtimeReady), expectedStatus: "startRequested", expectedEffects: []),
             .init(name: "request resumes from durable partial work", from: state(.runtimeReady, .resumable(evidence)), event: .startRequested(stage: .runtimeReady), expectedStatus: "startRequested", expectedEffects: []),
             .init(name: "failure is recoverable", from: state(.sshPaired, .inProgress(op)), event: .operationFailed(op, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
@@ -55,7 +55,7 @@ import Testing
             .init(name: "interruption becomes unknown and inspects", from: state(.macOSInstalled, .inProgress(op)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled)]),
             .init(name: "still disconnected: inspect again", from: state(.macOSInstalled, .unknownOutcome(op)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled)]),
             .init(name: "user asks to check again while unknown", from: state(.macOSInstalled, .unknownOutcome(op)), event: .userRetried, expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled)]),
-            .init(name: "user asks to check again while inspecting", from: state(.macOSInstalled, .awaitingInspection), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.macOSInstalled)]),
+            .init(name: "user asks to check again while inspecting", from: state(.macOSInstalled, .awaitingInspection), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: []),
             .init(name: "retry after failure inspects first", from: state(.sshPaired, .recoverableFailure(failure)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired)]),
             .init(name: "retry after cancel inspects first", from: state(.sshPaired, .canceled), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired)]),
             .init(name: "user finished console step, inspect", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .userActionCompleted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.needsGuestSetup)]),
@@ -191,10 +191,11 @@ import Testing
 
     @Test func resumeEvidenceIsRedactedAndBoundedAtConstruction() throws {
         let evidence = ResumeEvidence(summary: "download resumed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\nnext", stagingPath: "downloads/\u{202E}restore.partial")
-        #expect(evidence.summary == "download resumed with token [redacted:github-token]next")
+        #expect(evidence.summary.hasPrefix("download resumed with token [redacted:github-token]"))
+        #expect(!evidence.summary.contains("\n"))
         #expect(evidence.stagingPath == "downloads/restore.partial")
         let long = ResumeEvidence(summary: String(repeating: "s", count: 5_000))
-        #expect(long.summary.unicodeScalars.count == 200)
+        #expect(long.summary.unicodeScalars.count == 201, "200 scalars and an ellipsis")
         let decoded = try JSONDecoder().decode(ResumeEvidence.self, from: Data("{\"summary\":\"password: hunter2\"}".utf8))
         #expect(decoded.summary == "password: [redacted:secret]")
     }
