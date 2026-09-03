@@ -435,6 +435,8 @@ actor RuntimeClient: RuntimeBackend {
         pendingEvents[id] = events
     }
 
+    private var interruptionObservers: [AsyncStream<RuntimeConnectionInterrupted>.Continuation] = []
+
     private func consumerGone(_ key: ContinuationKey) {
         guard let id = consumers.removeValue(forKey: key) else {
             // Already answered (a query or a failed send): nothing to cancel. Otherwise not
@@ -448,7 +450,18 @@ actor RuntimeClient: RuntimeBackend {
         try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
     }
 
+    nonisolated func connectionInterruptions() -> AsyncStream<RuntimeConnectionInterrupted> {
+        AsyncStream { continuation in
+            Task { await self.addInterruptionObserver(continuation) }
+        }
+    }
+
+    private func addInterruptionObserver(_ observer: AsyncStream<RuntimeConnectionInterrupted>.Continuation) {
+        interruptionObservers.append(observer)
+    }
+
     private func connectionDropped() {
+        for observer in interruptionObservers { observer.yield(RuntimeConnectionInterrupted()) }
         let pending = operations
         operations.removeAll()
         pendingEvents.removeAll()

@@ -28,7 +28,7 @@ struct ContentView: View {
             case .unavailable(let error):
                 Image(systemName: "exclamationmark.triangle").imageScale(.large)
                 Text(error.userMessage)
-                Button("Check Environment") { Task { await model.refresh() } }
+                RecoveryActionRow(error: error) { Task { await model.refresh() } }
             }
             #if DEBUG
             Text(debugProbe.result)
@@ -40,6 +40,44 @@ struct ContentView: View {
         }
         .padding()
         .frame(minWidth: 360, minHeight: 200)
+    }
+}
+
+/// The error's own recovery actions, in its order. Checking the environment is the one the
+/// app can perform today; the others are named so the user knows what the fix will be.
+struct RecoveryActionRow: View {
+    let error: GuesthouseError
+    let check: () -> Void
+
+    var body: some View {
+        HStack {
+            ForEach(Array(error.recoveryActions.enumerated()), id: \.offset) { _, action in
+                switch action {
+                case .retry, .inspectState:
+                    Button("Check Environment", action: check)
+                case .cancel:
+                    EmptyView()
+                case .repair, .openConsole, .exportWork, .openSettings, .signInAgain, .freeDiskSpace, .deleteEnvironment, .reinstallApp:
+                    Text("\(label(action)) is not available yet").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func label(_ action: RecoveryAction) -> String {
+        switch action {
+        case .retry: "Retry"
+        case .inspectState: "Check Environment"
+        case .repair: "Repair"
+        case .openConsole: "Open Console"
+        case .exportWork: "Export Work"
+        case .openSettings: "Open Settings"
+        case .signInAgain: "Sign In Again"
+        case .freeDiskSpace: "Free Disk Space"
+        case .deleteEnvironment: "Delete Environment"
+        case .reinstallApp: "Reinstall Guesthouse"
+        case .cancel: "Cancel"
+        }
     }
 }
 

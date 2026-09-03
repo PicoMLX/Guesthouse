@@ -47,6 +47,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     private nonisolated let configuration = Mutex(Configuration())
+    private nonisolated let interruptionObservers = Mutex<[AsyncStream<RuntimeConnectionInterrupted>.Continuation]>([])
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var environments: [DevelopmentEnvironment] = []
     private var versionInfo: RuntimeVersionInfo
@@ -126,7 +127,20 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         configuration.withLock { $0.pendingOperationIDs[caseName] = id }
     }
 
+    /// Simulates the service going away while idle: every observer is told once.
+    public nonisolated func dropConnection() {
+        interruptionObservers.withLock { observers in
+            for observer in observers { observer.yield(RuntimeConnectionInterrupted()) }
+        }
+    }
+
     // MARK: - RuntimeBackend
+
+    public nonisolated func connectionInterruptions() -> AsyncStream<RuntimeConnectionInterrupted> {
+        AsyncStream { continuation in
+            self.interruptionObservers.withLock { $0.append(continuation) }
+        }
+    }
 
     public nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
         // Ticket and binding are taken under one lock, so two concurrent sends cannot swap

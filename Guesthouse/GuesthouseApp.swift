@@ -24,14 +24,10 @@ struct GuesthouseApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        WindowGroup(id: "main") {
+            MainWindow(model: model, delegate: delegate)
                 .environment(model)
                 .environment(debugProbe)
-                .task { delegate.model = model; await model.refresh() }
-                .sheet(isPresented: Binding(get: { model.quitFlow != .idle }, set: { _ in })) {
-                    QuitSheet(model: model).interactiveDismissDisabled()
-                }
         }
         .commands {
             CommandGroup(replacing: .appTermination) {
@@ -49,6 +45,25 @@ struct GuesthouseApp: App {
         MenuBarExtra("Guesthouse", systemImage: "desktopcomputer") {
             MenuBarContent(model: model)
         }
+    }
+}
+
+/// The main window's content plus the Quit sheet, which needs a window to be presented on.
+struct MainWindow: View {
+    @Bindable var model: AppModel
+    let delegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        ContentView()
+            .task {
+                delegate.openMainWindow = { openWindow(id: "main") }
+                delegate.model = model
+                await model.refresh()
+            }
+            .sheet(isPresented: Binding(get: { model.quitFlow != .idle }, set: { _ in })) {
+                QuitSheet(model: model).interactiveDismissDisabled()
+            }
     }
 }
 
