@@ -88,14 +88,19 @@ public final class ProcessRun: @unchecked Sendable {
         for child in descendants { kill(child, SIGTERM) }
         let task = Task { [self] in
             try? await Task.sleep(for: gracePeriod)
-            guard self.process.isRunning else { return }
-            for child in Self.descendants(of: pid) { kill(child, SIGKILL) }
-            kill(pid, SIGKILL)
+            // Descendants are escalated on their own: a helper that ignored SIGTERM must not
+            // outlive a parent that exited on it.
+            for child in Set(descendants + Self.descendants(of: pid)) where kill(child, 0) == 0 {
+                kill(child, SIGKILL)
+            }
+            if self.process.isRunning { kill(pid, SIGKILL) }
         }
         lock.withLock { killTask = task }
     }
 
     func finish(with reason: ProcessExit.Reason) {
+        // The handler captured this run; releasing it breaks the run/process cycle.
+        process.terminationHandler = nil
         let (waiters, exit): ([CheckedContinuation<ProcessExit, Never>], ProcessExit) = lock.withLock {
             killTask?.cancel()
             let exit = ProcessExit(reason: reason, timedOut: timedOut, terminated: terminationRequested, standardInputFailed: standardInputFailed, outputTruncated: outputTruncated)
@@ -132,9 +137,10 @@ public final class ProcessRun: @unchecked Sendable {
 /// Launches programs with an executable URL and argument array, streams their output through
 /// the redactor, enforces a timeout, and never involves a shell.
 public actor ProcessRunner: ProcessRunning {
-    /// Standard input is written off the caller's task; a child that never reads cannot block
-    /// the runner, and a child that exits early produces an error instead of a signal.
-    private static let standardInputQueue = DispatchQueue(label: "GuesthouseRuntimeKit.ProcessRunner.stdin", qos: .utility)
+    /// Standard input is written off the caller's task, one writer per invocation so a child
+    /// that never reads cannot stall another run's delivery; a child that exits early
+    /// produces an error instead of a signal.
+    private static let standardInputQueue = DispatchQueue(label: "GuesthouseRuntimeKit.ProcessRunner.stdin", qos: .utility, attributes: .concurrent)
     private static let ignoreBrokenPipes: Void = { signal(SIGPIPE, SIG_IGN) }()
 
     public init() {
@@ -177,11 +183,15 @@ public actor ProcessRunner: ProcessRunning {
         readers.attach(stdout.fileHandleForReading, kind: .stdout)
         readers.attach(stderr.fileHandleForReading, kind: .stderr)
 
+        // Registered before launch: a child that exits at once must still wait for the
+        // delivery attempt before its exit is reported.
         let standardInputDelivery = DispatchGroup()
+        if case .data = invocation.standardInput { standardInputDelivery.enter() }
         process.terminationHandler = { [run] process in
-            readers.waitUntilDrained()
-            // The exit reports whether input was delivered, so the write must have finished.
-            _ = standardInputDelivery.wait(timeout: .now() + 5)
+            // Output still arriving after the drain wait expires is lost, and input still
+            // undelivered after its wait is a failure; both are reported, never assumed fine.
+            if readers.waitUntilDrained() == .timedOut { run.markOutputTruncated() }
+            if standardInputDelivery.wait(timeout: .now() + 5) == .timedOut { run.markStandardInputFailed() }
             let reason: ProcessExit.Reason = process.terminationReason == .uncaughtSignal
                 ? .signal(process.terminationStatus)
                 : .status(process.terminationStatus)
@@ -192,6 +202,7 @@ public actor ProcessRunner: ProcessRunning {
         do {
             try process.run()
         } catch {
+            if case .data = invocation.standardInput { standardInputDelivery.leave() }
             readers.detach()
             run.finish(with: .status(-1))
             throw ProcessLaunchError.launchFailed(executable: invocation.executable.lastPathComponent, reason: SanitizedText(String(describing: error), limit: 120))
@@ -208,7 +219,6 @@ public actor ProcessRunner: ProcessRunning {
 
         if case .data(let data) = invocation.standardInput, let stdin {
             let handle = stdin.fileHandleForWriting
-            standardInputDelivery.enter()
             Self.standardInputQueue.async { [run] in
                 defer { standardInputDelivery.leave() }
                 do {
@@ -225,21 +235,18 @@ public actor ProcessRunner: ProcessRunning {
 }
 
 /// Reads both pipes continuously so a chatty child can never fill a pipe and deadlock, splits
-/// the bytes into lines, and redacts each line before yielding it.
+/// the bytes into records (`RecordSplitter`), and redacts each record before yielding it.
 ///
-/// Bounds: a record longer than `maximumLineBytes` is emitted in pieces, `\r` ends a record
-/// like `\n` (progress bars), and once `maximumBytes` have been emitted the rest is discarded
-/// while the pipes keep draining.
+/// Once `maximumBytes` have been emitted the rest is discarded while the pipes keep draining.
 private final class OutputReaders: @unchecked Sendable {
     enum Kind { case stdout, stderr }
 
     static let maximumQueuedLines = 4_096
-    static let maximumLineBytes = 64 << 10
 
     private let continuation: AsyncStream<ProcessOutput>.Continuation
     private let lock = NSLock()
     private let drained = DispatchGroup()
-    private var buffers: [ObjectIdentifier: Data] = [:]
+    private var splitters: [ObjectIdentifier: RecordSplitter] = [:]
     private var states: [ObjectIdentifier: Redactor.StreamState] = [:]
     private var emittedBytes = 0
     private let maximumBytes: Int
@@ -256,7 +263,7 @@ private final class OutputReaders: @unchecked Sendable {
         drained.enter()
         let id = ObjectIdentifier(handle)
         lock.withLock {
-            buffers[id] = Data()
+            splitters[id] = RecordSplitter()
             states[id] = Redactor.StreamState()
         }
         handle.readabilityHandler = { [weak self] handle in
@@ -274,50 +281,24 @@ private final class OutputReaders: @unchecked Sendable {
 
     func detach() {
         // Launch failed: nothing will ever be read.
-        lock.withLock { buffers.removeAll() }
+        lock.withLock { splitters.removeAll() }
         continuation.finish()
     }
 
-    func waitUntilDrained() {
-        _ = drained.wait(timeout: .now() + 5)
+    @discardableResult
+    func waitUntilDrained() -> DispatchTimeoutResult {
+        drained.wait(timeout: .now() + 5)
     }
 
     private func consume(_ data: Data, id: ObjectIdentifier, kind: Kind) {
-        var lines: [Data] = []
-        lock.withLock {
-            guard var pending = buffers[id] else { return }
-            pending.append(data)
-            // One linear pass: a record ends at `\n` or `\r` (a `\r\n` pair is one ending) or
-            // when it reaches the per-record cap, so a chatty child costs O(bytes), not O(bytes²).
-            var start = pending.startIndex
-            var index = start
-            var previousWasCarriageReturn = false
-            while index < pending.endIndex {
-                let byte = pending[index]
-                if byte == 0x0A || byte == 0x0D {
-                    if !(byte == 0x0A && previousWasCarriageReturn && start == index) {
-                        lines.append(pending[start..<index])
-                    }
-                    start = index + 1
-                    previousWasCarriageReturn = byte == 0x0D
-                } else {
-                    previousWasCarriageReturn = false
-                    if index - start + 1 >= Self.maximumLineBytes {
-                        lines.append(pending[start...index])
-                        start = index + 1
-                    }
-                }
-                index += 1
-            }
-            buffers[id] = Data(pending[start...])
-        }
-        for line in lines { emit(line, id: id, kind: kind) }
+        let records: [Data] = lock.withLock { splitters[id]?.consume(data) ?? [] }
+        for record in records { emit(record, id: id, kind: kind) }
     }
 
     private func flush(_ id: ObjectIdentifier, kind: Kind) {
         let remainder: Data? = lock.withLock {
-            let data = buffers.removeValue(forKey: id)
-            return (data?.isEmpty == false) ? data : nil
+            var splitter = splitters.removeValue(forKey: id)
+            return splitter?.flush()
         }
         if let remainder { emit(remainder, id: id, kind: kind) }
     }

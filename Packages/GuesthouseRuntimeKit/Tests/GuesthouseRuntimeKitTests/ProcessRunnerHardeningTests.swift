@@ -67,6 +67,38 @@ import Testing
         #expect(!result.exit.outputTruncated)
     }
 
+    @Test func splitterKeepsCRLFAcrossReadsAndNeverCutsTokensOrScalars() {
+        var splitter = RecordSplitter()
+        var records = splitter.consume(Data("one\r".utf8))
+        records += splitter.consume(Data("\ntwo\r\nthree".utf8))
+        records += [splitter.flush()].compactMap { $0 }
+        #expect(records.map { String(decoding: $0, as: UTF8.self) } == ["one", "two", "three"])
+
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let filler = String(repeating: "x", count: RecordSplitter.maximumRecordBytes - 20)
+        var straddling = RecordSplitter()
+        var chunks = straddling.consume(Data((filler + " " + token + " tail").utf8))
+        chunks += [straddling.flush()].compactMap { $0 }
+        let texts = chunks.map { String(decoding: $0, as: UTF8.self) }
+        #expect(texts.contains { $0.contains(token) }, "the token is whole in one record")
+        #expect(texts.allSatisfy { $0.utf8.count <= RecordSplitter.maximumRecordBytes })
+
+        var multibyte = RecordSplitter()
+        let ascii = String(repeating: "y", count: RecordSplitter.maximumRecordBytes - 1)
+        var pieces = multibyte.consume(Data((ascii + "😀 end").utf8))
+        pieces += [multibyte.flush()].compactMap { $0 }
+        #expect(pieces.map { String(decoding: $0, as: UTF8.self) }.joined() == ascii + "😀 end", "no scalar was torn")
+    }
+
+    @Test func aTokenStraddlingAForcedSplitIsStillRedacted() async throws {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let filler = String(repeating: "x", count: RecordSplitter.maximumRecordBytes - 20)
+        let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/printf"), arguments: ["%s %s tail", filler, token]))
+        let result = await collect(run)
+        #expect(!result.lines.joined().contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
+        #expect(result.lines.joined().contains("[redacted:github-token]"))
+    }
+
     @Test func outputBeyondTheCapIsDiscardedAndReported() async throws {
         let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/yes"), timeout: .milliseconds(400), terminationGracePeriod: .milliseconds(100), maximumOutputBytes: 8_000))
         let result = await collect(run)
