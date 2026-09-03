@@ -53,10 +53,13 @@ public struct Redactor: Sendable {
         }
 
         if let label = state.pemLabel {
-            if text.contains("-----END \(label)-----") {
-                state.pemLabel = nil
+            guard let footer = text.range(of: "-----END \(label)-----") else {
+                return RedactedLine(Self.marker("private-key"))
             }
-            return RedactedLine(Self.marker("private-key"))
+            // The block ends here; whatever follows the footer is scanned like any other text,
+            // including another block that begins on the same line.
+            state.pemLabel = nil
+            text = Self.marker("private-key") + text[footer.upperBound...]
         }
         while let begin = text.firstMatch(of: Self.patterns.pemBegin) {
             let label = String(begin.1)
@@ -69,8 +72,16 @@ public struct Redactor: Sendable {
             }
         }
 
+        // A blank line carries nothing and keeps the device-code context for the next one.
+        if text.allSatisfy(\.isWhitespace) {
+            return RedactedLine(text)
+        }
         let codeExpected = state.expectingDeviceCode
         state.expectingDeviceCode = false
+        // A header whose value may continue on an indented line keeps the continuation state.
+        if text.contains(Self.patterns.authorizationLabel) {
+            state.expectingAuthorizationValue = true
+        }
         return RedactedLine(Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state))
     }
 
@@ -108,6 +119,8 @@ public struct Redactor: Sendable {
         let terminalEscape = #/\u{1B}[\]P_^X][^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}][^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[@-Z\\-_]|[\u{80}-\u{9F}]/#
         /// A folded header: the label alone on a line, value on the next.
         let authorizationLabelOnly = #/\s*"?authorization"?\s*:\s*/#.ignoresCase()
+        /// Any authorization label, for lines whose value may continue on the next line.
+        let authorizationLabel = #/\bauthorization\b"?\s*[:=]/#.ignoresCase()
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
