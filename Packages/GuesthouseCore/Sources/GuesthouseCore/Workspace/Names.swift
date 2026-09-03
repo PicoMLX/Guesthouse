@@ -23,6 +23,11 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
         for scalar in name.unicodeScalars {
             if scalar.value < 0x20 || scalar.value == 0x7F { return false }
             if " ~^:?*[\\".unicodeScalars.contains(scalar) { return false }
+            // Display controls could make the confirmation read differently from the ref.
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: return false
+            default: break
+            }
         }
         return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
             !$0.hasPrefix(".") && !$0.hasSuffix(".lock") && $0.utf8.count <= maximumComponentBytes

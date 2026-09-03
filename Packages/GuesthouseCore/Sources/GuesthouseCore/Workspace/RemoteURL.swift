@@ -29,8 +29,10 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
         } else if let components = URLComponents(string: text), let scheme = components.scheme?.lowercased(), let urlHost = components.host {
             // Only the documented transports, and nothing the canonical form would drop: a
             // port, query, fragment, or user other than SSH's `git` names something else.
+            // SSH remotes must name GitHub's `git` account; without it SSH would use the guest
+            // account and every clone or push would fail.
             guard ["https", "ssh"].contains(scheme), components.port == nil, components.query == nil, components.fragment == nil,
-                  components.password == nil, components.user == nil || (scheme == "ssh" && components.user == "git")
+                  components.password == nil, scheme == "https" ? components.user == nil : components.user == "git"
             else { return nil }
             host = urlHost
             path = components.path
