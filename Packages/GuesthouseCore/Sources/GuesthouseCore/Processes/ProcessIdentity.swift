@@ -15,6 +15,10 @@ public struct ProcessIdentity: Codable, Hashable, Sendable {
     public var environmentID: EnvironmentID
     public var recordedAt: Date
 
+    /// A record whose VM name is not the environment's own name describes some other VM;
+    /// ownership is never granted on it.
+    public var isConsistent: Bool { vmName == environmentID.tartVMName }
+
     public init(pid: Int32, startTime: Date, executablePath: String, argumentsDigest: String, vmName: String, environmentID: EnvironmentID, recordedAt: Date) {
         self.pid = pid
         self.startTime = startTime
@@ -33,12 +37,16 @@ public struct LiveProcess: Codable, Hashable, Sendable {
     public var startTime: Date
     public var executablePath: String
     public var argumentsDigest: String
+    /// The VM the process claims to run (`tart run <name> …`), parsed and validated by the
+    /// enumerator; `nil` when the arguments name no VM.
+    public var claimedVMName: String?
 
-    public init(pid: Int32, startTime: Date, executablePath: String, argumentsDigest: String) {
+    public init(pid: Int32, startTime: Date, executablePath: String, argumentsDigest: String, claimedVMName: String? = nil) {
         self.pid = pid
         self.startTime = startTime
         self.executablePath = executablePath
         self.argumentsDigest = argumentsDigest
+        self.claimedVMName = claimedVMName
     }
 }
 
@@ -63,14 +71,18 @@ public enum OwnershipVerdict: Hashable, Sendable {
         case lockHeldWithoutProcess
         /// More than one live process claims to match the record.
         case multipleCandidates
+        /// The recorded process is gone, but another process claims the same VM (the same
+        /// invocation, or `tart run` naming the VM); it may be acquiring the lock right now.
+        case anotherProcessClaimsVM
+        /// The record names a VM that is not the environment's own.
+        case recordInconsistent
     }
 }
 
 /// Pure decision logic for "is the VM I recorded still mine?".
 public enum ProcessReconciler {
-    /// Start-time comparisons tolerate this much clock noise between the kernel's value at
-    /// record time and at observation time.
-    public static let startTimeTolerance: TimeInterval = 1.0
+    /// The kernel's start time is an identity, stored losslessly and compared exactly; a
+    /// process with the same PID and a different start time is another process.
 
     /// - Parameters:
     ///   - recorded: what was journaled when the process was launched.
@@ -82,14 +94,19 @@ public enum ProcessReconciler {
         observed: [LiveProcess],
         vmLockPresent: Bool
     ) -> OwnershipVerdict {
+        guard recorded.isConsistent else { return .uncertain(.recordInconsistent) }
         let samePID = observed.filter { $0.pid == recorded.pid }
         if samePID.count > 1 {
             return .uncertain(.multipleCandidates)
         }
         guard let candidate = samePID.first else {
-            return vmLockPresent ? .uncertain(.lockHeldWithoutProcess) : .exited
+            if vmLockPresent { return .uncertain(.lockHeldWithoutProcess) }
+            // Another process with the same invocation, or one whose arguments name this VM,
+            // may be about to take the lock; nothing is safe to start under it.
+            let claimants = observed.filter { $0.argumentsDigest == recorded.argumentsDigest || $0.claimedVMName == recorded.vmName }
+            return claimants.isEmpty ? .exited : .uncertain(.anotherProcessClaimsVM)
         }
-        guard abs(candidate.startTime.timeIntervalSince(recorded.startTime)) <= startTimeTolerance else {
+        guard candidate.startTime == recorded.startTime else {
             return .uncertain(.pidReusedByAnotherProcess)
         }
         guard candidate.executablePath == recorded.executablePath else {
