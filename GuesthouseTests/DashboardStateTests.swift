@@ -23,6 +23,8 @@ import Testing
         #expect(card.statusText == "Running")
         #expect(card.availability(of: .start) == .disabled(reason: "Already running"))
         #expect(card.details.contains(.init(label: "Xcode", value: "17F113")))
+        #expect(card.details.contains { $0.label == "Disk capacity" })
+        #expect(card.details.contains(.init(label: "Accounts", value: "Not observed yet")))
         #expect(card.details.contains(.init(label: "Runtime", value: "Tart 2.36.0")))
         #expect(card.details.contains(.init(label: "Codex CLI", value: "Unknown")))
         #expect(model.createAvailability == .enabled)
@@ -83,6 +85,64 @@ import Testing
         #expect(requests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1)
     }
 
+    @Test func startIsBlockedOnEveryCardWhileAnotherRunsOrOperates() async throws {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "First", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Second", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .running, readiness: .ready))
+        await backend.setStatus(EnvironmentStatus(environmentID: second.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        guard case .disabled(let reason) = model.cardStates()[1].availability(of: .start) else { Issue.record("expected Start blocked"); return }
+        #expect(reason.contains("First is running"))
+        model.start(second.id)
+        #expect(model.operations.isEmpty, "a refused start sends nothing")
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .hang)
+        await model.refresh()
+        #expect(model.cardStates()[1].availability(of: .start) == .enabled)
+        model.start(first.id)
+        await waitUntil { model.operations[first.id] != nil }
+        guard case .disabled(let busy) = model.cardStates()[1].availability(of: .start) else { Issue.record("expected Start blocked during the operation"); return }
+        #expect(busy.contains("in progress on First"))
+        if let operation = model.operations[first.id] { for try await _ in backend.send(.cancelOperation(operation.id)) {} }
+        await waitUntil { model.operations.isEmpty }
+    }
+
+    @Test func recoveredInFlightOperationsArePolledUntilTerminal() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: OperationID()))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        #expect(model.cardStates().first?.isBusy == true)
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        for _ in 0..<600 where model.statuses[environment.id]?.inFlightOperation != nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(model.statuses[environment.id]?.inFlightOperation == nil)
+        #expect(model.cardStates().first?.statusText == "Running")
+    }
+
+    @Test func quitWaitsForAnAcceptedStartBeforeChoosingWhatToStop() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .succeed(phases: [ProgressPhase(kind: .startingVM)], status: EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready)))
+        await backend.script("stopEnvironment", .succeed(status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready)))
+        let decisions = AppModelTests.Decision()
+        let model = AppModel(backend: backend) { decisions.values.append($0) }
+        await model.refresh()
+        model.start(environment.id)
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { model.quitFlow == .terminating }
+        let requests = await backend.receivedRequests
+        #expect(requests.contains { if case .stopEnvironment(let id, _) = $0 { id == environment.id } else { false } }, "the freshly started VM was stopped before quitting")
+        #expect(decisions.values == [true])
+    }
+
     @Test func startFailureIsShownOnTheCardWithItsRecoveryActions() async throws {
         let backend = FakeRuntimeBackend()
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
@@ -95,7 +155,7 @@ import Testing
         await waitUntil { model.lastErrors[environment.id] != nil && model.operations.isEmpty }
         let card = try #require(model.cardStates().first)
         #expect(card.attention == .guestNotReachable(environment.id))
-        #expect(card.availability(of: .start) == .disabled(reason: GuesthouseError.guestNotReachable(environment.id).userMessage))
+        #expect(card.availability(of: .start) == .enabled, "a stopped, ready VM can be started again after a failed start")
         #expect(!(card.attention?.recoveryActions.isEmpty ?? true))
     }
 

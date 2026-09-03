@@ -194,6 +194,7 @@ final class AppModel {
             environments = listed
             statuses = fresh
             launchState = .ready
+            Task { await pollRecoveredOperations() }
         case .unavailable(let error):
             launchState = .unavailable(error)
             // An unavailable runtime is not something reconnecting fixes: the error carries
@@ -348,6 +349,32 @@ final class AppModel {
         }
     }
 
+    /// The runtime runs one lifecycle operation at a time and one VM at a time
+    /// (MVP-PLAN.md §4, §6), so a start on any card is refused while another environment is
+    /// running or any operation is in flight.
+    var globalStartBlock: String? {
+        if let busy = operations.keys.first ?? statuses.values.first(where: { $0.inFlightOperation != nil })?.environmentID,
+           let name = environments.first(where: { $0.id == busy })?.name {
+            return "An operation is in progress on \(name)."
+        }
+        if let running = runningEnvironments.first {
+            return "\(running.name) is running. Guesthouse runs one development Mac at a time until resource validation allows two."
+        }
+        return nil
+    }
+
+    /// Statuses that name an operation this app did not start (one recovered after a
+    /// relaunch) are re-queried until they become terminal, so a card never stays busy for
+    /// an operation nobody observes.
+    func pollRecoveredOperations() async {
+        while !Task.isCancelled {
+            let recovered = statuses.values.filter { $0.inFlightOperation != nil && operations[$0.environmentID] == nil }.map(\.environmentID)
+            if recovered.isEmpty { return }
+            try? await Task.sleep(for: .seconds(2))
+            for id in recovered { await refreshStatus(of: id) }
+        }
+    }
+
     /// Re-reads one environment's status after an operation, whatever its outcome.
     func refreshStatus(of id: EnvironmentID) async {
         do {
@@ -363,8 +390,15 @@ final class AppModel {
 
     /// One card per environment, in creation order.
     func cardStates() -> [EnvironmentCardState] {
-        environments.map { environment in
-            EnvironmentCardState(environment: environment, status: statuses[environment.id], operation: operations[environment.id], lastError: lastErrors[environment.id])
+        let block = globalStartBlock
+        return environments.map { environment in
+            EnvironmentCardState(
+                environment: environment,
+                status: statuses[environment.id],
+                operation: operations[environment.id],
+                lastError: lastErrors[environment.id],
+                startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil
+            )
         }
     }
 
@@ -380,7 +414,7 @@ final class AppModel {
 
     /// Starts an environment. The only dashboard action wired to the runtime so far.
     func start(_ id: EnvironmentID) {
-        guard environments.contains(where: { $0.id == id }), operations[id] == nil else { return }
+        guard environments.contains(where: { $0.id == id }), operations[id] == nil, globalStartBlock == nil else { return }
         Task { await run(.startEnvironment(id, StartOptions()), for: id) }
     }
 
@@ -583,6 +617,12 @@ final class AppModel {
             quitFlow = quitFailure()
             return
         }
+        // A start accepted moments ago has not reported `running` yet; the decision waits
+        // for every active operation and re-reads the statuses before choosing targets.
+        await waitForOperations()
+        guard generation == quitGeneration, !Task.isCancelled, !quitCancelRequested else { finishCancel(reconcile: true); return }
+        // The mode still decides how they are stopped: only the environments whose graceful
+        // stop already failed are force-stopped.
         quitFlow = mode == .force ? .forceStopping(nil) : .stopping(nil, nil)
         // An operation the runtime still reports is unresolved, whatever the VM state says:
         // quitting over it could leave a VM the app never saw start.
@@ -591,6 +631,16 @@ final class AppModel {
             return
         }
         await stopAll(mode: mode, generation: generation)
+    }
+
+    private func waitForOperations() async {
+        while !operations.isEmpty, !Task.isCancelled {
+            quitFlow = .stopping(operations.keys.first, nil)
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        for environment in environments where !Task.isCancelled {
+            await refreshStatus(of: environment.id)
+        }
     }
 
     /// Stops every running environment. `mode` is `.force` only for the environments whose

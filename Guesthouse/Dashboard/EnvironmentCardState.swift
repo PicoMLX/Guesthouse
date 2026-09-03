@@ -61,7 +61,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
     let details: [Detail]
     let availability: [Action: Availability]
 
-    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?) {
+    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?, startBlockedElsewhere: String? = nil) {
         id = environment.id
         name = environment.name
         let attention: GuesthouseError? = {
@@ -73,7 +73,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         isBusy = status == nil || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil
         statusText = Self.statusText(for: status, operation: operation)
         details = Self.details(for: environment, status: status)
-        availability = Self.availability(for: status, operation: operation, attention: attention)
+        availability = Self.availability(for: status, operation: operation, attention: attention, blockedElsewhere: startBlockedElsewhere)
     }
 
     func availability(of action: Action) -> Availability {
@@ -115,29 +115,35 @@ struct EnvironmentCardState: Equatable, Identifiable {
 
     private static func details(for environment: DevelopmentEnvironment, status: EnvironmentStatus?) -> [Detail] {
         let observed = status?.observed
+        // Disk is the guest's logical capacity, labeled as such: actual usage is not observed
+        // yet. Account status is not observed yet either, and the row says so instead of
+        // claiming a value.
         return [
-            Detail(label: "Disk", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: environment.guestDiskBytes), countStyle: .file)),
+            Detail(label: "Disk capacity", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: environment.guestDiskBytes), countStyle: .file)),
             Detail(label: "Xcode", value: observed?.xcodeBuild ?? "Unknown"),
             Detail(label: "Guest macOS", value: observed?.guestMacOSBuild ?? "Unknown"),
             Detail(label: "Runtime", value: observed?.tartVersion.map { "Tart \($0)" } ?? "Unknown"),
             Detail(label: "Codex CLI", value: observed?.codexCLIVersion ?? "Unknown"),
-            Detail(label: "Accounts", value: "Unknown"),
+            Detail(label: "Accounts", value: "Not observed yet"),
         ]
     }
 
-    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?) -> [Action: Availability] {
+    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, blockedElsewhere: String?) -> [Action: Availability] {
         var table: [Action: Availability] = [:]
         for action in Action.allCases where action != .start {
             table[action] = .notImplemented(note: Self.notImplementedNote(for: action))
         }
-        table[.start] = startAvailability(for: status, operation: operation, attention: attention)
+        table[.start] = startAvailability(for: status, operation: operation, attention: attention, blockedElsewhere: blockedElsewhere)
         return table
     }
 
-    private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?) -> Availability {
+    private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, blockedElsewhere: String?) -> Availability {
         guard let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
         if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
-        if let attention { return .disabled(reason: attention.userMessage) }
+        if let blockedElsewhere { return .disabled(reason: blockedElsewhere) }
+        // A failed start does not lock Start forever: once the status re-check reports a
+        // stopped, ready VM, Start is a retry and the runtime's own recovery actions apply.
+        if let attention, status.readiness != .ready || status.vm != .stopped { return .disabled(reason: attention.userMessage) }
         switch status.vm {
         case .stopped: return .enabled
         case .running: return .disabled(reason: "Already running")
