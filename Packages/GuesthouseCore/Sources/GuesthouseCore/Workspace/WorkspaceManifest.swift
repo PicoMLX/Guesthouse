@@ -78,8 +78,11 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
                 // dependency's identity from the repository name, so the two must agree or the
                 // override never applies (MVP-PLAN.md §6). Two packages with one identity are
                 // ambiguous and refused.
+                // The checkout must carry the repository's identity: its name, or the safe
+                // form derived from it when the name itself is not a valid directory name.
                 let identity = repository.remote.name.lowercased()
-                guard repository.checkoutName.identity == identity else {
+                let derived = DirectoryName.derived(from: repository.remote.name).identity
+                guard repository.checkoutName.identity == identity || repository.checkoutName.identity == derived else {
                     throw .checkoutNameDoesNotMatchRepository(checkout: repository.checkoutName.rawValue, repository: repository.remote.name)
                 }
                 guard seenIdentities.insert(identity).inserted else {

@@ -20,6 +20,17 @@ import Testing
         #expect(RemoteURL("ssh://git@github.com/Org/Repo.git")?.canonical == "https://github.com/Org/Repo")
     }
 
+    @Test func sshRemotesNeedTheGitUserAndBranchesRefuseDisplayControls() throws {
+        #expect(RemoteURL("ssh://github.com/Org/Repo") == nil)
+        #expect(RemoteURL("ssh://git@github.com/Org/Repo") != nil)
+        #expect(BranchName("main\u{202E}") == nil)
+        #expect(BranchName("feature\u{2028}x") == nil)
+        let long = String(repeating: "r", count: 65)
+        let package = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/Org/\(long)")!, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        #expect(package.checkoutName.rawValue.count == 64)
+        #expect(throws: Never.self) { try manifest(repositories: [app(sha: sha), package]).validate() }
+    }
+
     @Test func branchNamesRejectHEADAndOverlongComponents() {
         #expect(BranchName("HEAD") == nil)
         #expect(BranchName("feature/HEAD") != nil)
