@@ -12,8 +12,13 @@ public enum CompatibilityState: Codable, Hashable, Sendable {
     public enum NeedsValidationReason: Codable, Hashable, Sendable {
         /// At least one component could not be identified. Never guess; ask for validation.
         case unknownFields([CompatibilityField])
+        /// The guest login shell can see more than one Codex executable.
+        case competingInstallations(count: Int)
         /// A known combination, but no real connection has ever been recorded for it.
         case neverConnected
+        /// The manifest records a connection for this combination, but on a different host
+        /// version or build than the one observed.
+        case verifiedOnDifferentHost
         /// Something changed since the last recorded connection.
         case changedSinceLastVerified([CompatibilityField])
         /// This combination is not in the manifest at all.
@@ -31,7 +36,7 @@ public enum CompatibilityEvaluator {
     /// - Parameters:
     ///   - observed: what was read from the host, desktop app, and guest right now.
     ///   - manifest: the shipped list of tested combinations.
-    ///   - history: previously recorded real connections, newest last or in any order.
+    ///   - history: previously recorded real connections, in any order.
     public static func evaluate(
         observed: ObservedTuple,
         manifest: CompatibilityManifest,
@@ -46,6 +51,10 @@ public enum CompatibilityEvaluator {
             return .needsValidation(.unknownFields(unknown))
         }
 
+        if exact.codexCLIInstallations != 1 {
+            return .needsValidation(.competingInstallations(count: exact.codexCLIInstallations))
+        }
+
         if let record = history.filter({ $0.tuple == exact }).max(by: { $0.verifiedAt < $1.verifiedAt }) {
             return .verified(recordedAt: record.verifiedAt)
         }
@@ -58,9 +67,12 @@ public enum CompatibilityEvaluator {
             return .needsValidation(.untestedCombination)
         }
 
-        if let verifiedAt = tested.verifiedAt {
-            return .verified(recordedAt: verifiedAt)
+        guard let verification = tested.verification else {
+            return .needsValidation(.neverConnected)
         }
-        return .needsValidation(.neverConnected)
+        guard verification.covers(exact) else {
+            return .needsValidation(.verifiedOnDifferentHost)
+        }
+        return .verified(recordedAt: verification.verifiedAt)
     }
 }

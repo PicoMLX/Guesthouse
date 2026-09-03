@@ -6,7 +6,10 @@
 public struct SemanticVersion: Hashable, Sendable, Comparable, CustomStringConvertible {
     public let components: [Int]
 
+    /// Components must be nonnegative; the string initializer already enforces this, and an
+    /// encoded negative component could never be decoded again.
     public init(_ components: [Int]) {
+        precondition(components.allSatisfy { $0 >= 0 }, "version components must be nonnegative")
         var trimmed = components
         while trimmed.count > 1, trimmed.last == 0 {
             trimmed.removeLast()
