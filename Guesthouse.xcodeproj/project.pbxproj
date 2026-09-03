@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		F8ACD8A830493E2C00550943 /* VirtualMacCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* VirtualMacCore */; };
+		F8ACD8A830493E2C00550943 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* GuesthouseCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,7 +57,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F8ACD8A830493E2C00550943 /* VirtualMacCore in Frameworks */,
+				F8ACD8A830493E2C00550943 /* GuesthouseCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -119,7 +119,7 @@
 			);
 			name = Guesthouse;
 			packageProductDependencies = (
-				F8ACD8A730493E2C00550943 /* VirtualMacCore */,
+				F8ACD8A730493E2C00550943 /* GuesthouseCore */,
 			);
 			productName = Guesthouse;
 			productReference = F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */;
@@ -204,7 +204,7 @@
 			mainGroup = F8976E81304933D10071C234;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/VirtualMacCore" */,
+				F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/GuesthouseCore" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F8976E8B304933D10071C234 /* Products */;
@@ -628,16 +628,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/VirtualMacCore" */ = {
+		F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/GuesthouseCore" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/VirtualMacCore;
+			relativePath = Packages/GuesthouseCore;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		F8ACD8A730493E2C00550943 /* VirtualMacCore */ = {
+		F8ACD8A730493E2C00550943 /* GuesthouseCore */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = VirtualMacCore;
+			productName = GuesthouseCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
