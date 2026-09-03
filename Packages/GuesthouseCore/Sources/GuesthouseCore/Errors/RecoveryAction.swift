@@ -2,6 +2,10 @@
 ///
 /// The GUI renders these as buttons (MVP-PLAN.md §10, Phase 1: "Never show 'something went
 /// wrong' as the only recovery information").
+///
+/// Stopping an environment is deliberately not a recovery action: the dashboard's stop
+/// control stays available in every state, including every compatibility state
+/// (MVP-PLAN.md §5), and an error's buttons are shown alongside it, never instead of it.
 public enum RecoveryAction: Codable, Hashable, Sendable {
     /// Run the same operation again. Only offered when the outcome of the last attempt is known.
     case retry
