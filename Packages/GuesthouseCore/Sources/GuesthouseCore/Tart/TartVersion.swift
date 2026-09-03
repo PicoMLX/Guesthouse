@@ -17,17 +17,31 @@ public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomString
     }
 
     /// Parses the output of `tart --version`. Accepts exactly one non-empty line of the form
-    /// `2.36.0`, `v2.36.0`, or `tart 2.36.0`, with all three numeric components present.
-    /// Anything else (extra lines, a two-component version, trailing text) is not a version and
-    /// must be treated as unknown, never as matching the pin.
+    /// `2.36.0`, `v2.36.0`, or `tart 2.36.0`, with all three numeric components present and
+    /// at most one prefix. Anything else (extra lines, a two-component version, `tart v2.36.0`,
+    /// trailing text) is not a version and must be treated as unknown, never as matching the pin.
     public init?(parsing output: String) {
         let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        guard lines.count == 1 else { return nil }
-        var text = lines[0]
-        if text.lowercased().hasPrefix("tart ") { text = String(text.dropFirst(5)).trimmingCharacters(in: .whitespaces) }
-        if text.hasPrefix("v") { text = String(text.dropFirst()) }
-        guard text.wholeMatch(of: #/[0-9]+\.[0-9]+\.[0-9]+/#) != nil, let semantic = SemanticVersion(text) else { return nil }
+        guard lines.count == 1,
+              let match = lines[0].wholeMatch(of: #/(?:[Tt][Aa][Rr][Tt] |v)?([0-9]+\.[0-9]+\.[0-9]+)/#),
+              let semantic = SemanticVersion(String(match.1))
+        else { return nil }
         self.init(semantic)
+    }
+
+    /// Encoded as the canonical three-component string; decoding applies the same strict
+    /// parse as CLI output, so a persisted or received `2.36` can never match the pin.
+    public init(from decoder: any Decoder) throws {
+        let text = try decoder.singleValueContainer().decode(String.self)
+        guard let version = TartVersion(parsing: text) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "not a three-component Tart version"))
+        }
+        self = version
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(description)
     }
 
     public var matchesPin: Bool { self == TartPin.version }
@@ -36,5 +50,9 @@ public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomString
         lhs.semantic < rhs.semantic
     }
 
-    public var description: String { semantic.description }
+    /// Always three components (`2.36.0`, never `2.36`), the form the strict parse accepts.
+    public var description: String {
+        let padded = semantic.components + Array(repeating: 0, count: max(0, 3 - semantic.components.count))
+        return padded.map(String.init).joined(separator: ".")
+    }
 }

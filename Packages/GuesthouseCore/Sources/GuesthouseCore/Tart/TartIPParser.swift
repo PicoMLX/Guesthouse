@@ -37,7 +37,8 @@ extension GuestIPAddress: Codable {
     public init(from decoder: any Decoder) throws {
         let string = try decoder.singleValueContainer().decode(String.self)
         guard let address = GuestIPAddress(string) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "not an IP address: \(string)"))
+            // The rejected text is never echoed: it came from outside the app.
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "not an IP address"))
         }
         self = address
     }
