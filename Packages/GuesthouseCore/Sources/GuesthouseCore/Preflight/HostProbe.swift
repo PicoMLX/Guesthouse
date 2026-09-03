@@ -1,3 +1,4 @@
+import Darwin
 import AppKit
 import Foundation
 import IOKit.ps
@@ -44,6 +45,14 @@ public protocol HostProbe: Sendable {
 public struct SystemHostProbe: HostProbe {
     /// Where macOS mounts volumes other than the startup volume.
     static let mountContainerPath = "/Volumes"
+
+    /// Whether `url` is that directory, compared by filesystem identity rather than by
+    /// spelling: on a case-insensitive volume `/volumes` names the same directory.
+    static func isMountContainer(_ url: URL) -> Bool {
+        var candidate = stat(), container = stat()
+        guard stat(url.path, &candidate) == 0, stat(mountContainerPath, &container) == 0 else { return false }
+        return candidate.st_dev == container.st_dev && candidate.st_ino == container.st_ino
+    }
 
     public init() {}
 
@@ -104,7 +113,7 @@ public struct SystemHostProbe: HostProbe {
         while !FileManager.default.fileExists(atPath: existing.path) {
             let parent = existing.deletingLastPathComponent()
             if parent.path == existing.path { break }
-            if parent.path == Self.mountContainerPath {
+            if Self.isMountContainer(parent) {
                 throw HostProbeError.volumeUnavailable(path: existing.path)
             }
             existing = parent
