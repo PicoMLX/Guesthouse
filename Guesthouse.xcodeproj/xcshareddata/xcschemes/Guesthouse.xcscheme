@@ -49,6 +49,20 @@
                ReferencedContainer = "container:Guesthouse.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "GuesthouseRuntimeKitTests"
+               BuildableName = "GuesthouseRuntimeKitTests"
+               BlueprintName = "GuesthouseRuntimeKitTests"
+               ReferencedContainer = "container:Packages/GuesthouseRuntimeKit">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -86,6 +100,16 @@
                BuildableName = "GuesthouseUITests.xctest"
                BlueprintName = "GuesthouseUITests"
                ReferencedContainer = "container:Guesthouse.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "GuesthouseRuntimeKitTests"
+               BuildableName = "GuesthouseRuntimeKitTests"
+               BlueprintName = "GuesthouseRuntimeKitTests"
+               ReferencedContainer = "container:Packages/GuesthouseRuntimeKit">
             </BuildableReference>
          </TestableReference>
       </Testables>
