@@ -162,6 +162,10 @@ import Testing
         let record = ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .machineReadableStatus(source: "desktop-status"))
         let data = try JSONEncoder().encode(record)
         #expect(try JSONDecoder().decode(ConnectionVerificationRecord.self, from: data) == record)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["schemaVersion"] as? Int == SchemaVersion.current.rawValue)
+        let future = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(SchemaVersion.current.rawValue)", with: "\"schemaVersion\":99")
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(future.utf8)) }
         for state in [CompatibilityState.needsValidation(.changedSinceLastVerified([.tartVersion, .xcodeBuild])), .needsValidation(.competingInstallations(count: 3)), .needsValidation(.verifiedOnDifferentHost)] {
             let stateData = try JSONEncoder().encode(state)
             #expect(try JSONDecoder().decode(CompatibilityState.self, from: stateData) == state)

@@ -32,7 +32,7 @@ public enum CompatibilityState: Codable, Hashable, Sendable {
 }
 
 /// Pure decision logic. No I/O; the caller supplies what it observed and what it remembers.
-public enum CompatibilityEvaluator {
+public enum CompatibilityEvaluator: Sendable {
     /// - Parameters:
     ///   - observed: what was read from the host, desktop app, and guest right now.
     ///   - manifest: the shipped list of tested combinations.
