@@ -4,7 +4,10 @@ public struct ProvisioningState: Hashable, Sendable {
     public var stage: ProvisioningStage
     public var status: StageStatus
 
+    /// A status that carries a checkpoint must carry one for `stage`; constructing anything
+    /// else is a programming error, and decoding it is rejected.
     public init(stage: ProvisioningStage, status: StageStatus) {
+        precondition(Self.isConsistent(stage: stage, status: status), "checkpoint stage does not match \(stage.rawValue)")
         self.stage = stage
         self.status = status
     }
@@ -20,7 +23,9 @@ public struct ProvisioningState: Hashable, Sendable {
     }
 
     /// A status that carries a checkpoint must carry one for the outer stage.
-    public var isConsistent: Bool {
+    public var isConsistent: Bool { Self.isConsistent(stage: stage, status: status) }
+
+    static func isConsistent(stage: ProvisioningStage, status: StageStatus) -> Bool {
         switch status {
         case .completed(let checkpoint), .persistingCheckpoint(let checkpoint):
             checkpoint.stage == stage
@@ -37,11 +42,13 @@ extension ProvisioningState: Codable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        stage = try container.decode(ProvisioningStage.self, forKey: .stage)
-        status = try container.decode(StageStatus.self, forKey: .status)
-        guard isConsistent else {
+        let stage = try container.decode(ProvisioningStage.self, forKey: .stage)
+        let status = try container.decode(StageStatus.self, forKey: .status)
+        guard Self.isConsistent(stage: stage, status: status) else {
             throw DecodingError.dataCorruptedError(forKey: .status, in: container, debugDescription: "checkpoint stage does not match \(stage.rawValue)")
         }
+        self.stage = stage
+        self.status = status
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -72,6 +79,9 @@ public struct ResumeEvidence: Codable, Hashable, Sendable {
 public enum StageStatus: Codable, Hashable, Sendable {
     /// Nothing has run for this stage. Safe to start.
     case notStarted
+    /// A start was requested and the runtime has not yet answered. Reserved synchronously so a
+    /// second start cannot slip in while the first request is in flight.
+    case startRequested
     /// An operation is running.
     case inProgress(OperationID)
     /// The checkpoint was reached but is not yet durable. Nothing may advance until it is.
@@ -98,6 +108,7 @@ public enum StageStatus: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .notStarted: "notStarted"
+        case .startRequested: "startRequested"
         case .inProgress: "inProgress"
         case .persistingCheckpoint: "persistingCheckpoint"
         case .completed: "completed"

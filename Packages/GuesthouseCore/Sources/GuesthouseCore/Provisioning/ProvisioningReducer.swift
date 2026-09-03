@@ -2,6 +2,14 @@ import Foundation
 
 /// Something that happened to a provisioning operation.
 public enum ProvisioningEvent: Hashable, Sendable {
+    /// The coordinator is about to ask the runtime to start `stage`. Reserves the stage before
+    /// the asynchronous request so a reentrant start is rejected rather than double-run.
+    case startRequested(stage: ProvisioningStage)
+    /// The runtime refused the request before doing anything; nothing durable happened.
+    case startRequestRejected(GuesthouseError)
+    /// The connection dropped while the request was in flight; the runtime may or may not
+    /// have accepted it, so actual state must be inspected.
+    case startRequestInterrupted
     /// The runtime accepted an operation for `stage`.
     case operationStarted(OperationID, stage: ProvisioningStage)
     /// The operation reached its checkpoint. It is not durable until `checkpointPersisted`.
@@ -31,6 +39,9 @@ public enum ProvisioningEvent: Hashable, Sendable {
 
     public var caseName: String {
         switch self {
+        case .startRequested: "startRequested"
+        case .startRequestRejected: "startRequestRejected"
+        case .startRequestInterrupted: "startRequestInterrupted"
         case .operationStarted: "operationStarted"
         case .checkpointReached: "checkpointReached"
         case .checkpointPersisted: "checkpointPersisted"
@@ -123,8 +134,10 @@ extension ProvisioningTransitionError: LocalizedError {
 /// Pure transition function for `ProvisioningState`.
 ///
 /// The rules everything else follows from:
-/// - An operation starts only from `notStarted`, from `resumable`, or from the previous stage's
-///   `completed`. Never from a failure, an unknown outcome, or an unpersisted checkpoint.
+/// - A start is reserved synchronously with `startRequested` from `notStarted`, `resumable`, or
+///   the previous stage's `completed`, and only then may the runtime be asked; `operationStarted`
+///   is legal solely from `startRequested`. Never from a failure, an unknown outcome, or an
+///   unpersisted checkpoint, and never twice.
 /// - Failure, cancellation, interruption, and user action all lead to an inspection before
 ///   anything re-runs, so a retry can never blindly repeat a step whose real outcome is unknown
 ///   (MVP-PLAN.md §3, §4, §9). Inspection can be requested again while the outcome is unknown.
@@ -141,14 +154,24 @@ public enum ProvisioningReducer {
 
         switch (state.status, event) {
 
-        case (.notStarted, .operationStarted(let id, let requested)), (.resumable, .operationStarted(let id, let requested)):
+        case (.notStarted, .startRequested(let requested)), (.resumable, .startRequested(let requested)):
+            guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
+            return at(.startRequested)
+
+        case (.completed, .startRequested(let requested)):
+            guard let next = stage.next else { throw .alreadyReady }
+            guard requested == next else { throw .stageMismatch(expected: next, actual: requested) }
+            return (ProvisioningState(stage: next, status: .startRequested), [])
+
+        case (.startRequested, .operationStarted(let id, let requested)):
             guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
             return at(.inProgress(id))
 
-        case (.completed, .operationStarted(let id, let requested)):
-            guard let next = stage.next else { throw .alreadyReady }
-            guard requested == next else { throw .stageMismatch(expected: next, actual: requested) }
-            return (ProvisioningState(stage: next, status: .inProgress(id)), [])
+        case (.startRequested, .startRequestRejected):
+            return at(.notStarted)
+
+        case (.startRequested, .startRequestInterrupted):
+            return at(.awaitingInspection, [.inspectActualState(stage)])
 
         case (.inProgress(let current), .checkpointReached(let id, let checkpoint)):
             try requireSame(current, id)
