@@ -79,6 +79,31 @@ import Testing
         #expect(accepted == ids.map { Optional($0) })
     }
 
+    @Test func aCompletedOperationIsNoLongerInFlightWithoutAScriptedStatus() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = EnvironmentID()
+        let operation = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready, inFlightOperation: operation))
+        await backend.useOperationID(operation, forNext: "startEnvironment")
+        for try await _ in backend.send(.startEnvironment(environment, StartOptions())) {}
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil, "a completed operation is not still in flight")
+    }
+
+    @Test func aConsumerCancelledDuringAProgressPhaseClearsTheInFlightOperation() async throws {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(30))
+        let environment = EnvironmentID()
+        let operation = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready, inFlightOperation: operation))
+        await backend.useOperationID(operation, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .succeed(phases: [ProgressPhase(kind: .startingVM), ProgressPhase(kind: .waitingForNetwork)]))
+        let consumer = Task { for try await _ in backend.send(.startEnvironment(environment, StartOptions())) { break } }
+        _ = try? await consumer.value
+        for _ in 0..<200 where await backend.status(of: environment)?.inFlightOperation != nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil, "a cancelled operation is not still in flight")
+    }
+
     @Test func explicitCancellationIsRecordedOnceEvenWhenTheConsumerAlsoStops() async throws {
         let backend = FakeRuntimeBackend()
         let id = OperationID()
