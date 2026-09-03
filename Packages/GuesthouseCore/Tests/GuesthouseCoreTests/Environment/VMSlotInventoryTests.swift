@@ -98,6 +98,16 @@ import Testing
         #expect(error?.recoveryMessage.isEmpty == false)
     }
 
+    @Test func structuralDecodeFailuresAreAlsoActionable() {
+        for json in ["{}", "{\"slots\":3}", "{\"slots\":[{\"environmentID\":\"not-a-uuid\"}]}"] {
+            let error = #expect(throws: VMSlotError.self, "\(json)") {
+                try JSONDecoder().decode(VMSlotInventory.self, from: Data(json.utf8))
+            }
+            #expect(error == .corruptInventory(reason: .malformed), "\(json)")
+            #expect(error?.recoveryMessage.isEmpty == false)
+        }
+    }
+
     @Test func decodingDuplicateEnvironmentsIsAnActionableError() throws {
         let slots = [a, a].map { VMSlotInventory.Slot(environmentID: $0) }
         let data = try JSONEncoder().encode(["slots": slots])

@@ -81,6 +81,9 @@ public enum VMSlotError: Error, Hashable, Sendable {
     public enum Reason: Hashable, Sendable {
         case tooManySlots(found: Int, maximum: Int)
         case duplicateEnvironment
+        /// The file is not a slot inventory at all: a missing or mistyped field, an invalid
+        /// identifier, or an unknown slot state.
+        case malformed
     }
 }
 
@@ -96,6 +99,8 @@ extension VMSlotError: LocalizedError {
             "Guesthouse's record of development Macs lists \(found) of them, more than the \(maximum) it manages, so it cannot be used as it is."
         case .corruptInventory(.duplicateEnvironment):
             "Guesthouse's record of development Macs lists the same one twice, so it cannot be used as it is."
+        case .corruptInventory(.malformed):
+            "Guesthouse's record of development Macs could not be read."
         }
     }
 
@@ -122,8 +127,15 @@ extension VMSlotInventory: Codable {
     }
 
     public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decoded = try container.decode([Slot].self, forKey: .slots)
+        // Every structural failure is reported as a corrupt inventory, so a caller always has
+        // a message and a way forward rather than a decoder's internal complaint.
+        let decoded: [Slot]
+        do {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            decoded = try container.decode([Slot].self, forKey: .slots)
+        } catch {
+            throw VMSlotError.corruptInventory(reason: .malformed)
+        }
         // A corrupt inventory is a state the user can be told about and recover from, so it
         // is reported as `VMSlotError` rather than as a decoder's internal complaint.
         guard decoded.count <= Self.maximumSlots else {
