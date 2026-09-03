@@ -176,6 +176,11 @@ public actor EnvironmentLifecycle {
         if let record = unresolved[id] {
             readiness = .needsAttention(.operationOutcomeUnknown(record.id))
         }
+        // A preserved slot is reported as such, so the GUI does not offer a start the
+        // lifecycle would refuse.
+        if snapshot.slots.state(of: id) == .preserved {
+            readiness = .needsAttention(.environmentPreserved(id))
+        }
         return EnvironmentStatus(
             environmentID: id,
             vm: vm,

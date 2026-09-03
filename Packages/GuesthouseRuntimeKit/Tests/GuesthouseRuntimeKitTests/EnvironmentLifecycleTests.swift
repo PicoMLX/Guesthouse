@@ -108,6 +108,7 @@ import Testing
         try snapshot.slots.markPreserved(environment)
         try await store.saveSnapshot(snapshot)
         try await lifecycle.prepare()
+        #expect(try await lifecycle.status(of: environment).readiness == .needsAttention(.environmentPreserved(environment)))
         await #expect(throws: GuesthouseError.environmentPreserved(environment)) {
             _ = try await lifecycle.start(environment, options: StartOptions()) { _ in }
         }
