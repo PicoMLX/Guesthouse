@@ -1,6 +1,6 @@
 # Gate: `<name>`
 
-Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC). Guesthouse commit: `<git SHA of the checkout used>`. Status: `<in progress | passed | passed with follow-ups | failed | exception approved (link the ADR; only gates #38 and #39)>`.
+Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC). Guesthouse commit: `<git SHA of the checkout used; the checkout must be clean, or record the exact uncommitted diff below>`. Status: `<in progress | passed | passed with follow-ups | failed | exception approved (link the ADR; only gates #38 and #39)>`.
 
 ## Versions
 
@@ -10,6 +10,7 @@ Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC).
 | Host macOS | `<version (build)>` |
 | Guesthouse signed build | `<git SHA; Developer ID or development signing; launched from Finder>` |
 | Guesthouse debug build | `<git SHA; launched from Xcode>` |
+| Guesthouse checkout state | `<clean, or the exact uncommitted diff that produced this evidence>` |
 | Tart | `<version, Team ID verified yes/no>` |
 | Guest macOS | `<version (build)>` |
 | Xcode (host) | `<version (build); the installation that built and signed Guesthouse>` |
@@ -62,7 +63,7 @@ For each step: what was done, what was observed, and where the evidence is. Ever
 
 ## Decision
 
-What this gate decides for the design, and what changes in the plan or issues as a result. If the gate settled a design question (for example the Xcode transport, the console path, or the cold-boot authentication requirement), link the ADR written for it in `docs/decisions/`. If it did not, state explicitly: "No architectural decision resulted from this gate."
+What this gate decides for the design, and what changes in the plan or issues as a result. If the gate settled a design question (for example the Xcode transport, the console path, or the cold-boot authentication approach), link the ADR written for it in `docs/decisions/`. If it did not, state explicitly: "No architectural decision resulted from this gate."
 
 ## Follow-ups
 
