@@ -95,7 +95,7 @@ import Testing
         #expect(RemoteURL("git@github.com:Org/Repo")?.canonical == "https://github.com/Org/Repo")
         // `Repo.git.git` would canonicalize to a URL that parses back as `Repo`.
         #expect(RemoteURL("https://github.com/Org/Repo.git.git") == nil)
-        let round = try? #require(RemoteURL("https://github.com/Org/Repo.git"))
+        let round = RemoteURL("https://github.com/Org/Repo.git")
         #expect(round?.canonical == "https://github.com/Org/Repo")
         #expect(RemoteURL(round?.canonical ?? "") == round, "the canonical form parses back to the same repository")
     }
