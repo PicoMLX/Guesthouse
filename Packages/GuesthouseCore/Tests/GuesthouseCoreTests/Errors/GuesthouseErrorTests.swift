@@ -113,7 +113,7 @@ import Testing
     @Test func untrustedValuesAreSanitizedBeforeInterpolation() {
         let injected = "codex\nInjected: secret line\u{2028}more"
         let long = String(repeating: "x", count: 200)
-        let error = GuesthouseError.toolMismatch(tool: injected, found: long, expected: "1.0")
+        let error = GuesthouseError.toolMismatch(tool: injected, found: SanitizedText(long), expected: "1.0")
         #expect(!error.userMessage.contains("\n"))
         #expect(!error.userMessage.contains("\u{2028}"))
         #expect(error.userMessage.contains("codexInjected: secret linemore"))
@@ -124,7 +124,7 @@ import Testing
 
     @Test func credentialsInUntrustedValuesAreRedactedNotJustTruncated() {
         let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
-        let probe = GuesthouseError.toolMismatch(tool: "gh", found: token, expected: "2.80.0")
+        let probe = GuesthouseError.toolMismatch(tool: "gh", found: SanitizedText(token), expected: "2.80.0")
         #expect(!probe.userMessage.contains(token))
         #expect(probe.userMessage.contains("[redacted:github-token]"))
         #expect(!probe.redactedDescription.contains(token))

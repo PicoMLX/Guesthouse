@@ -3,21 +3,21 @@ import Foundation
 /// Every failure Guesthouse shows to the user, with a category, a message, and recovery actions.
 ///
 /// Associated values are structured on purpose: identifiers, sizes, versions, component names,
-/// and paths. Never a token, password, device code, or raw command output; those must be
-/// redacted before they can reach a log, and they never belong in an error
-/// (MVP-PLAN.md §3, "Local storage").
+/// and paths. Never a token, password, device code, or raw command output; anything that can
+/// originate outside the app is a `SanitizedText`, redacted and bounded at construction, so
+/// the encoded form of an error carries no raw value either (MVP-PLAN.md §3, "Local storage").
 public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case unsupportedHost(UnsupportedHostReason)
-    case insufficientDisk(requiredBytes: UInt64, availableBytes: UInt64, volumePath: String)
-    case downloadVerificationFailed(artifact: String, check: VerificationCheck)
+    case insufficientDisk(requiredBytes: UInt64, availableBytes: UInt64, volumePath: SanitizedText)
+    case downloadVerificationFailed(artifact: SanitizedText, check: VerificationCheck)
     case runtimeMissing
-    case runtimeIncompatible(found: String?, required: String)
+    case runtimeIncompatible(found: SanitizedText?, required: String)
     case guestNotReachable(EnvironmentID)
     case hostKeyChanged(EnvironmentID)
     case credentialsLocked(CredentialStore)
     case loginExpired(Provider)
-    case toolMismatch(tool: String, found: String?, expected: String)
-    case xcodeComponentsIncomplete(missing: [String])
+    case toolMismatch(tool: String, found: SanitizedText?, expected: String)
+    case xcodeComponentsIncomplete(missing: [SanitizedText])
     case vmSlotUnavailable(maximum: Int)
     case operationOutcomeUnknown(OperationID)
     case unauthorizedCaller
@@ -27,7 +27,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
 
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
         case notAppleSilicon
-        case macOSTooOld(found: String, minimum: String)
+        case macOSTooOld(found: SanitizedText, minimum: String)
         case insufficientMemory(foundBytes: UInt64, minimumBytes: UInt64)
     }
 
@@ -73,17 +73,17 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
         case .unsupportedHost(.macOSTooOld(let found, let minimum)):
-            "This Mac runs macOS \(Self.sanitize(found)). Guesthouse needs macOS \(Self.sanitize(minimum)) or later."
+            "This Mac runs macOS \(found.value). Guesthouse needs macOS \(Self.sanitize(minimum)) or later."
         case .unsupportedHost(.insufficientMemory(let found, let minimum)):
             "This Mac has \(Self.formatMemory(found)) of memory. Guesthouse needs at least \(Self.formatMemory(minimum)) to run a development Mac alongside your other apps."
         case .insufficientDisk(let required, let available, let volume):
-            Self.insufficientDiskMessage(required: required, available: available, volume: volume)
+            Self.insufficientDiskMessage(required: required, available: available, volume: volume.value)
         case .downloadVerificationFailed(let artifact, let check):
-            "The downloaded \(Self.sanitize(artifact)) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
+            "The downloaded \(artifact.value) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible(let found, let required):
-            "The installed virtual machine runtime (\(found.map { Self.sanitize($0) } ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
+            "The installed virtual machine runtime (\(found?.value ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
         case .guestNotReachable(let id):
             "The development Mac \(id.tartVMName) is not answering over the network."
         case .hostKeyChanged(let id):
@@ -95,9 +95,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired(let provider):
             "Your \(Self.name(of: provider)) sign-in on the development Mac has expired."
         case .toolMismatch(let tool, let found, let expected):
-            "The development Mac has \(Self.sanitize(tool)) \(found.map { Self.sanitize($0) } ?? "missing") but the tested version is \(Self.sanitize(expected))."
+            "The development Mac has \(Self.sanitize(tool)) \(found?.value ?? "missing") but the tested version is \(Self.sanitize(expected))."
         case .xcodeComponentsIncomplete(let missing):
-            "Xcode is installed on the development Mac but is missing required components: \(missing.map { Self.sanitize($0) }.joined(separator: ", "))."
+            "Xcode is installed on the development Mac but is missing required components: \(Self.list(missing))."
         case .vmSlotUnavailable(let maximum):
             "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones. Export any unpublished work from one you no longer need, then delete it to make room."
         case .operationOutcomeUnknown:
@@ -134,7 +134,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unauthorizedCaller: [.cancel]
         case .protocolMismatch: [.reinstallApp, .cancel]
         case .invalidRequest: [.cancel]
-        case .canceled: [.retry, .cancel]
+        // A cancellation may have interrupted a mutation midway; the state is inspected
+        // before the same operation is offered again (MVP-PLAN.md §9).
+        case .canceled: [.inspectState, .cancel]
         }
     }
 
@@ -205,9 +207,14 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// begins inside the visible prefix is always fully inside the redacted window.
     static let sanitizeLookahead = 512
 
-    static func sanitize(_ value: String, limit: Int = 80) -> String {
-        let bounded = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead)
-        let normalized = String(String.UnicodeScalarView(bounded.filter { scalar in
+    public static func sanitize(_ value: String, limit: Int = 80) -> String {
+        let input = value.unicodeScalars
+        let truncated = input.count > limit + Self.sanitizeLookahead
+        let bounded = String(String.UnicodeScalarView(input.prefix(limit + Self.sanitizeLookahead)))
+        // Complete escape sequences go first, so styling inside a token cannot leave a
+        // fragment behind once the bare control scalars are dropped.
+        let stripped = Redactor.stripTerminalEscapes(bounded)
+        var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
                 false
@@ -215,10 +222,24 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
                 true
             }
         }))
+        if truncated {
+            // A URL authority still open at the cut may be userinfo whose terminating `@` fell
+            // outside the window: treat the whole remainder as a credential.
+            normalized = normalized.replacing(#/(:\/\/)[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
+        }
         let redacted = Redactor().redact(fieldValue: normalized)
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return redacted }
         return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
+    }
+
+    /// How many missing components are named before the rest is summarized as a count.
+    static let maximumListedComponents = 20
+
+    static func list(_ items: [SanitizedText]) -> String {
+        let shown = items.prefix(maximumListedComponents).map(\.value).joined(separator: ", ")
+        let rest = items.count - maximumListedComponents
+        return rest > 0 ? "\(shown), and \(rest) more" : shown
     }
 
     /// Names the shortfall explicitly, and falls back to exact byte counts when rounding would
