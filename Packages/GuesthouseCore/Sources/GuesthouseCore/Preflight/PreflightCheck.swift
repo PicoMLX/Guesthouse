@@ -81,9 +81,11 @@ public enum PreflightCheck {
         var results: [PreflightResult] = []
 
         let architecture = probe.cpuArchitecture
+        // An architecture nobody could determine is never a pass, whatever the policy asks
+        // for: the unknown case is answered before the policy is consulted.
         let architectureOutcome: PreflightResult.Outcome = switch architecture {
-        case policy.requiredArchitecture: .pass(detail: "Apple silicon")
         case .unknown: .fail(.unsupportedHost(.architectureUnknown))
+        case policy.requiredArchitecture: .pass(detail: "Apple silicon")
         default: .fail(.unsupportedHost(.notAppleSilicon))
         }
         results.append(PreflightResult(kind: .architecture, outcome: architectureOutcome))
@@ -98,7 +100,9 @@ public enum PreflightCheck {
         let memoryOutcome: PreflightResult.Outcome
         // The guest's allocation plus the host's headroom is the real floor; the policy minimum
         // applies on top of it.
-        let floor = max(policy.minimumMemoryBytes, preset.memoryBytes.addingReportingOverflow(policy.hostMemoryHeadroomBytes).partialValue)
+        // A guest allocation plus headroom that cannot be represented cannot be satisfied.
+        let (required, requiredOverflows) = preset.memoryBytes.addingReportingOverflow(policy.hostMemoryHeadroomBytes)
+        let floor = requiredOverflows ? UInt64.max : max(policy.minimumMemoryBytes, required)
         if memory < floor {
             memoryOutcome = .fail(.unsupportedHost(.insufficientMemory(foundBytes: memory, minimumBytes: floor)))
         } else if memory >= policy.recommendedMemoryBytes {
@@ -156,8 +160,10 @@ public enum LargeOperationPreflight {
         volumePath: String,
         policy: ResourcePolicy = .standard
     ) throws(GuesthouseError) {
-        // A requirement that cannot be represented cannot be satisfied.
-        let (needed, overflow) = requiredBytes.addingReportingOverflow(policy.largeOperationMarginBytes)
+        // A requirement that cannot be represented cannot be satisfied, and the reported
+        // requirement is the unrepresentable one rather than the wrapped remainder.
+        let (sum, overflow) = requiredBytes.addingReportingOverflow(policy.largeOperationMarginBytes)
+        let needed = overflow ? UInt64.max : sum
         guard !overflow, freeBytes >= needed else {
             throw .insufficientDisk(requiredBytes: needed, availableBytes: freeBytes, volumePath: SanitizedText(volumePath))
         }

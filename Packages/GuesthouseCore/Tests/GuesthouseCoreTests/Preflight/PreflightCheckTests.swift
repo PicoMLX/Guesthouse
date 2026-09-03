@@ -134,6 +134,30 @@ struct StubProbe: HostProbe {
         #expect(run(probe).canProceed)
     }
 
+    @Test func anUnknownArchitectureFailsEvenWhenThePolicyAsksForOne() {
+        var probe = StubProbe(); probe.cpuArchitecture = .unknown
+        var policy = ResourcePolicy(); policy.requiredArchitecture = .unknown
+        let report = PreflightCheck.run(probe: probe, policy: policy, storageRoot: root, now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(report.result(.architecture)!.outcome == .fail(.unsupportedHost(.architectureUnknown)))
+        #expect(!report.canProceed)
+    }
+
+    @Test func anImpossibleMemoryFloorIsNeverSatisfied() {
+        var policy = ResourcePolicy(); policy.hostMemoryHeadroomBytes = UInt64.max - 1
+        var preset = ResourcePreset.recommended; preset.memoryBytes = 16 * ResourcePreset.gibibyte
+        let report = PreflightCheck.run(probe: StubProbe(), policy: policy, storageRoot: root, preset: preset, now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(report.result(.memory)!.isFailure, "a requirement that overflows can never be met")
+    }
+
+    @Test func anUnrepresentableRequirementReportsItselfAsSuch() {
+        let error = #expect(throws: GuesthouseError.self) {
+            try LargeOperationPreflight.check(freeBytes: 500 * ResourcePreset.gigabyte, requiredBytes: UInt64.max - 1, volumePath: "/x")
+        }
+        guard case .insufficientDisk(let required, let available, _)? = error else { Issue.record("expected insufficientDisk"); return }
+        #expect(required == UInt64.max, "the reported requirement is not the wrapped remainder")
+        #expect(available == 500 * ResourcePreset.gigabyte)
+    }
+
     @Test func everyFailureCarriesARecoveryAction() {
         var probe = StubProbe()
         probe.cpuArchitecture = .intel

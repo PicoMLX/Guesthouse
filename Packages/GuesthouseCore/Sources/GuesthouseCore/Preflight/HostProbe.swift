@@ -42,6 +42,9 @@ public protocol HostProbe: Sendable {
 /// The real thing. Not unit-tested beyond a smoke test; every decision that matters is made
 /// by `PreflightCheck` from values that tests supply through a stub.
 public struct SystemHostProbe: HostProbe {
+    /// Where macOS mounts volumes other than the startup volume.
+    static let mountContainerPath = "/Volumes"
+
     public init() {}
 
     public var cpuArchitecture: CPUArchitecture {
@@ -92,11 +95,18 @@ public struct SystemHostProbe: HostProbe {
 
     /// The destination usually does not exist yet on first launch; the nearest existing
     /// ancestor tells which volume it will land on.
+    /// The capacity of the volume that will hold `url`. A destination that does not exist yet
+    /// is measured on its nearest existing ancestor, but the walk never crosses the directory
+    /// that holds mount points: an unmounted external volume must not be answered with the
+    /// startup disk's free space.
     public func freeBytes(at url: URL) throws -> UInt64 {
         var existing = url.standardizedFileURL
         while !FileManager.default.fileExists(atPath: existing.path) {
             let parent = existing.deletingLastPathComponent()
             if parent.path == existing.path { break }
+            if parent.path == Self.mountContainerPath {
+                throw HostProbeError.volumeUnavailable(path: existing.path)
+            }
             existing = parent
         }
         let values = try existing.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
@@ -115,4 +125,20 @@ public struct SystemHostProbe: HostProbe {
             build: info?["CFBundleVersion"] as? String
         )
     }
+}
+
+/// What the host probe could not answer. Each leaves a preflight check undetermined rather
+/// than answered from the wrong disk.
+public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
+    /// The destination's volume is not mounted, so its free space is unknowable.
+    case volumeUnavailable(path: String)
+
+    public var userMessage: String {
+        switch self {
+        case .volumeUnavailable(let path):
+            "The volume that holds \(GuesthouseError.sanitize(path, limit: 200)) is not available, so Guesthouse cannot tell how much space it has. Connect the volume, or choose a storage location on this Mac."
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
 }
