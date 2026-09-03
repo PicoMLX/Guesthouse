@@ -32,13 +32,25 @@ actor RuntimeClient: RuntimeBackend {
     private var pendingEvents: [OperationID: [RuntimeEvent]] = [:]
     /// Which accepted operation each consumer stream owns, keyed by the stream's identity.
     private var consumers: [ObjectIdentifier: OperationID] = [:]
+    /// Consumers that went away before their `accepted` reply arrived; the operation is
+    /// canceled the moment it is accepted.
+    private var abandonedBeforeAccept: Set<ObjectIdentifier> = []
     private let inbox: AsyncStream<Inbound>
     private let inboxContinuation: AsyncStream<Inbound>.Continuation
     private var started = false
 
+    /// Events buffered for one consumer before it reads them. Progress and log traffic beyond
+    /// this drops the oldest entries; the terminal event is always the newest, so it survives.
+    static let consumerBufferLimit = 1_024
+
     init(transport: any RuntimeTransport = XPCRuntimeTransport()) {
         self.transport = transport
         (inbox, inboxContinuation) = AsyncStream.makeStream(of: Inbound.self, bufferingPolicy: .unbounded)
+    }
+
+    deinit {
+        // Ends the drain loop of a discarded client; it holds no strong reference to self.
+        inboxContinuation.finish()
     }
 
     /// Requests are enqueued on the same ordered inbox as every callback, synchronously, so
@@ -46,7 +58,7 @@ actor RuntimeClient: RuntimeBackend {
     /// consumer stops reading an accepted operation, the client unregisters it and asks the
     /// runtime to cancel it, so a host mutation never keeps running unobserved.
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(Self.consumerBufferLimit)) { continuation in
             let key = ContinuationKey()
             continuation.onTermination = { [inboxContinuation] termination in
                 if case .cancelled = termination {
@@ -76,18 +88,24 @@ actor RuntimeClient: RuntimeBackend {
             incoming: { event in inboxContinuation.yield(.incoming(event)) },
             interrupted: { inboxContinuation.yield(.interrupted) }
         )
-        Task { await self.drain() }
+        // The loop borrows `self` per item only, so a client nobody holds is released while
+        // the loop waits, and `deinit` then ends the inbox.
+        let inbox = inbox
+        Task { [weak self] in
+            for await item in inbox {
+                guard let self else { return }
+                await self.handle(item)
+            }
+        }
     }
 
-    private func drain() async {
-        for await item in inbox {
-            switch item {
-            case .send(let request, let continuation, let key): start(request, continuation, key: key)
-            case .reply(let result, let continuation, let key): handleReply(result, for: continuation, key: key)
-            case .incoming(let event): route(event)
-            case .interrupted: connectionDropped()
-            case .consumerGone(let continuation): consumerGone(continuation)
-            }
+    private func handle(_ item: Inbound) {
+        switch item {
+        case .send(let request, let continuation, let key): start(request, continuation, key: key)
+        case .reply(let result, let continuation, let key): handleReply(result, for: continuation, key: key)
+        case .incoming(let event): route(event)
+        case .interrupted: connectionDropped()
+        case .consumerGone(let continuation): consumerGone(continuation)
         }
     }
 
@@ -97,6 +115,14 @@ actor RuntimeClient: RuntimeBackend {
             continuation.yield(event)
             switch event {
             case .accepted(let id):
+                if abandonedBeforeAccept.remove(key) != nil {
+                    // The consumer left before acceptance: nobody observes this mutation, so
+                    // it is canceled right away instead of running unobserved.
+                    continuation.finish()
+                    pendingEvents.removeValue(forKey: id)
+                    try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
+                    return
+                }
                 // More events follow through the incoming handler until completed or failed.
                 operations[id] = continuation
                 consumers[key] = id
@@ -104,9 +130,11 @@ actor RuntimeClient: RuntimeBackend {
                     route(buffered)
                 }
             case .runtimeVersion, .status, .completed, .failed, .progress, .log:
+                abandonedBeforeAccept.remove(key)
                 continuation.finish()
             }
         case .failure:
+            abandonedBeforeAccept.remove(key)
             continuation.finish(throwing: RuntimeConnectionInterrupted())
         }
     }
@@ -133,7 +161,12 @@ actor RuntimeClient: RuntimeBackend {
     }
 
     private func consumerGone(_ key: ObjectIdentifier) {
-        guard let id = consumers.removeValue(forKey: key), operations.removeValue(forKey: id) != nil else { return }
+        guard let id = consumers.removeValue(forKey: key) else {
+            // Not accepted yet (or a query): remembered until the reply says which it was.
+            abandonedBeforeAccept.insert(key)
+            return
+        }
+        guard operations.removeValue(forKey: id) != nil else { return }
         pendingEvents.removeValue(forKey: id)
         try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
     }

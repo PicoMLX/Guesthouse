@@ -19,6 +19,9 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
 
     private let lock = NSLock()
     private var session: XPCSession?
+    /// Incremented per session, so a callback from a canceled session never clears its
+    /// replacement or reports a second interruption for it.
+    private var generation = 0
     private var incoming: (@Sendable (RuntimeEvent) -> Void)?
     private var interrupted: (@Sendable () -> Void)?
 
@@ -39,6 +42,8 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
     private func activeSession() throws -> XPCSession {
         try lock.withLock {
             if let session { return session }
+            generation += 1
+            let mine = generation
             // Created inactive: the session is activated once below. Creating it active and
             // activating again is an XPC API misuse that traps on first use.
             let created = try XPCSession(
@@ -51,27 +56,29 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
                     } else {
                         // An undecodable push means a contract mismatch: treat it as a lost
                         // connection so waiting operations report an unknown outcome.
-                        let handler = self.lock.withLock { () -> (@Sendable () -> Void)? in
-                            self.session?.cancel(reason: "undecodable event")
-                            self.session = nil
-                            return self.interrupted
-                        }
-                        handler?()
+                        self.dropSession(generation: mine, reason: "undecodable event")
                     }
                     return nil
                 },
                 cancellationHandler: { [weak self] _ in
-                    guard let self else { return }
-                    let handler = self.lock.withLock { () -> (@Sendable () -> Void)? in
-                        self.session = nil
-                        return self.interrupted
-                    }
-                    handler?()
+                    self?.dropSession(generation: mine, reason: nil)
                 }
             )
             try created.activate()
             session = created
             return created
         }
+    }
+
+    /// Clears the session and reports an interruption only if the session that failed is
+    /// still the current one.
+    private func dropSession(generation: Int, reason: String?) {
+        let handler = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard self.generation == generation else { return nil }
+            if let reason { session?.cancel(reason: reason) }
+            session = nil
+            return interrupted
+        }
+        handler?()
     }
 }

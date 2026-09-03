@@ -5,12 +5,29 @@ import Testing
 
 /// A transport that answers from a script and can simulate a dropped connection.
 final class FakeTransport: RuntimeTransport, @unchecked Sendable {
-    enum Behavior { case reply(RuntimeEvent), fail, throwOnSend, acceptThenStream([RuntimeEvent]), acceptThenDrop }
+    enum Behavior { case reply(RuntimeEvent), fail, throwOnSend, acceptThenStream([RuntimeEvent]), acceptThenDrop, acceptLater }
+    private var pendingReply: (@Sendable (Result<RuntimeEvent, any Error>) -> Void)?
+    private(set) var lastAcceptedID: OperationID?
+
+    /// For `.acceptLater`: delivers the `accepted` reply held back by the last send.
+    func deliverPendingAccept() {
+        let (reply, id) = lock.withLock { () -> ((@Sendable (Result<RuntimeEvent, any Error>) -> Void)?, OperationID) in
+            let id = OperationID()
+            lastAcceptedID = id
+            defer { pendingReply = nil }
+            return (pendingReply, id)
+        }
+        reply?(.success(.accepted(id)))
+    }
     let lock = NSLock()
     var behavior: Behavior
     var incoming: (@Sendable (RuntimeEvent) -> Void)?
     var interrupted: (@Sendable () -> Void)?
-    var sent: [RuntimeRequestEnvelope] = []
+    private var sentEnvelopes: [RuntimeRequestEnvelope] = []
+    /// Snapshots taken under the lock, so a test polling while the client drains sees
+    /// consistent state.
+    var sent: [RuntimeRequestEnvelope] { lock.withLock { sentEnvelopes } }
+    var sentCount: Int { lock.withLock { sentEnvelopes.count } }
 
     init(_ behavior: Behavior) { self.behavior = behavior }
 
@@ -19,7 +36,7 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
     }
 
     func send(_ envelope: RuntimeRequestEnvelope, reply: @escaping @Sendable (Result<RuntimeEvent, any Error>) -> Void) throws {
-        lock.withLock { sent.append(envelope) }
+        lock.withLock { sentEnvelopes.append(envelope) }
         switch behavior {
         case .reply(let event): reply(.success(event))
         case .fail: reply(.failure(CocoaError(.xpcConnectionInterrupted)))
@@ -39,6 +56,12 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         case .acceptThenDrop:
             reply(.success(.accepted(OperationID())))
             lock.withLock { self.interrupted }?()
+        case .acceptLater:
+            if case .cancelOperation = envelope.request {
+                reply(.success(.completed(OperationID())))
+            } else {
+                lock.withLock { pendingReply = reply }
+            }
         }
     }
 }
@@ -97,10 +120,37 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
         let consumer = Task { for try await _ in stream {} }
-        for _ in 0..<200 where transport.sent.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        for _ in 0..<200 where transport.sentCount == 0 { try await Task.sleep(for: .milliseconds(5)) }
         consumer.cancel()
-        for _ in 0..<200 where transport.sent.count < 2 { try await Task.sleep(for: .milliseconds(5)) }
-        guard transport.sent.count == 2, case .cancelOperation = transport.sent[1].request else { Issue.record("no cancelOperation sent: \(transport.sent.map(\.request))"); return }
+        for _ in 0..<200 where transport.sentCount < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        let sent = transport.sent
+        guard sent.count == 2, case .cancelOperation = sent[1].request else { Issue.record("no cancelOperation sent: \(sent.map(\.request))"); return }
+    }
+
+    @Test func aConsumerGoneBeforeAcceptanceStillCancelsTheOperation() async throws {
+        let transport = FakeTransport(.acceptLater)
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let consumer = Task { for try await _ in stream {} }
+        for _ in 0..<200 where transport.sentCount == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        consumer.cancel()
+        try await Task.sleep(for: .milliseconds(30))
+        transport.deliverPendingAccept()
+        for _ in 0..<200 where transport.sentCount < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        let sent = transport.sent
+        guard sent.count == 2, case .cancelOperation(let id) = sent[1].request else { Issue.record("no cancelOperation sent: \(sent.map(\.request))"); return }
+        #expect(id == transport.lastAcceptedID)
+    }
+
+    @Test func aDiscardedClientIsReleased() async throws {
+        weak var weakClient: RuntimeClient?
+        do {
+            let client = RuntimeClient(transport: FakeTransport(.reply(.runtimeVersion(RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")))))
+            _ = try await collect(client.send(.runtimeVersion))
+            weakClient = client
+        }
+        for _ in 0..<100 where weakClient != nil { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(weakClient == nil)
     }
 
     @Test func droppedConnectionFailsInFlightOperationsWithTheirID() async {
