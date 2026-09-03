@@ -44,11 +44,14 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
         host = host.lowercased()
         var parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard parts.count == 2 else { return nil }
-        if parts[1].lowercased().hasSuffix(".git") { parts[1] = String(parts[1].dropLast(4)) }
-        // A repository whose own name ends in `.git` has no round-trippable canonical form:
-        // the canonical URL would lose the suffix on the next parse, silently naming a
-        // different repository. Such a remote is refused rather than normalized.
-        guard !parts[1].lowercased().hasSuffix(".git") else { return nil }
+        // SwiftPM strips only a lowercase `.git` when it derives an identity from a location,
+        // so this parser does the same: `Repo.GIT` keeps its suffix, and its identity stays
+        // `repo.git`, which is what `Package.resolved` will spell.
+        if parts[1].hasSuffix(".git") { parts[1] = String(parts[1].dropLast(4)) }
+        // A repository whose own name then still ends in a lowercase `.git` has no
+        // round-trippable canonical form: the canonical URL would lose the suffix on the next
+        // parse, silently naming a different repository. Such a remote is refused.
+        guard !parts[1].hasSuffix(".git") else { return nil }
         guard Self.isValidComponent(parts[0]), Self.isValidComponent(parts[1]) else { return nil }
         self.host = host
         owner = parts[0]
