@@ -47,15 +47,20 @@ import Testing
     }
 
     @Test func errorsAreActionable() {
-        let errors: [RuntimeStorageError] = [
-            .insecureDirectory(path: "/x", reason: "symbolic link"),
-            .unwritable(path: "/x", reason: SanitizedText("No space left on device")),
-        ]
+        let insecure = RuntimeStorageError.insecureDirectory(path: "/x", reason: "symbolic link")
+        let unwritable = RuntimeStorageError.unwritable(
+            path: "/x",
+            reason: SanitizedText("No space left on device")
+        )
+        let errors = [insecure, unwritable]
         for error in errors {
             #expect(!error.userMessage.isEmpty)
             #expect(!error.recoveryActions.isEmpty)
             #expect(error.errorDescription == error.userMessage)
+            #expect(!error.userMessage.contains("Settings"))
         }
+        #expect(insecure.recoveryActions == [.retry, .cancel])
+        #expect(unwritable.recoveryActions == [.freeDiskSpace, .retry, .cancel])
     }
 
     @Test func aMissingRootParentIsReportedAsUnwritable() {
