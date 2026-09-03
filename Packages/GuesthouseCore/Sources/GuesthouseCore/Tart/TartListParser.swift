@@ -47,30 +47,45 @@ public enum TartParseError: Error, Hashable, Sendable {
 }
 
 public enum TartListParser {
+    /// Tart's field names, decoded strictly: a JSON boolean never becomes a number and a
+    /// number never becomes a boolean, so a changed schema fails instead of producing
+    /// plausible but wrong inventory.
+    private struct RawEntry: Decodable {
+        let Source: String
+        let Name: String
+        let Disk: Int
+        let Size: Int
+        let Accessed: String?
+        let Running: Bool
+        let State: String
+    }
+
     public static func parse(_ data: Data) throws(TartParseError) -> [TartVMInfo] {
-        guard let object = try? JSONSerialization.jsonObject(with: data) else { throw .notJSON }
-        guard let entries = object as? [[String: Any]] else { throw .unexpectedShape("expected an array of objects") }
+        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw .notJSON }
+        let entries: [RawEntry]
+        do {
+            entries = try JSONDecoder().decode([RawEntry].self, from: data)
+        } catch let DecodingError.typeMismatch(_, context) {
+            throw .unexpectedShape(context.codingPath.last?.stringValue ?? "expected an array of objects")
+        } catch let DecodingError.keyNotFound(key, _) {
+            throw .unexpectedShape(key.stringValue)
+        } catch let DecodingError.valueNotFound(_, context) {
+            throw .unexpectedShape(context.codingPath.last?.stringValue ?? "value")
+        } catch {
+            throw .unexpectedShape("expected an array of objects")
+        }
         var result: [TartVMInfo] = []
         for entry in entries {
-            result.append(try parseEntry(entry))
+            guard let source = TartVMInfo.Source(rawValue: entry.Source.lowercased()) else { throw .unknownValue(field: "Source", value: entry.Source) }
+            guard !entry.Name.isEmpty else { throw .unexpectedShape("Name") }
+            guard let state = TartVMInfo.State(rawValue: entry.State) else { throw .unknownValue(field: "State", value: entry.State) }
+            let accessed = entry.Accessed.flatMap { try? Date($0, strategy: .iso8601) }
+            result.append(TartVMInfo(source: source, name: entry.Name, diskGigabytes: entry.Disk, sizeGigabytes: entry.Size, accessed: accessed, running: entry.Running, state: state))
         }
         return result
     }
 
     public static func parse(_ text: String) throws(TartParseError) -> [TartVMInfo] {
         try parse(Data(text.utf8))
-    }
-
-    private static func parseEntry(_ entry: [String: Any]) throws(TartParseError) -> TartVMInfo {
-        guard let sourceRaw = entry["Source"] as? String else { throw .unexpectedShape("Source") }
-        guard let source = TartVMInfo.Source(rawValue: sourceRaw.lowercased()) else { throw .unknownValue(field: "Source", value: sourceRaw) }
-        guard let name = entry["Name"] as? String, !name.isEmpty else { throw .unexpectedShape("Name") }
-        guard let disk = entry["Disk"] as? Int else { throw .unexpectedShape("Disk") }
-        guard let size = entry["Size"] as? Int else { throw .unexpectedShape("Size") }
-        guard let running = entry["Running"] as? Bool else { throw .unexpectedShape("Running") }
-        guard let stateRaw = entry["State"] as? String else { throw .unexpectedShape("State") }
-        guard let state = TartVMInfo.State(rawValue: stateRaw) else { throw .unknownValue(field: "State", value: stateRaw) }
-        let accessed = (entry["Accessed"] as? String).flatMap { try? Date($0, strategy: .iso8601) }
-        return TartVMInfo(source: source, name: name, diskGigabytes: disk, sizeGigabytes: size, accessed: accessed, running: running, state: state)
     }
 }
