@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A file the generator wants written, relative to the workspace root.
@@ -111,7 +112,15 @@ public enum IntegrationWorkspaceGenerator {
         else { throw GeneratedFileError.invalidPath(relativePath) }
         guard components[0].lowercased() != "repos" else { throw GeneratedFileError.pathOutsideWorkspace(relativePath) }
         var url = resolvedRoot
-        for component in components { url.append(path: component) }
+        for component in components {
+            url.append(path: component)
+            // The guest's file system is untrusted: an agent that replaced a generated
+            // directory with a link must not redirect the write through it.
+            var info = stat()
+            if lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK {
+                throw GeneratedFileError.pathOutsideWorkspace(relativePath)
+            }
+        }
         guard url.standardizedFileURL.path.hasPrefix(resolvedRoot.path + "/") else {
             throw GeneratedFileError.pathOutsideWorkspace(relativePath)
         }
@@ -172,9 +181,7 @@ public enum IntegrationWorkspaceGenerator {
 
         Always build through the integration workspace, never through the app project alone. The workspace contains the app project and every package directory above, so the app resolves those packages from the local checkouts instead of the versions pinned in its `Package.resolved`:
 
-        ```bash
-        xcodebuild -workspace \(WorkspaceLayout.integrationWorkspaceName) -scheme \(manifest.sharedScheme) -destination '\(manifest.testDestination.specifier)' -derivedDataPath artifacts/DerivedData -clonedSourcePackagesDirPath artifacts/SourcePackages test
-        ```
+        \(fenced("xcodebuild -workspace \(shellQuoted(WorkspaceLayout.integrationWorkspaceName)) -scheme \(shellQuoted(manifest.sharedScheme)) -destination \(shellQuoted(manifest.testDestination.specifier)) -derivedDataPath artifacts/DerivedData -clonedSourcePackagesDirPath artifacts/SourcePackages test", language: "bash"))
 
         Build state and downloaded package sources stay under `artifacts/` so a workspace can be cleaned or exported as a unit and nothing lands in Xcode's shared defaults.
 
@@ -208,6 +215,20 @@ public enum IntegrationWorkspaceGenerator {
         One pull request per changed repository. A package change that alters public API usually has to merge and be released or pinned before the app's dependency update is valid; say so in the app pull request.
         """
         return text + "\n"
+    }
+
+    /// One shell argument, quoted so repository-controlled text cannot end it: single quotes
+    /// take everything literally, and an embedded quote is closed, escaped, and reopened.
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// A fenced block whose fence is longer than any backtick run inside it, so the content
+    /// cannot end the block early.
+    static func fenced(_ text: String, language: String) -> String {
+        let longest = text.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0
+        let fence = String(repeating: "`", count: max(3, longest + 1))
+        return "\(fence)\(language)\n\(text)\n\(fence)"
     }
 
     /// A Markdown code span that cannot be closed early by the value: repository-controlled
