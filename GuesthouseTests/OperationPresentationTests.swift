@@ -132,7 +132,9 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
     }
 
     @Test func retryWaitsForTheStatusCheckThatFollowsAFailure() async throws {
-        let backend = FakeRuntimeBackend(delay: .milliseconds(40))
+        // A slow status reply keeps the reconciliation window open long enough to observe it
+        // on a loaded machine.
+        let backend = FakeRuntimeBackend(delay: .milliseconds(150))
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
         await backend.setEnvironments([environment])
         await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
@@ -199,7 +201,9 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.lastErrors[environment.id] != nil && model.operations.isEmpty }
+        // Retry becomes available only once the status check that follows the failure has
+        // answered: nothing is replayed over a state that was not read back.
+        await waitUntil { model.lastErrors[environment.id] != nil && model.operations.isEmpty && !model.reconciling.contains(environment.id) }
         let failed = try #require(model.cardStates().first)
         #expect(failed.recovery?.options.contains { $0.action == .retry && $0.availability == .enabled } == true)
         await backend.script("startEnvironment", .succeed(status: EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready)))
