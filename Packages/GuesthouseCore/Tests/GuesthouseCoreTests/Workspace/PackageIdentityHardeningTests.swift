@@ -30,13 +30,13 @@ import Testing
     @Test func aMixedCaseGitSuffixKeepsSwiftPMsSpelling() {
         // SwiftPM strips only a lowercase `.git`, so `Mixed-Repo.GIT` is the package
         // `mixed-repo.git`, which is what it writes into `Package.resolved`.
-        let remote = try? #require(RemoteURL("https://github.com/Org/Mixed-Repo.GIT"))
-        #expect(remote?.name == "Mixed-Repo.GIT")
-        #expect(PackageIdentity(remote: remote!).rawValue == "mixed-repo.git")
-        #expect(RemoteURL(remote!.canonical) == remote, "the canonical form still parses back to the same repository")
-        let package = WorkspaceRepository(role: .package, remote: remote!, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
-        let file = resolved(identity: "mixed-repo.git", location: remote!.canonical)
-        #expect(LocalOverrideMatcher.match(selected: [package], resolved: file, observedOrigins: [package.checkoutName: remote!]) == [.matched(identity: PackageIdentity(remote: remote!), location: remote!.canonical)])
+        let remote = RemoteURL("https://github.com/Org/Mixed-Repo.GIT")!
+        #expect(remote.name == "Mixed-Repo.GIT")
+        #expect(PackageIdentity(remote: remote).rawValue == "mixed-repo.git")
+        #expect(RemoteURL(remote.canonical) == remote, "the canonical form still parses back to the same repository")
+        let package = WorkspaceRepository(role: .package, remote: remote, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        let file = resolved(identity: "mixed-repo.git", location: remote.canonical)
+        #expect(LocalOverrideMatcher.match(selected: [package], resolved: file, observedOrigins: [package.checkoutName: remote]) == [.matched(identity: PackageIdentity(remote: remote), location: remote.canonical)])
     }
 
     @Test func anUnreadCheckoutIsNeverApproved() {
