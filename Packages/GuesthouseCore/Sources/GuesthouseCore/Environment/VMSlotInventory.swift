@@ -74,6 +74,14 @@ public struct VMSlotInventory: Hashable, Sendable {
 public enum VMSlotError: Error, Hashable, Sendable {
     case inventoryFull(maximum: Int)
     case unknownEnvironment(EnvironmentID)
+    /// The persisted inventory could not be used: more slots than exist, or the same
+    /// environment listed twice.
+    case corruptInventory(reason: Reason)
+
+    public enum Reason: Hashable, Sendable {
+        case tooManySlots(found: Int, maximum: Int)
+        case duplicateEnvironment
+    }
 }
 
 extension VMSlotError: LocalizedError {
@@ -84,6 +92,10 @@ extension VMSlotError: LocalizedError {
             "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones."
         case .unknownEnvironment(let id):
             "No development Mac with the identifier \(id) is registered on this Mac."
+        case .corruptInventory(.tooManySlots(let found, let maximum)):
+            "Guesthouse's record of development Macs lists \(found) of them, more than the \(maximum) it manages, so it cannot be used as it is."
+        case .corruptInventory(.duplicateEnvironment):
+            "Guesthouse's record of development Macs lists the same one twice, so it cannot be used as it is."
         }
     }
 
@@ -94,8 +106,11 @@ extension VMSlotError: LocalizedError {
             "Export any unpublished work from a development Mac you no longer need, then delete it to make room. Exporting alone does not free a slot."
         case .unknownEnvironment:
             "Check the environment list; the record may have been removed by a repair or deletion."
+        case .corruptInventory:
+            "Guesthouse will inspect the virtual machines that actually exist and rebuild the record from them; nothing is started or deleted until it has."
         }
     }
+
 
     public var errorDescription: String? { userMessage }
     public var recoverySuggestion: String? { recoveryMessage }
@@ -109,17 +124,13 @@ extension VMSlotInventory: Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decoded = try container.decode([Slot].self, forKey: .slots)
+        // A corrupt inventory is a state the user can be told about and recover from, so it
+        // is reported as `VMSlotError` rather than as a decoder's internal complaint.
         guard decoded.count <= Self.maximumSlots else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .slots, in: container,
-                debugDescription: "\(decoded.count) slots exceed the maximum of \(Self.maximumSlots)"
-            )
+            throw VMSlotError.corruptInventory(reason: .tooManySlots(found: decoded.count, maximum: Self.maximumSlots))
         }
         guard Set(decoded.map(\.environmentID)).count == decoded.count else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .slots, in: container,
-                debugDescription: "duplicate environment identifiers in slot inventory"
-            )
+            throw VMSlotError.corruptInventory(reason: .duplicateEnvironment)
         }
         slots = decoded
     }

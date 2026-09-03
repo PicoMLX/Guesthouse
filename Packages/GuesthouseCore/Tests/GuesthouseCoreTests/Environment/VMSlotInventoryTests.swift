@@ -87,19 +87,24 @@ import Testing
         #expect(decoded == inventory)
     }
 
-    @Test func decodingMoreThanMaximumSlotsFails() throws {
+    @Test func decodingMoreThanMaximumSlotsIsAnActionableError() throws {
         let slots = [a, b, c].map { VMSlotInventory.Slot(environmentID: $0) }
         let data = try JSONEncoder().encode(["slots": slots])
-        #expect(throws: DecodingError.self) {
+        let error = #expect(throws: VMSlotError.self) {
             try JSONDecoder().decode(VMSlotInventory.self, from: data)
         }
+        #expect(error == .corruptInventory(reason: .tooManySlots(found: 3, maximum: VMSlotInventory.maximumSlots)))
+        #expect(error?.userMessage.contains("3") == true)
+        #expect(error?.recoveryMessage.isEmpty == false)
     }
 
-    @Test func decodingDuplicateEnvironmentsFails() throws {
+    @Test func decodingDuplicateEnvironmentsIsAnActionableError() throws {
         let slots = [a, a].map { VMSlotInventory.Slot(environmentID: $0) }
         let data = try JSONEncoder().encode(["slots": slots])
-        #expect(throws: DecodingError.self) {
+        let error = #expect(throws: VMSlotError.self) {
             try JSONDecoder().decode(VMSlotInventory.self, from: data)
         }
+        #expect(error == .corruptInventory(reason: .duplicateEnvironment))
+        #expect(error?.recoveryMessage.contains("inspect") == true)
     }
 }
