@@ -8,7 +8,8 @@ Issue: `#<number>`. Run by: `<name>`. Date: `<YYYY-MM-DD>`. Status: `<in progres
 | --- | --- |
 | Host Mac | `<model, RAM>` |
 | Host macOS | `<version (build)>` |
-| Guesthouse build | `<git SHA, signed or debug, launched from Finder or Xcode>` |
+| Guesthouse signed build | `<git SHA; Developer ID or development signing; launched from Finder>` |
+| Guesthouse debug build | `<git SHA; launched from Xcode>` |
 | Tart | `<version, Team ID verified yes/no>` |
 | Guest macOS | `<version (build)>` |
 | Xcode (guest) | `<version (build)>` |
@@ -16,6 +17,7 @@ Issue: `#<number>`. Run by: `<name>`. Date: `<YYYY-MM-DD>`. Status: `<in progres
 | Codex desktop | `<version (build)>` |
 | Codex CLI (guest) | `<version, path>` |
 | GitHub CLI (guest) | `<version>` |
+| Git (guest) | `<version; executable path as resolved by the login shell>` |
 | Provisioning scripts | `<version or commit>` |
 | Guest VM configuration | `<preset name; CPU count; RAM; logical disk capacity>` |
 
