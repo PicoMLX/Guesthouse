@@ -1,0 +1,29 @@
+[
+  {
+    "Source" : "local",
+    "Name" : "guesthouse-1a2b3c4d-0000-4000-8000-000000000001",
+    "Disk" : 160,
+    "Size" : 42,
+    "Accessed" : "2026-09-03T07:00:00Z",
+    "Running" : true,
+    "State" : "running"
+  },
+  {
+    "Source" : "OCI",
+    "Name" : "ghcr.io/cirruslabs/macos-tahoe-base:latest",
+    "Disk" : 50,
+    "Size" : 20,
+    "Accessed" : "2026-08-30T12:34:56Z",
+    "Running" : false,
+    "State" : "stopped"
+  },
+  {
+    "Source" : "local",
+    "Name" : "suspended-vm",
+    "Disk" : 100,
+    "Size" : 30,
+    "Accessed" : "just now",
+    "Running" : false,
+    "State" : "suspended"
+  }
+]
