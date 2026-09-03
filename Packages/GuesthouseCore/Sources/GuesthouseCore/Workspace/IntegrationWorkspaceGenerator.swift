@@ -22,9 +22,33 @@ public struct GeneratedFile: Hashable, Sendable {
 /// regenerating an unchanged manifest yields byte-identical files. The committed app project
 /// and package manifests are never edited; the override happens because the wrapper workspace
 /// contains both the app project and the local package directories.
-public enum GeneratedFileError: Error, Hashable, Sendable {
+/// Why a generated file could not be placed or written; each names what the user can do.
+public enum GeneratedFileError: Error, Hashable, Sendable, LocalizedError {
     case invalidPath(String)
     case pathOutsideWorkspace(String)
+    /// A real I/O failure (full disk, denied directory), with a sanitized reason.
+    case unwritable(path: String, reason: SanitizedText)
+
+    public var userMessage: String {
+        switch self {
+        case .invalidPath(let path):
+            "Guesthouse would not write the workspace file \(GuesthouseError.sanitize(path)) because its path is not a plain relative path. This is a bug in Guesthouse."
+        case .pathOutsideWorkspace(let path):
+            "Guesthouse would not write \(GuesthouseError.sanitize(path)) because it lies outside the workspace or inside a repository. This is a bug in Guesthouse."
+        case .unwritable(let path, let reason):
+            "The workspace file \(GuesthouseError.sanitize(path)) could not be written (\(reason.value)). Free disk space on the development Mac or repair the workspace, then try again."
+        }
+    }
+
+    /// In preference order. Never empty.
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .invalidPath, .pathOutsideWorkspace: [.cancel]
+        case .unwritable: [.freeDiskSpace, .retry, .repair(.tools), .cancel]
+        }
+    }
+
+    public var errorDescription: String? { userMessage }
 }
 
 public enum IntegrationWorkspaceGenerator {
@@ -58,13 +82,21 @@ public enum IntegrationWorkspaceGenerator {
         let resolvedRoot = root.standardizedFileURL
         for file in files {
             let url = try destination(for: file.relativePath, in: resolvedRoot)
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try file.contents.write(to: url, options: .atomic)
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try file.contents.write(to: url, options: .atomic)
+            } catch {
+                throw GeneratedFileError.unwritable(path: file.relativePath, reason: SanitizedText(error.localizedDescription, limit: 120))
+            }
         }
         if !files.contains(where: { $0.relativePath == resolvedPackagesRelativePath }) {
             let stale = try destination(for: resolvedPackagesRelativePath, in: resolvedRoot)
             if FileManager.default.fileExists(atPath: stale.path) {
-                try FileManager.default.removeItem(at: stale)
+                do {
+                    try FileManager.default.removeItem(at: stale)
+                } catch {
+                    throw GeneratedFileError.unwritable(path: resolvedPackagesRelativePath, reason: SanitizedText(error.localizedDescription, limit: 120))
+                }
             }
         }
     }
@@ -129,7 +161,7 @@ public enum IntegrationWorkspaceGenerator {
 
         """
         for repository in manifest.repositories.sorted(by: { ($0.role == .app ? 0 : 1, $0.checkoutName.identity) < ($1.role == .app ? 0 : 1, $1.checkoutName.identity) }) {
-            text += "| `\(layout.repositoryPathFromRoot(repository))` | \(repository.role.rawValue) | \(repository.remote.canonical) | `\(repository.baseBranch)` | `\(repository.taskBranch)` |\n"
+            text += "| \(cell(layout.repositoryPathFromRoot(repository))) | \(repository.role.rawValue) | \(repository.remote.canonical) | \(cell(repository.baseBranch.rawValue)) | \(cell(repository.taskBranch.rawValue)) |\n"
         }
         text += """
 
@@ -152,11 +184,11 @@ public enum IntegrationWorkspaceGenerator {
             text += "No package repositories are part of this workspace.\n"
         } else {
             for package in packages {
-                text += "- `\(layout.repositoryPathFromRoot(package))` overrides the dependency on \(package.remote.canonical) (package identity `\(package.remote.name.lowercased())`).\n"
+                text += "- \(code(layout.repositoryPathFromRoot(package))) overrides the dependency on \(package.remote.canonical) (package identity \(code(package.remote.name.lowercased()))).\n"
             }
         }
         if let app {
-            text += "\nThe app project is `\(layout.repositoryPathFromRoot(app))/\(manifest.appProjectPath)` with shared scheme `\(manifest.sharedScheme)`.\n"
+            text += "\nThe app project is \(code("\(layout.repositoryPathFromRoot(app))/\(manifest.appProjectPath)")) with shared scheme \(code(manifest.sharedScheme)).\n"
         }
         text += """
 
@@ -175,19 +207,35 @@ public enum IntegrationWorkspaceGenerator {
         return text + "\n"
     }
 
+    /// A Markdown code span that cannot be closed early by the value: repository-controlled
+    /// text (a branch name, a project path) is wrapped in one more backtick than its longest
+    /// run, the way CommonMark specifies.
+    static func code(_ text: String) -> String {
+        let longest = text.split(separator: "`", omittingEmptySubsequences: false).count > 1
+            ? text.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0
+            : 0
+        let fence = String(repeating: "`", count: longest + 1)
+        return "\(fence) \(text) \(fence)".replacingOccurrences(of: "\(fence) \(text) \(fence)", with: longest == 0 ? "`\(text)`" : "\(fence) \(text) \(fence)")
+    }
+
+    /// A table cell: a code span whose pipes are escaped so they cannot add columns.
+    static func cell(_ text: String) -> String {
+        code(text).replacingOccurrences(of: "|", with: "\\|")
+    }
+
     // MARK: - workspace.json
 
-    /// ISO 8601 with fractional seconds, matching the state store, so timestamps round-trip.
-    public static let dateFormat = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-
+    /// The manifest is written and read with `Date`'s own representation (seconds since the
+    /// reference date), which round-trips exactly; `decodeManifest` is the matching reader.
     static func encodedManifest(_ manifest: WorkspaceManifest) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
-        encoder.dateEncodingStrategy = .custom { date, encoder in
-            var container = encoder.singleValueContainer()
-            try container.encode(Self.dateFormat.format(date))
-        }
         // A manifest that validated cannot fail to encode; every field is a plain value type.
         return (try? encoder.encode(manifest)) ?? Data()
+    }
+
+    /// Reads a `workspace.json` written by `generate`.
+    public static func decodeManifest(_ data: Data) throws -> WorkspaceManifest {
+        try JSONDecoder().decode(WorkspaceManifest.self, from: data)
     }
 }
