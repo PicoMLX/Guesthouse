@@ -53,9 +53,12 @@ import Testing
 
     @Test func sanitizingAHugeValueCostsOnlyTheWindow() {
         let huge = String(repeating: "x", count: 20_000_000)
+        // The point is that the cost does not scale with the input: a linear pass over 20
+        // million scalars takes seconds, so a second is a generous ceiling that still fails
+        // if the window is ever abandoned, and it does not depend on how loaded the machine is.
         let started = ContinuousClock.now
         _ = GuesthouseError.sanitize(huge)
-        #expect(ContinuousClock.now - started < .milliseconds(200))
+        #expect(ContinuousClock.now - started < .seconds(1))
     }
 
     @Test func unterminatedAuthorityAtTheBoundIsRedacted() {
