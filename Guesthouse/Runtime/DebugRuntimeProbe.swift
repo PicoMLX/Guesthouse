@@ -15,7 +15,17 @@ final class DebugRuntimeProbe {
 
     /// Debug-only: pick an Xcode and ask the service to validate it through the handoff.
     func importXcodeCandidate() {
-        guard let handoff = XcodeSelection.chooseXcode() else { result = "Xcode selection canceled"; return }
+        let handoff: FileHandoff
+        switch XcodeSelection.chooseXcode() {
+        case .canceled:
+            result = "Xcode selection canceled"
+            return
+        case .bookmarkFailed(let reason):
+            result = "The selection could not be handed off: \(reason). Record this for gate #34."
+            return
+        case .handoff(let made):
+            handoff = made
+        }
         result = "Validating \(handoff.displayName)…"
         Task {
             do {

@@ -43,6 +43,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case unauthorizedCaller
     case protocolMismatch(client: Int, service: Int)
     case invalidRequest(InvalidRequestReason)
+    /// The user's selection is not an Xcode that can be imported; choose again.
+    case xcodeSelectionRejected(XcodeSelectionProblem)
     case canceled
 
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
@@ -93,6 +95,17 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case github, codex
     }
 
+    public enum XcodeSelectionProblem: String, Codable, Hashable, Sendable {
+        /// The handoff could not be resolved to a location.
+        case unresolvable
+        /// The location is not an application bundle.
+        case notAnApplication
+        /// The application is not Xcode.
+        case notXcode
+        /// The bundle's metadata is missing, oversized, or not a plain file.
+        case metadataUnreadable
+    }
+
     public enum InvalidRequestReason: String, Codable, Hashable, Sendable {
         case oversized, pathEscapesAllowedRoot, invalidVMName, unsupportedOperation, malformed
         /// The caller has too many requests in flight on one session.
@@ -116,6 +129,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
         case .vmSlotUnavailable, .environmentNotFound, .environmentAlreadyRunning, .operationInFlight, .operationOutcomeUnknown: .workflow
         case .unauthorizedCaller, .protocolMismatch, .invalidRequest: .ipc
+        case .xcodeSelectionRejected: .user
         case .canceled: .user
         }
     }
@@ -188,6 +202,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "The Guesthouse app (protocol \(client)) and its runtime service (protocol \(service)) are from different versions. Reinstall Guesthouse to repair this."
         case .invalidRequest(let reason):
             "The runtime service rejected a request from the app (\(Self.describe(reason))). This is a bug in Guesthouse, not something you did."
+        case .xcodeSelectionRejected(let problem):
+            switch problem {
+            case .unresolvable: "The selected Xcode could not be opened by the Guesthouse runtime. Choose it again."
+            case .notAnApplication: "The selected item is not an application. Choose Xcode.app."
+            case .notXcode: "The selected application is not Xcode. Choose Xcode.app."
+            case .metadataUnreadable: "The selected application's metadata could not be read, so it was not imported. Choose a copy of Xcode installed from the App Store or from Apple's developer site."
+            }
         case .canceled:
             "The operation was canceled."
         }
@@ -228,6 +249,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unauthorizedCaller: [.cancel]
         case .protocolMismatch: [.reinstallApp, .cancel]
         case .invalidRequest: [.cancel]
+        case .xcodeSelectionRejected: [.retry, .cancel]
         // A cancellation may have interrupted a mutation midway; the state is inspected
         // before the same operation is offered again (MVP-PLAN.md §9).
         case .canceled: [.inspectState, .cancel]
@@ -277,6 +299,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unauthorizedCaller: "unauthorizedCaller"
         case .protocolMismatch: "protocolMismatch"
         case .invalidRequest: "invalidRequest"
+        case .xcodeSelectionRejected: "xcodeSelectionRejected"
         case .canceled: "canceled"
         }
     }

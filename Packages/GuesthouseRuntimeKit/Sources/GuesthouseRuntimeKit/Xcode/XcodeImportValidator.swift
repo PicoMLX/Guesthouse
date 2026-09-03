@@ -10,19 +10,43 @@ import GuesthouseCore
 /// its version and build are read from `Info.plist` and `version.plist` without executing it.
 public enum XcodeImportValidator {
     public static let xcodeBundleIdentifier = "com.apple.dt.Xcode"
-    /// Files enumerated for the size estimate before giving up and reporting `nil`.
-    public static let sizeEstimateFileLimit = 400_000
+    /// Entries enumerated for the size estimate before giving up and reporting `nil`.
+    public static let sizeEstimateEntryLimit = 400_000
+    /// Larger metadata files are refused rather than loaded.
+    public static let maximumMetadataBytes = 4 << 20
 
     /// Resolves the handoff to a location. Descriptors are received out of band by the
     /// service (gate #34 decides the transport); this validator accepts bookmarks now.
-    public static func resolve(_ handoff: FileHandoff) throws(GuesthouseError) -> URL {
+    /// A resolved handoff whose security scope, when the bookmark carries one, stays active
+    /// until the value is released.
+    public final class ResolvedLocation: Sendable {
+        public let url: URL
+        private let scoped: Bool
+
+        init(url: URL, scoped: Bool) {
+            self.url = url
+            self.scoped = scoped
+        }
+
+        deinit {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+    }
+
+    public static func resolve(_ handoff: FileHandoff) throws(GuesthouseError) -> ResolvedLocation {
         switch handoff.kind {
         case .securityScopedBookmark(let data):
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL else {
-                throw .invalidRequest(.malformed)
+            // The scope is started here and kept for the validation; a bookmark without a
+            // scope (a plain one made in tests) is simply used as a location.
+            if let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI, .withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL {
+                let scoped = url.startAccessingSecurityScopedResource()
+                return ResolvedLocation(url: url, scoped: scoped)
             }
-            return url
+            guard let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale), url.isFileURL else {
+                throw .xcodeSelectionRejected(.unresolvable)
+            }
+            return ResolvedLocation(url: url, scoped: false)
         case .fileDescriptor:
             throw .invalidRequest(.unsupportedOperation)
         }
@@ -35,15 +59,15 @@ public enum XcodeImportValidator {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory), isDirectory.boolValue,
               resolved.pathExtension == "app"
-        else { throw .invalidRequest(.malformed) }
+        else { throw .xcodeSelectionRejected(.notAnApplication) }
 
-        guard let info = plist(resolved.appending(path: "Contents/Info.plist")) else { throw .invalidRequest(.malformed) }
+        guard let info = try plist(resolved.appending(path: "Contents/Info.plist")) else { throw .xcodeSelectionRejected(.notAnApplication) }
         let identifier = info["CFBundleIdentifier"] as? String ?? ""
         guard identifier == xcodeBundleIdentifier, identifier == (expectedBundleIdentifier ?? identifier) else {
-            throw .invalidRequest(.malformed)
+            throw .xcodeSelectionRejected(.notXcode)
         }
         guard let version = info["CFBundleShortVersionString"] as? String, !version.isEmpty else { throw .xcodeComponentsIncomplete(missing: ["Info.plist version"]) }
-        let versionPlist = plist(resolved.appending(path: "Contents/version.plist")) ?? [:]
+        let versionPlist = try plist(resolved.appending(path: "Contents/version.plist")) ?? [:]
         guard let build = (versionPlist["ProductBuildVersion"] as? String) ?? (info["DTXcodeBuild"] as? String), !build.isEmpty else {
             throw .xcodeComponentsIncomplete(missing: ["ProductBuildVersion"])
         }
@@ -55,21 +79,27 @@ public enum XcodeImportValidator {
         )
     }
 
-    /// Allocated bytes under the bundle, or `nil` when the file limit was reached.
+    /// Allocated bytes under the bundle, or `nil` when the entry limit was reached. Every
+    /// enumerated entry counts toward the limit, whatever it is, so a hostile tree cannot keep
+    /// the runtime walking.
     public static func estimateSize(of url: URL) -> UInt64? {
         guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey], options: []) else { return nil }
         var total: UInt64 = 0
-        var files = 0
+        var entries = 0
         for case let item as URL in enumerator {
+            entries += 1
+            if entries > sizeEstimateEntryLimit { return nil }
             guard let values = try? item.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]), values.isRegularFile == true else { continue }
             total += UInt64(values.totalFileAllocatedSize ?? 0)
-            files += 1
-            if files >= sizeEstimateFileLimit { return nil }
         }
         return total
     }
 
-    private static func plist(_ url: URL) -> [String: Any]? {
+    /// A metadata file is read only if it is a contained regular file of bounded size.
+    private static func plist(_ url: URL) throws(GuesthouseError) -> [String: Any]? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else { return nil }
+        guard values.isSymbolicLink != true, values.isRegularFile == true else { return nil }
+        guard let size = values.fileSize, size <= maximumMetadataBytes else { throw .xcodeSelectionRejected(.metadataUnreadable) }
         guard let data = try? Data(contentsOf: url),
               let object = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         else { return nil }

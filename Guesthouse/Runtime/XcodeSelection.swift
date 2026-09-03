@@ -11,9 +11,17 @@ import UniformTypeIdentifiers
 enum XcodeSelection {
     static let expectedBundleIdentifier = "com.apple.dt.Xcode"
 
-    /// Presents the open panel and returns a handoff, or `nil` if the user canceled.
+    enum Outcome {
+        case canceled
+        case handoff(FileHandoff)
+        /// The panel returned a selection but no bookmark could be made for it: exactly the
+        /// failure gate #34 exists to diagnose, so it is named, never reported as a cancel.
+        case bookmarkFailed(String)
+    }
+
+    /// Presents the open panel and reports what happened.
     @MainActor
-    static func chooseXcode() -> FileHandoff? {
+    static func chooseXcode() -> Outcome {
         let panel = NSOpenPanel()
         panel.title = "Choose Xcode"
         panel.message = "Choose the Xcode application to copy into the development Mac."
@@ -22,12 +30,16 @@ enum XcodeSelection {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.applicationBundle]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return handoff(for: url)
+        guard panel.runModal() == .OK, let url = panel.url else { return .canceled }
+        do {
+            return .handoff(try handoff(for: url))
+        } catch {
+            return .bookmarkFailed(GuesthouseError.sanitize((error as NSError).localizedDescription, limit: 160))
+        }
     }
 
-    static func handoff(for url: URL) -> FileHandoff? {
-        guard let bookmark = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) else { return nil }
+    static func handoff(for url: URL) throws -> FileHandoff {
+        let bookmark = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
         return FileHandoff(kind: .securityScopedBookmark(bookmark), displayName: url.lastPathComponent, expectedBundleIdentifier: expectedBundleIdentifier)
     }
 }

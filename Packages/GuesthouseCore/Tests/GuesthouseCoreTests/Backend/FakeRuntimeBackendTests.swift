@@ -40,11 +40,10 @@ import Testing
 
     @Test func disconnectScenarioThrowsInterruptionSoOutcomeIsUnknown() async throws {
         let backend = FakeRuntimeBackend()
-        await backend.script("importXcode", .disconnect(after: [ProgressPhase(kind: .copying)]))
-        let handoff = FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")
+        await backend.script("stopEnvironment", .disconnect(after: [ProgressPhase(kind: .copying)]))
         var seen: [String] = []
         await #expect(throws: RuntimeConnectionInterrupted.self) {
-            for try await event in backend.send(.importXcode(environment, handoff)) {
+            for try await event in backend.send(.stopEnvironment(EnvironmentID(), .force)) {
                 seen.append(event.caseName)
             }
         }

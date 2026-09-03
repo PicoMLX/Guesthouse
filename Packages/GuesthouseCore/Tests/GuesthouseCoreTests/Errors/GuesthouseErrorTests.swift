@@ -35,6 +35,7 @@ import Testing
         .unauthorizedCaller,
         .protocolMismatch(client: 2, service: 1),
         .invalidRequest(.pathEscapesAllowedRoot),
+        .xcodeSelectionRejected(.notXcode),
         .canceled,
         .anotherEnvironmentRunning(EnvironmentID()), .environmentPreserved(EnvironmentID()), .vmOwnershipUncertain(EnvironmentID()), .gracefulStopTimedOut(EnvironmentID()),
     ]
@@ -44,7 +45,7 @@ import Testing
         "runtimeStateUnavailable", "runtimeStorageUnavailable",
         "runtimeVerificationFailed", "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
-        "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
+        "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest", "xcodeSelectionRejected",
         "canceled", "environmentNotFound", "environmentAlreadyRunning", "operationInFlight",
         "runtimeStarting", "runtimeStateUnavailable", "anotherEnvironmentRunning", "environmentPreserved", "vmOwnershipUncertain", "gracefulStopTimedOut",
     ]
