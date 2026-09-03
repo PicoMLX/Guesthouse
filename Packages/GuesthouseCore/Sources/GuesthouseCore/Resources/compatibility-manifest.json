@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "manifestVersion": 1,
-  "notes": "Seed manifest from MVP-PLAN.md §4 (Tahoe host and guest, Xcode 26.6, Tart 2.36.0). Values marked TBD are placeholders that can never match a real observation. Phase-0 gate #41 replaces this entry with the measured combination and sets verifiedAt only after a real Codex desktop connection (docs/phase0/compat.md).",
+  "notes": "Seed manifest from MVP-PLAN.md §4 (Tahoe host and guest, Xcode 26.6, Tart 2.36.0). Values marked TBD are placeholders that can never match a real observation. Phase-0 gate #41 replaces this entry with the measured combination and adds a verification only after a real Codex desktop connection on an exact host version and build (docs/phase0/compat.md).",
   "tested": [
     {
       "hostMacOS": { "minimum": "26.4" },
@@ -12,6 +12,8 @@
       "guestMacOSBuild": "25F84",
       "xcodeBuild": "17F113",
       "codexCLIVersion": "TBD",
+      "codexCLIPath": "TBD",
+      "codexCLICapabilities": [],
       "githubCLIVersion": "TBD",
       "provisioningScriptVersion": "TBD"
     }
