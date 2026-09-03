@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Everything the runtime service streams back to the GUI.
@@ -41,13 +42,22 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
     }
 
     public struct TartRuntimeInfo: Codable, Hashable, Sendable {
-        public var version: String
+        /// Parsed from the runtime's own `--version` output: redacted and bounded before it
+        /// is stored, so CLI text cannot reach the GUI or diagnostics unchanged.
+        public private(set) var version: String
         /// Signature and digest checks passed against the pinned expectations.
         public var verified: Bool
 
         public init(version: String, verified: Bool) {
-            self.version = version
+            self.version = GuesthouseError.sanitize(version, limit: 64)
             self.verified = verified
+        }
+
+        private enum CodingKeys: String, CodingKey { case version, verified }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(version: try c.decode(String.self, forKey: .version), verified: try c.decode(Bool.self, forKey: .verified))
         }
     }
 }
@@ -68,8 +78,9 @@ public struct ProgressPhase: Codable, Hashable, Sendable {
     }
 
     public var kind: Kind
-    /// 0...1 when the phase can measure itself; `nil` for indeterminate phases.
-    public var fraction: Double?
+    /// 0...1 when the phase can measure itself; `nil` for indeterminate phases. Only this
+    /// type sets it, so a value that cannot be encoded never reaches an event.
+    public private(set) var fraction: Double?
     /// False for phases that must not be interrupted (for example a rename after a copy).
     public var cancelable: Bool
 
@@ -87,6 +98,11 @@ public struct ProgressPhase: Codable, Hashable, Sendable {
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(kind: try c.decode(Kind.self, forKey: .kind), fraction: try c.decodeIfPresent(Double.self, forKey: .fraction), cancelable: try c.decodeIfPresent(Bool.self, forKey: .cancelable) ?? true)
+    }
+
+    /// A copy of the phase measured at `fraction`, normalized the same way.
+    public func measured(_ fraction: Double?) -> ProgressPhase {
+        ProgressPhase(kind: kind, fraction: fraction, cancelable: cancelable)
     }
 
     static func valid(_ fraction: Double?) -> Double? {
@@ -145,7 +161,7 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
 extension ObservedTuple {
     /// Every string bounded and redacted; capabilities capped in number and length.
     public func sanitizedForWire() -> ObservedTuple {
-        func clean(_ value: String?) -> String? { value.map { GuesthouseError.sanitize($0, limit: 256) } }
+        func clean(_ value: String?) -> String? { value.map { Self.bounded($0, limit: 256) } }
         var copy = self
         copy.hostMacOSBuild = clean(hostMacOSBuild)
         copy.codexDesktopVersion = clean(codexDesktopVersion)
@@ -156,9 +172,30 @@ extension ObservedTuple {
         copy.xcodeBuild = clean(xcodeBuild)
         copy.codexCLIVersion = clean(codexCLIVersion)
         copy.codexCLIPath = clean(codexCLIPath)
-        copy.codexCLICapabilities = codexCLICapabilities.map { Array($0.prefix(64)).map { GuesthouseError.sanitize($0, limit: 128) } }
+        copy.codexCLICapabilities = codexCLICapabilities.map { Array($0.prefix(64)).map { Self.bounded($0, limit: 128) } }
         copy.githubCLIVersion = clean(githubCLIVersion)
         copy.provisioningScriptVersion = clean(provisioningScriptVersion)
         return copy
+    }
+
+    /// Sanitizing is lossy, and these values are also an identity: a long path and a
+    /// decomposed one can bound to the same text. A value the sanitizer changed therefore
+    /// carries a digest of the exact observation, so two different observations never
+    /// collapse into one verified compatibility tuple.
+    static func bounded(_ value: String, limit: Int) -> String {
+        let sanitized = GuesthouseError.sanitize(value, limit: limit)
+        // A redacted value stands for a secret: it gets no digest, since that would let a
+        // guess be confirmed. Only a value that was merely bounded or normalized carries one,
+        // and the suffix is counted against the same limit.
+        guard sanitized != value, !sanitized.contains("[redacted") else { return sanitized }
+        let room = max(16, limit - identitySuffixLength)
+        return "\(GuesthouseError.sanitize(value, limit: room)) [exact:\(digest(of: value))]"
+    }
+
+    /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
+    static let identitySuffixLength = 22
+
+    static func digest(of value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 }

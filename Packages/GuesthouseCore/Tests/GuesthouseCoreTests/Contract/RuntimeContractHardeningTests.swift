@@ -18,6 +18,44 @@ import Testing
         #expect(throws: RequestValidationError.pathEscapesRoot) { try RequestValidator.validateContainment(of: root.appending(path: "escape/file"), within: root) }
     }
 
+    @Test func aRootReachedThroughAnAliasStillRefusesDanglingLinks() throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let alias = FileManager.default.temporaryDirectory.appending(path: "Alias-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        try FileManager.default.createSymbolicLink(at: root.appending(path: "dangling"), withDestinationURL: URL(fileURLWithPath: "/nonexistent/outside/new-file"))
+        #expect(throws: RequestValidationError.pathEscapesRoot) {
+            try RequestValidator.validateContainment(of: alias.appending(path: "dangling"), within: alias)
+        }
+    }
+
+    @Test func observationsThatBoundToTheSameTextKeepTheirIdentity() {
+        let long = String(repeating: "a", count: 400)
+        let other = String(repeating: "a", count: 401)
+        let first = ObservedTuple(codexCLIPath: long).sanitizedForWire()
+        let second = ObservedTuple(codexCLIPath: other).sanitizedForWire()
+        #expect(first.codexCLIPath != second.codexCLIPath, "two different observations never collapse into one verified value")
+        #expect(first.codexCLIPath?.hasPrefix(String(repeating: "a", count: 100)) == true)
+        #expect((first.codexCLIPath?.unicodeScalars.count ?? 0) <= 256, "the identity suffix counts against the same bound")
+        let short = ObservedTuple(codexCLIPath: "/usr/local/bin/codex").sanitizedForWire()
+        #expect(short.codexCLIPath == "/usr/local/bin/codex", "a value the sanitizer leaves alone is unchanged")
+    }
+
+    @Test func theTartVersionIsSanitizedOnTheWire() throws {
+        let info = RuntimeVersionInfo(serviceVersion: "1.0", serviceBuild: "1", tart: .init(version: "2.36.0\u{1B}[31m evil", verified: true))
+        #expect(info.tart?.version.contains("\u{1B}") == false)
+        let json = #"{"serviceVersion":"1.0","serviceBuild":"1","protocolVersion":1,"tart":{"version":"2.36.0\u001b[31m","verified":true}}"#
+        let decoded = try JSONDecoder().decode(RuntimeVersionInfo.self, from: Data(json.utf8))
+        #expect(decoded.tart?.version.contains("\u{1B}") == false)
+    }
+
+    @Test func aPhaseFractionIsAlwaysEncodable() throws {
+        let phase = ProgressPhase(kind: .copying, fraction: 0.5)
+        #expect(phase.measured(.nan).fraction == nil)
+        #expect(phase.measured(2).fraction == nil)
+        #expect(phase.measured(0.25).fraction == 0.25)
+        #expect(throws: Never.self) { try JSONEncoder().encode(phase.measured(.infinity)) }
+    }
+
     @Test func lineSeparatorsAreNotDisplayNames() {
         for bad in ["Xcode\u{2028}.app", "Xcode\u{2029}.app", "Xcode\u{202E}.app"] {
             #expect(throws: RequestValidationError.invalidDisplayName) {
