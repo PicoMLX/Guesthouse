@@ -39,8 +39,9 @@ public struct VMSlotInventory: Hashable, Sendable {
         slots.first { $0.environmentID == id }?.state
     }
 
-    /// Reserves a slot for `id`. Reserving an environment that already holds a slot is a no-op,
-    /// so a retried operation cannot consume a second slot.
+    /// Reserves a slot for `id`. Reserving an environment that already holds a slot is a no-op
+    /// (its state, active or preserved, is unchanged), so a retried operation cannot consume a
+    /// second slot. Use `markActive` to bring a preserved environment back.
     public mutating func reserve(_ id: EnvironmentID) throws(VMSlotError) {
         if slots.contains(where: { $0.environmentID == id }) { return }
         guard !isFull else { throw .inventoryFull(maximum: Self.maximumSlots) }
@@ -53,6 +54,15 @@ public struct VMSlotInventory: Hashable, Sendable {
             throw .unknownEnvironment(id)
         }
         slots[index].state = .preserved
+    }
+
+    /// Returns a preserved environment to normal use after a repair or recovery succeeded.
+    /// The slot is never released in between, so the bundle is never unaccounted for.
+    public mutating func markActive(_ id: EnvironmentID) throws(VMSlotError) {
+        guard let index = slots.firstIndex(where: { $0.environmentID == id }) else {
+            throw .unknownEnvironment(id)
+        }
+        slots[index].state = .active
     }
 
     /// Frees the slot held by `id`. Releasing an unknown environment is a no-op.

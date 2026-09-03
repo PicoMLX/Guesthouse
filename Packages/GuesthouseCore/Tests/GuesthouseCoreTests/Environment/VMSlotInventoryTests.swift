@@ -49,6 +49,18 @@ import Testing
         #expect(inventory.isFull)
     }
 
+    @Test func preservedEnvironmentReturnsToActiveWithoutReleasingItsSlot() throws {
+        var inventory = VMSlotInventory()
+        try inventory.reserve(a)
+        try inventory.markPreserved(a)
+        try inventory.reserve(a)
+        #expect(inventory.state(of: a) == .preserved, "reserve never changes an existing slot's state")
+        try inventory.markActive(a)
+        #expect(inventory.state(of: a) == .active)
+        #expect(inventory.occupiedSlots == 1)
+        #expect(throws: VMSlotError.unknownEnvironment(b)) { try inventory.markActive(b) }
+    }
+
     @Test func markingUnknownEnvironmentPreservedFails() {
         var inventory = VMSlotInventory()
         #expect(throws: VMSlotError.unknownEnvironment(a)) {
