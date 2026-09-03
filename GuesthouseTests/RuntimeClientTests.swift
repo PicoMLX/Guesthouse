@@ -82,6 +82,27 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         #expect(events.map(\.caseName) == ["accepted", "progress", "completed"])
     }
 
+    @Test func requestsReachTheTransportInSendOrder() async throws {
+        let transport = FakeTransport(.reply(.completed(OperationID())))
+        let client = RuntimeClient(transport: transport)
+        let requests: [RuntimeRequest] = (0..<25).map { $0.isMultiple(of: 2) ? .startEnvironment(EnvironmentID(), StartOptions()) : .stopEnvironment(EnvironmentID(), .force) }
+        var streams: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        for request in requests { streams.append(client.send(request)) }
+        for stream in streams { _ = try await collect(stream) }
+        #expect(transport.sent.map(\.request) == requests)
+    }
+
+    @Test func abandonedConsumerCancelsTheOperation() async throws {
+        let transport = FakeTransport(.acceptThenStream([]))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let consumer = Task { for try await _ in stream {} }
+        for _ in 0..<200 where transport.sent.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        consumer.cancel()
+        for _ in 0..<200 where transport.sent.count < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        guard transport.sent.count == 2, case .cancelOperation = transport.sent[1].request else { Issue.record("no cancelOperation sent: \(transport.sent.map(\.request))"); return }
+    }
+
     @Test func droppedConnectionFailsInFlightOperationsWithTheirID() async {
         let client = RuntimeClient(transport: FakeTransport(.acceptThenDrop))
         var seen: [String] = []

@@ -1,6 +1,10 @@
 import Foundation
 import GuesthouseCore
 
+/// Identity for one consumer stream, so its termination can be matched to the operation.
+nonisolated final class ContinuationKey: Sendable {
+}
+
 /// The GUI's `RuntimeBackend` over XPC.
 ///
 /// Connects lazily, maps a dropped connection to `RuntimeConnectionInterrupted` so callers
@@ -15,15 +19,19 @@ actor RuntimeClient: RuntimeBackend {
     typealias Continuation = AsyncThrowingStream<RuntimeEvent, any Error>.Continuation
 
     private enum Inbound: Sendable {
-        case reply(Result<RuntimeEvent, any Error>, Continuation)
+        case send(RuntimeRequest, Continuation, ObjectIdentifier)
+        case reply(Result<RuntimeEvent, any Error>, Continuation, ObjectIdentifier)
         case incoming(RuntimeEvent)
         case interrupted
+        case consumerGone(ObjectIdentifier)
     }
 
     private let transport: any RuntimeTransport
     private var operations: [OperationID: Continuation] = [:]
     /// Events that arrived for an operation before its `accepted` reply registered a consumer.
     private var pendingEvents: [OperationID: [RuntimeEvent]] = [:]
+    /// Which accepted operation each consumer stream owns, keyed by the stream's identity.
+    private var consumers: [ObjectIdentifier: OperationID] = [:]
     private let inbox: AsyncStream<Inbound>
     private let inboxContinuation: AsyncStream<Inbound>.Continuation
     private var started = false
@@ -33,17 +41,27 @@ actor RuntimeClient: RuntimeBackend {
         (inbox, inboxContinuation) = AsyncStream.makeStream(of: Inbound.self, bufferingPolicy: .unbounded)
     }
 
+    /// Requests are enqueued on the same ordered inbox as every callback, synchronously, so
+    /// two back-to-back sends reach the transport in the order they were made. When the
+    /// consumer stops reading an accepted operation, the client unregisters it and asks the
+    /// runtime to cancel it, so a host mutation never keeps running unobserved.
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
         AsyncThrowingStream { continuation in
-            Task { await self.start(request, continuation) }
+            let key = ContinuationKey()
+            continuation.onTermination = { [inboxContinuation] termination in
+                if case .cancelled = termination {
+                    inboxContinuation.yield(.consumerGone(ObjectIdentifier(key)))
+                }
+            }
+            inboxContinuation.yield(.send(request, continuation, ObjectIdentifier(key)))
+            Task { await self.startIfNeeded() }
         }
     }
 
-    private func start(_ request: RuntimeRequest, _ continuation: Continuation) {
-        startIfNeeded()
+    private func start(_ request: RuntimeRequest, _ continuation: Continuation, key: ObjectIdentifier) {
         do {
             try transport.send(RuntimeRequestEnvelope(request: request)) { [inboxContinuation] result in
-                inboxContinuation.yield(.reply(result, continuation))
+                inboxContinuation.yield(.reply(result, continuation, key))
             }
         } catch {
             continuation.finish(throwing: RuntimeConnectionInterrupted())
@@ -64,14 +82,16 @@ actor RuntimeClient: RuntimeBackend {
     private func drain() async {
         for await item in inbox {
             switch item {
-            case .reply(let result, let continuation): handleReply(result, for: continuation)
+            case .send(let request, let continuation, let key): start(request, continuation, key: key)
+            case .reply(let result, let continuation, let key): handleReply(result, for: continuation, key: key)
             case .incoming(let event): route(event)
             case .interrupted: connectionDropped()
+            case .consumerGone(let continuation): consumerGone(continuation)
             }
         }
     }
 
-    private func handleReply(_ result: Result<RuntimeEvent, any Error>, for continuation: Continuation) {
+    private func handleReply(_ result: Result<RuntimeEvent, any Error>, for continuation: Continuation, key: ObjectIdentifier) {
         switch result {
         case .success(let event):
             continuation.yield(event)
@@ -79,6 +99,7 @@ actor RuntimeClient: RuntimeBackend {
             case .accepted(let id):
                 // More events follow through the incoming handler until completed or failed.
                 operations[id] = continuation
+                consumers[key] = id
                 for buffered in pendingEvents.removeValue(forKey: id) ?? [] {
                     route(buffered)
                 }
@@ -100,6 +121,7 @@ actor RuntimeClient: RuntimeBackend {
             }
         case .completed(let id), .failed(let id, _):
             if let continuation = operations.removeValue(forKey: id) {
+                consumers = consumers.filter { $0.value != id }
                 continuation.yield(event)
                 continuation.finish()
             } else {
@@ -110,6 +132,12 @@ actor RuntimeClient: RuntimeBackend {
         }
     }
 
+    private func consumerGone(_ key: ObjectIdentifier) {
+        guard let id = consumers.removeValue(forKey: key), operations.removeValue(forKey: id) != nil else { return }
+        pendingEvents.removeValue(forKey: id)
+        try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
+    }
+
     private func connectionDropped() {
         let pending = operations
         operations.removeAll()
@@ -117,5 +145,6 @@ actor RuntimeClient: RuntimeBackend {
         for (id, continuation) in pending {
             continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
         }
+        consumers.removeAll()
     }
 }

@@ -35,7 +35,8 @@ final class RuntimeService: Sendable {
     }
 
     func sessionEnded(_ error: XPCRichError) {
-        log.notice("session ended: \(String(describing: error), privacy: .public)")
+        // The rich error's description is opaque and may quote context; log a fixed message.
+        log.notice("session ended")
     }
 
     static var versionInfo: RuntimeVersionInfo {
