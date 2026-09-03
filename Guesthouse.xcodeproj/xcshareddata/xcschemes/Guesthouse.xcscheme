@@ -35,6 +35,20 @@
                ReferencedContainer = "container:Packages/GuesthouseCore">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "16255D1DB7F34BFAB6C65BC8"
+               BuildableName = "GuesthouseRuntime.xpc"
+               BlueprintName = "GuesthouseRuntime"
+               ReferencedContainer = "container:Guesthouse.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction

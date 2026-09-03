@@ -1,0 +1,49 @@
+import Foundation
+import GuesthouseCore
+import OSLog
+import XPC
+
+/// Decodes envelopes, dispatches named operations, and replies with `RuntimeEvent`s.
+final class RuntimeService: Sendable {
+    static let serviceName = "com.starlingprotocol.Guesthouse.Runtime"
+
+    private let log = Logger(subsystem: serviceName, category: "service")
+
+    /// One reply per request. Streaming events for long operations arrive with #25.
+    func handle(_ message: XPCReceivedMessage) -> (any Encodable)? {
+        let envelope: RuntimeRequestEnvelope
+        do {
+            envelope = try message.decode(as: RuntimeRequestEnvelope.self)
+        } catch {
+            log.error("undecodable request: \(String(describing: error), privacy: .public)")
+            return RuntimeEvent.failed(OperationID(), .invalidRequest(.malformed))
+        }
+        do {
+            try RequestValidator.validate(envelope)
+        } catch {
+            log.error("rejected request: \(String(describing: error), privacy: .public)")
+            return RuntimeEvent.failed(OperationID(), error.guesthouseError)
+        }
+        switch envelope.request {
+        case .runtimeVersion:
+            return RuntimeEvent.runtimeVersion(Self.versionInfo)
+        case .environmentStatus, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation:
+            log.notice("operation not implemented yet: \(envelope.request.caseName, privacy: .public)")
+            return RuntimeEvent.failed(OperationID(), .invalidRequest(.unsupportedOperation))
+        }
+    }
+
+    func sessionEnded(_ error: XPCRichError) {
+        log.notice("session ended: \(String(describing: error), privacy: .public)")
+    }
+
+    static var versionInfo: RuntimeVersionInfo {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return RuntimeVersionInfo(
+            serviceVersion: info["CFBundleShortVersionString"] as? String ?? "0",
+            serviceBuild: info["CFBundleVersion"] as? String ?? "0",
+            protocolVersion: .current,
+            tart: nil
+        )
+    }
+}
