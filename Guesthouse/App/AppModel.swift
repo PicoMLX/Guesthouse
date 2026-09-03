@@ -46,7 +46,10 @@ final class AppModel {
     struct OperationState: Equatable {
         static let maximumLogLines = 500
 
+        /// The app's own label for the operation until the runtime accepts it.
         var id: OperationID
+        /// The runtime's id, known only after `accepted`; nothing is canceled by any other id.
+        var acceptedID: OperationID?
         var request: RuntimeRequest
         var phase: ProgressPhase?
         /// Redacted lines the runtime reported for this operation, newest last, bounded.
@@ -73,6 +76,9 @@ final class AppModel {
     private(set) var unknownOutcomes: [EnvironmentID: OperationID] = [:]
     /// What Retry re-sends.
     private(set) var lastRequests: [EnvironmentID: RuntimeRequest] = [:]
+    /// Environments whose post-operation status query is still outstanding: nothing is
+    /// replayed until the actual state has been read (MVP-PLAN.md §9).
+    private(set) var reconciling: Set<EnvironmentID> = []
     /// The log of the last finished operation, for the disclosure after it ends.
     private(set) var lastLogs: [EnvironmentID: [RedactedLine]] = [:]
     private(set) var quitFlow: QuitFlow = .idle
@@ -241,6 +247,9 @@ final class AppModel {
             // error stays: it is what the card explains.
             for id in fresh.keys where statusQueryFailures.remove(id) != nil { lastErrors[id] = nil }
             launchState = .ready
+            // A full reconciliation read every listed environment's status: those unknown
+            // outcomes are settled here just as a per-card check would settle them.
+            unknownOutcomes = unknownOutcomes.filter { fresh[$0.key] == nil }
             startRecoveredOperationPoll()
         case .unavailable(let error):
             launchState = .unavailable(error)
@@ -513,6 +522,7 @@ final class AppModel {
             statusQueriesInFlight[id] = outstanding > 0 ? outstanding : nil
         }
         do {
+            var received = false
             for try await event in backend.send(.environmentStatus(id)) {
                 // A reconciliation that began after this query did has read the actual state
                 // since, so its snapshot stands: an inspection that started while the VM was
@@ -525,6 +535,7 @@ final class AppModel {
                 switch event {
                 case .status(let status):
                     statuses[id] = status
+                    received = true
                     // The environment answered, so a failure of an earlier *query* is history.
                     // A failed operation's error stays: it is what the card explains.
                     if statusQueryFailures.remove(id) != nil { lastErrors[id] = nil }
@@ -541,7 +552,9 @@ final class AppModel {
                 default: break
                 }
             }
-            unknownOutcomes[id] = nil
+            // Only an actual status answer settles an unknown outcome; a failed or empty
+            // reply leaves it unknown.
+            if received { unknownOutcomes[id] = nil }
         } catch {
             // A reconciliation that began after this query did has read the actual state
             // since, so its result stands: replacing it here would delete the status it just
@@ -584,6 +597,7 @@ final class AppModel {
                 statusCheckFailed: statusQueryFailures.contains(environment.id) && statusQueriesInFlight[environment.id] == nil,
                 unknownOutcome: unknownOutcomes[environment.id],
                 logs: operations[environment.id]?.logs ?? lastLogs[environment.id] ?? [],
+                retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
                 runtimeVersion: runtimeVersion
             )
@@ -591,11 +605,16 @@ final class AppModel {
     }
 
     /// Asks the runtime to cancel the environment's in-flight operation.
+    /// Asks the runtime to cancel the environment's in-flight operation: the one this app
+    /// started once the runtime has accepted it, or the one a status reported after a
+    /// relaunch. A cancellation the runtime refuses is shown like any other failure.
     func cancel(_ id: EnvironmentID) {
-        guard let operation = operations[id] else { return }
+        guard let operation = operations[id]?.acceptedID ?? statuses[id]?.inFlightOperation else { return }
         Task {
             do {
-                for try await _ in backend.send(.cancelOperation(operation.id)) {}
+                for try await event in backend.send(.cancelOperation(operation)) {
+                    if case .failed(_, let error) = event { lastErrors[id] = error }
+                }
             } catch {
                 launchState = .interrupted(RuntimeConnectionInterrupted())
             }
@@ -608,7 +627,7 @@ final class AppModel {
     func perform(_ action: RecoveryAction, for id: EnvironmentID) {
         switch action {
         case .retry:
-            guard unknownOutcomes[id] == nil, operations[id] == nil, let request = lastRequests[id] else { return }
+            guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id), let request = lastRequests[id] else { return }
             Task { await run(request, for: id) }
         case .inspectState:
             Task { await refreshStatus(of: id) }
@@ -637,7 +656,8 @@ final class AppModel {
         // over state nothing has re-established. Nothing is started until reconciliation has
         // (AGENTS.md: never retry a mutating operation blindly).
         guard launchState == .ready else { return }
-        guard environments.contains(where: { $0.id == id }), operations[id] == nil, globalStartBlock == nil else { return }
+        guard environments.contains(where: { $0.id == id }), operations[id] == nil,
+              !reconciling.contains(id), globalStartBlock == nil else { return }
         // Reserved before the first suspension, so two rapid starts cannot both pass the guard.
         operations[id] = OperationState(id: OperationID(), request: .startEnvironment(id, StartOptions()))
         Task { await run(.startEnvironment(id, StartOptions()), for: id) }
@@ -666,7 +686,7 @@ final class AppModel {
         do {
             for try await event in backend.send(request) {
                 switch event {
-                case .accepted(let operation): operations[id]?.id = operation
+                case .accepted(let operation): operations[id]?.acceptedID = operation
                 case .progress(_, let phase): operations[id]?.phase = phase
                 case .log(_, let line):
                     operations[id]?.logs.append(line)
@@ -689,7 +709,9 @@ final class AppModel {
             // since, so its result stands rather than being overwritten by this loss.
             if generation == refreshGeneration { launchState = .interrupted(RuntimeConnectionInterrupted()) }
             // The outcome is unknown until the runtime answers a status query; never replay.
-            unknownOutcomes[id] = operations[id]?.id
+            // Before acceptance the app's own label stands in: the runtime may or may not
+            // have received the request.
+            unknownOutcomes[id] = operations[id]?.acceptedID ?? operations[id]?.id
         }
         // A start that failed or was lost may already have launched the VM, so what was cached
         // before it says nothing about the state now. Nor does it after one that completed
@@ -701,7 +723,9 @@ final class AppModel {
         // is already running (AGENTS.md: never retry a mutating operation blindly).
         if !completed || !described { statuses[id] = nil }
         lastLogs[id] = operations.removeValue(forKey: id)?.logs
+        reconciling.insert(id)
         await refreshStatus(of: id)
+        reconciling.remove(id)
         // The runtime may still be running the operation this app stopped listening to. A
         // reconciliation that ran while the operation was still local started a poll that found
         // nothing to follow and ended at once, so this handoff — from an operation this app

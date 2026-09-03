@@ -19,30 +19,33 @@ struct RecoveryPresentation: Equatable {
     /// True when the last operation's result is not established: retry is never offered.
     let outcomeUnknown: Bool
 
-    init(error: GuesthouseError) {
+    /// - Parameter retryAvailable: whether the model holds a request it could replay. A
+    ///   problem the runtime reported on its own (no operation this window started) has
+    ///   nothing to retry, so the option says so instead of doing nothing.
+    init(error: GuesthouseError, retryAvailable: Bool = true) {
         let unknown: Bool = if case .operationOutcomeUnknown = error { true } else { false }
         title = unknown ? "Checking environment" : "Needs attention"
         message = error.userMessage
         outcomeUnknown = unknown
-        options = error.recoveryActions.map { Self.option(for: $0, outcomeUnknown: unknown) }
+        options = error.recoveryActions.map { Self.option(for: $0, outcomeUnknown: unknown, retryAvailable: retryAvailable) }
     }
 
     /// The distinct state after a lost connection: the runtime is asked again before anything
-    /// else is offered, and there is no Retry (MVP-PLAN.md §3).
+    /// else is offered, and there is no Retry and nothing to dismiss (MVP-PLAN.md §3).
     init(unknownOutcomeOf operation: OperationID) {
         let error = GuesthouseError.operationOutcomeUnknown(operation)
         title = "Checking environment"
         message = error.userMessage + " Guesthouse is asking the runtime what actually happened before offering anything else."
         outcomeUnknown = true
-        options = [.inspectState, .cancel].map { Self.option(for: $0, outcomeUnknown: true) }
+        options = [Self.option(for: .inspectState, outcomeUnknown: true)]
     }
 
-    static func option(for action: RecoveryAction, outcomeUnknown: Bool) -> Option {
+    static func option(for action: RecoveryAction, outcomeUnknown: Bool, retryAvailable: Bool = true) -> Option {
         switch action {
         case .retry:
             Option(action: action, title: "Try again", availability: outcomeUnknown
                    ? .disabled(reason: "The result of the last operation is not known yet. Check the environment first.")
-                   : .enabled)
+                   : retryAvailable ? .enabled : .disabled(reason: "Nothing to try again from here: the runtime reported this on its own. Use Start when it is offered, or check the environment."))
         case .inspectState:
             Option(action: action, title: "Check environment", availability: .enabled)
         case .cancel:
@@ -85,20 +88,33 @@ struct OperationProgressPresentation: Equatable {
         case immediate
         /// The phase must not be interrupted casually; Cancel asks first.
         case confirmFirst(reason: String)
+        /// Nothing can be canceled yet: the runtime has not accepted the operation, so there
+        /// is no id to cancel by.
+        case unavailable(reason: String)
     }
 
     let title: String
     let fraction: Double?
     let cancelability: Cancelability
 
-    init(phase: ProgressPhase?, request: RuntimeRequest) {
+    init(phase: ProgressPhase?, request: RuntimeRequest, accepted: Bool = true) {
         title = phase.map(EnvironmentCardState.describe) ?? Self.describe(request)
         fraction = phase?.fraction
-        if let phase, !phase.cancelable {
+        if !accepted {
+            cancelability = .unavailable(reason: "Waiting for the runtime to accept the operation.")
+        } else if let phase, !phase.cancelable {
             cancelability = .confirmFirst(reason: "\"\(title)\" should not be interrupted. Canceling now can leave the development Mac needing repair.")
         } else {
             cancelability = .immediate
         }
+    }
+
+    /// An operation the runtime reports but this window did not start: its phase is not
+    /// known, only that it runs, and it can be canceled by the reported id.
+    init(recoveredOperation: OperationID) {
+        title = "Operation in progress…"
+        fraction = nil
+        cancelability = .immediate
     }
 
     private static func describe(_ request: RuntimeRequest) -> String {

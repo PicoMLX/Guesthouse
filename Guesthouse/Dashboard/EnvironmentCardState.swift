@@ -84,6 +84,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         statusCheckFailed: Bool = false,
         unknownOutcome: OperationID? = nil,
         logs: [RedactedLine] = [],
+        retryAvailable: Bool = true,
         startBlockedElsewhere: String? = nil,
         runtimeVersion: RuntimeVersionInfo? = nil
     ) {
@@ -98,12 +99,20 @@ struct EnvironmentCardState: Equatable, Identifiable {
         recoveryActions = attention?.recoveryActions ?? []
         canDismiss = statusAttention == nil && lastError != nil
         phase = operation?.phase
-        progress = operation.map { OperationProgressPresentation(phase: $0.phase, request: $0.request) }
+        // An operation the status reports without a local counterpart (recovered after a
+        // relaunch or a dropped connection) gets the same progress and Cancel controls.
+        progress = if let operation {
+            OperationProgressPresentation(phase: operation.phase, request: operation.request, accepted: operation.acceptedID != nil)
+        } else if let recovered = status?.inFlightOperation {
+            OperationProgressPresentation(recoveredOperation: recovered)
+        } else {
+            nil
+        }
         outcomeUnknown = unknownOutcome != nil
         recovery = if let unknownOutcome {
             RecoveryPresentation(unknownOutcomeOf: unknownOutcome)
         } else if let attention {
-            RecoveryPresentation(error: attention)
+            RecoveryPresentation(error: attention, retryAvailable: retryAvailable)
         } else {
             nil
         }

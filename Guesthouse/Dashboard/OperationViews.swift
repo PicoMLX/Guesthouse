@@ -20,9 +20,12 @@ struct OperationProgressView: View {
                     switch presentation.cancelability {
                     case .immediate: cancel()
                     case .confirmFirst: confirming = true
+                    case .unavailable: break
                     }
                 }
                 .accessibilityLabel("Cancel operation")
+                .disabled({ if case .unavailable = presentation.cancelability { true } else { false } }())
+                .help({ if case .unavailable(let reason) = presentation.cancelability { reason } else { "" } }())
             }
             Text(presentation.title).font(.callout).foregroundStyle(.secondary)
         }

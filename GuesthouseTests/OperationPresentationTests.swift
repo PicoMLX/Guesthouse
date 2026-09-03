@@ -55,6 +55,100 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
         }
     }
 
+    @Test func unknownOutcomesOfferOnlyACheck() {
+        #expect(RecoveryPresentation(unknownOutcomeOf: OperationID()).options.map(\.action) == [.inspectState])
+    }
+
+    @Test func retryIsDisabledWhenThereIsNothingToReplay() {
+        let presentation = RecoveryPresentation(error: .guestNotReachable(EnvironmentID()), retryAvailable: false)
+        guard let retry = presentation.options.first(where: { $0.action == .retry }) else { Issue.record("no retry option"); return }
+        guard case .disabled = retry.availability else { Issue.record("retry should be disabled without a request"); return }
+        #expect(OperationProgressPresentation(phase: nil, request: .startEnvironment(EnvironmentID(), StartOptions()), accepted: false).cancelability == .unavailable(reason: "Waiting for the runtime to accept the operation."))
+        #expect(OperationProgressPresentation(recoveredOperation: OperationID()).cancelability == .immediate)
+    }
+
+    @Test func aFailedStatusReplyKeepsTheOutcomeUnknown() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .disconnect())
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        model.start(environment.id)
+        await waitUntil { model.operations[environment.id] == nil && !model.reconciling.contains(environment.id) }
+        #expect(model.unknownOutcomes[environment.id] != nil, "a failed status reply settles nothing")
+        #expect(model.cardStates().first?.outcomeUnknown == true)
+        await backend.script("environmentStatus", .succeed())
+        await model.refresh()
+        #expect(model.unknownOutcomes.isEmpty, "a full reconciliation that read the status settles it")
+    }
+
+    @Test func cancelWaitsForTheAcceptedIDAndReportsRefusals() async throws {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(30))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .hang)
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        #expect(model.cardStates().first?.progress?.cancelability == .unavailable(reason: "Waiting for the runtime to accept the operation."))
+        model.cancel(environment.id)
+        await waitUntil { model.operations[environment.id]?.acceptedID != nil }
+        let accepted = try #require(model.operations[environment.id]?.acceptedID)
+        #expect(model.cardStates().first?.progress?.cancelability == .immediate)
+        await backend.script("cancelOperation", .fail(error: .operationInFlight(accepted)))
+        model.cancel(environment.id)
+        await waitUntil { model.lastErrors[environment.id] != nil }
+        #expect(model.lastErrors[environment.id] == .operationInFlight(accepted), "a refused cancellation is shown")
+        await backend.script("cancelOperation", .succeed())
+        model.cancel(environment.id)
+        await waitUntil { model.operations[environment.id] == nil }
+        let cancels = await backend.receivedRequests.filter { if case .cancelOperation = $0 { return true }; return false }
+        #expect(cancels.allSatisfy { $0 == .cancelOperation(accepted) }, "only the accepted id is ever canceled")
+        #expect(cancels.count == 2)
+    }
+
+    @Test func aStatusReportedOperationCanBeCanceledByItsID() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let recovered = OperationID()
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: recovered))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        let card = try #require(model.cardStates().first)
+        #expect(card.progress != nil, "a recovered operation gets progress and Cancel controls")
+        model.cancel(environment.id)
+        var requests: [RuntimeRequest] = []
+        for _ in 0..<400 {
+            requests = await backend.receivedRequests
+            if requests.contains(.cancelOperation(recovered)) { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(requests.contains(.cancelOperation(recovered)))
+    }
+
+    @Test func retryWaitsForTheStatusCheckThatFollowsAFailure() async throws {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(40))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(environment.id)))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil { model.reconciling.contains(environment.id) }
+        #expect(model.cardStates().first?.recovery?.options.first { $0.action == .retry }?.availability != .enabled, "no retry while the status is being read")
+        model.perform(.retry, for: environment.id)
+        await waitUntil { model.reconciling.isEmpty }
+        let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { return true }; return false }
+        #expect(starts.count == 1, "the retry during reconciliation was refused")
+        #expect(model.cardStates().first?.recovery?.options.first { $0.action == .retry }?.availability == .enabled)
+    }
+
     @Test func unknownOutcomesNeverOfferRetry() {
         let unknown = RecoveryPresentation(unknownOutcomeOf: OperationID())
         #expect(unknown.title == "Checking environment")
