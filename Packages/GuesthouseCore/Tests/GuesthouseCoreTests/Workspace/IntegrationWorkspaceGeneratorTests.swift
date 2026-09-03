@@ -27,6 +27,26 @@ import Testing
         return String(decoding: f.contents, as: UTF8.self)
     }
 
+    @Test func theBuildCommandQuotesEveryUntrustedArgument() throws {
+        var hostile = manifest()
+        hostile.sharedScheme = "App Scheme'; rm -rf ~"
+        let files = try IntegrationWorkspaceGenerator.generate(hostile)
+        let text = try file(files, "AGENTS.md")
+        #expect(text.contains("-scheme 'App Scheme'\\''; rm -rf ~'"), "the value cannot end its own argument")
+        #expect(!text.contains("-scheme App Scheme"))
+    }
+
+    @Test func aLinkedDestinationComponentIsRefused() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Generated-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let repos = root.appending(path: "repos"); try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appending(path: WorkspaceLayout.integrationWorkspaceName), withDestinationURL: repos)
+        #expect(throws: GeneratedFileError.self) {
+            try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "\(WorkspaceLayout.integrationWorkspaceName)/contents.xcworkspacedata", text: "x")], to: root)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: repos.path).isEmpty, "nothing was written through the link")
+    }
+
     @Test func workspaceDataMatchesGoldenAndOrdersAppFirstThenPackagesSorted() throws {
         let files = try IntegrationWorkspaceGenerator.generate(manifest())
         let xml = try file(files, "Integration.xcworkspace/contents.xcworkspacedata")
@@ -54,7 +74,7 @@ import Testing
         let guide = try file(files, "AGENTS.md")
         #expect(guide.hasPrefix("# Workspace feature-123"))
         #expect(guide.contains("| `repos/MyApp` | app | https://github.com/PicoMLX/MyApp | `main` | `feature/123` |"))
-        #expect(guide.contains("xcodebuild -workspace Integration.xcworkspace -scheme MyApp -destination 'platform=macOS' -derivedDataPath artifacts/DerivedData -clonedSourcePackagesDirPath artifacts/SourcePackages test"))
+        #expect(guide.contains("xcodebuild -workspace 'Integration.xcworkspace' -scheme 'MyApp' -destination 'platform=macOS' -derivedDataPath artifacts/DerivedData -clonedSourcePackagesDirPath artifacts/SourcePackages test"))
         #expect(guide.contains("- `repos/ModelKit` overrides the dependency on https://github.com/PicoMLX/ModelKit (package identity `modelkit`)."))
         #expect(guide.contains("Do not push, force-push, or open pull requests yourself."))
         #expect(guide.contains("One pull request per changed repository."))
