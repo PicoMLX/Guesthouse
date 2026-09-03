@@ -9,6 +9,9 @@ public protocol ProcessRunning: Sendable {
 }
 
 /// A running or finished child process: its redacted output and its exit.
+///
+/// A run keeps itself alive until the child has exited, so a caller that stops listening
+/// cannot orphan the child: the timeout and the kill after the grace period still fire.
 public final class ProcessRun: @unchecked Sendable {
     /// Line-buffered stdout and stderr, each line redacted before it leaves this type.
     public let output: AsyncStream<ProcessOutput>
@@ -20,7 +23,11 @@ public final class ProcessRun: @unchecked Sendable {
     private var exitWaiters: [CheckedContinuation<ProcessExit, Never>] = []
     private var timedOut = false
     private var terminationRequested = false
+    private var standardInputFailed = false
+    private var outputTruncated = false
     private var killTask: Task<Void, Never>?
+    /// Self-reference held from launch until `finish`, so the run outlives its callers.
+    private var retainedWhileRunning: ProcessRun?
 
     init(process: Process, output: AsyncStream<ProcessOutput>, continuation: AsyncStream<ProcessOutput>.Continuation) {
         self.process = process
@@ -45,48 +52,94 @@ public final class ProcessRun: @unchecked Sendable {
 
     /// Asks the child to stop: SIGTERM now, SIGKILL after the grace period if it is still alive.
     public func terminate(gracePeriod: Duration) {
-        lock.withLock { terminationRequested = true }
-        stop(gracePeriod: gracePeriod)
+        stop(gracePeriod: gracePeriod, becauseOfTimeout: false)
     }
 
     func timeOut(gracePeriod: Duration) {
-        lock.withLock { timedOut = true }
-        stop(gracePeriod: gracePeriod)
+        stop(gracePeriod: gracePeriod, becauseOfTimeout: true)
     }
 
-    private func stop(gracePeriod: Duration) {
-        guard process.isRunning else { return }
-        process.terminate()
+    func retainWhileRunning() {
+        lock.withLock { retainedWhileRunning = self }
+    }
+
+    func markStandardInputFailed() {
+        lock.withLock { standardInputFailed = true }
+    }
+
+    func markOutputTruncated() {
+        lock.withLock { outputTruncated = true }
+    }
+
+    /// Records the interruption only when termination really starts: a child that exited on
+    /// its own moments earlier is never reported as interrupted.
+    private func stop(gracePeriod: Duration, becauseOfTimeout: Bool) {
+        let started: Bool = lock.withLock {
+            guard exitResult == nil, killTask == nil, process.isRunning else { return false }
+            if becauseOfTimeout { timedOut = true } else { terminationRequested = true }
+            return true
+        }
+        guard started else { return }
         let pid = process.processIdentifier
-        let task = Task { [weak self] in
+        // Helpers the program forked are signaled too, so a timeout cannot leave a
+        // descendant modifying the host or the VM after the exit is reported.
+        let descendants = Self.descendants(of: pid)
+        process.terminate()
+        for child in descendants { kill(child, SIGTERM) }
+        let task = Task { [self] in
             try? await Task.sleep(for: gracePeriod)
-            guard let self, self.process.isRunning else { return }
+            guard self.process.isRunning else { return }
+            for child in Self.descendants(of: pid) { kill(child, SIGKILL) }
             kill(pid, SIGKILL)
         }
         lock.withLock { killTask = task }
     }
 
-    func finish(with exit: ProcessExit) {
-        let waiters: [CheckedContinuation<ProcessExit, Never>] = lock.withLock {
+    func finish(with reason: ProcessExit.Reason) {
+        let (waiters, exit): ([CheckedContinuation<ProcessExit, Never>], ProcessExit) = lock.withLock {
             killTask?.cancel()
+            let exit = ProcessExit(reason: reason, timedOut: timedOut, terminated: terminationRequested, standardInputFailed: standardInputFailed, outputTruncated: outputTruncated)
             exitResult = exit
             let pending = exitWaiters
             exitWaiters.removeAll()
-            return pending
+            retainedWhileRunning = nil
+            return (pending, exit)
         }
         outputContinuation.finish()
         for waiter in waiters { waiter.resume(returning: exit) }
     }
 
-    var flags: (timedOut: Bool, terminated: Bool) {
-        lock.withLock { (timedOut, terminationRequested) }
+    /// Every live descendant of `pid`, deepest last. `proc_listchildpids` reports counts of
+    /// pids, not bytes.
+    static func descendants(of pid: pid_t) -> [pid_t] {
+        var found: [pid_t] = []
+        var queue = [pid]
+        while let parent = queue.popLast() {
+            let expected = proc_listchildpids(parent, nil, 0)
+            guard expected > 0 else { continue }
+            var buffer = [pid_t](repeating: 0, count: Int(expected) + 16)
+            let count = buffer.withUnsafeMutableBufferPointer { pointer in
+                proc_listchildpids(parent, pointer.baseAddress, Int32(pointer.count * MemoryLayout<pid_t>.size))
+            }
+            let children = buffer.prefix(max(0, Int(count))).filter { $0 > 0 }
+            found.append(contentsOf: children)
+            queue.append(contentsOf: children)
+        }
+        return found
     }
 }
 
 /// Launches programs with an executable URL and argument array, streams their output through
 /// the redactor, enforces a timeout, and never involves a shell.
 public actor ProcessRunner: ProcessRunning {
-    public init() {}
+    /// Standard input is written off the caller's task; a child that never reads cannot block
+    /// the runner, and a child that exits early produces an error instead of a signal.
+    private static let standardInputQueue = DispatchQueue(label: "GuesthouseRuntimeKit.ProcessRunner.stdin", qos: .utility)
+    private static let ignoreBrokenPipes: Void = { signal(SIGPIPE, SIG_IGN) }()
+
+    public init() {
+        _ = Self.ignoreBrokenPipes
+    }
 
     public func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
         guard FileManager.default.isExecutableFile(atPath: invocation.executable.path) else {
@@ -114,40 +167,58 @@ public actor ProcessRunner: ProcessRunning {
             stdin = pipe
         }
 
-        let (stream, continuation) = AsyncStream.makeStream(of: ProcessOutput.self, bufferingPolicy: .unbounded)
+        // Bounded: a consumer that falls far behind loses the oldest lines and the exit says
+        // so, instead of the service growing without limit.
+        let (stream, continuation) = AsyncStream.makeStream(of: ProcessOutput.self, bufferingPolicy: .bufferingNewest(OutputReaders.maximumQueuedLines))
         let run = ProcessRun(process: process, output: stream, continuation: continuation)
-        let readers = OutputReaders(continuation: continuation)
+        let readers = OutputReaders(continuation: continuation, maximumBytes: invocation.maximumOutputBytes) { [weak run] in
+            run?.markOutputTruncated()
+        }
         readers.attach(stdout.fileHandleForReading, kind: .stdout)
         readers.attach(stderr.fileHandleForReading, kind: .stderr)
 
-        process.terminationHandler = { [weak run] process in
+        let standardInputDelivery = DispatchGroup()
+        process.terminationHandler = { [run] process in
             readers.waitUntilDrained()
+            // The exit reports whether input was delivered, so the write must have finished.
+            _ = standardInputDelivery.wait(timeout: .now() + 5)
             let reason: ProcessExit.Reason = process.terminationReason == .uncaughtSignal
                 ? .signal(process.terminationStatus)
                 : .status(process.terminationStatus)
-            guard let run else { return }
-            let flags = run.flags
-            run.finish(with: ProcessExit(reason: reason, timedOut: flags.timedOut, terminated: flags.terminated))
+            run.finish(with: reason)
         }
 
+        run.retainWhileRunning()
         do {
             try process.run()
         } catch {
             readers.detach()
-            throw ProcessLaunchError.launchFailed(String(describing: error))
+            run.finish(with: .status(-1))
+            throw ProcessLaunchError.launchFailed(executable: invocation.executable.lastPathComponent, reason: SanitizedText(String(describing: error), limit: 120))
+        }
+
+        // The timeout is armed before standard input is delivered, so a child that never
+        // reads it is still ended at the deadline.
+        let grace = invocation.terminationGracePeriod
+        let timeout = invocation.timeout
+        Task { [run] in
+            try? await Task.sleep(for: timeout)
+            run.timeOut(gracePeriod: grace)
         }
 
         if case .data(let data) = invocation.standardInput, let stdin {
             let handle = stdin.fileHandleForWriting
-            try? handle.write(contentsOf: data)
-            try? handle.close()
-        }
-
-        let grace = invocation.terminationGracePeriod
-        let timeout = invocation.timeout
-        Task { [weak run] in
-            try? await Task.sleep(for: timeout)
-            run?.timeOut(gracePeriod: grace)
+            standardInputDelivery.enter()
+            Self.standardInputQueue.async { [run] in
+                defer { standardInputDelivery.leave() }
+                do {
+                    try handle.write(contentsOf: data)
+                    try handle.close()
+                } catch {
+                    run.markStandardInputFailed()
+                    try? handle.close()
+                }
+            }
         }
         return run
     }
@@ -155,18 +226,30 @@ public actor ProcessRunner: ProcessRunning {
 
 /// Reads both pipes continuously so a chatty child can never fill a pipe and deadlock, splits
 /// the bytes into lines, and redacts each line before yielding it.
+///
+/// Bounds: a record longer than `maximumLineBytes` is emitted in pieces, `\r` ends a record
+/// like `\n` (progress bars), and once `maximumBytes` have been emitted the rest is discarded
+/// while the pipes keep draining.
 private final class OutputReaders: @unchecked Sendable {
     enum Kind { case stdout, stderr }
+
+    static let maximumQueuedLines = 4_096
+    static let maximumLineBytes = 64 << 10
 
     private let continuation: AsyncStream<ProcessOutput>.Continuation
     private let lock = NSLock()
     private let drained = DispatchGroup()
     private var buffers: [ObjectIdentifier: Data] = [:]
     private var states: [ObjectIdentifier: Redactor.StreamState] = [:]
+    private var emittedBytes = 0
+    private let maximumBytes: Int
+    private let truncated: @Sendable () -> Void
     private let redactor = Redactor()
 
-    init(continuation: AsyncStream<ProcessOutput>.Continuation) {
+    init(continuation: AsyncStream<ProcessOutput>.Continuation, maximumBytes: Int, truncated: @escaping @Sendable () -> Void) {
         self.continuation = continuation
+        self.maximumBytes = maximumBytes
+        self.truncated = truncated
     }
 
     func attach(_ handle: FileHandle, kind: Kind) {
@@ -200,14 +283,33 @@ private final class OutputReaders: @unchecked Sendable {
     }
 
     private func consume(_ data: Data, id: ObjectIdentifier, kind: Kind) {
-        var lines: [String] = []
+        var lines: [Data] = []
         lock.withLock {
-            buffers[id, default: Data()].append(data)
-            while let newline = buffers[id]!.firstIndex(of: 0x0A) {
-                let lineData = buffers[id]!.subdata(in: buffers[id]!.startIndex..<newline)
-                buffers[id]!.removeSubrange(buffers[id]!.startIndex...newline)
-                lines.append(String(decoding: lineData, as: UTF8.self))
+            guard var pending = buffers[id] else { return }
+            pending.append(data)
+            // One linear pass: a record ends at `\n` or `\r` (a `\r\n` pair is one ending) or
+            // when it reaches the per-record cap, so a chatty child costs O(bytes), not O(bytes²).
+            var start = pending.startIndex
+            var index = start
+            var previousWasCarriageReturn = false
+            while index < pending.endIndex {
+                let byte = pending[index]
+                if byte == 0x0A || byte == 0x0D {
+                    if !(byte == 0x0A && previousWasCarriageReturn && start == index) {
+                        lines.append(pending[start..<index])
+                    }
+                    start = index + 1
+                    previousWasCarriageReturn = byte == 0x0D
+                } else {
+                    previousWasCarriageReturn = false
+                    if index - start + 1 >= Self.maximumLineBytes {
+                        lines.append(pending[start...index])
+                        start = index + 1
+                    }
+                }
+                index += 1
             }
+            buffers[id] = Data(pending[start...])
         }
         for line in lines { emit(line, id: id, kind: kind) }
     }
@@ -217,16 +319,24 @@ private final class OutputReaders: @unchecked Sendable {
             let data = buffers.removeValue(forKey: id)
             return (data?.isEmpty == false) ? data : nil
         }
-        if let remainder { emit(String(decoding: remainder, as: UTF8.self), id: id, kind: kind) }
+        if let remainder { emit(remainder, id: id, kind: kind) }
     }
 
-    private func emit(_ line: String, id: ObjectIdentifier, kind: Kind) {
-        let redacted: RedactedLine = lock.withLock {
+    private func emit(_ lineData: Data, id: ObjectIdentifier, kind: Kind) {
+        let redacted: RedactedLine? = lock.withLock {
+            guard emittedBytes < maximumBytes else { return nil }
+            emittedBytes += lineData.count
             var state = states[id] ?? Redactor.StreamState()
-            let result = redactor.redact(line: line, state: &state)
+            let result = redactor.redact(processOutputLine: String(decoding: lineData, as: UTF8.self), state: &state)
             states[id] = state
             return result
         }
-        continuation.yield(kind == .stdout ? .stdout(redacted) : .stderr(redacted))
+        guard let redacted else {
+            truncated()
+            return
+        }
+        if case .dropped = continuation.yield(kind == .stdout ? .stdout(redacted) : .stderr(redacted)) {
+            truncated()
+        }
     }
 }
