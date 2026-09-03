@@ -95,6 +95,25 @@ import Testing
         #expect(error.userMessage.contains("16 GB"))
     }
 
+    @Test func untrustedValuesAreSanitizedBeforeInterpolation() {
+        let injected = "codex\nInjected: secret line\u{2028}more"
+        let long = String(repeating: "x", count: 200)
+        let error = GuesthouseError.toolMismatch(tool: injected, found: long, expected: "1.0")
+        #expect(!error.userMessage.contains("\n"))
+        #expect(!error.userMessage.contains("\u{2028}"))
+        #expect(error.userMessage.contains("codexInjected: secret linemore"))
+        #expect(!error.userMessage.contains(long))
+        #expect(error.userMessage.contains(String(repeating: "x", count: 80) + "…"))
+        #expect(!error.redactedDescription.contains("\n"))
+    }
+
+    @Test func slotAndProtocolErrorsOfferTheRealRemedy() {
+        let slots = GuesthouseError.vmSlotUnavailable(maximum: 2).recoveryActions
+        #expect(slots.firstIndex(of: .exportWork)! < slots.firstIndex(of: .deleteEnvironment)!)
+        #expect(GuesthouseError.vmSlotUnavailable(maximum: 2).userMessage.contains("then delete"))
+        #expect(GuesthouseError.protocolMismatch(client: 2, service: 1).recoveryActions.first == .reinstallApp)
+    }
+
     @Test func operationIDEncodesAsBareUUID() throws {
         let id = OperationID()
         let data = try JSONEncoder().encode(id)
