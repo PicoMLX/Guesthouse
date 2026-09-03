@@ -90,6 +90,15 @@ import Testing
         #expect(try JSONDecoder().decode(RedactedLine.self, from: data) == literal)
     }
 
+    @Test func fieldValuesRedactBareDeviceCodes() {
+        #expect(redactor.redact(fieldValue: "AB12-CD34") == "[redacted:device-code]")
+        #expect(redactor.redact(fieldValue: "0.50.0 (AB12-CD34)") == "0.50.0 ([redacted:device-code])")
+        #expect(redactor.redact(fieldValue: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab") == "[redacted:github-token]")
+        #expect(redactor.redact(fieldValue: "2.36.0") == "2.36.0")
+        #expect(redactor.redact(fieldValue: "1A2B3C4D-0000-4000-8000-000000000000") == "1A2B3C4D-0000-4000-8000-000000000000")
+        #expect(redactor.redact("AB12-CD34") == "AB12-CD34", "log lines keep the context rule")
+    }
+
     @Test func batchRedactionSharesStateAcrossLines() {
         let out = redactor.redact(lines: ["-----BEGIN X-----", "material", "-----END X-----", "password=x"])
         #expect(out.map(\.text) == [
