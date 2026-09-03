@@ -148,11 +148,15 @@ import Testing
         #expect(code.redactedDescription.contains("[redacted:device-code]"))
     }
 
-    @Test func sanitizedValuesAreBoundedInUnicodeScalars() {
+    @Test func sanitizedValuesAreBoundedInUnicodeScalarsAndCombiningMarksAreDropped() {
         let combining = "a" + String(repeating: "\u{0301}", count: 500)
         let error = GuesthouseError.toolMismatch(tool: combining, found: nil, expected: "1.0")
-        #expect(error.userMessage.unicodeScalars.count < 400)
-        #expect(error.userMessage.contains("…"))
+        #expect(!error.userMessage.unicodeScalars.contains("\u{0301}"))
+        #expect(error.userMessage.contains("has a missing"))
+        let wide = String(repeating: "\u{1F600}", count: 200)
+        let long = GuesthouseError.toolMismatch(tool: wide, found: nil, expected: "1.0")
+        #expect(long.userMessage.unicodeScalars.count < 400)
+        #expect(long.userMessage.contains("…"))
     }
 
     @Test func hostAndToolErrorsOfferActionableRoutes() {

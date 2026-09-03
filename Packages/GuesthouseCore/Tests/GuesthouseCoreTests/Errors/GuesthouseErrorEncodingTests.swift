@@ -16,13 +16,46 @@ import Testing
         #expect(found.value == "[redacted:github-token]")
     }
 
-    @Test func missingComponentListsAreBounded() {
-        let missing = (0..<100).map { SanitizedText("Component \($0)") }
-        let message = GuesthouseError.xcodeComponentsIncomplete(missing: missing).userMessage
+    @Test func missingComponentListsAreBoundedInMessagesAndPayloads() throws {
+        let missing = MissingComponents((0..<100).map { SanitizedText("Component \($0)") })
+        let error = GuesthouseError.xcodeComponentsIncomplete(missing: missing)
+        let message = error.userMessage
         #expect(message.contains("Component 19"))
         #expect(!message.contains("Component 20"))
         #expect(message.contains("and 80 more"))
         #expect(GuesthouseError.xcodeComponentsIncomplete(missing: ["a", "b"]).userMessage.contains("components: a, b."))
+        let json = String(decoding: try JSONEncoder().encode(error), as: UTF8.self)
+        #expect(!json.contains("Component 20"))
+        #expect(json.contains("\"omitted\":80"))
+        let oversized = #"{"listed":[\#((0..<50).map { "\"c\($0)\"" }.joined(separator: ","))],"omitted":0}"#
+        let decoded = try JSONDecoder().decode(MissingComponents.self, from: Data(oversized.utf8))
+        #expect(decoded.listed.count == 20)
+        #expect(decoded.omitted == 30)
+    }
+
+    @Test func combiningMarksCannotSplitACredential() {
+        let split = "ghp_\u{0301}ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let message = GuesthouseError.toolMismatch(tool: "gh", found: SanitizedText(split), expected: "1").userMessage
+        #expect(!message.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
+        #expect(message.contains("[redacted:github-token]"))
+    }
+
+    @Test func sanitizedTextLimitsSurviveARoundTrip() throws {
+        let long = SanitizedText(String(repeating: "x", count: 100), limit: 200)
+        #expect(long.value.unicodeScalars.count == 100)
+        let decoded = try JSONDecoder().decode(SanitizedText.self, from: try JSONEncoder().encode(long))
+        #expect(decoded == long)
+        let capped = SanitizedText(String(repeating: "y", count: 5_000), limit: 100_000)
+        #expect(capped.value.unicodeScalars.count == SanitizedText.maximumLimit + 1)
+        let raw = try JSONDecoder().decode(SanitizedText.self, from: Data(("\"" + String(repeating: "z", count: 5_000) + "\"").utf8))
+        #expect(raw.value.unicodeScalars.count == SanitizedText.maximumLimit + 1)
+    }
+
+    @Test func sanitizingAHugeValueCostsOnlyTheWindow() {
+        let huge = String(repeating: "x", count: 20_000_000)
+        let started = ContinuousClock.now
+        _ = GuesthouseError.sanitize(huge)
+        #expect(ContinuousClock.now - started < .milliseconds(200))
     }
 
     @Test func unterminatedAuthorityAtTheBoundIsRedacted() {
