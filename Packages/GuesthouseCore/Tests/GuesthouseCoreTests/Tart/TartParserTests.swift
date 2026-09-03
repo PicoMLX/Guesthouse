@@ -27,14 +27,14 @@ import Testing
     @Test func rejectsMalformedLists() throws {
         #expect(throws: TartParseError.notJSON) { try TartListParser.parse("not json") }
         #expect(throws: TartParseError.unexpectedShape("expected an array of objects")) { try TartListParser.parse("{\"Name\": \"x\"}") }
-        #expect(throws: TartParseError.unexpectedShape("Disk")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":\"160 GB\",\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
-        #expect(throws: TartParseError.unknownValue(field: "State", value: "hibernating")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":false,\"State\":\"hibernating\"}]") }
-        #expect(throws: TartParseError.unknownValue(field: "Source", value: "cloud")) { try TartListParser.parse("[{\"Source\":\"cloud\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
+        #expect(throws: TartParseError.unexpectedShape("Disk")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":\"160 GB\",\"Size\":1,\"Accessed\":\"2026-01-01T00:00:00Z\",\"Running\":false,\"State\":\"stopped\"}]") }
+        #expect(throws: TartParseError.unknownValue(field: "State", value: "hibernating")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Accessed\":\"2026-01-01T00:00:00Z\",\"Running\":false,\"State\":\"hibernating\"}]") }
+        #expect(throws: TartParseError.unknownValue(field: "Source", value: "cloud")) { try TartListParser.parse("[{\"Source\":\"cloud\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Accessed\":\"2026-01-01T00:00:00Z\",\"Running\":false,\"State\":\"stopped\"}]") }
         #expect(try TartListParser.parse("[]").isEmpty)
         #expect(try TartListParser.parse(fixture("list-empty.json")).isEmpty, "real capture of an empty store")
-        #expect(throws: TartParseError.unknownValue(field: "Disk", value: "-1")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":-1,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
-        #expect(throws: TartParseError.unexpectedShape("Disk")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":true,\"Size\":1,\"Running\":false,\"State\":\"stopped\"}]") }
-        #expect(throws: TartParseError.unexpectedShape("Running")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Running\":1,\"State\":\"stopped\"}]") }
+        #expect(throws: TartParseError.unknownValue(field: "Disk", value: "-1")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":-1,\"Size\":1,\"Accessed\":\"2026-01-01T00:00:00Z\",\"Running\":false,\"State\":\"stopped\"}]") }
+        #expect(throws: TartParseError.unexpectedShape("Disk")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":true,\"Size\":1,\"Accessed\":\"2026-01-01T00:00:00Z\",\"Running\":false,\"State\":\"stopped\"}]") }
+        #expect(throws: TartParseError.unexpectedShape("Running")) { try TartListParser.parse("[{\"Source\":\"local\",\"Name\":\"x\",\"Disk\":1,\"Size\":1,\"Accessed\":\"2026-01-01T00:00:00Z\",\"Running\":1,\"State\":\"stopped\"}]") }
     }
 
     @Test func parsesVersionsAndComparesWithThePin() throws {

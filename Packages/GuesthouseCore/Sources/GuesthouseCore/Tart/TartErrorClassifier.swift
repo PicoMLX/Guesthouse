@@ -20,7 +20,8 @@ public enum TartFailure: Hashable, Sendable {
     case lockHeld
     /// `VM directory is already initialized, preventing overwrite`
     case directoryAlreadyInitialized
-    /// The disk image is in use elsewhere, for example mounted in Finder.
+    /// `<disk> seems to be already in use, unmount it first in Finder` or `already in use, try
+    /// umounting it via "diskutil …"`: the VM disk image is mounted elsewhere.
     case diskInUse
     /// `The number of VMs exceeds the system limit`.
     case virtualMachineLimitExceeded
@@ -33,12 +34,12 @@ public enum TartErrorClassifier {
         func has(_ phrase: String) -> Bool { text.contains(phrase) }
 
         if has("the specified vm") && has("does not exist") { return .vmNotFound }
-        if has("is already running") { return .alreadyRunning }
+        if text.contains(#/vm "[^"]*" is already running/#) { return .alreadyRunning }
         if has("is not running") { return .notRunning }
         if has("no ip address found") { return .noIPAddress }
         if has("failed to lock ") { return .lockHeld }
         if has("vm directory is already initialized") { return .directoryAlreadyInitialized }
-        if has("disk") && has("in use") { return .diskInUse }
+        if has("seems to be already in use, unmount it first") || has("already in use, try umounting it") { return .diskInUse }
         if has("the number of vms exceeds the system limit") { return .virtualMachineLimitExceeded }
         if has("is running") || has("must be stopped") { return .requiresStoppedVM }
         let firstLine = stderr.split(whereSeparator: \.isNewline).first.map(String.init) ?? "exit status \(exitStatus)"
