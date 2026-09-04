@@ -76,7 +76,7 @@ public enum DiagnosticsExportBuilder {
             exportedAt: exportedAt,
             appVersion: GuesthouseError.sanitize(appVersion),
             appBuild: GuesthouseError.sanitize(appBuild),
-            runtime: runtime,
+            runtime: scrubbed(runtime),
             compatibility: scrubbed(compatibility),
             environmentIDs: environments.map(\.id),
             logLineCount: lines.count,
@@ -171,7 +171,7 @@ public enum DiagnosticsExportBuilder {
     /// Scrubs a stream of lines. A credential is often printed over two lines (`password:`
     /// on one, the value on the next), so a line that ends in a credential label redacts the
     /// value that follows it.
-    static func scrubbedStream(_ logs: [RedactedLine]) -> [String] {
+    public static func scrubbedStream(_ logs: [RedactedLine]) -> [String] {
         var result: [String] = []
         var expectingValue = false
         for line in logs {
@@ -186,6 +186,16 @@ public enum DiagnosticsExportBuilder {
             result.append(scrubbed)
         }
         return result
+    }
+
+    /// The runtime's own report can name a path: a storage failure quotes where it tried to
+    /// write, which is often under the user's home directory. Its problem is replaced with a
+    /// scrubbed description so the manifest keeps the failure without the account name.
+    static func scrubbed(_ runtime: RuntimeVersionInfo?) -> RuntimeVersionInfo? {
+        guard var info = runtime, var tart = info.tart, let problem = tart.problem else { return runtime }
+        tart.problem = .runtimeStateUnavailable(reason: SanitizedText(scrub(problem.userMessage), limit: 300))
+        info.tart = tart
+        return info
     }
 
     /// The observations that may appear in the manifest: paths carry the account name of

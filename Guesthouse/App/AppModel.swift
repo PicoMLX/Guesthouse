@@ -309,7 +309,8 @@ final class AppModel {
             // outcome over an inspection that has already happened.
             reconciledGeneration = generation
             startRecoveredOperationPoll()
-        case .unavailable(let error):
+        case .unavailable(let error, let version):
+            if let version { runtimeInfo = version }
             launchState = .unavailable(error)
             // An unavailable runtime is not something reconnecting fixes: the error carries
             // its own recovery, and the app stays on it until the user asks again.
@@ -333,17 +334,27 @@ final class AppModel {
 
     private enum ReconcileOutcome {
         case ready([DevelopmentEnvironment], [EnvironmentID: ReadStatus], RuntimeVersionInfo?)
-        case unavailable(GuesthouseError)
+        /// The runtime answered its version and then could not be used. The version is
+        /// carried anyway: diagnostics must describe the runtime as it is now, not as the
+        /// last successful check left it.
+        case unavailable(GuesthouseError, RuntimeVersionInfo?)
         case interrupted(RuntimeConnectionInterrupted)
     }
 
     private func reconcile() async -> ReconcileOutcome {
         do {
+            // Asked first, so a listing that fails afterwards still names the runtime the
+            // diagnostics bundle reports. Supplementary: a service that cannot describe
+            // itself leaves the version row unknown rather than making the app unavailable.
+            var version: RuntimeVersionInfo?
+            for try await event in backend.send(.runtimeVersion) {
+                if case .runtimeVersion(let info) = event { version = info }
+            }
             var listed: [DevelopmentEnvironment] = []
             for try await event in backend.send(.listEnvironments) {
                 switch event {
                 case .environments(let environments): listed = environments
-                case .failed(_, let error): return .unavailable(error)
+                case .failed(_, let error): return .unavailable(error, version)
                 default: break
                 }
             }
@@ -354,14 +365,8 @@ final class AppModel {
                     if case .status(let status) = event {
                         fresh[environment.id] = ReadStatus(status: status, generation: generation)
                     }
-                    if case .failed(_, let error) = event { return .unavailable(error) }
+                    if case .failed(_, let error) = event { return .unavailable(error, version) }
                 }
-            }
-            // Supplementary: the environments were read, so a service that cannot describe
-            // itself leaves the version row unknown rather than making the app unavailable.
-            var version: RuntimeVersionInfo?
-            for try await event in backend.send(.runtimeVersion) {
-                if case .runtimeVersion(let info) = event { version = info }
             }
             return .ready(listed, fresh, version)
         } catch let error as RuntimeConnectionInterrupted {
@@ -798,9 +803,12 @@ final class AppModel {
 
     var diagnosticsLines: [RedactedLine] {
         environments.flatMap { environment -> [RedactedLine] in
-            let lines = logs(of: environment.id)
+            // Scrubbed as a stream *before* the prefix goes on. A credential printed over two
+            // lines is recognized by the line that ends in its label, and a UUID in front of
+            // that label would hide it from the whole-line match.
+            let scrubbed = DiagnosticsExportBuilder.scrubbedStream(logs(of: environment.id))
             // Prefixing goes back through the redactor: `RedactedLine` is only ever made there.
-            return redactor.redact(lines: lines.map { "\(environment.id.uuid.uuidString) \($0.text)" })
+            return redactor.redact(lines: scrubbed.map { "\(environment.id.uuid.uuidString) \($0)" })
         }
     }
 
