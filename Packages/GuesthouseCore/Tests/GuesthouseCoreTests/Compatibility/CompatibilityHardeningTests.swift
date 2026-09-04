@@ -20,7 +20,7 @@ import Testing
 
     @Test func newerManifestSchemasAreRejected() throws {
         var manifest = CompatibilityManifest(manifestVersion: 1, tested: [])
-        manifest.schemaVersion = SchemaVersion(SchemaVersion.current.rawValue + 1)
+        manifest.schemaVersion = SchemaVersion(SchemaVersion.current.rawValue + 1)!
         let data = try JSONEncoder().encode(manifest)
         #expect(throws: CompatibilityManifestError.unsupportedSchema(found: manifest.schemaVersion, supported: .current)) {
             try CompatibilityManifest.decode(from: data)
@@ -175,7 +175,7 @@ import Testing
     }
 
     @Test func manifestErrorsAreActionableAndVerifiedManifestsRoundTrip() throws {
-        let error = CompatibilityManifestError.unsupportedSchema(found: SchemaVersion(9), supported: .current)
+        let error = CompatibilityManifestError.unsupportedSchema(found: SchemaVersion(9)!, supported: .current)
         #expect(error.recoveryActions.first == .reinstallApp)
         #expect(error.errorDescription == error.userMessage)
         let verification = CompatibilityManifest.Verification(verifiedAt: Date(timeIntervalSince1970: 1_800_000_000.25), hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
