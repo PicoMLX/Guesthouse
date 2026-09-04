@@ -94,6 +94,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         retryBlockedReason: String? = nil,
         startBlockedElsewhere: String? = nil,
         runtimeVersion: RuntimeVersionInfo? = nil,
+        operationElsewhere: String? = nil,
         forceStopAvailable: Bool = false
     ) {
         id = environment.id
@@ -160,7 +161,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         details = Self.details(for: environment, status: status, runtimeVersion: runtimeVersion)
         // A status nobody has read back yet is not a state to act on: Start stays disabled
         // until the environment answers again.
-        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, checking: checking, blockedElsewhere: startBlockedElsewhere, forceStopAvailable: forceStopAvailable)
+        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, checking: checking, blockedElsewhere: startBlockedElsewhere, operationElsewhere: operationElsewhere, forceStopAvailable: forceStopAvailable)
     }
 
     func availability(of action: Action) -> Availability {
@@ -243,21 +244,28 @@ struct EnvironmentCardState: Equatable, Identifiable {
         ]
     }
 
-    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?, forceStopAvailable: Bool) -> [Action: Availability] {
+    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?, operationElsewhere: String?, forceStopAvailable: Bool) -> [Action: Availability] {
         var table: [Action: Availability] = [:]
         for action in Action.allCases where action != .start && action != .stop && action != .forceStop {
             table[action] = .notImplemented(note: Self.notImplementedNote(for: action))
         }
         table[.start] = startAvailability(for: status, operation: operation, attention: attention, checking: checking, blockedElsewhere: blockedElsewhere)
-        table[.stop] = stopAvailability(for: status, operation: operation, checking: checking, blockedElsewhere: blockedElsewhere)
+        table[.stop] = stopAvailability(for: status, operation: operation, checking: checking, blockedElsewhere: blockedElsewhere, operationElsewhere: operationElsewhere)
         table[.forceStop] = forceStopAvailable ? .enabled : .disabled(reason: "Force-stopping is offered only after a normal stop did not finish in time.")
         return table
     }
 
-    /// Stop stays visible in every state (MVP-PLAN.md §5) and is enabled for a running VM.
-    private static func stopAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checking: Bool, blockedElsewhere: String?) -> Availability {
+    /// Stop is disabled with a reason rather than hidden, like every other action here, and is
+    /// enabled for a running VM. The stop and warned force-stop contract is MVP-PLAN.md §2
+    /// ("Returning developer").
+    private static func stopAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checking: Bool, blockedElsewhere: String?, operationElsewhere: String?) -> Availability {
         guard !checking, let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
+        // An outcome the runtime reports as unresolved is inspected before anything is sent
+        // again, exactly as one this app observed being interrupted (MVP-PLAN.md §3).
+        if case .needsAttention(.operationOutcomeUnknown) = status.readiness { return .disabled(reason: "Checking environment") }
         if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
+        // The runtime takes one lifecycle operation at a time and would refuse this one.
+        if let operationElsewhere { return .disabled(reason: operationElsewhere) }
         if let blockedElsewhere, status.vm != .running { return .disabled(reason: blockedElsewhere) }
         switch status.vm {
         case .running: return .enabled

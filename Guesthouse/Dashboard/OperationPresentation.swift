@@ -151,6 +151,10 @@ struct OperationProgressPresentation: Equatable {
         fraction = phase?.fraction
         if !accepted {
             cancelability = .unavailable(reason: "Waiting for the runtime to accept the operation.")
+        } else if case .stopEnvironment = request {
+            // Every phase the runtime reports for a stop is uninterruptible, so a Cancel here
+            // could only look like it would stop the shutdown; the sheet says so instead.
+            cancelability = .unavailable(reason: "A stop runs to its end: the development Mac is shutting down.")
         } else if let phase, !phase.cancelable {
             // `EnvironmentLifecycle.cancel` never interrupts a protected phase: it records the
             // request and honors it at the next step that can be interrupted, and an operation

@@ -610,6 +610,15 @@ final class AppModel {
         unknownOutcomes[id] ?? Self.reportedUnknownOutcome(of: statuses[id])
     }
 
+    /// The runtime's single lifecycle slot, seen from another card: an operation anywhere else
+    /// makes every mutation here fail, so the control says why instead of doing nothing.
+    func operationBlockedElsewhere(_ id: EnvironmentID) -> String? {
+        let busy = operations.keys.first { $0 != id }
+            ?? statuses.values.first { $0.inFlightOperation != nil && $0.environmentID != id }?.environmentID
+        guard let busy, let name = environments.first(where: { $0.id == busy })?.name else { return nil }
+        return "An operation is in progress on \(name)."
+    }
+
     /// Statuses that name an operation this app did not start (one recovered after a
     /// relaunch) are re-queried until they become terminal, so a card never stays busy for
     /// an operation nobody observes.
@@ -904,7 +913,10 @@ final class AppModel {
                 status: statuses[environment.id],
                 operation: operations[environment.id],
                 lastError: lastErrors[environment.id],
-                statusUnread: statuses[environment.id] == nil,
+                // A status that has not been read back — never, or not since the operation
+                // that just ended — is not a state to offer actions over: `canMutate` refuses
+                // them, so the card must not render them as if they would do something.
+                statusUnread: statuses[environment.id] == nil || reconciling.contains(environment.id),
                 statusCheckFailed: statusQueryFailures[environment.id] != nil && statusQueriesInFlight[environment.id] == nil,
                 unknownOutcome: unknownOutcomes[environment.id],
                 statusQueryFailure: statusQueryFailures[environment.id],
@@ -914,6 +926,7 @@ final class AppModel {
                 retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
                 runtimeVersion: runtimeInfo,
+                operationElsewhere: operationBlockedElsewhere(environment.id),
                 forceStopAvailable: canForceStop(environment.id)
             )
         }
@@ -1047,20 +1060,33 @@ final class AppModel {
     /// down; if it does not, the runtime reports `gracefulStopTimedOut` and the card offers
     /// the warned force-stop.
     func stop(_ id: EnvironmentID) {
-        guard canMutate(id), statuses[id]?.vm == .running, operations.isEmpty else { return }
-        Task { await run(.stopEnvironment(id, .graceful(deadline: Self.gracefulStopDeadline)), for: id) }
+        guard canMutate(id), statuses[id]?.vm == .running else { return }
+        send(.stopEnvironment(id, .graceful(deadline: Self.gracefulStopDeadline)), for: id)
+    }
+
+    /// Reserves the operation before the first suspension, so two rapid activations cannot
+    /// both pass the guard and share one `operations` entry: the one the runtime refuses
+    /// would otherwise remove the state belonging to the one it accepted.
+    private func send(_ request: RuntimeRequest, for id: EnvironmentID) {
+        operations[id] = OperationState(id: OperationID(), request: request)
+        Task { await run(request, for: id) }
     }
 
     /// Whether a mutating request may be sent for this environment: no operation of ours in
-    /// flight, no operation the runtime reports, no unsettled outcome, and no status check
+    /// flight, none the runtime reports anywhere, no unsettled outcome, and no status check
     /// still outstanding. A state that was never verified never licenses a second mutation
     /// (MVP-PLAN.md §3).
     func canMutate(_ id: EnvironmentID) -> Bool {
-        operations[id] == nil
-            && unknownOutcomes[id] == nil
-            && !reconciling.contains(id)
-            && statuses[id]?.inFlightOperation == nil
-            && statuses[id] != nil
+        // The runtime runs one lifecycle operation at a time and refuses every request while
+        // its slot is occupied, so an operation on another environment blocks this one too,
+        // exactly as `globalStartBlock` already says for Start (MVP-PLAN.md §4).
+        guard operations.isEmpty, !statuses.values.contains(where: { $0.inFlightOperation != nil }) else { return false }
+        guard unknownOutcomes[id] == nil, !reconciling.contains(id), let status = statuses[id] else { return false }
+        // An outcome the runtime itself reports as unresolved blocks a second mutation just as
+        // a lost connection does: the actual state has not been established yet.
+        if case .needsAttention(.operationOutcomeUnknown) = status.readiness { return false }
+        if case .operationOutcomeUnknown? = lastErrors[id] { return false }
+        return true
     }
 
     /// Whether the card may offer Retry: something to replay, and a state fresh enough to
@@ -1068,20 +1094,30 @@ final class AppModel {
     /// own warning.
     func retryAvailable(for id: EnvironmentID) -> Bool {
         guard let request = lastRequests[id], canMutate(id) else { return false }
-        if case .stopEnvironment(_, .force) = request { return false }
-        return true
+        switch request {
+        case .stopEnvironment(_, .force): return false
+        // A stop the VM completed on its own after the failure is not repeated: the reconciled
+        // status decides, not the error the timeout left behind (MVP-PLAN.md §3).
+        case .stopEnvironment: return statuses[id]?.vm == .running
+        default: return true
+        }
     }
 
     /// The explicitly warned force-stop, offered only after a graceful stop did not finish.
     func forceStop(_ id: EnvironmentID) {
-        guard canForceStop(id), canMutate(id) else { return }
-        Task { await run(.stopEnvironment(id, .force), for: id) }
+        guard canForceStop(id) else { return }
+        send(.stopEnvironment(id, .force), for: id)
     }
 
+    /// A force-stop is offered after a graceful stop this app made failed and the following
+    /// status check proved the VM is still running — whatever the failure was, since
+    /// `EnvironmentLifecycle` reports a Tart stop that did not work as `guestNotReachable`
+    /// just as often as a timeout, and MVP-PLAN.md §2 promises the warned force-stop after a
+    /// failed graceful stop. An unresolved outcome is inspected instead, never forced past.
     func canForceStop(_ id: EnvironmentID) -> Bool {
-        guard operations.isEmpty, statuses[id]?.vm == .running else { return false }
-        if case .gracefulStopTimedOut? = lastErrors[id] { return true }
-        return false
+        guard canMutate(id), statuses[id]?.vm == .running, lastErrors[id] != nil else { return false }
+        guard case .stopEnvironment(_, .graceful)? = lastRequests[id] else { return false }
+        return true
     }
 
     private func run(_ request: RuntimeRequest, for id: EnvironmentID) async {
@@ -1134,8 +1170,7 @@ final class AppModel {
             // reconciliation that began after this stream did has looked at the actual state
             // since, so its result stands rather than being overwritten by this loss.
             if generation == refreshGeneration { launchState = .interrupted(RuntimeConnectionInterrupted()) }
-            // The reason is logged as fixed text: the interruption carries nothing quotable.
-            Self.log.error("runtime connection interrupted during \(request.caseName, privacy: .public); outcome unknown until inspected")
+            logRuntimeEvent("runtime connection interrupted during \(request.caseName); outcome unknown until inspected")
             // …and when that reconciliation has also finished, this environment's actual state
             // has been read back: that is the inspection an interrupted operation calls for,
             // so recreating an unknown marker over it, dropping the status it published and
@@ -1181,6 +1216,18 @@ final class AppModel {
     /// stream knows, and it is what an unknown outcome is waiting for.
     private func reconciledSinceStreamBegan(_ generation: UInt64, of id: EnvironmentID) -> Bool {
         reconciledGeneration > generation && statuses[id] != nil
+    }
+
+    /// The one path from this model to the system log. Every line goes through the redaction
+    /// layer first, so a message that later interpolates something the runtime said cannot
+    /// reach the log unchecked (AGENTS.md: route every log line through redaction).
+    func redactedLogLine(_ message: String) -> RedactedLine {
+        var state = Redactor.StreamState()
+        return redactor.redact(line: message, state: &state)
+    }
+
+    private func logRuntimeEvent(_ message: String) {
+        Self.log.error("\(self.redactedLogLine(message).text, privacy: .public)")
     }
 
     /// A model over a preview scenario's environments and scripted backend, already refreshed.
