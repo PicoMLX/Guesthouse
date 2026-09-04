@@ -118,10 +118,10 @@ import Testing
     }
 
     @Test func migrationsMustAdvanceExactlyOneVersion() {
-        let skipping = SnapshotMigrator(current: SchemaVersion(3), migrations: [
-            SnapshotMigrator.Migration(from: SchemaVersion(1)) { _ in Data("{\"schemaVersion\":3}".utf8) },
+        let skipping = SnapshotMigrator(current: SchemaVersion(3)!, migrations: [
+            SnapshotMigrator.Migration(from: SchemaVersion(1)!) { _ in Data("{\"schemaVersion\":3}".utf8) },
         ])
-        #expect(throws: StateStoreError.migrationProducedWrongVersion(from: SchemaVersion(1), produced: SchemaVersion(3))) {
+        #expect(throws: StateStoreError.migrationProducedWrongVersion(from: SchemaVersion(1)!, produced: SchemaVersion(3)!)) {
             try skipping.migrate(Data("{\"schemaVersion\":1}".utf8))
         }
     }
@@ -150,9 +150,9 @@ import Testing
         let errors: [StateStoreError] = [
             .operationUnresolved(OperationID()),
             .insecureDirectory(reason: "x"), .corruptSnapshot, .inconsistentSnapshot(reason: "x"), .corruptJournal(line: 1),
-            .inconsistentRecord(OperationID()), .newerSchemaVersion(found: SchemaVersion(2), current: SchemaVersion(1)),
-            .migrationMissing(from: SchemaVersion(1)), .migrationProducedWrongVersion(from: SchemaVersion(1), produced: SchemaVersion(3)),
-            .duplicateMigration(from: SchemaVersion(1)), .fileUnwritable(name: "x"), .fileUnreadable(name: "x"), .unencodable(name: "x"),
+            .inconsistentRecord(OperationID()), .newerSchemaVersion(found: SchemaVersion(2)!, current: SchemaVersion(1)!),
+            .migrationMissing(from: SchemaVersion(1)!), .migrationProducedWrongVersion(from: SchemaVersion(1)!, produced: SchemaVersion(3)!),
+            .duplicateMigration(from: SchemaVersion(1)!), .fileUnwritable(name: "x"), .fileUnreadable(name: "x"), .unencodable(name: "x"),
         ]
         for error in errors {
             #expect(!error.userMessage.isEmpty)
@@ -347,7 +347,7 @@ import Testing
 
     @Test func aRecordFromAnotherSchemaVersionIsNeverSavedOrLoaded() async throws {
         let store = try StateStore(rootURL: root)
-        let future = try snapshot([DevelopmentEnvironment(name: "Dev", createdAt: Date(), schemaVersion: SchemaVersion(99))])
+        let future = try snapshot([DevelopmentEnvironment(name: "Dev", createdAt: Date(), schemaVersion: SchemaVersion(99)!)])
         await #expect(throws: StateStoreError.inconsistentSnapshot(reason: "a development Mac record with another schema version")) {
             try await store.saveSnapshot(future)
         }
@@ -383,11 +383,11 @@ import Testing
     }
 
     @Test func twoMigrationsFromOneVersionAreReportedNotTrapped() {
-        let ambiguous = SnapshotMigrator(current: SchemaVersion(2), migrations: [
-            SnapshotMigrator.Migration(from: SchemaVersion(1)) { _ in Data("{\"schemaVersion\":2}".utf8) },
-            SnapshotMigrator.Migration(from: SchemaVersion(1)) { _ in Data("{\"schemaVersion\":2}".utf8) },
+        let ambiguous = SnapshotMigrator(current: SchemaVersion(2)!, migrations: [
+            SnapshotMigrator.Migration(from: SchemaVersion(1)!) { _ in Data("{\"schemaVersion\":2}".utf8) },
+            SnapshotMigrator.Migration(from: SchemaVersion(1)!) { _ in Data("{\"schemaVersion\":2}".utf8) },
         ])
-        #expect(throws: StateStoreError.duplicateMigration(from: SchemaVersion(1))) {
+        #expect(throws: StateStoreError.duplicateMigration(from: SchemaVersion(1)!)) {
             try ambiguous.migrate(Data("{\"schemaVersion\":1}".utf8))
         }
     }

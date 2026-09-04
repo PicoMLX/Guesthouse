@@ -153,7 +153,7 @@ import Testing
         """
         try Data(future.utf8).write(to: root.appending(path: StateStore.snapshotFileName))
         let store = try StateStore(rootURL: root)
-        await #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(99), current: .current)) {
+        await #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(99)!, current: .current)) {
             try await store.loadSnapshot()
         }
     }
@@ -174,13 +174,13 @@ import Testing
     }
 
     @Test func migrationsRunInSequenceAndMissingStepFails() throws {
-        let v2 = SnapshotMigrator(current: SchemaVersion(2), migrations: [
-            .init(from: SchemaVersion(0)) { data in
+        let v2 = SnapshotMigrator(current: SchemaVersion(2)!, migrations: [
+            .init(from: SchemaVersion.unversioned) { data in
                 var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 object["schemaVersion"] = 1
                 return try JSONSerialization.data(withJSONObject: object)
             },
-            .init(from: SchemaVersion(1)) { data in
+            .init(from: SchemaVersion(1)!) { data in
                 var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 object["schemaVersion"] = 2
                 object["migrated"] = true
@@ -188,13 +188,13 @@ import Testing
             },
         ])
         let (data, from) = try v2.migrate(Data("{}".utf8))
-        #expect(from == SchemaVersion(0))
+        #expect(from == SchemaVersion.unversioned)
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(object["schemaVersion"] as? Int == 2)
         #expect(object["migrated"] as? Bool == true)
 
-        let gap = SnapshotMigrator(current: SchemaVersion(3), migrations: [])
-        #expect(throws: StateStoreError.migrationMissing(from: SchemaVersion(1))) {
+        let gap = SnapshotMigrator(current: SchemaVersion(3)!, migrations: [])
+        #expect(throws: StateStoreError.migrationMissing(from: SchemaVersion(1)!)) {
             try gap.migrate(Data("{\"schemaVersion\":1}".utf8))
         }
     }

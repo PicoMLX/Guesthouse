@@ -39,7 +39,7 @@ public struct SnapshotMigrator: Sendable {
     /// `0 → 1`: documents written before versioning carry no `schemaVersion` key. They are
     /// treated as version 0 and receive the key; nothing else about them changes.
     public static let standard = SnapshotMigrator(migrations: [
-        Migration(from: SchemaVersion(0)) { data in
+        Migration(from: .unversioned) { data in
             var object = try SnapshotMigrator.object(in: data)
             object["schemaVersion"] = 1
             guard let upgraded = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
@@ -85,14 +85,17 @@ public struct SnapshotMigrator: Sendable {
 
     static func version(of data: Data) throws -> SchemaVersion {
         let object = try object(in: data)
-        guard let raw = object["schemaVersion"] else { return SchemaVersion(0) }
+        guard let raw = object["schemaVersion"] else { return .unversioned }
         // `true` and `false` arrive as boolean `NSNumber`s, which cast to 1 and 0. A document
         // whose version reads `false` would otherwise look unversioned and be rewritten as
         // version 1 instead of being reported as corrupt.
         guard CFGetTypeID(raw as CFTypeRef) != CFBooleanGetTypeID(), let value = raw as? Int else {
             throw StateStoreError.corruptSnapshot
         }
-        return SchemaVersion(value)
+        // A document that carries a version at all must carry one a reader accepts: zero or a
+        // negative number is not the unversioned case, it is damage.
+        guard let version = SchemaVersion(value) else { throw StateStoreError.corruptSnapshot }
+        return version
     }
 }
 
