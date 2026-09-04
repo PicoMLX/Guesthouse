@@ -25,7 +25,17 @@ public final class ProcessRun: @unchecked Sendable {
     private var terminationRequested = false
     private var standardInputFailed = false
     private var outputTruncated = false
-    private var killTask: Task<Void, Never>?
+    /// Set under the same lock that reads it, so two overlapping requests cannot each start
+    /// their own escalation of the same process graph.
+    private var terminating = false
+    /// When SIGKILL is due, and which escalation owns that deadline: an earlier deadline
+    /// supersedes the one already waiting, and the superseded task does nothing.
+    private var killDeadline: ContinuousClock.Instant?
+    private var killGeneration = 0
+    private var capturedDescendants: [pid_t: Date] = [:]
+    /// The child's start time, read at launch. A PID the kernel reused after the child exited
+    /// is not the child, and is never signaled.
+    private var childStart: Date?
     private var timeoutTask: Task<Void, Never>?
     private var standardInputChannel: DispatchIO?
     /// Self-reference held from launch until `finish`, so the run outlives its callers.
@@ -38,6 +48,11 @@ public final class ProcessRun: @unchecked Sendable {
     }
 
     public var processIdentifier: Int32 { process.processIdentifier }
+
+    /// When SIGKILL falls due for whatever has not stopped yet, and `nil` once nothing is
+    /// pending. It outlives the child's own exit: a descendant that is still shutting down
+    /// keeps the grace period the caller asked for.
+    var escalationDeadline: ContinuousClock.Instant? { lock.withLock { killDeadline } }
 
     /// Waits for the child to end.
     public func exit() async -> ProcessExit {
@@ -63,6 +78,12 @@ public final class ProcessRun: @unchecked Sendable {
 
     func retainWhileRunning() {
         lock.withLock { retainedWhileRunning = self }
+    }
+
+    /// Reads the child's identity right after launch, while the PID is certainly still its own.
+    func recordChildIdentity() {
+        let start = Self.startTime(of: process.processIdentifier)
+        lock.withLock { childStart = start }
     }
 
     func markStandardInputFailed() {
@@ -94,46 +115,94 @@ public final class ProcessRun: @unchecked Sendable {
         lock.withLock { outputTruncated = true }
     }
 
+    /// What one request has to do about a termination that may already be under way.
+    private enum TerminationStep {
+        case ignore
+        case begin
+        case shorten
+    }
+
     /// Records the interruption only when termination really starts: a child that exited on
     /// its own moments earlier is never reported as interrupted.
-    private func stop(gracePeriod: Duration, becauseOfTimeout: Bool) {
-        let started: Bool = lock.withLock {
-            guard exitResult == nil, killTask == nil, process.isRunning else { return false }
+    ///
+    /// - Returns: whether this call is the one that began the termination.
+    @discardableResult
+    func stop(gracePeriod: Duration, becauseOfTimeout: Bool) -> Bool {
+        let deadline = ContinuousClock.now + gracePeriod
+        let (step, generation): (TerminationStep, Int) = lock.withLock {
+            guard exitResult == nil, process.isRunning else { return (.ignore, 0) }
             if becauseOfTimeout { timedOut = true } else { terminationRequested = true }
-            return true
+            // A request that would escalate no earlier than the one already waiting changes
+            // nothing; an earlier one takes over, so a caller asking for a long grace period
+            // cannot stretch the invocation past its own deadline.
+            if terminating, let current = killDeadline, deadline >= current { return (.ignore, 0) }
+            let step: TerminationStep = terminating ? .shorten : .begin
+            terminating = true
+            killDeadline = deadline
+            killGeneration += 1
+            return (step, killGeneration)
         }
-        guard started else { return }
-        let pid = process.processIdentifier
-        // Helpers the program forked are signaled too, so a timeout cannot leave a
-        // descendant modifying the host or the VM after the exit is reported. Each one is
-        // captured with its start time: a PID reused during the grace period is not ours.
+        switch step {
+        case .ignore:
+            return false
+        case .begin:
+            beginTermination()
+            escalate(after: gracePeriod, generation: generation)
+            return true
+        case .shorten:
+            escalate(after: gracePeriod, generation: generation)
+            return false
+        }
+    }
+
+    /// SIGTERM for the child and for every helper it had forked, so a timeout cannot leave a
+    /// descendant modifying the host or the VM after the exit is reported. Each helper is
+    /// captured with its start time and signaled only while it is still that process.
+    private func beginTermination() {
         var captured: [pid_t: Date] = [:]
-        for child in Self.descendants(of: pid) {
+        for child in Self.descendants(of: process.processIdentifier) {
             captured[child] = Self.startTime(of: child)
         }
+        lock.withLock { capturedDescendants = captured }
         process.terminate()
-        for child in captured.keys { kill(child, SIGTERM) }
-        let task = Task { [self] in
+        for (child, start) in captured { Self.signalIfUnchanged(SIGTERM, to: child, startedAt: start) }
+    }
+
+    /// SIGKILL for whatever ignored SIGTERM, when the grace period ends. Deliberately not tied
+    /// to the child's own exit: a descendant still cleaning up keeps the whole grace period
+    /// even when its parent exits at once.
+    private func escalate(after gracePeriod: Duration, generation: Int) {
+        let pid = process.processIdentifier
+        Task { [self] in
             try? await Task.sleep(for: gracePeriod)
-            // Descendants are escalated on their own: a helper that ignored SIGTERM must not
-            // outlive a parent that exited on it. A captured PID is signaled only while it
-            // still belongs to the process seen before the grace period.
-            for (child, start) in captured where Self.startTime(of: child) == start {
-                kill(child, SIGKILL)
+            let state: (captured: [pid_t: Date], child: Date?)? = lock.withLock {
+                // A later request with an earlier deadline has taken this over.
+                guard killGeneration == generation else { return nil }
+                killDeadline = nil
+                return (capturedDescendants, childStart)
             }
-            for child in Self.descendants(of: pid) where captured[child] == nil {
-                kill(child, SIGKILL)
+            guard let (captured, child) = state else { return }
+            for (descendant, start) in captured { Self.signalIfUnchanged(SIGKILL, to: descendant, startedAt: start) }
+            // Helpers first seen now are captured with their identity as well, and only while
+            // the child is still ours: once its PID belongs to somebody else, the processes
+            // below it are strangers.
+            if let child, Self.startTime(of: pid) == child {
+                var late: [pid_t: Date] = [:]
+                for descendant in Self.descendants(of: pid) where captured[descendant] == nil {
+                    late[descendant] = Self.startTime(of: descendant)
+                }
+                for (descendant, start) in late { Self.signalIfUnchanged(SIGKILL, to: descendant, startedAt: start) }
             }
-            if self.process.isRunning { kill(pid, SIGKILL) }
+            Self.signalIfUnchanged(SIGKILL, to: pid, startedAt: child)
         }
-        lock.withLock { killTask = task }
     }
 
     func finish(with reason: ProcessExit.Reason) {
         // The handler captured this run; releasing it breaks the run/process cycle.
         process.terminationHandler = nil
+        // The escalation task outlives this: descendants may still be cleaning up on the
+        // SIGTERM they were sent, and they keep the grace period the caller asked for.
         let (waiters, exit): ([CheckedContinuation<ProcessExit, Never>], ProcessExit) = lock.withLock {
-            killTask?.cancel()
             timeoutTask?.cancel()
             timeoutTask = nil
             let exit = ProcessExit(reason: reason, timedOut: timedOut, terminated: terminationRequested, standardInputFailed: standardInputFailed, outputTruncated: outputTruncated)
@@ -145,6 +214,15 @@ public final class ProcessRun: @unchecked Sendable {
         }
         outputContinuation.finish()
         for waiter in waiters { waiter.resume(returning: exit) }
+    }
+
+    /// Signals `pid` only while it is still the process whose start time was captured. A PID
+    /// the kernel handed to somebody else after that process exited is left alone, whatever
+    /// the delay between capturing it and signaling it (MVP-PLAN.md §4).
+    @discardableResult
+    static func signalIfUnchanged(_ signal: Int32, to pid: pid_t, startedAt start: Date?) -> Bool {
+        guard let start, startTime(of: pid) == start else { return false }
+        return kill(pid, signal) == 0
     }
 
     /// The kernel's start time for `pid`, the identity that tells a reused PID from the
@@ -191,6 +269,11 @@ public actor ProcessRunner: ProcessRunning {
     public func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
         guard FileManager.default.isExecutableFile(atPath: invocation.executable.path) else {
             throw ProcessLaunchError.executableNotFound(invocation.executable.lastPathComponent)
+        }
+        // A workspace folder that is gone or unreadable is a different failure from a broken
+        // runtime, and reinstalling the runtime would not repair it.
+        if let directory = invocation.currentDirectory, !Self.isUsableDirectory(directory) {
+            throw ProcessLaunchError.workingDirectoryUnavailable(directory.lastPathComponent)
         }
 
         let process = Process()
@@ -251,6 +334,7 @@ public actor ProcessRunner: ProcessRunning {
             run.finish(with: .status(-1))
             throw ProcessLaunchError.launchFailed(executable: invocation.executable.lastPathComponent, reason: SanitizedText(String(describing: error), limit: 120))
         }
+        run.recordChildIdentity()
 
         // The timeout is armed before standard input is delivered, so a child that never
         // reads it is still ended at the deadline.
@@ -266,6 +350,8 @@ public actor ProcessRunner: ProcessRunning {
             // SIGPIPE is suppressed on this descriptor alone; the process-wide disposition,
             // which children would inherit across exec, is left as it is.
             _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+            // `DispatchIO` borrows the descriptor and hands it back here; this close is the
+            // only one, and it is what lets the child see end of input.
             let channel = DispatchIO(type: .stream, fileDescriptor: handle.fileDescriptor, queue: Self.standardInputQueue) { _ in
                 try? handle.close()
             }
@@ -280,6 +366,13 @@ public actor ProcessRunner: ProcessRunning {
             }
         }
         return run
+    }
+
+    /// Whether a working directory is there and can be entered.
+    static func isUsableDirectory(_ url: URL) -> Bool {
+        var info = stat()
+        guard stat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return false }
+        return access(url.path, X_OK) == 0
     }
 }
 
@@ -355,7 +448,9 @@ private final class OutputReaders: @unchecked Sendable {
     private func emit(_ lineData: Data, id: ObjectIdentifier, kind: Kind) {
         let redacted: RedactedLine? = lock.withLock {
             guard emittedBytes < maximumBytes else { return nil }
-            emittedBytes += lineData.count
+            // The ending that closed the record is charged too, so a child printing nothing
+            // but newlines still reaches the cap instead of streaming for as long as it runs.
+            emittedBytes += lineData.count + 1
             var state = states[id] ?? Redactor.StreamState()
             let result = redactor.redact(processOutputLine: String(decoding: lineData, as: UTF8.self), state: &state)
             states[id] = state

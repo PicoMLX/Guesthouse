@@ -3,10 +3,14 @@ import Foundation
 /// Splits a byte stream into records for redaction: a record ends at `\n` or `\r` (a `\r\n`
 /// pair is one ending, even across two reads), or when it reaches `maximumRecordBytes`.
 ///
-/// A forced split happens at the last ASCII separator anywhere in the record when there is
-/// one, so a token (which contains no separator) is never cut in two however long it is;
-/// otherwise at a UTF-8 scalar boundary, so no scalar is ever torn, and a scalar whose
-/// remaining bytes have not arrived yet is held for the next read.
+/// A forced split happens at the last ASCII separator in the record when there is one, so a
+/// token (which contains no separator) is never cut in two however long it is; otherwise at a
+/// UTF-8 scalar boundary, so no scalar is ever torn, and a scalar whose remaining bytes have
+/// not arrived yet is held for the next read.
+///
+/// The separator begins the record that follows it rather than ending the one before, so a
+/// value cut away from the label that introduced it still reads as an indented continuation
+/// and the redactor removes it.
 struct RecordSplitter {
     static let maximumRecordBytes = 64 << 10
 
@@ -49,12 +53,15 @@ struct RecordSplitter {
         return pending.isEmpty ? nil : pending
     }
 
-    /// The index to cut a record that reached the limit: after the last separator in the
-    /// record, else at the last UTF-8 scalar boundary at or before the limit.
+    /// The index to cut a record that reached the limit: at the last separator in the record,
+    /// which then leads the next record, else at the last UTF-8 scalar boundary at or before
+    /// the limit.
     static func forcedCut(in data: Data, from start: Data.Index, through last: Data.Index) -> Data.Index {
         var index = last
         while index > start {
-            if isSeparator(data[index]) { return index + 1 }
+            // The separator goes with what follows it: a header value torn from its label is
+            // then still a folded continuation, and is redacted as one.
+            if isSeparator(data[index]) { return index }
             index -= 1
         }
         var boundary = last + 1

@@ -131,8 +131,99 @@ import Testing
         input.append(UInt8(ascii: "\n"))
         let records = splitter.consume(input)
         #expect(records.count == 2)
-        #expect(records.first?.count == (60 << 10) + 1)
-        #expect(records.last == token, "the cut goes back to the separator, however far it is")
+        #expect(records.first?.count == 60 << 10)
+        #expect(records.last == Data([UInt8(ascii: " ")]) + token, "the cut goes back to the separator, however far it is, and the separator leads what follows")
+    }
+
+    @Test func aHeaderValueTornFromItsLabelIsStillRedacted() {
+        var splitter = RecordSplitter()
+        // The forced cut lands exactly on the space between the label and its value.
+        let filler = String(repeating: "x", count: RecordSplitter.maximumRecordBytes - 16)
+        let records = splitter.consume(Data("\(filler) Authorization: opaque-secret\n".utf8))
+        #expect(records.count == 2)
+        #expect(String(decoding: records[1], as: UTF8.self) == " opaque-secret")
+
+        let redactor = Redactor()
+        var state = Redactor.StreamState()
+        let texts = records.map { redactor.redact(processOutputLine: String(decoding: $0, as: UTF8.self), state: &state).text }
+        #expect(!texts.contains { $0.contains("opaque-secret") }, "the value is a folded continuation of the label it was cut from")
+        #expect(texts.last == "[redacted:authorization]")
+    }
+
+    @Test func aSignalIsWithheldWhenThePIDIsNoLongerTheCapturedProcess() {
+        let me = getpid()
+        #expect(ProcessRun.signalIfUnchanged(0, to: me, startedAt: ProcessRun.startTime(of: me)))
+        // A start time that is not this process's stands for a PID the kernel handed on after
+        // the captured process exited; signaling it would hit whoever holds it now.
+        #expect(!ProcessRun.signalIfUnchanged(0, to: me, startedAt: Date(timeIntervalSince1970: 1)))
+        #expect(!ProcessRun.signalIfUnchanged(0, to: me, startedAt: nil))
+    }
+
+    @Test func theGracePeriodOutlivesAParentThatExitsOnTheSignal() async throws {
+        let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/caffeinate"), arguments: ["-i", "/bin/sleep", "30"], timeout: .seconds(30), terminationGracePeriod: .seconds(1)))
+        for _ in 0..<100 where ProcessRun.descendants(of: run.processIdentifier).isEmpty {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        run.terminate(gracePeriod: .seconds(1))
+        #expect(await run.exit().terminated)
+        // caffeinate exits on SIGTERM at once. A helper of its own that is still stopping has
+        // the rest of the second before it is killed, and the parent's exit must not take it.
+        let due = try #require(run.escalationDeadline, "the parent's exit cancelled the helpers' grace period")
+        #expect(due > ContinuousClock.now)
+        for _ in 0..<300 where run.escalationDeadline != nil { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(run.escalationDeadline == nil, "the escalation still runs when the grace period ends")
+    }
+
+    @Test func theInvocationDeadlineShortensAnOpenEndedTermination() async throws {
+        let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"], timeout: .seconds(30), terminationGracePeriod: .milliseconds(200)))
+        // Stopping the child first keeps it from finishing its exit between the two requests,
+        // so the second one meets a termination that is genuinely still under way.
+        #expect(kill(run.processIdentifier, SIGSTOP) == 0)
+        let began = run.stop(gracePeriod: .seconds(3600), becauseOfTimeout: false)
+        let asked = run.escalationDeadline
+        let second = run.stop(gracePeriod: .milliseconds(200), becauseOfTimeout: true)
+        let enforced = run.escalationDeadline
+        #expect(began)
+        #expect(!second, "the deadline joins the termination under way instead of starting another")
+        #expect(try #require(enforced) < #require(asked), "an invocation cannot be stretched past its own deadline by the grace period a caller asked for")
+        let exit = await run.exit()
+        #expect(exit.timedOut)
+        #expect(exit.terminated)
+    }
+
+    @Test func overlappingTerminationRequestsBeginOneEscalation() async throws {
+        let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/caffeinate"), arguments: ["-i", "/bin/sleep", "30"], timeout: .seconds(30), terminationGracePeriod: .milliseconds(200)))
+        // A process graph makes the scan that precedes the signals long enough for two
+        // requests to overlap inside it.
+        for _ in 0..<100 where ProcessRun.descendants(of: run.processIdentifier).isEmpty {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let begun = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<16 {
+                group.addTask { run.stop(gracePeriod: .milliseconds(200), becauseOfTimeout: false) }
+            }
+            var count = 0
+            for await began in group where began { count += 1 }
+            return count
+        }
+        #expect(begun == 1, "only one request may own the termination of one process graph")
+        #expect(await run.exit().terminated)
+    }
+
+    @Test func newlineOnlyOutputStillReachesTheCap() async throws {
+        let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/yes"), arguments: [""], timeout: .milliseconds(400), terminationGracePeriod: .milliseconds(100), maximumOutputBytes: 500))
+        let result = await collect(run)
+        #expect(result.exit.outputTruncated)
+        #expect(result.lines.allSatisfy { $0.isEmpty })
+        // Each record costs at least the ending that closed it, so a 500 byte cap admits at
+        // most 500 of them however long the child keeps printing.
+        #expect(result.lines.count <= 500, "\(result.lines.count) empty records passed a 500 byte cap")
+    }
+
+    @Test func aMissingWorkingDirectoryIsItsOwnFailure() async {
+        await #expect(throws: ProcessLaunchError.workingDirectoryUnavailable("here")) {
+            _ = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/pwd"), currentDirectory: URL(fileURLWithPath: "/definitely/not/here")))
+        }
     }
 
     @Test func anUnfinishedScalarAtTheLimitWaitsForTheNextRead() {
@@ -162,5 +253,10 @@ import Testing
             #expect(error.recoveryActions.first == .repair(.runtime))
             #expect(error.errorDescription == error.userMessage)
         }
+        // A workspace folder that is gone is not repaired by reinstalling the runtime.
+        let missing = ProcessLaunchError.workingDirectoryUnavailable("feature-123")
+        #expect(!missing.userMessage.isEmpty)
+        #expect(missing.recoveryActions == [.inspectState, .retry, .cancel])
+        #expect(missing.errorDescription == missing.userMessage)
     }
 }

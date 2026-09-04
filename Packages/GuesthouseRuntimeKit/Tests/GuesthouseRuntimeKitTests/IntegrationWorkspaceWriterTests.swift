@@ -63,8 +63,36 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: repos.path).isEmpty, "nothing was written through the link")
     }
 
+    /// The guest shares this file system and changes it while the write runs, so a directory
+    /// that was checked can be a link by the time the next file is written.
+    @Test func aRootSwappedForALinkWhileWritingCannotRedirectIt() async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Swap-\(UUID().uuidString)")
+        let root = base.appending(path: "workspace")
+        let moved = base.appending(path: "moved")
+        let decoy = base.appending(path: "repos/MyApp")
+        let link = base.appending(path: "link")
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: decoy)
+        let files = (0..<1_500).map { GeneratedFile(relativePath: "artifacts/file-\($0)", text: "x") }
+
+        let writing = Task.detached { try IntegrationWorkspaceWriter.write(files, to: root) }
+        let first = root.appending(path: "artifacts/file-0")
+        for _ in 0..<2_000 where !FileManager.default.fileExists(atPath: first.path) {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        // The root is renamed away and the link to a checkout takes its name: a writer that
+        // resolves the path again for every file would follow it from here on.
+        try FileManager.default.moveItem(at: root, to: moved)
+        try FileManager.default.moveItem(at: link, to: root)
+        try await writing.value
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: decoy.path).isEmpty, "no file was written through the link")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: moved.appending(path: "artifacts").path).count == files.count)
+    }
+
     @Test func writeFailuresAreActionable() throws {
-        let files = try IntegrationWorkspaceGenerator.generate(manifest())
+        let files = try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project)
         #expect(throws: GeneratedFileError.self) { try IntegrationWorkspaceWriter.write(files, to: URL(fileURLWithPath: "/dev/null/workspace")) }
         for error in [GeneratedFileError.invalidPath("x"), .pathOutsideWorkspace("x"), .unwritable(path: "x", reason: "full")] {
             #expect(!error.userMessage.isEmpty)
@@ -83,7 +111,7 @@ import Testing
         try Data("pins".utf8).write(to: resolved)
         let before = try snapshot(of: root.appending(path: "repos"))
 
-        let files = try IntegrationWorkspaceGenerator.generate(manifest(), appResolvedPackages: Data(contentsOf: resolved))
+        let files = try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project, appResolvedPackages: Data(contentsOf: resolved))
         try IntegrationWorkspaceWriter.write(files, to: root)
 
         #expect(try snapshot(of: root.appending(path: "repos")) == before)
@@ -108,10 +136,10 @@ import Testing
 
     @Test func regenerationWithoutResolvedPackagesRemovesTheStaleCopy() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
-        try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest(), appResolvedPackages: Data("pins".utf8)), to: root)
+        try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project, appResolvedPackages: Data("pins".utf8)), to: root)
         let resolved = root.appending(path: IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)
         #expect(FileManager.default.fileExists(atPath: resolved.path))
-        try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest()), to: root)
+        try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project), to: root)
         #expect(!FileManager.default.fileExists(atPath: resolved.path))
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "Integration.xcworkspace/contents.xcworkspacedata").path))
     }
