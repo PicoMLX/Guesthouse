@@ -60,12 +60,75 @@ import Testing
         #expect(throws: ResolvedPackagesError.malformed("state")) { try ResolvedPackagesFile.decode(pin("")) }
         #expect(throws: ResolvedPackagesError.malformed("state")) { try ResolvedPackagesFile.decode(pin(#","state":"1.0.0""#)) }
         #expect(throws: ResolvedPackagesError.malformed("state.revision")) { try ResolvedPackagesFile.decode(pin(#","state":{"version":"1.0.0"}"#)) }
+        // A revision that is present but blank identifies no commit either.
+        #expect(throws: ResolvedPackagesError.malformed("state.revision")) { try ResolvedPackagesFile.decode(pin(#","state":{"revision":"","version":"1.0.0"}"#)) }
+        #expect(throws: ResolvedPackagesError.malformed("state.revision")) { try ResolvedPackagesFile.decode(pin(#","state":{"revision":"  ","version":"1.0.0"}"#)) }
         #expect(throws: ResolvedPackagesError.malformed("state.version")) {
             try ResolvedPackagesFile.decode(pin(#","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":1}"#))
         }
         // A registry pin carries a version and no commit, and still decodes.
         let registry = try ResolvedPackagesFile.decode(Data(#"{"version":3,"pins":[{"identity":"registrykit","kind":"registry","location":"org.registrykit","state":{"version":"2.0.0"}}]}"#.utf8))
         #expect(registry.pins.first?.version == "2.0.0")
+    }
+
+    /// GitHub resolves `foo%2Dbar` to the same repository as `foo-bar`, but SwiftPM keeps the
+    /// spelling and pins the identity `foo%2dbar`, which no checkout directory can carry.
+    @Test func anEncodedPinLocationIsAnIdentityMismatchNotAnAbsentDependency() {
+        let remote = RemoteURL("https://github.com/Org/foo-bar")!
+        let file = resolved(identity: "foo%2dbar", location: "https://github.com/Org/foo%2Dbar.git")
+        let package = WorkspaceRepository(role: .package, remote: remote, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        #expect(LocalOverrideMatcher.match(selected: [package], resolved: file, observedOrigins: [package.checkoutName: remote])
+            == [.identityMismatch(identity: PackageIdentity(remote: remote), pinned: PackageIdentity(resolvedIdentity: "foo%2dbar")!, location: "https://github.com/Org/foo%2Dbar.git")],
+            "the app depends on this repository, so it is never reported as one to add")
+    }
+
+    /// SwiftPM parses a pinned version with the semantic-version grammar and refuses the whole
+    /// lockfile when it does not parse, so a wrapper seeded from it would fail at resolution.
+    @Test func aPinnedVersionMustBeOneSwiftPMCanParse() throws {
+        func pin(_ version: String) -> Data {
+            Data(#"{"version":3,"pins":[{"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":"\#(version)"}}]}"#.utf8)
+        }
+        for bad in ["not-semver", "1.0", "1.0.0.0", "v1.0.0", "1.0.0-", "1.0.0+", "1.0.0-beta..1", "1.0.x"] {
+            #expect(throws: ResolvedPackagesError.malformed("state.version")) { try ResolvedPackagesFile.decode(pin(bad)) }
+        }
+        for good in ["1.0.0", "0.1.0-beta.1", "1.2.3+build.5", "1.2.3-rc.1+exp.sha.5114f85"] {
+            #expect(throws: Never.self) { try ResolvedPackagesFile.decode(pin(good)) }
+        }
+    }
+
+    /// A registry pin is pinned by version alone, so SwiftPM refuses one that carries none.
+    @Test func aRegistryPinWithoutAVersionIsRefused() {
+        func pin(_ state: String) -> Data {
+            Data(#"{"version":3,"pins":[{"identity":"registrykit","kind":"registry","location":"org.registrykit"\#(state)}]}"#.utf8)
+        }
+        #expect(throws: ResolvedPackagesError.malformed("state")) { try ResolvedPackagesFile.decode(pin("")) }
+        #expect(throws: ResolvedPackagesError.malformed("state")) { try ResolvedPackagesFile.decode(pin(#","state":null"#)) }
+        #expect(throws: ResolvedPackagesError.malformed("state.version")) { try ResolvedPackagesFile.decode(pin(#","state":{}"#)) }
+        #expect(throws: ResolvedPackagesError.malformed("state.version")) { try ResolvedPackagesFile.decode(pin(#","state":{"branch":"main"}"#)) }
+        #expect(throws: Never.self) { try ResolvedPackagesFile.decode(pin(#","state":{"version":"2.0.0"}"#)) }
+    }
+
+    /// A source-control pin's revision is the commit SwiftPM checked out, so text that is not
+    /// a Git object ID pins nothing, however plausible it reads.
+    @Test func aRevisionThatIsNotACommitIDIsRefused() throws {
+        func pin(_ revision: String) -> Data {
+            Data(#"{"version":3,"pins":[{"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"revision":"\#(revision)","version":"1.0.0"}}]}"#.utf8)
+        }
+        for bad in ["not-a-commit", "main", "0123456789abcdef", String(repeating: "0", count: 40), "0123456789abcdef0123456789abcdef0123456z"] {
+            #expect(throws: ResolvedPackagesError.malformed("state.revision"), Comment(rawValue: bad)) { try ResolvedPackagesFile.decode(pin(bad)) }
+        }
+        let good = try ResolvedPackagesFile.decode(pin("0123456789ABCDEF0123456789abcdef01234567"))
+        #expect(good.pins.first?.revision == "0123456789ABCDEF0123456789abcdef01234567", "the lockfile's own spelling is kept")
+    }
+
+    /// The lockfile is committed in a repository the user merely selected, so its size is
+    /// bounded before the parser materializes it.
+    @Test func anOversizedLockfileIsRefusedBeforeItIsParsed() {
+        let padding = String(repeating: "p", count: ResolvedPackagesFile.maximumEncodedSize)
+        let data = Data(#"{"version":3,"pins":[],"padding":"\#(padding)"}"#.utf8)
+        #expect(throws: ResolvedPackagesError.tooLarge(bytes: data.count)) { try ResolvedPackagesFile.decode(data) }
+        #expect(!ResolvedPackagesError.tooLarge(bytes: data.count).recoveryActions.isEmpty)
+        #expect(throws: Never.self) { try ResolvedPackagesFile.decode(Data(#"{"version":3,"pins":[]}"#.utf8)) }
     }
 
     @Test func thePublicMatchingTypesAreSendable() {
@@ -77,15 +140,25 @@ import Testing
     }
 
     @Test func anIdentityFromALocationMatchesTheOneDerivedFromItsRemote() {
-        // The SCP form without a path has only the colon between the host and the repository,
-        // so splitting on `/` alone would keep `git@example.com:` inside the identity.
-        #expect(PackageIdentity(location: "git@example.com:SharedUI.git")?.rawValue == "sharedui")
+        // SwiftPM splits a location on the path separator alone, so the SCP form without a
+        // path keeps its host prefix: `swift package resolve` on `git@github.com:Foo.git`
+        // reports the identity `git@github.com:foo`.
+        #expect(PackageIdentity(location: "git@example.com:SharedUI.git")?.rawValue == "git@example.com:sharedui")
         #expect(PackageIdentity(location: "git@github.com:PicoMLX/SharedUI.git")?.rawValue == "sharedui")
         // SwiftPM strips only a lowercase `.git`, so both routes to an identity keep `.GIT`
         // and a caller cannot derive two spellings for one dependency.
         let remote = RemoteURL("https://github.com/Org/Mixed-Repo.GIT")!
         #expect(PackageIdentity(location: "https://github.com/Org/Mixed-Repo.GIT") == PackageIdentity(remote: remote))
         #expect(PackageIdentity(location: "git@github.com:Org/Mixed-Repo.GIT")?.rawValue == "mixed-repo.git")
+    }
+
+    @Test func aLocationKeepsTheBoundarySpacesOfItsBasename() {
+        // SwiftPM 6.3 writes `" foo "` for a local dependency at `/tmp/spmspace/ Foo `, so an
+        // identity derived here without those spaces would never associate with that pin.
+        #expect(PackageIdentity(location: "/tmp/spmspace/ Foo ")?.rawValue == " foo ")
+        #expect(PackageIdentity(location: "/tmp/spmspace/ Foo ") == PackageIdentity(resolvedIdentity: " foo "))
+        // A line terminator is framing from whatever read the location, never part of a name.
+        #expect(PackageIdentity(location: "https://github.com/Org/SharedUI.git\n")?.rawValue == "sharedui")
     }
 
     @Test func aDecodedIdentityCarriesTheInvariantsADerivedOneHas() throws {

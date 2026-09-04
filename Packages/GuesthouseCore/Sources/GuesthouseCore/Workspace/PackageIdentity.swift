@@ -8,16 +8,17 @@ public struct PackageIdentity: Hashable, Sendable, CustomStringConvertible {
     public let rawValue: String
 
     public init?(location: String) {
-        var text = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only line terminators are removed. A checkout directory may begin or end with a
+        // space and SwiftPM keeps it: `/tmp/spmspace/ Foo ` is the package `" foo "`, so
+        // trimming the location would derive an identity no pin carries.
+        var text = location.trimmingCharacters(in: .newlines)
         while text.hasSuffix("/") { text.removeLast() }
-        // An SCP-form remote (`git@host:Name.git`) has no slash at all, so the colon that
-        // separates the host from the path is the only separator there is; splitting on `/`
-        // alone would keep `git@host:` inside the identity.
+        // The path separator is the only separator SwiftPM uses. An SCP-form remote has none,
+        // so `git@host:Name.git` is the package `git@host:name`, not `name`; splitting on the
+        // colon here would name a package that no `Package.resolved` entry carries.
         var name: String
         if let slash = text.lastIndex(of: "/") {
             name = String(text[text.index(after: slash)...])
-        } else if let colon = text.lastIndex(of: ":") {
-            name = String(text[text.index(after: colon)...])
         } else {
             name = text
         }
@@ -101,7 +102,14 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
         self.pins = pins
     }
 
+    /// A lockfile pins one entry of a few hundred bytes per dependency, so this is room for
+    /// thousands of them. The file is committed in a repository the workspace only selected,
+    /// so its size is bounded before `JSONSerialization` materializes the whole document and
+    /// the pin arrays are built from it.
+    public static let maximumEncodedSize = 1024 * 1024
+
     public static func decode(_ data: Data) throws(ResolvedPackagesError) -> ResolvedPackagesFile {
+        guard data.count <= Self.maximumEncodedSize else { throw .tooLarge(bytes: data.count) }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw .notJSON }
         guard let version = object["version"] as? Int else { throw .missingVersion }
         guard version == 2 || version == 3 else { throw .unsupportedVersion(version) }
@@ -125,15 +133,60 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
     private static func decodeState(_ raw: Any?, kind: Pin.Kind) throws(ResolvedPackagesError) -> (revision: String?, version: String?, branch: String?) {
         let isSourceControl = kind == .remoteSourceControl || kind == .localSourceControl
         guard let raw, !(raw is NSNull) else {
-            if isSourceControl { throw .malformed("state") }
+            // A registry pin is pinned by version alone, so SwiftPM refuses one that carries
+            // no state for the same reason it refuses a source-control pin without a commit.
+            // Reading it as a pin with no metadata would approve overrides from a lockfile the
+            // wrapper's own resolution then rejects, where re-resolving is no longer a repair
+            // the user can make.
+            if isSourceControl || kind == .registry { throw .malformed("state") }
             return (nil, nil, nil)
         }
         guard let fields = raw as? [String: Any] else { throw .malformed("state") }
         let revision = try string(fields["revision"], field: "state.revision")
         let version = try string(fields["version"], field: "state.version")
         let branch = try string(fields["branch"], field: "state.branch")
-        if isSourceControl, revision == nil { throw .malformed("state.revision") }
+        // SwiftPM writes the full Git object ID it resolved, so a revision that is not one
+        // names no commit and is as corrupt as an absent one, whether it is blank or a branch
+        // name: an override approved against it would fail at resolution or at the build
+        // instead of here, where the lockfile can still be re-resolved.
+        if isSourceControl, CommitSHA(revision ?? "") == nil { throw .malformed("state.revision") }
+        // SwiftPM parses a pinned version with the semantic-version grammar and refuses the
+        // whole file when it does not parse, so text such as `not-semver` names a lockfile the
+        // wrapper cannot be seeded from. It is caught here, while the repair is still to
+        // resolve packages in Xcode and commit the result.
+        if let version, !isSemanticVersion(version) { throw .malformed("state.version") }
+        if kind == .registry, version == nil { throw .malformed("state.version") }
         return (revision, version, branch)
+    }
+
+    /// SwiftPM's `Version` grammar: three numeric identifiers, then an optional prerelease and
+    /// optional build metadata, each a dot-separated run of alphanumerics and hyphens.
+    static func isSemanticVersion(_ text: String) -> Bool {
+        var numbers = Substring(text)
+        // Build metadata is split off first: it may contain hyphens, which would otherwise
+        // read as the start of a prerelease.
+        if let plus = numbers.firstIndex(of: "+") {
+            let metadata = numbers[numbers.index(after: plus)...]
+            numbers = numbers[..<plus]
+            guard isVersionIdentifiers(metadata) else { return false }
+        }
+        if let hyphen = numbers.firstIndex(of: "-") {
+            let prerelease = numbers[numbers.index(after: hyphen)...]
+            numbers = numbers[..<hyphen]
+            guard isVersionIdentifiers(prerelease) else { return false }
+        }
+        let parts = numbers.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 3 && parts.allSatisfy { part in
+            !part.isEmpty && part.allSatisfy { $0.isASCII && $0.isNumber }
+        }
+    }
+
+    private static func isVersionIdentifiers(_ text: Substring) -> Bool {
+        let identifiers = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard !identifiers.isEmpty else { return false }
+        return identifiers.allSatisfy { identifier in
+            !identifier.isEmpty && identifier.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
     }
 
     /// A present-but-unreadable field is refused rather than dropped, so a lockfile that spells
@@ -151,9 +204,12 @@ public enum ResolvedPackagesError: Error, Hashable, Sendable, LocalizedError {
     case unsupportedVersion(Int)
     case unknownKind(String)
     case malformed(String)
+    /// The committed file is larger than any lockfile, so it is refused before it is parsed.
+    case tooLarge(bytes: Int)
 
     public var userMessage: String {
         switch self {
+        case .tooLarge(let bytes): "The app's Package.resolved is \(bytes) bytes, larger than the \(ResolvedPackagesFile.maximumEncodedSize) a lockfile can be, so Guesthouse did not read it. Check that file in the app repository, resolve packages in Xcode, and commit the result, then try again."
         case .notJSON: "The app's Package.resolved is not valid JSON. Resolve packages in Xcode and commit the file, then try again."
         case .missingVersion: "The app's Package.resolved has no version field. Resolve packages in Xcode and commit the file, then try again."
         case .unsupportedVersion(let version): "The app's Package.resolved uses format \(version), which this version of Guesthouse does not read. Update Guesthouse, or resolve packages with the Xcode version Guesthouse supports."
@@ -185,10 +241,11 @@ public enum LocalOverrideMatcher: Sendable {
         case collision(identity: PackageIdentity, locations: [String])
         /// The app does not depend on this package, directly or transitively.
         case notADependency(identity: PackageIdentity)
-        /// The app pins this repository, but under an identity SwiftPM did not derive from the
-        /// pinned location. A dependency mirror does exactly this: SwiftPM writes the mirror's
-        /// identity and maps the location back to the original URL. A local checkout can only
-        /// carry the location's identity, so the override would never take effect.
+        /// The app pins this repository, but under an identity a local checkout cannot carry,
+        /// so the override would never take effect. A dependency mirror does this: SwiftPM
+        /// writes the mirror's identity and maps the location back to the original URL. So
+        /// does a percent-encoded location: GitHub resolves `foo%2Dbar` to the same repository
+        /// as `foo-bar`, while SwiftPM keeps the spelling and pins the identity `foo%2dbar`.
         case identityMismatch(identity: PackageIdentity, pinned: PackageIdentity, location: String)
         /// The dependency exists but is not a Git URL dependency (registry or local path).
         case unsupportedKind(identity: PackageIdentity, kind: ResolvedPackagesFile.Pin.Kind)
@@ -228,8 +285,8 @@ public enum LocalOverrideMatcher: Sendable {
                 // identity, so the app does depend on the selected repository even though no
                 // pin carries its identity. Reporting that as an absent dependency would send
                 // the user to add a dependency the app already has.
-                if let mirrored = resolved.pins.first(where: { RemoteURL($0.location) == repository.remote }) {
-                    results.append(.identityMismatch(identity: identity, pinned: mirrored.identity, location: mirrored.location))
+                if let elsewhere = resolved.pins.first(where: { Self.locates(repository.remote, $0.location) }) {
+                    results.append(.identityMismatch(identity: identity, pinned: elsewhere.identity, location: elsewhere.location))
                 } else {
                     results.append(.notADependency(identity: identity))
                 }
@@ -266,5 +323,17 @@ public enum LocalOverrideMatcher: Sendable {
             results.append(.matched(identity: identity, location: pin.location))
         }
         return results
+    }
+
+    /// Whether a pin's location names this repository, including through percent escapes.
+    ///
+    /// `RemoteURL` refuses an encoded spelling because SwiftPM keeps it when deriving the
+    /// identity, which is exactly why such a pin has to be found here: the repository is a
+    /// dependency, so reporting it as absent would tell the user to add one the app already
+    /// has. The decoded form is only ever used to recognize the pin, never to approve it.
+    private static func locates(_ remote: RemoteURL, _ location: String) -> Bool {
+        if RemoteURL(location) == remote { return true }
+        guard location.contains("%"), let decoded = location.removingPercentEncoding else { return false }
+        return RemoteURL(decoded) == remote
     }
 }
