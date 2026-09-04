@@ -128,16 +128,12 @@ struct EnvironmentCardView: View {
     /// The actions wrap: at the adaptive grid's narrow column two cards leave roughly a third
     /// of the window for each, which is not enough for these labels on one line.
     private var actionsRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                actionButtons
-                Spacer()
-                overflowMenu
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) { actionButtons }
-                HStack { Spacer(); overflowMenu }
-            }
+        // A real flow: at the adaptive grid's narrow column the buttons wrap onto as many
+        // lines as they need. `ViewThatFits` could only choose between whole layouts, so its
+        // fallback still had to fit every button on one line.
+        WrappingRow(spacing: 8) {
+            actionButtons
+            overflowMenu
         }
     }
 
@@ -253,3 +249,54 @@ struct ScenarioPreview: View {
 #Preview("Environment needing repair") { ScenarioPreview { await PreviewScenarios.environmentNeedingRepair() } }
 #Preview("Both slots full") { ScenarioPreview { await PreviewScenarios.bothSlotsFull() } }
 #Preview("Operation in progress") { ScenarioPreview { await PreviewScenarios.operationInProgress() } }
+
+/// Lays its subviews out left to right, starting a new line when the next one does not fit.
+/// Each subview keeps its ideal width, so a label is never compressed or truncated.
+struct WrappingRow: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let rows = arrange(subviews: subviews, within: width)
+        let height = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(rows.count - 1, 0))
+        let widest = rows.map(\.width).max() ?? 0
+        return CGSize(width: proposal.width ?? widest, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(subviews: subviews, within: bounds.width) {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func arrange(subviews: Subviews, within width: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+            if !current.indices.isEmpty, needed > width {
+                rows.append(current)
+                current = Row()
+            }
+            current.width = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+            current.height = max(current.height, size.height)
+            current.indices.append(index)
+        }
+        if !current.indices.isEmpty { rows.append(current) }
+        return rows
+    }
+}

@@ -406,6 +406,11 @@ final class AppModel {
                 }
             }
         } catch {
+            // The query never answered. What was cached says nothing about the VM now, and
+            // Quit must not choose stop targets from it: the status is dropped and the
+            // environment is marked as unanswered, exactly as a failed reply would.
+            statuses[id] = nil
+            statusQueryFailures.insert(id)
             launchState = .interrupted(RuntimeConnectionInterrupted())
         }
     }
