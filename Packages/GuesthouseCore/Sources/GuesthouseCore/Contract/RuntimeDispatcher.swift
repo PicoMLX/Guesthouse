@@ -3,8 +3,9 @@ import Foundation
 /// The service-side decision for one received message, before any operation runs.
 ///
 /// Pure, so the handshake and validation rules are unit-tested here rather than inside the
-/// XPC service bundle. The service applies the decision: it replies, and for
-/// `replyAndClose` it also cancels the session (MVP-PLAN.md §3, "Sandbox and XPC boundary").
+/// XPC service bundle. The service applies the decision: it replies, and for `replyAndClose`
+/// it marks the session refused and closes it on the peer's next message, so the reply is
+/// always delivered first (MVP-PLAN.md §3, "Sandbox and XPC boundary").
 public enum RuntimeDispatcher: Sendable {
     public enum Decision: Hashable, Sendable {
         /// Reply with this event and keep the session.
