@@ -27,14 +27,31 @@ public struct TartBackend: Sendable {
         }
     }
 
+    /// Launches the verified executable. macOS has no `fexecve`, so a process cannot be
+    /// started from an open descriptor: the runner opens the path. The window that leaves is
+    /// closed from the other side instead. The identity is checked again the moment the child
+    /// exists, and a process started from anything but the verified file is ended before it
+    /// is spoken to, so a substitute never receives a request or reaches a VM.
+    func launch(_ invocation: ProcessInvocation) async throws -> ProcessRun {
+        try requireVerifiedExecutable()
+        let run = try await runner.run(invocation)
+        do {
+            try requireVerifiedExecutable()
+        } catch {
+            run.terminate(gracePeriod: .seconds(1))
+            _ = await run.exit()
+            throw error
+        }
+        return run
+    }
+
     /// The most records a parsed command may produce before its output is refused.
     static let maximumCapturedRecords = 512
 
     /// `tart --version`, parsed strictly. Anything unparseable is reported as a failure, never
     /// guessed.
     public func version() async throws -> TartVersion {
-        try requireVerifiedExecutable()
-        let run = try await runner.run(ProcessInvocation(
+        let run = try await launch(ProcessInvocation(
             executable: bundle.executable,
             arguments: ["--version"],
             environment: storage.environmentForTart(),

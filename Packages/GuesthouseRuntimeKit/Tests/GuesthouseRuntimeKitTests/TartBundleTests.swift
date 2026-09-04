@@ -46,6 +46,27 @@ struct DummyBundle {
         #expect(await runner.invocations.isEmpty, "nothing was launched")
     }
 
+    @Test func anExecutableReplacedAfterTheLaunchIsEndedNotSpokenTo() async throws {
+        /// Replaces the bundle's executable at the moment the launch happens: the file that
+        /// passed verification is gone by the time the child exists.
+        struct SwappingRunner: ProcessRunning {
+            let executable: URL
+            let inner = FakeProcessRunner(stdout: ["2.36.0"], exit: ProcessExit(reason: .status(0)))
+            func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
+                try? FileManager.default.removeItem(at: executable)
+                try? FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/cat"), to: executable)
+                return try await inner.run(invocation)
+            }
+        }
+        let root = FileManager.default.temporaryDirectory.appending(path: "Swap-\(UUID().uuidString)")
+        let storage = try RuntimeStorage(root: root.appending(path: "state"))
+        let dummy = try await DummyBundle(root: root, sign: false)
+        let bundle = TartBundle(url: dummy.url)
+        let identity = try #require(bundle.executableIdentity)
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: SwappingRunner(executable: bundle.executable), verifiedExecutable: identity)
+        await #expect(throws: TartInvocationError.self) { _ = try await backend.version() }
+    }
+
     @Test func versionOutputIsBoundedByRecordCount() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Records-\(UUID().uuidString)")
         let storage = try RuntimeStorage(root: root)
