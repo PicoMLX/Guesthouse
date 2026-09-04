@@ -26,6 +26,7 @@ actor RuntimeClient: RuntimeBackend {
         case incoming(RuntimeEvent)
         case interrupted
         case consumerGone(ContinuationKey)
+        case streamFinished(ContinuationKey)
     }
 
     private let transport: any RuntimeTransport
@@ -43,7 +44,8 @@ actor RuntimeClient: RuntimeBackend {
     /// guest output accumulate again.
     private var retired: Set<OperationID> = []
     /// Keys whose request finished without acceptance (a query reply or a failure), so a
-    /// late `consumerGone` for them is ignored.
+    /// late `consumerGone` for them is ignored. A key is held only until its stream
+    /// terminates, which is the last moment a cancellation can still race the reply.
     private var settled: Set<ContinuationKey> = []
     /// Buffered events per operation that has not been accepted yet, bounded so a runtime
     /// that streams before its reply cannot grow this without limit.
@@ -52,11 +54,19 @@ actor RuntimeClient: RuntimeBackend {
     private let inboxContinuation: AsyncStream<Inbound>.Continuation
     private var started = false
 
-    /// Progress and log events held for one consumer that is not reading. The client drops
-    /// its own excess rather than letting the stream evict, so control events (`accepted` and
-    /// the terminal event) are never lost and never reordered behind droppable traffic.
+    /// How many events one consumer's stream buffers. The client drops its own excess before
+    /// the stream is full, so control events (`accepted` and the terminal event) are never
+    /// lost and never reordered behind droppable traffic a consumer is not reading.
     static let consumerBufferLimit = 1_024
-    private var bufferedTraffic: [OperationID: Int] = [:]
+    /// Slots of that buffer kept free for control events: droppable traffic stops here.
+    static let consumerControlReserve = 64
+    /// While traffic is being dropped, one event in this many is delivered anyway. A yield is
+    /// the only report of how much room a consumer has left, so without this probe a consumer
+    /// that fell behind once would never receive traffic again for the rest of the operation.
+    static let trafficProbeInterval = 64
+    /// Room left in each consumer's stream, as of its last yield.
+    private var consumerRoom: [OperationID: Int] = [:]
+    private var droppedSinceProbe: [OperationID: Int] = [:]
 
     init(transport: any RuntimeTransport = XPCRuntimeTransport()) {
         self.transport = transport
@@ -73,15 +83,21 @@ actor RuntimeClient: RuntimeBackend {
     /// consumer stops reading an accepted operation, the client unregisters it and asks the
     /// runtime to cancel it, so a host mutation never keeps running unobserved.
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
-        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+        // The buffer is bounded and never evicts what it already holds: the client stops
+        // delivering droppable traffic while the room left is down to the reserve, so a
+        // control event always finds a slot even when a consumer stops reading entirely.
+        AsyncThrowingStream(bufferingPolicy: .bufferingOldest(Self.consumerBufferLimit)) { continuation in
             let key = ContinuationKey()
             // The termination closure holds the client, so a caller that keeps only the
             // stream still has a producer: the client is released when the stream ends.
             let owner = self
             continuation.onTermination = { [inboxContinuation] termination in
                 withExtendedLifetime(owner) {
-                    if case .cancelled = termination {
-                        inboxContinuation.yield(.consumerGone(key))
+                    switch termination {
+                    case .cancelled: inboxContinuation.yield(.consumerGone(key))
+                    // The stream ended normally, so no cancellation can still race the reply
+                    // and the key is no longer needed for anything.
+                    default: inboxContinuation.yield(.streamFinished(key))
                     }
                 }
             }
@@ -131,7 +147,8 @@ actor RuntimeClient: RuntimeBackend {
         case .reply(let result, let continuation, let key): handleReply(result, for: continuation, key: key)
         case .incoming(let event): route(event)
         case .interrupted: connectionDropped()
-        case .consumerGone(let continuation): consumerGone(continuation)
+        case .consumerGone(let key): consumerGone(key)
+        case .streamFinished(let key): streamFinished(key)
         }
     }
 
@@ -171,24 +188,59 @@ actor RuntimeClient: RuntimeBackend {
     /// How many events are held for an operation that has not been accepted. Test seam.
     func pendingEventCount(for id: OperationID) -> Int { pendingEvents[id]?.count ?? 0 }
 
+    /// How many finished requests are still held against a cancellation race. Test seam.
+    func settledKeyCount() -> Int { settled.count }
+
+    /// Whether an operation has ended, so nothing more will be delivered for it. Test seam.
+    func isRetired(_ id: OperationID) -> Bool { retired.contains(id) }
+
     private func settle(_ key: ContinuationKey) {
         settled.insert(key)
+    }
+
+    /// A stream that ended on its own can no longer produce a `consumerGone`, so everything
+    /// remembered about it is released; otherwise one key per query would be held for the
+    /// life of the client.
+    private func streamFinished(_ key: ContinuationKey) {
+        settled.remove(key)
+        abandonedBeforeAccept.remove(key)
+        consumers.removeValue(forKey: key)
     }
 
     private func retire(_ id: OperationID) {
         retired.insert(id)
         pendingEvents.removeValue(forKey: id)
-        bufferedTraffic.removeValue(forKey: id)
+        consumerRoom.removeValue(forKey: id)
+        droppedSinceProbe.removeValue(forKey: id)
     }
 
-    /// Droppable traffic. The stream itself buffers without limit, so the control events
-    /// (`accepted` and the terminal event) can never be evicted or reordered; the excess that
-    /// a consumer is not reading is dropped here instead, and counted.
+    /// Droppable traffic: progress and log lines. It is delivered while the consumer's stream
+    /// has room beyond the reserve, so the control events (`accepted` and the terminal event)
+    /// can never be crowded out or reordered behind traffic nobody is reading. The room is
+    /// what the stream reports, not a count of everything ever sent, so a consumer keeping up
+    /// in real time is never cut off.
     private func deliver(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
-        let buffered = bufferedTraffic[id, default: 0]
-        guard buffered < Self.consumerBufferLimit else { return }
-        bufferedTraffic[id] = buffered + 1
-        continuation.yield(event)
+        if consumerRoom[id, default: Self.consumerBufferLimit] <= Self.consumerControlReserve {
+            let dropped = droppedSinceProbe[id, default: 0] + 1
+            guard dropped >= Self.trafficProbeInterval else {
+                droppedSinceProbe[id] = dropped
+                return
+            }
+            // Probe: the stream refuses a yield it has no room for, so this measures the room
+            // again without displacing anything already queued.
+            droppedSinceProbe[id] = 0
+        }
+        yieldTracking(event, to: continuation, id: id)
+    }
+
+    /// Yields and records the room the stream reports it has left, which is how a consumer
+    /// that has caught up is noticed.
+    private func yieldTracking(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
+        if case .enqueued(let remaining) = continuation.yield(event) {
+            consumerRoom[id] = remaining
+        } else {
+            consumerRoom[id] = 0
+        }
     }
 
     private func route(_ event: RuntimeEvent) {
@@ -210,15 +262,26 @@ actor RuntimeClient: RuntimeBackend {
             } else if !retired.contains(id) {
                 append(event, for: id)
             }
-        case .status, .runtimeVersion, .accepted, .log(nil, _):
-            for continuation in operations.values { continuation.yield(event) }
+        case .status, .runtimeVersion, .accepted:
+            for (id, continuation) in operations { yieldTracking(event, to: continuation, id: id) }
+        case .log(nil, _):
+            // Unscoped guest output is droppable traffic for every operation, not a control
+            // event: it takes the bounded path too, so high-volume output cannot accumulate
+            // in the stream of a consumer that is not reading.
+            for (id, continuation) in operations { deliver(event, to: continuation, id: id) }
         }
     }
 
     /// Buffers an event for an operation that has not been accepted yet, bounded.
     private func append(_ event: RuntimeEvent, for id: OperationID) {
         var events = pendingEvents[id] ?? []
-        guard events.count < Self.pendingEventLimit else { return }
+        if events.count >= Self.pendingEventLimit {
+            // The terminal event is what ends the consumer's stream: dropping it would leave
+            // the caller waiting forever once the operation is finally accepted. Room is made
+            // for it by dropping the oldest droppable event instead.
+            guard event.endsOperation, let droppable = events.firstIndex(where: { !$0.endsOperation }) else { return }
+            events.remove(at: droppable)
+        }
         events.append(event)
         pendingEvents[id] = events
     }
@@ -240,9 +303,22 @@ actor RuntimeClient: RuntimeBackend {
         let pending = operations
         operations.removeAll()
         pendingEvents.removeAll()
+        consumerRoom.removeAll()
+        droppedSinceProbe.removeAll()
         for (id, continuation) in pending {
             continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
         }
         consumers.removeAll()
+    }
+}
+
+nonisolated extension RuntimeEvent {
+    /// Ends an operation. A consumer that never receives one waits forever, so these events
+    /// are never dropped to make room for traffic.
+    fileprivate var endsOperation: Bool {
+        switch self {
+        case .completed, .failed: true
+        case .runtimeVersion, .accepted, .progress, .log, .status: false
+        }
     }
 }

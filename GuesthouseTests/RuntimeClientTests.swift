@@ -9,15 +9,18 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
     private var pendingReply: (@Sendable (Result<RuntimeEvent, any Error>) -> Void)?
     private(set) var lastAcceptedID: OperationID?
 
+    /// The id the held-back `accepted` reply will carry, known before acceptance so a test can
+    /// push events that arrive before it.
+    let preparedID = OperationID()
+
     /// For `.acceptLater`: delivers the `accepted` reply held back by the last send.
     func deliverPendingAccept() {
-        let (reply, id) = lock.withLock { () -> ((@Sendable (Result<RuntimeEvent, any Error>) -> Void)?, OperationID) in
-            let id = OperationID()
-            lastAcceptedID = id
+        let reply = lock.withLock { () -> (@Sendable (Result<RuntimeEvent, any Error>) -> Void)? in
+            lastAcceptedID = preparedID
             defer { pendingReply = nil }
-            return (pendingReply, id)
+            return pendingReply
         }
-        reply?(.success(.accepted(id)))
+        reply?(.success(.accepted(preparedID)))
     }
     let lock = NSLock()
     var behavior: Behavior
@@ -64,6 +67,30 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
             }
         }
     }
+}
+
+private struct MissedDeadline: Error {}
+
+/// Runs `work` with a deadline, so a client that stops delivering fails the test instead of
+/// hanging the run.
+private func withDeadline<T: Sendable>(_ duration: Duration = .seconds(10), _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+    try await withThrowingTaskGroup(of: T?.self) { group in
+        group.addTask { try await work() }
+        group.addTask {
+            try? await Task.sleep(for: duration)
+            return nil
+        }
+        let finished = try await group.next()
+        group.cancelAll()
+        guard let value = finished ?? nil else { throw MissedDeadline() }
+        return value
+    }
+}
+
+private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>) async throws -> [RuntimeEvent] {
+    var events: [RuntimeEvent] = []
+    for try await event in stream { events.append(event) }
+    return events
 }
 
 @Suite struct RuntimeClientTests {
@@ -203,6 +230,78 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         #expect(weakClient == nil)
     }
 
+    @Test func aTerminalEventSurvivesAFloodThatArrivesBeforeAcceptance() async throws {
+        let transport = FakeTransport(.acceptLater)
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<200 where transport.sentCount == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        let incoming = transport.lock.withLock { transport.incoming }
+        let id = transport.preparedID
+        // Every push is enqueued on the client's ordered inbox before the acceptance below,
+        // so all of this traffic is handled while the operation is still unaccepted.
+        for _ in 0..<(RuntimeClient.pendingEventLimit * 2) { incoming?(.progress(id, ProgressPhase(kind: .copying))) }
+        incoming?(.completed(id))
+        transport.deliverPendingAccept()
+        let events = try await withDeadline { try await collected(from: stream) }
+        #expect(events.last?.caseName == "completed", "the terminal event outlives the traffic that preceded it")
+        #expect(events.count <= RuntimeClient.pendingEventLimit + 1, "the buffer stayed bounded")
+    }
+
+    @Test func aConsumerThatKeepsUpNeverStopsReceivingTraffic() async throws {
+        let transport = FakeTransport(.acceptThenStream([]))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let total = RuntimeClient.consumerBufferLimit * 2
+        let received = try await withDeadline { () -> Int in
+            var iterator = stream.makeAsyncIterator()
+            guard case .accepted(let id)? = try await iterator.next() else { return 0 }
+            let incoming = transport.lock.withLock { transport.incoming }
+            var received = 0
+            for _ in 0..<total {
+                incoming?(.progress(id, ProgressPhase(kind: .copying)))
+                if case .progress? = try await iterator.next() { received += 1 }
+            }
+            return received
+        }
+        #expect(received == total, "a consumer reading in real time is never cut off")
+    }
+
+    @Test func unscopedLogsAreBoundedLikeOtherTraffic() async throws {
+        let transport = FakeTransport(.acceptThenStream([]))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        var iterator = stream.makeAsyncIterator()
+        guard case .accepted(let id)? = try await iterator.next() else {
+            Issue.record("no accepted event")
+            return
+        }
+        let incoming = transport.lock.withLock { transport.incoming }
+        let line = Redactor().redact(lines: ["unscoped guest output"])[0]
+        for _ in 0..<(RuntimeClient.consumerBufferLimit * 4) { incoming?(.log(nil, line)) }
+        incoming?(.completed(id))
+        // Nothing is read until the flood has been routed and the stream finished, so this
+        // measures what the client was willing to hold for a consumer that is not keeping up,
+        // and the drain below cannot wait on anything.
+        for _ in 0..<400 where await client.isRetired(id) == false { try await Task.sleep(for: .milliseconds(5)) }
+        guard await client.isRetired(id) else {
+            Issue.record("the flood was never routed")
+            return
+        }
+        var delivered: [RuntimeEvent] = []
+        while let event = try await iterator.next() { delivered.append(event) }
+        #expect(delivered.count <= RuntimeClient.consumerBufferLimit, "unscoped output cannot accumulate without limit")
+        #expect(delivered.last?.caseName == "completed", "unscoped output never crowds out the terminal event")
+    }
+
+    @Test func aQueryThatFinishesNormallyReleasesItsKey() async throws {
+        let info = RuntimeVersionInfo(serviceVersion: "1.0", serviceBuild: "7")
+        let transport = FakeTransport(.reply(.runtimeVersion(info)))
+        let client = RuntimeClient(transport: transport)
+        for _ in 0..<10 { _ = try await collect(client.send(.runtimeVersion)) }
+        for _ in 0..<200 where await client.settledKeyCount() > 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await client.settledKeyCount() == 0, "finished queries do not accumulate for the life of the client")
+    }
+
     @Test func droppedConnectionFailsInFlightOperationsWithTheirID() async {
         let client = RuntimeClient(transport: FakeTransport(.acceptThenDrop))
         var seen: [String] = []
@@ -214,5 +313,62 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         } catch {}
         #expect(seen == ["accepted"])
         #expect(interruption?.operationID != nil)
+    }
+}
+
+/// The transport's session rules, exercised without a live XPC connection.
+@Suite struct SessionRegistryTests {
+    @Test func aReplyFromARetiredSessionBecomesAnInterruption() {
+        let registry = SessionRegistry<NSObject>()
+        let (_, generation) = registry.session { _ in NSObject() }
+        guard case .success = registry.gate(.success(.accepted(OperationID())), from: generation) else {
+            Issue.record("the live session's reply was not forwarded")
+            return
+        }
+        _ = registry.retire(generation)
+        guard case .failure(let error) = registry.gate(.success(.accepted(OperationID())), from: generation) else {
+            Issue.record("an accepted reply from a retired session was forwarded")
+            return
+        }
+        #expect(error is RuntimeConnectionInterrupted)
+    }
+
+    @Test func aSessionIsRetiredOnce() {
+        let registry = SessionRegistry<NSObject>()
+        let (_, generation) = registry.session { _ in NSObject() }
+        registry.setHandlers(incoming: { _ in }, interrupted: {})
+        #expect(registry.retire(generation).interrupted != nil)
+        #expect(registry.retire(generation).interrupted == nil, "a second failure of the same session reports nothing")
+    }
+
+    @Test func aRetirementCannotOvertakeAnEventBeingDelivered() {
+        let registry = SessionRegistry<NSObject>()
+        let (_, generation) = registry.session { _ in NSObject() }
+        let retired = DispatchSemaphore(value: 0)
+        registry.setHandlers(
+            incoming: { _ in
+                DispatchQueue.global().async {
+                    _ = registry.retire(generation)
+                    retired.signal()
+                }
+                // A retirement racing this delivery must wait for it: the generation check and
+                // the handoff to the client are one step, so a stale event can never be queued
+                // behind the operations of a replacement session.
+                #expect(retired.wait(timeout: .now() + .milliseconds(300)) == .timedOut)
+            },
+            interrupted: {}
+        )
+        registry.deliverIncoming(.progress(OperationID(), ProgressPhase(kind: .copying)), from: generation)
+        #expect(retired.wait(timeout: .now() + .seconds(5)) == .success, "the retirement completed once delivery was done")
+    }
+
+    @Test func aRetiredSessionDeliversNothing() {
+        let registry = SessionRegistry<NSObject>()
+        let (_, generation) = registry.session { _ in NSObject() }
+        let delivered = DispatchSemaphore(value: 0)
+        registry.setHandlers(incoming: { _ in delivered.signal() }, interrupted: {})
+        _ = registry.retire(generation)
+        registry.deliverIncoming(.progress(OperationID(), ProgressPhase(kind: .copying)), from: generation)
+        #expect(delivered.wait(timeout: .now()) == .timedOut)
     }
 }
