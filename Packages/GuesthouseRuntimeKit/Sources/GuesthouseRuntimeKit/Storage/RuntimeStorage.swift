@@ -87,13 +87,34 @@ public struct RuntimeStorage: Sendable {
 
     private static func prepare(_ url: URL, backupExcluded: Bool, createIntermediates: Bool) throws {
         let manager = FileManager.default
-        if !manager.fileExists(atPath: url.path) {
+        var info = stat()
+        let inspectionStatus = lstat(url.path, &info)
+        if inspectionStatus != 0 {
+            let inspectionError = errno
+            guard isPathTraversalFailure(inspectionError) else {
+                throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
+            }
+            try refuseUnsafeExistingAncestor(of: url)
             do {
                 try manager.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: [.posixPermissions: directoryPermissions])
-            } catch {
-                throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
+            } catch let creationError {
+                // A path may have appeared between inspection and creation. Classify an
+                // object that now exists before translating the creation failure, so a
+                // dangling link can never acquire writable-storage recovery actions.
+                if lstat(url.path, &info) == 0 {
+                    try verify(url)
+                } else {
+                    let retryInspectionError = errno
+                    if isPathTraversalFailure(retryInspectionError) {
+                        try refuseUnsafeExistingAncestor(of: url)
+                    }
+                    throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(creationError.localizedDescription, limit: 120))
+                }
             }
         }
+        // Unlike FileManager.fileExists, lstat observes a symbolic link even when its target
+        // is absent. Verify before changing permissions or backup metadata so every link is
+        // refused with preservation-first guidance.
         try verify(url)
         do {
             try manager.setAttributes([.posixPermissions: directoryPermissions], ofItemAtPath: url.path)
@@ -110,6 +131,49 @@ public struct RuntimeStorage: Sendable {
         } catch {
             throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
         }
+    }
+
+    /// If a missing suffix sits below a path component that cannot resolve to a directory,
+    /// report that existing component as structural storage instead of blaming writability.
+    /// Valid ancestor links remain supported (for example, macOS's `/tmp` link).
+    private static func refuseUnsafeExistingAncestor(of url: URL) throws {
+        var candidate = url.deletingLastPathComponent()
+        while true {
+            var linkInfo = stat()
+            if lstat(candidate.path, &linkInfo) == 0 {
+                switch linkInfo.st_mode & S_IFMT {
+                case S_IFDIR:
+                    return
+                case S_IFLNK:
+                    var targetInfo = stat()
+                    guard stat(candidate.path, &targetInfo) == 0 else {
+                        let targetError = errno
+                        let reason = isPathTraversalFailure(targetError) ? "dangling symbolic link" : "cannot be inspected"
+                        throw RuntimeStorageError.insecureDirectory(path: candidate.path, reason: reason)
+                    }
+                    guard targetInfo.st_mode & S_IFMT == S_IFDIR else {
+                        throw RuntimeStorageError.insecureDirectory(path: candidate.path, reason: "not a directory")
+                    }
+                    return
+                default:
+                    throw RuntimeStorageError.insecureDirectory(path: candidate.path, reason: "not a directory")
+                }
+            }
+
+            let inspectionError = errno
+            guard isPathTraversalFailure(inspectionError) else {
+                throw RuntimeStorageError.insecureDirectory(path: candidate.path, reason: "cannot be inspected")
+            }
+            let parent = candidate.deletingLastPathComponent()
+            guard parent.path != candidate.path else {
+                throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
+            }
+            candidate = parent
+        }
+    }
+
+    private static func isPathTraversalFailure(_ code: Int32) -> Bool {
+        code == ENOENT || code == ENOTDIR || code == ELOOP
     }
 
     /// A real directory owned by the current user, not a link. Read with `lstat`, so a missing

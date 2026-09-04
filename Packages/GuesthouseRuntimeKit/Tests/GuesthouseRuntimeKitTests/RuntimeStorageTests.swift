@@ -47,12 +47,75 @@ import Testing
         }
     }
 
+    @Test func danglingSymlinkedSubdirectoryIsRefusedAndPreserved() throws {
+        let root = base.appending(path: "dangling-subdirectory-root")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let link = root.appending(path: "vms")
+        let missingTarget = base.appending(path: "unpublished-vms")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: missingTarget)
+        #expect(!FileManager.default.fileExists(atPath: link.path), "the regression requires a dangling link")
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: link.path, reason: "symbolic link")) {
+            try RuntimeStorage(root: root)
+        }
+
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == missingTarget.path)
+        #expect(!FileManager.default.fileExists(atPath: missingTarget.path))
+    }
+
     @Test func symlinkedRootIsRefused() throws {
         let real = base.appending(path: "real")
         try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
         let link = base.appending(path: "link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
         #expect(throws: RuntimeStorageError.self) { try RuntimeStorage(root: link) }
+    }
+
+    @Test func danglingSymlinkedRootIsRefusedAndPreserved() throws {
+        let missingTarget = base.appending(path: "missing-root")
+        let link = base.appending(path: "dangling-root")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: missingTarget)
+        #expect(!FileManager.default.fileExists(atPath: link.path), "the regression requires a dangling link")
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: link.path, reason: "symbolic link")) {
+            try RuntimeStorage(root: link)
+        }
+
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == missingTarget.path)
+        #expect(!FileManager.default.fileExists(atPath: missingTarget.path))
+    }
+
+    @Test func rootBelowADanglingSymlinkIsRefusedAndPreserved() throws {
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let unpublishedWork = base.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
+        let missingTarget = base.appending(path: "missing-parent")
+        let link = base.appending(path: "dangling-parent")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: missingTarget)
+        let root = link.appending(path: "Guesthouse")
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: link.path, reason: "dangling symbolic link")) {
+            try RuntimeStorage(root: root)
+        }
+
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == missingTarget.path)
+        #expect(!FileManager.default.fileExists(atPath: missingTarget.path))
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
+    }
+
+    @Test func rootBelowAValidDirectorySymlinkIsAllowed() throws {
+        let realParent = base.appending(path: "real-parent")
+        try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true)
+        let alias = base.appending(path: "parent-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: realParent)
+
+        let storage = try RuntimeStorage(root: alias.appending(path: "Guesthouse"))
+
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: storage.url(for: .vms).path, isDirectory: &isDirectory))
+        #expect(isDirectory.boolValue)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: alias.path) == realParent.path)
     }
 
     @Test func aFileWhereADirectoryBelongsIsRefused() throws {
