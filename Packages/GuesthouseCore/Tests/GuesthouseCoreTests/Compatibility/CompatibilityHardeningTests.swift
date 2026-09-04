@@ -45,8 +45,13 @@ import Testing
 
     @Test func testedEntriesMustDeclareTheirCapabilities() throws {
         let manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
-        let json = String(decoding: try JSONEncoder().encode(manifest), as: UTF8.self)
+        // Sorted, so the key this test removes is always followed by a comma: an encoder that
+        // happened to put it last would leave the JSON valid and the test would prove nothing.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let json = String(decoding: try encoder.encode(manifest), as: UTF8.self)
         let stale = json.replacingOccurrences(of: #""codexCLICapabilities":["remote-app-server"],"#, with: "")
+        #expect(stale != json, "the capabilities key was removed")
         #expect(throws: CompatibilityManifestError.malformedManifest) {
             try CompatibilityManifest.decode(from: Data(stale.utf8))
         }
