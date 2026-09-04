@@ -67,8 +67,15 @@ import Testing
         #expect(unwritable.recoveryActions == [.freeDiskSpace, .retry, .cancel])
     }
 
-    @Test func aMissingRootParentIsReportedAsUnwritable() {
-        let impossible = URL(fileURLWithPath: "/dev/null/guesthouse")
-        #expect(throws: RuntimeStorageError.self) { try RuntimeStorage(root: impossible) }
+    @Test func aNonDirectoryRootAncestorIsRefusedAndPreserved() throws {
+        let blocker = root.appending(path: "not-a-directory")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("keep me".utf8).write(to: blocker)
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: blocker.path, reason: "not a directory")) {
+            try RuntimeStorage(root: blocker.appending(path: "Guesthouse"))
+        }
+
+        #expect(try String(contentsOf: blocker, encoding: .utf8) == "keep me")
     }
 }
