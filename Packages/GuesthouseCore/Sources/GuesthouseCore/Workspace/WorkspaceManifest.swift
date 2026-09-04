@@ -307,6 +307,9 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case environmentMismatch
     /// The manifest names a workspace other than the directory that contained it.
     case nameDoesNotMatchDirectory(manifest: String, directory: String)
+    /// The app repository builds through a workspace of its own, which the wrapper would not
+    /// reproduce (MVP-PLAN.md §6).
+    case unsupportedAppWorkspace(String)
     /// The file could not be read as a workspace at all.
     case malformed(reason: SanitizedText)
 
@@ -350,6 +353,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "This workspace file belongs to another development Mac, so Guesthouse will not open it here."
         case .nameDoesNotMatchDirectory(let manifest, let directory):
             "The workspace in the folder \(GuesthouseError.sanitize(directory)) calls itself \(GuesthouseError.sanitize(manifest)), so Guesthouse cannot tell which workspace it is."
+        case .unsupportedAppWorkspace(let workspace):
+            "The app repository builds through its own workspace \(GuesthouseError.sanitize(workspace)), whose other projects and schemes Guesthouse cannot reproduce yet. Choose an app that builds from a committed .xcodeproj and shared scheme."
         }
     }
 

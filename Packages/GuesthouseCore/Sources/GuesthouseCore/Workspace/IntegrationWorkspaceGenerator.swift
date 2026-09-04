@@ -16,6 +16,21 @@ public struct GeneratedFile: Hashable, Sendable {
     }
 }
 
+/// How the app repository builds today, as the caller found it. MVP-PLAN.md §6 supports "a
+/// committed `.xcodeproj` and shared scheme" for the first release and requires complex
+/// existing workspace composition to be detected rather than silently rewritten, so the caller
+/// that can read the repository states what it saw instead of the generator assuming the
+/// simple shape.
+public enum AppProjectLayout: Hashable, Sendable {
+    /// The app builds from the committed `.xcodeproj` alone, so the wrapper workspace can
+    /// contain that project and stand in for it. The `project.xcworkspace` that lives inside
+    /// every `.xcodeproj` is part of the project, not a composition, and does not count.
+    case project
+    /// The app repository carries its own `.xcworkspace`, which may add further projects,
+    /// workspace-level schemes, or settings that the wrapper would not reproduce.
+    case existingWorkspace(name: String)
+}
+
 /// Produces the wrapper `.xcworkspace`, the seeded resolution file, the agent guide, and the
 /// manifest for one workspace (MVP-PLAN.md §6, "Deterministic local package overrides").
 ///
@@ -55,14 +70,21 @@ public enum GeneratedFileError: Error, Hashable, Sendable, LocalizedError {
 public enum IntegrationWorkspaceGenerator {
     public static let resolvedPackagesRelativePath = "\(WorkspaceLayout.integrationWorkspaceName)/xcshareddata/swiftpm/Package.resolved"
 
-    /// - Parameter appResolvedPackages: the app repository's committed `Package.resolved`, read by
-    ///   the caller, or `nil` when the project has none. It is copied unchanged so the wrapper
-    ///   resolves from the same pins the app does.
-    public static func generate(_ manifest: WorkspaceManifest, appResolvedPackages: Data? = nil) throws(WorkspaceValidationError) -> [GeneratedFile] {
+    /// - Parameters:
+    ///   - appProjectLayout: what the caller found in the app repository. There is no default:
+    ///     an app that builds through its own workspace is refused here rather than given a
+    ///     wrapper that silently leaves that composition out (MVP-PLAN.md §6).
+    ///   - appResolvedPackages: the app repository's committed `Package.resolved`, read by
+    ///     the caller, or `nil` when the project has none. It is copied unchanged so the wrapper
+    ///     resolves from the same pins the app does.
+    public static func generate(_ manifest: WorkspaceManifest, appProjectLayout: AppProjectLayout, appResolvedPackages: Data? = nil) throws(WorkspaceValidationError) -> [GeneratedFile] {
         // Generation happens while the workspace is being set up, before every clone has
         // recorded its base commit, so the structural rules apply and the base-SHA rule waits
         // for the supported-workspace check.
         try manifest.validate(stage: .setup)
+        if case .existingWorkspace(let name) = appProjectLayout {
+            throw .unsupportedAppWorkspace(name)
+        }
         let layout = WorkspaceLayout(manifest)
         var files: [GeneratedFile] = []
         files.append(GeneratedFile(relativePath: "\(WorkspaceLayout.integrationWorkspaceName)/contents.xcworkspacedata", text: workspaceData(manifest, layout: layout)))
@@ -79,52 +101,137 @@ public enum IntegrationWorkspaceGenerator {
     /// so a stale lockfile cannot outlive the app's own.
     ///
     /// Every path is normalized first: it must be relative, contain no `.` or `..` components,
-    /// and its first component must not be `repos` in any letter case (the usual macOS file
-    /// system is case-insensitive); the resolved location must lie inside `root`. The
-    /// repositories belong to Git, not to the generator.
+    /// and its first component must not be `repos` under the file system's own case folding.
+    /// The walk down to each file then happens through directory descriptors opened with
+    /// no-follow semantics, and the file is created and renamed inside the descriptor of the
+    /// directory that was checked, so a guest agent that swaps a directory for a link between
+    /// the check and the write cannot redirect it. The repositories belong to Git, not to the
+    /// generator.
     public static func write(_ files: [GeneratedFile], to root: URL) throws {
-        let resolvedRoot = root.standardizedFileURL
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            throw GeneratedFileError.unwritable(path: root.lastPathComponent, reason: SanitizedText(error.localizedDescription, limit: 120))
+        }
+        let rootDescriptor = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        let openError = errno
+        guard rootDescriptor >= 0 else {
+            throw GeneratedFileError.unwritable(path: root.lastPathComponent, reason: systemReason(openError))
+        }
+        defer { close(rootDescriptor) }
         for file in files {
-            let url = try destination(for: file.relativePath, in: resolvedRoot)
-            do {
-                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try file.contents.write(to: url, options: .atomic)
-            } catch {
-                throw GeneratedFileError.unwritable(path: file.relativePath, reason: SanitizedText(error.localizedDescription, limit: 120))
-            }
+            try write(file, under: rootDescriptor)
         }
         if !files.contains(where: { $0.relativePath == resolvedPackagesRelativePath }) {
-            let stale = try destination(for: resolvedPackagesRelativePath, in: resolvedRoot)
-            if FileManager.default.fileExists(atPath: stale.path) {
-                do {
-                    try FileManager.default.removeItem(at: stale)
-                } catch {
-                    throw GeneratedFileError.unwritable(path: resolvedPackagesRelativePath, reason: SanitizedText(error.localizedDescription, limit: 120))
-                }
-            }
+            try removeStaleResolvedPackages(under: rootDescriptor)
         }
     }
 
-    static func destination(for relativePath: String, in resolvedRoot: URL) throws -> URL {
+    /// The components of a generated file's path, refused unless it is a plain relative path
+    /// that stays inside the workspace and out of `repos/`.
+    static func components(of relativePath: String) throws -> [String] {
         let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !relativePath.hasPrefix("/"), !components.isEmpty,
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
         else { throw GeneratedFileError.invalidPath(relativePath) }
-        guard components[0].lowercased() != "repos" else { throw GeneratedFileError.pathOutsideWorkspace(relativePath) }
-        var url = resolvedRoot
-        for component in components {
-            url.append(path: component)
-            // The guest's file system is untrusted: an agent that replaced a generated
-            // directory with a link must not redirect the write through it.
-            var info = stat()
-            if lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK {
-                throw GeneratedFileError.pathOutsideWorkspace(relativePath)
-            }
-        }
-        guard url.standardizedFileURL.path.hasPrefix(resolvedRoot.path + "/") else {
+        // The guest volume matches names by Unicode case folding rather than by letter case, so
+        // `repoſ` and `ｒｅｐｏｓ` would open the existing `repos`; fold the same way it does.
+        guard components[0].folding(options: [.caseInsensitive, .widthInsensitive], locale: nil) != "repos" else {
             throw GeneratedFileError.pathOutsideWorkspace(relativePath)
         }
-        return url
+        return components
+    }
+
+    static func write(_ file: GeneratedFile, under rootDescriptor: Int32) throws {
+        let components = try components(of: file.relativePath)
+        var directory = rootDescriptor
+        defer { if directory != rootDescriptor { close(directory) } }
+        for name in components.dropLast() {
+            guard let next = try openSubdirectory(name, in: directory, creating: true, path: file.relativePath) else {
+                throw GeneratedFileError.unwritable(path: file.relativePath, reason: systemReason(ENOENT))
+            }
+            if directory != rootDescriptor { close(directory) }
+            directory = next
+        }
+        try writeAtomically(file.contents, named: components[components.count - 1], in: directory, path: file.relativePath)
+    }
+
+    /// Opens one directory below `parent`, creating it first when the caller is about to write
+    /// there. `nil` means it does not exist and none was created.
+    static func openSubdirectory(_ name: String, in parent: Int32, creating: Bool, path: String) throws -> Int32? {
+        if creating {
+            let made = mkdirat(parent, name, 0o755)
+            let code = errno
+            guard made == 0 || code == EEXIST else {
+                throw GeneratedFileError.unwritable(path: path, reason: systemReason(code))
+            }
+        }
+        // `O_NOFOLLOW` refuses a component that is a link instead of resolving it, and the
+        // descriptor keeps naming this directory even once the entry above it is replaced.
+        let descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        let code = errno
+        guard descriptor >= 0 else {
+            if code == ENOENT { return nil }
+            // `ELOOP` is a link; `ENOTDIR` is a file where a directory belongs.
+            guard code != ELOOP, code != ENOTDIR else { throw GeneratedFileError.pathOutsideWorkspace(path) }
+            throw GeneratedFileError.unwritable(path: path, reason: systemReason(code))
+        }
+        return descriptor
+    }
+
+    /// Creates the file inside `directory` and renames it into place, so a reader never sees a
+    /// half-written file and the bytes can only land in this directory.
+    static func writeAtomically(_ contents: Data, named name: String, in directory: Int32, path: String) throws {
+        let temporary = ".guesthouse-\(UUID().uuidString)"
+        let descriptor = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+        let openError = errno
+        guard descriptor >= 0 else { throw GeneratedFileError.unwritable(path: path, reason: systemReason(openError)) }
+        var placed = false
+        defer {
+            close(descriptor)
+            if !placed { unlinkat(directory, temporary, 0) }
+        }
+        var remaining = contents[...]
+        while !remaining.isEmpty {
+            let count = remaining.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+            let code = errno
+            guard count > 0 else {
+                if count < 0, code == EINTR { continue }
+                throw GeneratedFileError.unwritable(path: path, reason: systemReason(count < 0 ? code : EIO))
+            }
+            remaining = remaining.dropFirst(count)
+        }
+        // `renameat` replaces whatever the name holds without following it, so an entry an
+        // agent turned into a link is replaced rather than written through.
+        guard renameat(directory, temporary, directory, name) == 0 else {
+            throw GeneratedFileError.unwritable(path: path, reason: systemReason(errno))
+        }
+        placed = true
+    }
+
+    /// Removes a resolution file an earlier generation seeded, through the same held
+    /// descriptors, so a stale lockfile cannot outlive the app's own.
+    static func removeStaleResolvedPackages(under rootDescriptor: Int32) throws {
+        let path = resolvedPackagesRelativePath
+        let components = try components(of: path)
+        var directory = rootDescriptor
+        defer { if directory != rootDescriptor { close(directory) } }
+        for name in components.dropLast() {
+            guard let next = try openSubdirectory(name, in: directory, creating: false, path: path) else { return }
+            if directory != rootDescriptor { close(directory) }
+            directory = next
+        }
+        // `unlinkat` removes the entry itself, never what a link points at.
+        let removed = unlinkat(directory, components[components.count - 1], 0)
+        let code = errno
+        guard removed == 0 || code == ENOENT else {
+            throw GeneratedFileError.unwritable(path: path, reason: systemReason(code))
+        }
+    }
+
+    /// The system's own description of a POSIX failure. It names a condition, never a path.
+    static func systemReason(_ code: Int32) -> SanitizedText {
+        SanitizedText(NSError(domain: NSPOSIXErrorDomain, code: Int(code)).localizedDescription, limit: 120)
     }
 
     // MARK: - contents.xcworkspacedata
