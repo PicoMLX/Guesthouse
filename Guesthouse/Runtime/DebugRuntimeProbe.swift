@@ -20,7 +20,8 @@ final class DebugRuntimeProbe {
                 var text = "No reply"
                 for try await event in backend.send(.runtimeVersion) {
                     if case .runtimeVersion(let info) = event {
-                        text = "Service \(info.serviceVersion) (\(info.serviceBuild)), \(info.protocolVersion), Tart: \(info.tart.map { "\($0.version)\($0.verified ? " verified" : " unverified")" } ?? "not located")"
+                        let lume = info.lume.map(Self.describe) ?? "not located"
+                        text = "Service \(info.serviceVersion) (\(info.serviceBuild)), \(info.protocolVersion), Lume: \(lume)"
                     } else {
                         text = "Unexpected reply: \(event.caseName)"
                     }
@@ -30,5 +31,15 @@ final class DebugRuntimeProbe {
                 result = "Connection interrupted: \(error)"
             }
         }
+    }
+
+    static func describe(_ lume: RuntimeVersionInfo.LumeRuntimeInfo) -> String {
+        if lume.version == nil, lume.capabilities == nil, lume.problem == nil {
+            return "checking"
+        }
+        let vncStatus = lume.capabilities.map {
+            $0.vncCanBeDisabled ? "available" : "unavailable"
+        } ?? "not checked"
+        return "\(lume.version ?? "unknown version")\(lume.verified ? " verified" : " unverified"), VNC disable \(vncStatus)\(lume.problem.map { " (\($0.userMessage))" } ?? "")"
     }
 }
