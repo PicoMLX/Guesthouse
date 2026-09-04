@@ -101,6 +101,17 @@ import Testing
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: wrapper) }
     }
 
+    @Test func anAncestorReplacedAfterTheCheckIsNotFollowed() throws {
+        // The walk goes down from the bundle directory one component at a time and never
+        // follows a link, so a `Contents` swapped for a link to somewhere else is refused
+        // even though the bundle itself passed the containment check.
+        let real = try bundle(name: "Genuine.app")
+        let elsewhere = try bundle(name: "Elsewhere.app")
+        try FileManager.default.removeItem(at: real.appending(path: "Contents"))
+        try FileManager.default.createSymbolicLink(at: real.appending(path: "Contents"), withDestinationURL: elsewhere.appending(path: "Contents"))
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: real) }
+    }
+
     @Test func symlinksAreResolvedToTheRealBundle() throws {
         let real = try bundle(name: "Real.app")
         let link = root.appending(path: "Link.app")

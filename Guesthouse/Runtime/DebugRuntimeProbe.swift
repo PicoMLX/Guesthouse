@@ -19,6 +19,10 @@ final class DebugRuntimeProbe {
 
     /// Debug-only: pick an Xcode and ask the service to validate it through the handoff.
     func importXcodeCandidate() {
+        // Every outcome of the picker replaces whatever was running, including the ones that
+        // publish immediately: a scan still in flight must not overwrite the answer to the
+        // command the user just gave.
+        let generation = invalidatePreviousProbe()
         let handoff: FileHandoff
         switch XcodeSelection.chooseXcode() {
         case .canceled:
@@ -31,9 +35,6 @@ final class DebugRuntimeProbe {
             handoff = made
         }
         result = "Validating \(GuesthouseError.sanitize(handoff.displayName, limit: 120))…"
-        generation &+= 1
-        let generation = self.generation
-        probeTask?.cancel()
         probeTask = Task {
             do {
                 var text = "No reply"
@@ -56,11 +57,17 @@ final class DebugRuntimeProbe {
         }
     }
 
+    /// Retires the request in flight and returns the generation of the new one.
+    private func invalidatePreviousProbe() -> UInt64 {
+        generation &+= 1
+        probeTask?.cancel()
+        probeTask = nil
+        return generation
+    }
+
     func requestRuntimeVersion() {
         result = "Requesting…"
-        generation &+= 1
-        let generation = self.generation
-        probeTask?.cancel()
+        let generation = invalidatePreviousProbe()
         probeTask = Task {
             do {
                 var text = "No reply"

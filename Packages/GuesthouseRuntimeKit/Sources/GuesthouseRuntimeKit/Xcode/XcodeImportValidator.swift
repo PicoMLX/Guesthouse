@@ -65,14 +65,14 @@ public enum XcodeImportValidator {
               resolved.pathExtension == "app"
         else { throw .xcodeSelectionRejected(.notAnApplication) }
 
-        guard let info = try plist(resolved.appending(path: "Contents/Info.plist"), within: resolved) else { throw .xcodeSelectionRejected(.notAnApplication) }
+        guard let info = try plist(["Contents", "Info.plist"], within: resolved) else { throw .xcodeSelectionRejected(.notAnApplication) }
         let identifier = info["CFBundleIdentifier"] as? String ?? ""
         guard identifier == xcodeBundleIdentifier, identifier == (expectedBundleIdentifier ?? identifier) else {
             throw .xcodeSelectionRejected(.notXcode)
         }
         // Missing host metadata is a selection problem on this Mac, never a guest tool problem.
         guard let version = info["CFBundleShortVersionString"] as? String, !version.isEmpty else { throw .xcodeSelectionRejected(.metadataUnreadable) }
-        let versionPlist = try plist(resolved.appending(path: "Contents/version.plist"), within: resolved) ?? [:]
+        let versionPlist = try plist(["Contents", "version.plist"], within: resolved) ?? [:]
         guard let build = (versionPlist["ProductBuildVersion"] as? String) ?? (info["DTXcodeBuild"] as? String), !build.isEmpty else {
             throw .xcodeSelectionRejected(.metadataUnreadable)
         }
@@ -118,17 +118,34 @@ public enum XcodeImportValidator {
     /// A metadata file is read only if it is a regular file of bounded size whose real path,
     /// every ancestor resolved, still lies inside the bundle (a `Contents` link elsewhere
     /// would otherwise let a wrapper folder pass as Xcode).
-    private static func plist(_ url: URL, within bundle: URL) throws(GuesthouseError) -> [String: Any]? {
-        let real = url.standardizedFileURL.resolvingSymlinksInPath()
-        guard real.path.hasPrefix(bundle.path + "/") else { throw .xcodeSelectionRejected(.metadataUnreadable) }
-        // The file is opened once, without following a link, and then checked and read through
-        // that same descriptor: nothing can be swapped in between the check and the read.
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    /// Reads one metadata file inside the bundle by walking down from the bundle directory,
+    /// one component at a time, never following a link. `O_NOFOLLOW` on the final component
+    /// alone is not enough: an ancestor such as `Contents` can be replaced after the
+    /// containment check, and an absolute-path open would follow it straight out of the
+    /// bundle. Returns nil only when nothing is there.
+    private static func plist(_ components: [String], within bundle: URL) throws(GuesthouseError) -> [String: Any]? {
+        var directory = open(bundle.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard directory >= 0 else { throw .xcodeSelectionRejected(.metadataUnreadable) }
+        defer { close(directory) }
+        for component in components.dropLast() {
+            let next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard next >= 0 else {
+                // Absent is a bundle-shape problem. Anything else here means the component
+                // exists but is a link or not a directory, which is metadata this validator
+                // refuses to read rather than follow.
+                if errno == ENOENT { return nil }
+                throw .xcodeSelectionRejected(.metadataUnreadable)
+            }
+            close(directory)
+            directory = next
+        }
+        guard let leaf = components.last else { throw .xcodeSelectionRejected(.metadataUnreadable) }
+        let descriptor = openat(directory, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else {
             // Nothing there at all says the bundle has the wrong shape; a file that exists but
             // will not open (a link, a permissions problem) is metadata that cannot be read,
             // and the two failures need different advice.
-            if errno == ENOENT || errno == ENOTDIR { return nil }
+            if errno == ENOENT { return nil }
             throw .xcodeSelectionRejected(.metadataUnreadable)
         }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
