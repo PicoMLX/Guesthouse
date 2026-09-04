@@ -25,6 +25,104 @@ import Testing
         #expect(throws: CompatibilityManifestError.unsupportedSchema(found: manifest.schemaVersion, supported: .current)) {
             try CompatibilityManifest.decode(from: data)
         }
+        // The helper is a convenience, not the only gate: a caller reaching for Codable directly
+        // must not get a manifest whose extra dimensions this build would ignore.
+        #expect(throws: CompatibilityManifestError.unsupportedSchema(found: manifest.schemaVersion, supported: .current)) {
+            try JSONDecoder().decode(CompatibilityManifest.self, from: data)
+        }
+    }
+
+    @Test func damagedManifestResourcesReportSomethingTheUserCanDo() {
+        #expect(throws: CompatibilityManifestError.malformedManifest) {
+            try CompatibilityManifest.decode(from: Data("not a manifest".utf8))
+        }
+        for error: CompatibilityManifestError in [.unreadableManifest, .malformedManifest] {
+            #expect(!error.userMessage.isEmpty)
+            #expect(error.recoveryActions.contains(.reinstallApp))
+        }
+        #expect(throws: Never.self) { try CompatibilityManifest.bundled() }
+    }
+
+    @Test func testedEntriesMustDeclareTheirCapabilities() throws {
+        let manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
+        let json = String(decoding: try JSONEncoder().encode(manifest), as: UTF8.self)
+        let stale = json.replacingOccurrences(of: #""codexCLICapabilities":["remote-app-server"],"#, with: "")
+        #expect(throws: CompatibilityManifestError.malformedManifest) {
+            try CompatibilityManifest.decode(from: Data(stale.utf8))
+        }
+    }
+
+    @Test func rulesWithoutAnExplanationAreRejected() throws {
+        let manifest = #"{"schemaVersion":1,"manifestVersion":1,"tested":[],"incompatibilities":[{"reason":"   "}]}"#
+        #expect(throws: CompatibilityManifestError.malformedManifest) {
+            try CompatibilityManifest.decode(from: Data(manifest.utf8))
+        }
+        let cleared = try JSONDecoder().decode(CompatibilityManifest.KnownIncompatibility.self, from: Data(#"{"reason":"broken","recoveryActions":[]}"#.utf8))
+        #expect(cleared.recoveryActions == defaults)
+    }
+
+    @Test func verificationTimestampsSurviveEncoding() throws {
+        // Sub-second instants included on purpose: a real `Date()` has more precision than any
+        // ISO 8601 form carries, and rounding it must land somewhere the encoder reproduces.
+        let instants = [Date(), Date(timeIntervalSince1970: 1_800_000_000.123456)]
+            + (0..<64).map { Date(timeIntervalSince1970: 1_800_000_000 + Double($0) * 0.176_666) }
+        for instant in instants {
+            let verification = CompatibilityManifest.Verification(verifiedAt: instant, hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
+            let data = try JSONEncoder().encode(verification)
+            #expect(try JSONDecoder().decode(CompatibilityManifest.Verification.self, from: data) == verification)
+        }
+    }
+
+    @Test func capabilityOrderNeverDecidesWhetherARuleFires() {
+        var manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
+        manifest.incompatibilities = [.init(codexCLICapabilities: ["apply-patch", "remote-app-server"], reason: "this capability pair deadlocks")]
+        var observed = ObservedTuple(Fixtures.tuple())
+        observed.codexCLICapabilities = ["remote-app-server", "apply-patch"]
+        #expect(CompatibilityEvaluator.evaluate(observed: observed, manifest: manifest, history: []) == .incompatible(reason: "this capability pair deadlocks", recoveryActions: defaults))
+    }
+
+    @Test func negativeInstallationCountsAreNeverVerified() throws {
+        let manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
+        let impossible = Fixtures.tuple(installations: -1)
+        let history = [try ConnectionVerificationRecord(tuple: impossible, verifiedAt: Date(timeIntervalSince1970: 1_800_000_000), evidence: .userConfirmedWorkspaceOpened)]
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(impossible), manifest: manifest, history: history) == .needsValidation(.unknownFields([.codexCLIInstallations])))
+    }
+
+    @Test func decodedRecordsAreRevalidatedIncludingTheirEvidence() throws {
+        let record = try ConnectionVerificationRecord(tuple: Fixtures.tuple(), verifiedAt: Date(timeIntervalSince1970: 1_800_000_000), evidence: .machineReadableStatus(source: "desktop-status"))
+        let json = String(decoding: try JSONEncoder().encode(record), as: UTF8.self)
+        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let poisonedTuple = json.replacingOccurrences(of: #""0.50.0""#, with: #""0.50.0 \#(secret)""#)
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.codexCLIVersion)) {
+            try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(poisonedTuple.utf8))
+        }
+        let poisonedEvidence = json.replacingOccurrences(of: "desktop-status", with: "desktop-status \(secret)")
+        #expect(throws: CompatibilityRecordError.implausibleEvidenceSource) {
+            try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(poisonedEvidence.utf8))
+        }
+        #expect(throws: CompatibilityRecordError.implausibleEvidenceSource) {
+            try ConnectionVerificationRecord(tuple: Fixtures.tuple(), verifiedAt: Date(), evidence: .machineReadableStatus(source: "status\u{1B}[31m"))
+        }
+        #expect(!CompatibilityRecordError.implausibleEvidenceSource.userMessage.isEmpty)
+    }
+
+    @Test func fullLengthPathsAreRecordableButUnboundedOnesAreNot() throws {
+        let deep = "/Users/dev/" + String(repeating: "nested/", count: 60) + "Codex.app"
+        #expect(deep.unicodeScalars.count > ConnectionVerificationRecord.maximumObservationLength)
+        var far = Fixtures.tuple()
+        far.codexDesktopPath = deep
+        far.codexCLIPath = deep + "/Contents/MacOS/codex"
+        #expect(throws: Never.self) { try ConnectionVerificationRecord(tuple: far, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened) }
+        var unbounded = Fixtures.tuple()
+        unbounded.codexCLIPath = "/" + String(repeating: "a", count: ConnectionVerificationRecord.maximumPathLength)
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.codexCLIPath)) {
+            try ConnectionVerificationRecord(tuple: unbounded, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened)
+        }
+        var wordy = Fixtures.tuple()
+        wordy.codexDesktopVersion = String(repeating: "1", count: ConnectionVerificationRecord.maximumObservationLength + 1)
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.codexDesktopVersion)) {
+            try ConnectionVerificationRecord(tuple: wordy, verifiedAt: Date(), evidence: .userConfirmedWorkspaceOpened)
+        }
     }
 
     @Test func invertedRangesAreRejectedWhenDecoding() {
@@ -78,8 +176,12 @@ import Testing
         let verification = CompatibilityManifest.Verification(verifiedAt: Date(timeIntervalSince1970: 1_800_000_000.25), hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
         let manifest = CompatibilityManifest(manifestVersion: 2, tested: [Fixtures.tested(verification: verification)])
         let data = try JSONEncoder().encode(manifest)
-        #expect(String(decoding: data, as: UTF8.self).contains("2027-01-15T08:00:00.250Z"))
+        let json = String(decoding: data, as: UTF8.self)
+        #expect(json.contains("2027-01-15T08:00:00Z"))
         #expect(try CompatibilityManifest.decode(from: data) == manifest)
+        // A manifest authored with fractional seconds still reads, at the same precision.
+        let fractional = json.replacingOccurrences(of: "2027-01-15T08:00:00Z", with: "2027-01-15T08:00:00.250Z")
+        #expect(try CompatibilityManifest.decode(from: Data(fractional.utf8)) == manifest)
     }
 
     @Test func aMissingCLIIsAMissingPrerequisiteNotACompetingInstallation() {

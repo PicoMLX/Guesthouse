@@ -17,8 +17,10 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
     /// - Throws: `CompatibilityRecordError.implausibleObservation` when a guest-reported string
     ///   is empty, too long, carries control or format characters, or is something the
     ///   redactor would change: such an observation is never written to persisted history.
+    ///   `.implausibleEvidenceSource` when the evidence names its source the same way.
     public init(tuple: CompatibilityTuple, verifiedAt: Date, evidence: DesktopConnectionEvidence) throws(CompatibilityRecordError) {
         try Self.validate(tuple)
+        try Self.validate(evidence)
         schemaVersion = .current
         self.tuple = tuple
         self.verifiedAt = verifiedAt
@@ -26,26 +28,42 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
     }
 
     public static let maximumObservationLength = 256
+    /// A full path is bounded by the file system, not by the shape of a version string: a
+    /// deeply nested but entirely valid bundle or executable must still be recordable.
+    public static let maximumPathLength = 1024
 
     /// Every string in the tuple must be a plausible version, build, or path.
     public static func validate(_ tuple: CompatibilityTuple) throws(CompatibilityRecordError) {
-        let fields: [(CompatibilityField, [String])] = [
-            (.hostMacOSBuild, [tuple.hostMacOSBuild]), (.codexDesktopVersion, [tuple.codexDesktopVersion]),
-            (.codexDesktopBuild, [tuple.codexDesktopBuild]), (.codexDesktopPath, [tuple.codexDesktopPath]),
-            (.tartVersion, [tuple.tartVersion]), (.guestMacOSBuild, [tuple.guestMacOSBuild]), (.xcodeBuild, [tuple.xcodeBuild]),
-            (.codexCLIVersion, [tuple.codexCLIVersion]), (.codexCLIPath, [tuple.codexCLIPath]),
-            (.codexCLICapabilities, tuple.codexCLICapabilities), (.githubCLIVersion, [tuple.githubCLIVersion]),
-            (.provisioningScriptVersion, [tuple.provisioningScriptVersion]),
+        let fields: [(CompatibilityField, [String], Int)] = [
+            (.hostMacOSBuild, [tuple.hostMacOSBuild], maximumObservationLength),
+            (.codexDesktopVersion, [tuple.codexDesktopVersion], maximumObservationLength),
+            (.codexDesktopBuild, [tuple.codexDesktopBuild], maximumObservationLength),
+            (.codexDesktopPath, [tuple.codexDesktopPath], maximumPathLength),
+            (.tartVersion, [tuple.tartVersion], maximumObservationLength),
+            (.guestMacOSBuild, [tuple.guestMacOSBuild], maximumObservationLength),
+            (.xcodeBuild, [tuple.xcodeBuild], maximumObservationLength),
+            (.codexCLIVersion, [tuple.codexCLIVersion], maximumObservationLength),
+            (.codexCLIPath, [tuple.codexCLIPath], maximumPathLength),
+            (.codexCLICapabilities, tuple.codexCLICapabilities, maximumObservationLength),
+            (.githubCLIVersion, [tuple.githubCLIVersion], maximumObservationLength),
+            (.provisioningScriptVersion, [tuple.provisioningScriptVersion], maximumObservationLength),
         ]
-        for (field, values) in fields {
-            for value in values where !isPlausibleObservation(value) {
+        for (field, values, limit) in fields {
+            for value in values where !isPlausibleObservation(value, limit: limit) {
                 throw .implausibleObservation(field)
             }
         }
     }
 
-    static func isPlausibleObservation(_ value: String) -> Bool {
-        guard !value.isEmpty, value.unicodeScalars.count <= maximumObservationLength else { return false }
+    /// The evidence names where a machine-readable status came from, and that name is written
+    /// to persisted history too, so it is held to the same bar as the tuple's strings.
+    public static func validate(_ evidence: DesktopConnectionEvidence) throws(CompatibilityRecordError) {
+        guard case .machineReadableStatus(let source) = evidence else { return }
+        guard isPlausibleObservation(source) else { throw .implausibleEvidenceSource }
+    }
+
+    static func isPlausibleObservation(_ value: String, limit: Int = maximumObservationLength) -> Bool {
+        guard !value.isEmpty, value.unicodeScalars.count <= limit else { return false }
         let clean = value.unicodeScalars.allSatisfy { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: false
@@ -59,11 +77,15 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
 public enum CompatibilityRecordError: Error, Hashable, Sendable, LocalizedError {
     /// A guest-reported value did not look like a version, build, or path.
     case implausibleObservation(CompatibilityField)
+    /// The evidence named a source that does not look like an interface name.
+    case implausibleEvidenceSource
 
     public var userMessage: String {
         switch self {
         case .implausibleObservation(let field):
             "The development Mac reported a \(field.rawValue) value that does not look like a version, build, or path, so this connection was not recorded. Check the tools on the development Mac before trying again."
+        case .implausibleEvidenceSource:
+            "The Codex desktop app reported a connection status whose source does not look like an interface name, so this connection was not recorded. Check the tools on the development Mac before trying again."
         }
     }
 
@@ -85,9 +107,15 @@ extension ConnectionVerificationRecord: Codable {
             throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "record schema \(version) is not \(SchemaVersion.current)")
         }
         schemaVersion = version
-        tuple = try container.decode(CompatibilityTuple.self, forKey: .tuple)
+        let tuple = try container.decode(CompatibilityTuple.self, forKey: .tuple)
+        let evidence = try container.decode(DesktopConnectionEvidence.self, forKey: .evidence)
+        // History on disk is as untrusted as the probe that first produced it: an implausible
+        // value must not become verification evidence by having survived one round trip.
+        try Self.validate(tuple)
+        try Self.validate(evidence)
+        self.tuple = tuple
+        self.evidence = evidence
         verifiedAt = try container.decode(Date.self, forKey: .verifiedAt)
-        evidence = try container.decode(DesktopConnectionEvidence.self, forKey: .evidence)
     }
 
     public func encode(to encoder: any Encoder) throws {

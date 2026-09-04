@@ -50,6 +50,12 @@ public enum CompatibilityEvaluator: Sendable {
             return .incompatible(reason: rule.reason, recoveryActions: rule.recoveryActions)
         }
 
+        // No probe can see fewer than zero executables, so a count that says so is corrupt
+        // rather than a report of the single unambiguous installation a handoff needs.
+        if let installations = observed.codexCLIInstallations, installations < 0 {
+            return .needsValidation(.unknownFields([.codexCLIInstallations]))
+        }
+
         // A probe that found no executable is decisive on its own, whatever else is unknown.
         if observed.codexCLIInstallations == 0 {
             return .needsValidation(.codexCLIMissing)
