@@ -48,6 +48,7 @@ private struct OpaqueDiscoveryError: Error, CustomStringConvertible {
             ))
             #expect(!report.problem!.recoveryActions.contains(.openSettings))
             #expect(!report.problem!.recoveryActions.contains(.retry))
+            #expect(!report.problem!.recoveryActions.contains(.freeDiskSpace))
         }
     }
 

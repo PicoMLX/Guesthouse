@@ -179,8 +179,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
         // Phase 0 discovery runs once per service launch; do not promise an unwired retry.
-        case .runtimeStorageUnavailable(let problem):
-            problem.kind == .unwritable ? [.freeDiskSpace, .cancel] : [.cancel]
+        // A write failure can mean full disk, denied access, or a read-only volume. Until the
+        // GUI has a storage-repair flow, do not offer a button that addresses only one cause.
+        case .runtimeStorageUnavailable: [.cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
         case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
         case .runtimeProbeFailed: [.repair(.runtime), .cancel]

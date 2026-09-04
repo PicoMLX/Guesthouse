@@ -210,7 +210,7 @@ import Testing
         #expect(drift.recoveryActions == [.cancel])
         #expect(insecure.userMessage.contains("Preserve"))
         #expect(insecure.recoveryActions == [.cancel])
-        #expect(unwritable.recoveryActions == [.freeDiskSpace, .cancel])
+        #expect(unwritable.recoveryActions == [.cancel])
         #expect(unwritable.recoverySuggestion == "Free disk space or restore write access, then quit and reopen Guesthouse.")
         #expect(!unwritable.recoverySuggestion!.contains("try again"))
     }
