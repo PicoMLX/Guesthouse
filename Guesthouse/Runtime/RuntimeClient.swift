@@ -471,7 +471,7 @@ nonisolated extension RuntimeEvent {
     fileprivate var endsOperation: Bool {
         switch self {
         case .completed, .failed: true
-        case .runtimeVersion, .environments, .accepted, .progress, .log, .status: false
+        case .runtimeVersion, .environments, .xcodeCandidate, .accepted, .progress, .log, .status: false
         }
     }
 
