@@ -110,10 +110,17 @@ final class RuntimeService: Sendable {
         let storage: RuntimeStorage
         do {
             storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
-        } catch {
+        } catch let error as RuntimeStorageError {
             let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
             log.error("runtime storage unavailable: \(diagnostic.value, privacy: .public)")
-            lumeInfo.withLock { $0 = LumeDiscoveryReport.storageUnavailable }
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.storageUnavailable(error) }
+            return
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error("runtime storage discovery failed: \(diagnostic.value, privacy: .public)")
+            lumeInfo.withLock {
+                $0 = .init(version: nil, verified: false, problem: .runtimeProbeFailed)
+            }
             return
         }
         guard let bundle = LumeBundle.locate(in: storage) else {

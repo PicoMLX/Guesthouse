@@ -35,6 +35,19 @@ import Testing
                 )
             )
         )),
+        .runtimeVersion(RuntimeVersionInfo(
+            serviceVersion: "0.1.0",
+            serviceBuild: "12",
+            lume: .init(
+                version: nil,
+                verified: false,
+                problem: .runtimeStorageUnavailable(.init(
+                    kind: .unwritable,
+                    path: "/private/Guesthouse/vms",
+                    detail: "No space left on device"
+                ))
+            )
+        )),
         .accepted(operation),
         .progress(operation, ProgressPhase(kind: .waitingForNetwork, fraction: 0.5)),
         .progress(operation, ProgressPhase(kind: .copying, fraction: nil, cancelable: false)),

@@ -1,5 +1,38 @@
 import Foundation
 
+/// A wire-safe explanation of why Guesthouse's private runtime storage cannot be used.
+///
+/// The runtime service owns the filesystem-specific error. This value carries only the
+/// bounded, redacted context the GUI needs to give a truthful and non-destructive recovery.
+public struct RuntimeStorageProblem: Codable, Hashable, Sendable {
+    public enum Kind: String, Codable, Hashable, Sendable {
+        case protectionDrift
+        case insecureDirectory
+        case unwritable
+    }
+
+    public let kind: Kind
+    public let path: SanitizedText
+    public let detail: SanitizedText
+
+    public init(kind: Kind, path: String, detail: String) {
+        self.kind = kind
+        self.path = SanitizedText(path, limit: 200)
+        self.detail = SanitizedText(detail, limit: 120)
+    }
+
+    private enum CodingKeys: String, CodingKey { case kind, path, detail }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            kind: try container.decode(Kind.self, forKey: .kind),
+            path: try container.decode(String.self, forKey: .path),
+            detail: try container.decode(String.self, forKey: .detail)
+        )
+    }
+}
+
 /// Every failure Guesthouse shows to the user, with a category, a message, and recovery actions.
 ///
 /// Associated values are structured on purpose: identifiers, sizes, versions, component names,
@@ -10,7 +43,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case unsupportedHost(UnsupportedHostReason)
     case insufficientDisk(requiredBytes: UInt64, availableBytes: UInt64, volumePath: SanitizedText)
     case downloadVerificationFailed(artifact: SanitizedText, check: VerificationCheck)
-    case runtimeStorageUnavailable
+    case runtimeStorageUnavailable(RuntimeStorageProblem)
     case runtimeMissing
     case runtimeIncompatible(found: SanitizedText?, required: String)
     case runtimeProbeFailed
@@ -93,8 +126,15 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             Self.insufficientDiskMessage(required: required, available: available, volume: volume.value)
         case .downloadVerificationFailed(let artifact, let check):
             "The downloaded \(artifact.value) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
-        case .runtimeStorageUnavailable:
-            "Guesthouse cannot safely access its private runtime storage. It may be unavailable, incorrectly owned, or linked to another location."
+        case .runtimeStorageUnavailable(let problem):
+            switch problem.kind {
+            case .protectionDrift:
+                "Guesthouse stopped because its storage folder \(problem.path.value) is no longer private (\(problem.detail.value)). Leave the folder and its contents in place—they may include unpublished work. Quit and reopen Guesthouse so it can restore the required protection."
+            case .insecureDirectory:
+                "Guesthouse cannot safely use the item at its storage path \(problem.path.value) (\(problem.detail.value)). Preserve the item and any linked destination exactly as they are; they may contain unpublished work. Cancel and inspect the path before changing anything."
+            case .unwritable:
+                "Guesthouse cannot write to its storage folder \(problem.path.value) (\(problem.detail.value)). Leave the folder and its contents in place because they may contain unpublished work. Free disk space or restore write access, then quit and reopen Guesthouse."
+            }
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible(let found, let required):
@@ -139,7 +179,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
         // Phase 0 discovery runs once per service launch; do not promise an unwired retry.
-        case .runtimeStorageUnavailable: [.openSettings, .cancel]
+        case .runtimeStorageUnavailable(let problem):
+            problem.kind == .unwritable ? [.freeDiskSpace, .cancel] : [.cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
         case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
         case .runtimeProbeFailed: [.repair(.runtime), .cancel]
@@ -310,7 +351,10 @@ extension GuesthouseError: LocalizedError {
     public var errorDescription: String? { userMessage }
 
     public var recoverySuggestion: String? {
-        switch recoveryActions.first {
+        if case .runtimeStorageUnavailable(let problem) = self, problem.kind == .unwritable {
+            return "Free disk space or restore write access, then quit and reopen Guesthouse."
+        }
+        return switch recoveryActions.first {
         case .retry: "Try again."
         case .inspectState: "Check the environment before doing anything else."
         case .repair: "Use Repair to fix this without deleting the development Mac."

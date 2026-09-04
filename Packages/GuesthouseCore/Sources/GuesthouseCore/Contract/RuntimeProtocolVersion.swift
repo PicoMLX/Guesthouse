@@ -9,8 +9,9 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
         self.rawValue = rawValue
     }
 
-    /// Version 3 adds encoded runtime-storage and runtime-probe failure cases. Version 2 added
-    /// `InvalidRequestReason.tooManyInFlight`; peers that disagree must not decode each other.
+    /// Version 3 adds encoded Lume discovery failures and gives runtime-storage failures a
+    /// typed, sanitized payload. Version 2 added `InvalidRequestReason.tooManyInFlight`;
+    /// peers that disagree must not decode each other.
     public static let current = RuntimeProtocolVersion(3)
 
     public static func < (lhs: RuntimeProtocolVersion, rhs: RuntimeProtocolVersion) -> Bool {
