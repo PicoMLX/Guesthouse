@@ -21,7 +21,15 @@ public struct SchemaVersion: Hashable, Sendable, Comparable, CustomStringConvert
 
 extension SchemaVersion: Codable {
     public init(from decoder: any Decoder) throws {
-        rawValue = try decoder.singleValueContainer().decode(Int.self)
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(Int.self)
+        // Versions start at 1. Zero or a negative number is not an older format anyone can
+        // migrate from; it is a corrupt record, and reading it as the current layout would
+        // hide that.
+        guard value > 0 else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "schema version must be positive, found \(value)")
+        }
+        rawValue = value
     }
 
     public func encode(to encoder: any Encoder) throws {
