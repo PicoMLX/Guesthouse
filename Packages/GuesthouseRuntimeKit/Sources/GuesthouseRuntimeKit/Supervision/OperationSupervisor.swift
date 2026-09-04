@@ -69,6 +69,12 @@ public final class OperationSupervisor: Sendable {
         guard live.executablePath == executable.path, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
             throw SupervisionError.processMismatch(pid: pid)
         }
+        // The process must name the VM the caller says it launched: arguments for one VM
+        // recorded under another environment would make later reconciliation claim the wrong
+        // machine (MVP-PLAN.md §4).
+        guard live.claimedVMName == vmName else {
+            throw SupervisionError.processMismatch(pid: pid)
+        }
         // The start time is stored exactly as observed: the reconciler compares it for
         // equality, and the store persists dates losslessly.
         let identity = ProcessIdentity(
@@ -110,12 +116,14 @@ public final class OperationSupervisor: Sendable {
         for environment in Set(environments).union(recordedIdentities.keys) {
             let lock = vmLock(environment)
             if let recorded = recordedIdentities[environment] {
-                // A process that exists but cannot be read is neither matched nor ruled out.
-                if case .unavailable = enumerator.observe(pid: recorded.pid) {
+                // One scan answers both questions: which processes are there, and whether any
+                // candidate could not be read. An unreadable one is never an exit.
+                let scan = enumerator.candidates(executable: URL(fileURLWithPath: recorded.executablePath), pid: recorded.pid)
+                guard !scan.unreadable else {
                     verdicts[environment] = .uncertain(.processUnobservable)
                     continue
                 }
-                let observed = enumerator.candidates(executable: URL(fileURLWithPath: recorded.executablePath), pid: recorded.pid)
+                let observed = scan.processes
                 switch lock {
                 case .unknown:
                     // Without the inventory, "no process" cannot become "exited".
@@ -128,7 +136,13 @@ public final class OperationSupervisor: Sendable {
                 switch lock {
                 case .present: verdicts[environment] = .uncertain(.unrecordedLaunch)
                 case .unknown: verdicts[environment] = .uncertain(.inventoryUnavailable)
-                case .absent: break
+                case .absent:
+                    // No record and no lock, but a live process may already be claiming this
+                    // VM between its launch and the lock: that is not a free environment.
+                    let claimants = enumerator.claimants(ofVM: environment.tartVMName)
+                    if !claimants.processes.isEmpty {
+                        verdicts[environment] = .uncertain(.anotherProcessClaimsVM)
+                    }
                 }
             }
         }

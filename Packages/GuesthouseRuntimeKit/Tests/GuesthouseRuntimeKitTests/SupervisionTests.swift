@@ -20,9 +20,9 @@ import Testing
         #expect(live.argumentsDigest == LiveProcessEnumerator.digest(of: ["37"]))
         #expect(live.argumentsDigest != LiveProcessEnumerator.digest(of: ["38"]))
         let bySleepPath = enumerator.candidates(executable: URL(fileURLWithPath: "/bin/sleep"), pid: nil)
-        #expect(bySleepPath.contains(live))
+        #expect(bySleepPath.processes.contains(live))
         let byPID = enumerator.candidates(executable: nil, pid: pid)
-        #expect(byPID == [live])
+        #expect(byPID.processes == [live])
         #expect(enumerator.live(pid: 2_000_000_000) == nil)
     }
 
@@ -161,6 +161,54 @@ import Testing
         #expect(path.hasSuffix(ProcessIdentityStore.fileName))
         #expect(error?.recoveryActions.first == .inspectState)
         #expect(error?.userMessage.contains("inspect") == true)
+    }
+
+    @Test func aRecordFiledUnderTheWrongEnvironmentIsRefused() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "Identity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let a = EnvironmentID(), b = EnvironmentID()
+        let identity = ProcessIdentity(pid: 1, startTime: Date(), executablePath: "/x", argumentsDigest: "sha256:0", vmName: b.tartVMName, environmentID: b, recordedAt: Date())
+        let document = ProcessIdentityStore.Document(identities: [a: identity])
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .deferredToDate
+        try encoder.encode(document).write(to: directory.appending(path: ProcessIdentityStore.fileName))
+        let error = #expect(throws: ProcessIdentityStoreError.self) { try ProcessIdentityStore(directory: directory) }
+        guard case .unreadable? = error else { Issue.record("expected unreadable, got \(String(describing: error))"); return }
+    }
+
+    @Test func aLinkedIdentityFileIsRefusedAndStaleTemporariesAreRemoved() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "Identity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let elsewhere = directory.appending(path: "elsewhere.json")
+        try Data("{}".utf8).write(to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: directory.appending(path: ProcessIdentityStore.fileName), withDestinationURL: elsewhere)
+        #expect(throws: ProcessIdentityStoreError.self) { try ProcessIdentityStore(directory: directory) }
+        try FileManager.default.removeItem(at: directory.appending(path: ProcessIdentityStore.fileName))
+        let stale = directory.appending(path: ".\(ProcessIdentityStore.fileName).tmp-old")
+        try Data("leftover".utf8).write(to: stale)
+        _ = try ProcessIdentityStore(directory: directory)
+        #expect(!FileManager.default.fileExists(atPath: stale.path), "an interrupted write leaves nothing behind")
+    }
+
+    @Test func aLaunchMustNameTheVMItIsRecordedFor() async throws {
+        let store = try ProcessIdentityStore(directory: root)
+        let supervisor = OperationSupervisor(store: store)
+        let environment = EnvironmentID(), other = EnvironmentID()
+        let arguments = ["-e", "sleep 41", "run", other.tartVMName]
+        let fixture = URL(fileURLWithPath: "/usr/bin/perl")
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: fixture, arguments: arguments, timeout: .seconds(20)))
+        defer { run.terminate(gracePeriod: .milliseconds(100)) }
+        await #expect(throws: SupervisionError.processMismatch(pid: run.processIdentifier)) {
+            _ = try await supervisor.recordLaunch(pid: run.processIdentifier, executable: fixture, arguments: arguments, vmName: environment.tartVMName, environment: environment)
+        }
+    }
+
+    @Test func aClaimantWithoutARecordOrLockIsUncertain() async throws {
+        let store = try ProcessIdentityStore(directory: root)
+        let environment = EnvironmentID()
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/perl"), arguments: ["-e", "sleep 41", "run", environment.tartVMName], timeout: .seconds(20)))
+        defer { run.terminate(gracePeriod: .milliseconds(100)) }
+        let verdicts = await OperationSupervisor(store: store).reconcile(environments: [environment]) { _ in .absent }
+        #expect(verdicts[environment] == .uncertain(.anotherProcessClaimsVM), "a launch that has not taken the lock yet is not a free environment")
     }
 
     @Test func transactionsAreCountedAndEndedOnce() {

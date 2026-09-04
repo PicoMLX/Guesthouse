@@ -11,19 +11,47 @@ public struct LiveProcessEnumerator: Sendable {
 
     /// Every process the current user can inspect whose executable is `executable`, plus the
     /// process with `pid` if it exists (whatever it runs), so a reused PID is still observed.
-    public func candidates(executable: URL?, pid: Int32?) -> [LiveProcess] {
+    /// What one scan of the process table found: the processes it could read, and whether any
+    /// process that looked like a candidate could not be read. An unreadable candidate is not
+    /// evidence of absence, so callers treat it as uncertainty rather than as "nothing there".
+    public struct Candidates: Sendable {
+        public var processes: [LiveProcess]
+        public var unreadable: Bool
+
+        public init(processes: [LiveProcess], unreadable: Bool) {
+            self.processes = processes
+            self.unreadable = unreadable
+        }
+    }
+
+    public func candidates(executable: URL?, pid: Int32?) -> Candidates {
         var seen: Set<Int32> = []
         var result: [LiveProcess] = []
-        if let pid, let process = live(pid: pid) {
-            seen.insert(pid)
-            result.append(process)
+        var unreadable = false
+        if let pid {
+            switch observe(pid: pid) {
+            case .present(let process):
+                seen.insert(pid)
+                result.append(process)
+            case .unavailable:
+                seen.insert(pid)
+                unreadable = true
+            case .absent:
+                break
+            }
         }
-        guard let executable else { return result }
+        guard let executable else { return Candidates(processes: result, unreadable: unreadable) }
         for candidate in allPIDs() where !seen.contains(candidate) {
-            guard let path = executablePath(pid: candidate), path == executable.path, let process = live(pid: candidate) else { continue }
-            result.append(process)
+            guard let path = executablePath(pid: candidate), path == executable.path else { continue }
+            switch observe(pid: candidate) {
+            case .present(let process): result.append(process)
+            // The process runs the recorded program but could not be read: it may be a
+            // claimant, so its absence from the list must not be read as an exit.
+            case .unavailable: unreadable = true
+            case .absent: break
+            }
         }
-        return result
+        return Candidates(processes: result, unreadable: unreadable)
     }
 
     /// What the process table says about one PID. "Absent" and "unreadable" are different
@@ -45,6 +73,23 @@ public struct LiveProcessEnumerator: Sendable {
         // time has changed and the observation describes two processes, so it is discarded.
         guard startTime(pid: pid) == first else { return .unavailable(reason: "process replaced during observation") }
         return .present(LiveProcess(pid: pid, startTime: first, executablePath: path, argumentsDigest: Self.digest(of: arguments), claimedVMName: Self.claimedVMName(in: arguments)))
+    }
+
+    /// Every readable process whose arguments name `vmName`, and whether any process could
+    /// not be read. Used to notice a launch that has not taken the VM's lock yet.
+    public func claimants(ofVM vmName: String) -> Candidates {
+        var found: [LiveProcess] = []
+        var unreadable = false
+        for candidate in allPIDs() {
+            guard let arguments = arguments(pid: candidate) else { continue }
+            guard Self.claimedVMName(in: arguments) == vmName else { continue }
+            switch observe(pid: candidate) {
+            case .present(let process): found.append(process)
+            case .unavailable: unreadable = true
+            case .absent: break
+            }
+        }
+        return Candidates(processes: found, unreadable: unreadable)
     }
 
     /// The identity of one running process, or `nil` if it does not exist or cannot be read.

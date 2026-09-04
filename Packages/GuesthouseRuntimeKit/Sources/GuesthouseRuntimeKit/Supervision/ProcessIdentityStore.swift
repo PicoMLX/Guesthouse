@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GuesthouseCore
 
@@ -22,20 +23,67 @@ public actor ProcessIdentityStore {
         encoder.dateEncodingStrategy = .deferredToDate
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .deferredToDate
+        // Leftovers from a write that was interrupted before its rename are removed first, so
+        // repeated interruptions cannot fill the state volume with orphaned snapshots.
+        Self.removeStaleTemporaries(in: directory)
         guard FileManager.default.fileExists(atPath: url.path) else {
             identities = [:]
             return
         }
+        // Opened without following links and verified as a regular file: a link planted here
+        // must not turn some other document into ownership evidence.
         let data: Data
         do {
-            data = try Data(contentsOf: url)
+            data = try Self.readRegularFile(at: url)
+        } catch let error as ProcessIdentityStoreError {
+            throw error
         } catch {
             throw ProcessIdentityStoreError.unreadable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120).value)
         }
+        let document: Document
         do {
-            identities = try decoder.decode([EnvironmentID: ProcessIdentity].self, from: data)
+            document = try decoder.decode(Document.self, from: data)
         } catch {
             throw ProcessIdentityStoreError.unreadable(path: url.path, reason: "the file is not a valid process record")
+        }
+        guard document.schemaVersion <= SchemaVersion.current else {
+            throw ProcessIdentityStoreError.unreadable(path: url.path, reason: "the file was written by a newer Guesthouse")
+        }
+        // A record filed under one environment that describes another is not evidence of
+        // anything: the whole document is refused rather than half-trusted.
+        guard document.identities.allSatisfy({ $0.key == $0.value.environmentID && $0.value.isConsistent }) else {
+            throw ProcessIdentityStoreError.unreadable(path: url.path, reason: "a record does not match the environment it is filed under")
+        }
+        identities = document.identities
+    }
+
+    /// The persisted shape: the records plus the format they are written in, so a later
+    /// change can migrate rather than guess.
+    struct Document: Codable {
+        var schemaVersion: SchemaVersion = .current
+        var identities: [EnvironmentID: ProcessIdentity]
+    }
+
+    /// Reads a regular file without following a link at the final component.
+    static func readRegularFile(at url: URL) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            throw ProcessIdentityStoreError.unreadable(path: url.path, reason: errno == ELOOP ? "the file is a symbolic link" : String(cString: strerror(errno)))
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw ProcessIdentityStoreError.unreadable(path: url.path, reason: "the file is not a regular file")
+        }
+        return try handle.readToEnd() ?? Data()
+    }
+
+    /// Removes leftovers from writes that were interrupted before their rename.
+    static func removeStaleTemporaries(in directory: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasPrefix(".\(fileName).tmp-") {
+            try? FileManager.default.removeItem(at: directory.appending(path: name))
         }
     }
 
@@ -63,7 +111,7 @@ public actor ProcessIdentityStore {
     private func persist(_ staged: [EnvironmentID: ProcessIdentity]) throws {
         let data: Data
         do {
-            data = try encoder.encode(staged)
+            data = try encoder.encode(Document(identities: staged))
         } catch {
             throw ProcessIdentityStoreError.unwritable(path: url.path, reason: "could not be encoded")
         }
@@ -86,6 +134,13 @@ public actor ProcessIdentityStore {
             let reason = String(cString: strerror(errno))
             try? FileManager.default.removeItem(at: temp)
             throw ProcessIdentityStoreError.unwritable(path: url.path, reason: reason)
+        }
+        // The rename itself must be durable: synchronizing only the file leaves the directory
+        // entry in the cache, so a power loss could lose the record that was just reported.
+        let directory = open(url.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC)
+        if directory >= 0 {
+            _ = fsync(directory)
+            close(directory)
         }
     }
 }
