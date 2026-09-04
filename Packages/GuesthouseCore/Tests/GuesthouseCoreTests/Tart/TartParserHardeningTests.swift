@@ -45,6 +45,44 @@ import Testing
         }
     }
 
+    @Test func aQuotedNameNeverSpansTwoDiagnostics() {
+        for stderr in [
+            "Error: the specified VM \"\nregistry: mirror \" does not exist",
+            "Error: VM \"\nregistry: mirror \" is already running",
+            "Error: VM \"\nregistry: mirror \" is not running",
+            "Error: VM \"\nregistry: mirror \" is running",
+        ] {
+            guard case .unknown = TartErrorClassifier.classify(stderr: stderr, exitStatus: 1) else {
+                Issue.record(Comment(rawValue: "two diagnostics were stitched into one phrase: \(stderr)"))
+                continue
+            }
+        }
+    }
+
+    @Test func whitespaceAroundTheVersionIsNotThePinnedSpelling() {
+        #expect(TartVersion(parsing: " 2.36.0 ") == nil)
+        #expect(TartVersion(parsing: "\t2.36.0") == nil)
+        #expect(TartVersion(parsing: "2.36.0\n")?.matchesPin == true, "a trailing line terminator is still the pinned form")
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(TartVersion.self, from: Data(#"" 2.36.0 ""#.utf8)) }
+    }
+
+    /// An empty line is dropped by every line split, so it has to be refused explicitly or the
+    /// version keeps matching the pin through output Tart never printed.
+    @Test func aBlankLineAroundTheVersionIsNotThePinnedSpelling() {
+        #expect(TartVersion(parsing: "\n2.36.0") == nil)
+        #expect(TartVersion(parsing: "2.36.0\n\n") == nil)
+        #expect(TartVersion(parsing: "\n") == nil)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(TartVersion.self, from: Data(#""\n2.36.0""#.utf8)) }
+    }
+
+    @Test func aPaddedOrBlankIPLineIsNotAnAddress() throws {
+        for drifted in ["\n192.168.64.5", "192.168.64.5\n\n", " 192.168.64.5 ", "\t192.168.64.5", "192.168.64.5\n192.168.64.5"] {
+            #expect(throws: TartParseError.notAnIPAddress) { try TartIPParser.parse(drifted) }
+        }
+        #expect(try TartIPParser.parse("192.168.64.5\n").rawValue == "192.168.64.5", "the one terminator Tart prints is still an address")
+        #expect(try TartIPParser.parse("192.168.64.5").rawValue == "192.168.64.5")
+    }
+
     @Test func stateClassificationsAreAnchoredToTheVMPhrases() {
         #expect(TartErrorClassifier.classify(stderr: #"Error: VM "guesthouse-x" is not running"#, exitStatus: 1) == .notRunning)
         #expect(TartErrorClassifier.classify(stderr: #"Error: VM "guesthouse-x" is running"#, exitStatus: 1) == .requiresStoppedVM)

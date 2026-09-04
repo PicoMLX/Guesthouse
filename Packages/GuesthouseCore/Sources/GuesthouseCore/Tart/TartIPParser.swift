@@ -50,11 +50,17 @@ extension GuestIPAddress: Codable {
 }
 
 public enum TartIPParser: Sendable {
-    /// `tart ip` prints exactly one address on success. Anything else, including several lines
-    /// or a message, is a failure; the caller classifies stderr separately.
+    /// `tart ip` prints exactly one address, followed by at most one line terminator, on
+    /// success. Anything else — a blank line, padding around the address, several lines, a
+    /// message — is a failure; the caller classifies stderr separately.
     public static func parse(_ stdout: String) throws(TartParseError) -> GuestIPAddress {
-        let lines = stdout.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        guard lines.count == 1, let address = GuestIPAddress(lines[0]) else { throw .notAnIPAddress }
+        var line = stdout[...]
+        if line.last?.isNewline == true { line = line.dropLast() }
+        // The address parser trims whatever surrounds an address, so padding and a second
+        // line terminator are refused here instead: normalizing them would read output this
+        // pinned Tart never printed as a valid address rather than sending it to the
+        // runtime-incompatibility path.
+        guard !line.contains(where: \.isWhitespace), let address = GuestIPAddress(String(line)) else { throw .notAnIPAddress }
         return address
     }
 }

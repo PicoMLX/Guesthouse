@@ -52,7 +52,7 @@ public enum TartParseError: Error, Hashable, Sendable {
     /// message and at least one recovery action). The single conversion is here so no caller
     /// has to invent its own mapping.
     public var guesthouseError: GuesthouseError {
-        .runtimeIncompatible(found: SanitizedText(unreadableOutput), required: TartPin.releaseTag)
+        .runtimeIncompatible(found: SanitizedText(unreadableOutput), required: SanitizedText(TartPin.releaseTag))
     }
 
     /// Names what did not fit, in the place the message reserves for the installed version.
