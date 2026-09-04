@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import GuesthouseCore
+import Synchronization
 import Testing
 @testable import Guesthouse
 
@@ -315,6 +316,9 @@ import Testing
         await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: recovered))
         await backend.script("stopEnvironment", .succeed(status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready)))
         let (model, decision) = makeModel(backend)
+        // The quit re-inspects on the same cadence as the runtime's status queries; the test
+        // shortens it so the wait it is measuring is not several real seconds long.
+        model.quitWaitPollInterval = .milliseconds(20)
         await model.refresh()
         _ = model.handleQuitRequest()
         model.confirmStopAndQuit()
@@ -343,7 +347,13 @@ import Testing
         await backend.script("startEnvironment", .disconnect())
         await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
         model.start(first.id)
-        await waitUntil { model.unknownOutcomes[first.id] != nil && model.operations.isEmpty }
+        // Including the failed check that follows the start: the outcome is only unsettled
+        // once that check has answered, and re-scripting the backend before it lands would let
+        // it succeed and settle what this test is about.
+        await waitUntil {
+            model.unknownOutcomes[first.id] != nil && model.operations.isEmpty
+                && model.lastErrors[first.id] != nil && model.statuses[first.id] == nil
+        }
         // The runtime then stops listing that environment, so the per-environment checks below
         // can no longer settle it. Its outcome is still open, and a quit must not walk past it.
         await backend.script("environmentStatus", .succeed())
@@ -573,7 +583,9 @@ import Testing
         _ = await runningEnvironment(backend)
         let (model, _) = makeModel(backend)
         model.startRefresh()
-        await waitUntil { await backend.receivedRequests.count == 1 }
+        // Any request means the reconciliation is reading; which one goes out first is its own
+        // business, and a bare count no longer names that moment.
+        await waitUntil({ await !backend.receivedRequests.isEmpty }, "the reconciliation to start reading")
         #expect(model.launchState == .checkingEnvironment, "the reconciliation is still reading")
         // The session closes, and every query this reconciliation asked for is still answered:
         // the streams complete normally, so none of them carries the loss.
@@ -768,6 +780,227 @@ import Testing
         #expect(decision.values.isEmpty)
     }
 
+    @Test func aRuntimeReportedUnknownOutcomeStopsTheQuit() async {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        // The VM is stopped and this app holds no marker of its own — a successful refresh
+        // clears one — but the runtime says it cannot account for the last mutation.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.operationOutcomeUnknown(OperationID()))))
+        let (model, decision) = makeModel(backend)
+        await model.refresh()
+        #expect(model.unknownOutcomes.isEmpty, "nothing this app is tracking; only the runtime's own verdict")
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        guard case .stopFailed(let error) = model.quitFlow, error.caseName == "operationOutcomeUnknown" else {
+            Issue.record("expected the quit to stop on the runtime's unresolved outcome, got \(model.quitFlow)"); return
+        }
+        #expect(decision.values.isEmpty, "AppKit is never told to terminate over a mutation the runtime cannot account for")
+        #expect(!model.canForceStop, "the state is checked, never forced past")
+    }
+
+    @Test func anUnlistedReconciliationBlocksEveryStart() async {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Other Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .stopped, readiness: .ready))
+        await backend.setStatus(EnvironmentStatus(environmentID: second.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // The first environment's start fails and the inspection that would establish its VM
+        // state fails too, so it stays under reconciliation.
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(first.id)))
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        model.start(first.id)
+        // The inspection that follows the start fails, which is what drops the status and
+        // leaves the entry standing. The operation's own tail drops the status too, so the
+        // wait names the failure that inspection records: re-scripting the backend before it
+        // lands would let it succeed and settle exactly what this test is about.
+        await waitUntil {
+            model.operations.isEmpty && model.statuses[first.id] == nil
+                && model.lastErrors[first.id] != nil && model.reconciling.contains(first.id)
+        }
+        // The runtime then stops listing it, which deliberately keeps the entry: its VM state
+        // was never established, and the runtime runs one development Mac at a time.
+        // Unlisted first, and only then answering again: while it is still listed a check that
+        // succeeds settles it legitimately, which is not what this test is about.
+        await backend.setEnvironments([second])
+        await backend.script("environmentStatus", .succeed())
+        await model.refresh()
+        #expect(model.reconciling.contains(first.id), "no status answered for it, so nothing settled it")
+        let card = model.cardStates().first { $0.id == second.id }
+        #expect(card?.availability(of: .start) != .enabled, "the listed environment is not started over an unaccounted-for one")
+    }
+
+    @Test func aQuitStopsWhileAnEnvironmentsStateWasNeverReadBack() async {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Other Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .stopped, readiness: .ready))
+        await backend.setStatus(EnvironmentStatus(environmentID: second.id, vm: .stopped, readiness: .ready))
+        let (model, decision) = makeModel(backend)
+        await model.refresh()
+        // An ordinary failure, so there is no unknown-outcome marker: what stands is the
+        // reconciliation entry the failed inspection after it left behind.
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(first.id)))
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        model.start(first.id)
+        await waitUntil {
+            model.operations.isEmpty && model.statuses[first.id] == nil
+                && model.lastErrors[first.id] != nil && model.reconciling.contains(first.id)
+        }
+        // The runtime then stops listing it, so the quit's own loop never inspects it: the VM
+        // that start may have launched is not accounted for by anything.
+        await backend.setEnvironments([second])
+        await backend.script("environmentStatus", .succeed())
+        await model.refresh()
+        #expect(model.reconciling.contains(first.id), "nothing answered for it, so nothing settled it")
+        #expect(model.unknownOutcomes.isEmpty, "and it is not an unknown outcome: the operation reported an ordinary failure")
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil({ if case .stopFailed = model.quitFlow { return true }; return false }, "the quit to stop on the unread state")
+        #expect(decision.values.isEmpty, "AppKit is never told to terminate over a development Mac nobody could read")
+    }
+
+    @Test func aFullRefreshDoesNotPublishAReadANewerInspectionHasOvertaken() async {
+        let fake = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await fake.setEnvironments([environment])
+        await fake.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let older = EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: OperationID())
+        let newer = EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready)
+        let answers = Mutex<[[RuntimeEvent]]>([])
+        let backend = HeldReplyBackend(fake) { request in
+            guard case .environmentStatus = request else { return nil }
+            return answers.withLock { $0.isEmpty ? nil : $0.removeFirst() }
+        }
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // A snapshot is assembled over several round trips — the listing, one status per
+        // environment, then the version — so an inspection can read this environment after the
+        // snapshot did and still answer before the snapshot is published.
+        answers.withLock { $0 = [[.status(older)], [.status(newer)]] }
+        let snapshot = Task { await model.refresh() }
+        await waitUntil({ backend.heldReplies == 1 }, "the reconciliation's own read of this environment")
+        let inspection = Task { await model.refreshStatus(of: environment.id) }
+        await waitUntil({ backend.heldReplies == 2 }, "the card's check, which reads it later")
+        // The card's check answers first; the reconciliation publishes afterwards.
+        backend.release(1)
+        await inspection.value
+        backend.release(0)
+        await snapshot.value
+        #expect(model.statuses[environment.id]?.vm == .running, "the newer reading of this environment stands")
+        #expect(model.statuses[environment.id]?.inFlightOperation == nil, "a settled operation is not put back in flight")
+    }
+
+    @Test func aFullRefreshRetiresTheInspectionItSupersedes() async {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // A check whose stream never answers. A refresh that only bumps the generation leaves
+        // its request outstanding for the life of the session, and the recovered-operation
+        // poll skips an environment whose inspection is already running — so an operation only
+        // the runtime reports would never be seen to end.
+        await backend.script("environmentStatus", .hang)
+        let ended = Box<Bool>()
+        let hung = Task { await model.refreshStatus(of: environment.id); ended.value = true }
+        await waitUntil({ await backend.receivedRequests.contains(.environmentStatus(environment.id)) }, "the hung check to be sent")
+        await backend.script("environmentStatus", .succeed())
+        await model.refresh()
+        await waitUntil({ ended.value == true }, "the superseded check to be retired by the reconciliation")
+        await hung.value
+        #expect(model.statuses[environment.id] != nil, "and the reconciliation's own answer is what stands")
+        #expect(model.launchState == .ready, "a retired inspection reports no interruption over it")
+    }
+
+    @Test func aLossReconciledBeforeItLandsDoesNotReopenTheOutcome() async {
+        let fake = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await fake.setEnvironments([environment])
+        await fake.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let backend = HeldLossBackend(fake) { if case .startEnvironment = $0 { true } else { false } }
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil({ backend.heldLosses == 1 }, "the start to reach the runtime")
+        // The connection-loss observer's own reconciliation gets there first and reads back
+        // exactly the state this interrupted start would otherwise call unknown.
+        await fake.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        await model.refresh()
+        backend.releaseLoss()
+        await waitUntil({ model.operations[environment.id] == nil }, "the interrupted stream to finish")
+        #expect(model.unknownOutcomes[environment.id] == nil, "the actual state has been inspected, which is what an unknown outcome waits for")
+        #expect(model.statuses[environment.id]?.vm == .running, "the reconciled status is not dropped again")
+        #expect(!model.reconciling.contains(environment.id), "and no second check is asked for over the one that answered")
+        // The block that remains is the ordinary one-VM-at-a-time rule over a running machine,
+        // not an unaccounted-for mutation: nothing is waiting on a check that already happened.
+        #expect(model.globalStartBlock?.contains("checking") != true)
+    }
+
+    @Test func aCancellationLostAfterAReconciliationDoesNotTakeTheDashboardAway() async throws {
+        let fake = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await fake.setEnvironments([environment])
+        await fake.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready, inFlightOperation: OperationID()))
+        let backend = HeldLossBackend(fake) { if case .cancelOperation = $0 { true } else { false } }
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.cancel(environment.id)
+        await waitUntil({ backend.heldLosses == 1 }, "the cancellation to reach the runtime")
+        await model.refresh()
+        #expect(model.launchState == .ready, "the reconciliation re-established the app's state")
+        backend.releaseLoss()
+        // The loss belongs to a session a newer reconciliation has already replaced. This path
+        // starts no check of its own, so putting the app back on the interrupted screen would
+        // leave the whole dashboard unavailable until the user asked by hand.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(model.launchState == .ready)
+    }
+
+    @Test func aFullRefreshCannotBeOverwrittenByAnOlderInspection() async {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(60))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // A card inspection is outstanding when a newer full reconciliation publishes. The
+        // full refresh reads every status too, so it takes part in the same ordering: the
+        // older inspection's answer is discarded rather than replacing the newer snapshot.
+        let inspection = Task { await model.refreshStatus(of: environment.id) }
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        await model.refresh()
+        #expect(model.statuses[environment.id]?.vm == .running)
+        await inspection.value
+        #expect(model.statuses[environment.id]?.vm == .running, "the newer reconciliation stands")
+    }
+
+    @Test func aSupersededStatusRequestIsCancelledRatherThanLeftOutstanding() async {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // The first check's stream never answers. A generation check alone would discard its
+        // reply but leave the request holding one of the session's in-flight slots forever.
+        await backend.script("environmentStatus", .hang)
+        let hung = Task { await model.refreshStatus(of: environment.id) }
+        await waitUntil { await backend.receivedRequests.contains(.environmentStatus(environment.id)) }
+        await backend.script("environmentStatus", .succeed())
+        await model.refreshStatus(of: environment.id)
+        // The replacement ends the request it superseded, so the hung inspection returns.
+        await hung.value
+        #expect(model.statuses[environment.id] != nil, "and the newer answer is what stands")
+        #expect(model.launchState == .ready, "a cancelled inspection reports no interruption over it")
+    }
+
     @Test func fakeBackendIsChosenFromTheEnvironment() {
         // The test host always gets the fake, in any configuration.
         #expect(AppModel.makeBackend(environment: ["XCTestConfigurationFilePath": "/x"]) is FakeRuntimeBackend)
@@ -816,6 +1049,116 @@ import Testing
         await waitUntil { model.quitFlow == .terminating }
         let stopsAfter = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { return true }; return false }.count
         #expect(stopsAfter == stopsBefore, "nothing is signaled for a development Mac that is no longer running")
+    }
+
+    @Test func aFullReconciliationSettlesTheOutcomeItsStatusesAnswer() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        // The runtime cannot account for the mutation, and the check that follows is lost, so
+        // nothing settles the failure that reported it.
+        let unresolved = OperationID()
+        await backend.script("startEnvironment", .fail(error: .operationOutcomeUnknown(unresolved)))
+        await backend.script("environmentStatus", .disconnect())
+        model.start(environment.id)
+        await waitUntil { model.operations.isEmpty && model.unknownOutcomes[environment.id] != nil }
+        #expect(model.lastErrors[environment.id] == .operationOutcomeUnknown(unresolved))
+        // A full reconciliation reads the environment's actual state, so it settles that
+        // outcome exactly as a single-card check would.
+        await backend.script("environmentStatus", .succeed())
+        await model.refresh()
+        #expect(model.launchState == .ready)
+        #expect(model.lastErrors[environment.id] == nil, "the reconciliation that answered settled the outcome it could not account for")
+        let card = try #require(model.cardStates().first)
+        #expect(!card.outcomeUnknown)
+        #expect(card.availability(of: .start) == .enabled)
+    }
+
+    @Test func aRefusedCancellationSurvivesTheCheckAfterAnEarlierQueryFailure() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .hang)
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil { model.operations[environment.id]?.acceptedID != nil }
+        let accepted = try #require(model.operations[environment.id]?.acceptedID)
+        // A check fails while the start is still running, so a query-failure marker is left
+        // standing when the cancellation is refused.
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        await model.refreshStatus(of: environment.id)
+        await backend.script("cancelOperation", .fail(error: .operationInFlight(accepted)))
+        model.cancel(environment.id)
+        await waitUntil { model.lastErrors[environment.id] == .operationInFlight(accepted) }
+        // The operation is still in flight, so the refusal is still the news. A check that
+        // succeeds must not clear it as if it were the stale query failure.
+        await backend.script("environmentStatus", .succeed())
+        await model.refreshStatus(of: environment.id)
+        #expect(model.statuses[environment.id]?.inFlightOperation == accepted)
+        #expect(model.lastErrors[environment.id] == .operationInFlight(accepted), "the refusal is what the card still explains")
+        #expect(model.cardStates().first?.attention == .operationInFlight(accepted))
+        await backend.script("cancelOperation", .succeed())
+        model.cancel(environment.id)
+        await waitUntil { model.operations.isEmpty }
+    }
+
+    @Test func theRecoveredOperationPollWaitsForAnInspectionAlreadyRunning() async throws {
+        // Every query takes longer than either loop's interval, which is the case in which two
+        // loops that replace each other's request cancel it before it can ever answer.
+        let backend = FakeRuntimeBackend(delay: .milliseconds(100))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: OperationID()))
+        let (model, _) = makeModel(backend)
+        model.recoveredOperationPollInterval = .milliseconds(30)
+        await model.refresh()
+        // A second caller inspects the same environment on the same interval while the poll
+        // follows the recovered operation; a quit's own wait loop is that caller in the app.
+        let other = Task {
+            for _ in 0..<60 {
+                await model.refreshStatus(of: environment.id)
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+        }
+        // The operation finishes on the runtime. Only an inspection that is allowed to answer
+        // can tell the app, so the card leaves the busy state only if the two loops are not
+        // cancelling each other's request every interval.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        await waitUntil { model.statuses[environment.id]?.inFlightOperation == nil }
+        #expect(model.statuses[environment.id]?.inFlightOperation == nil, "an inspection answered instead of being replaced before it could")
+        other.cancel()
+        await other.value
+    }
+
+    @Test func oneEnvironmentAnsweringDoesNotEndTheInterruptionOnItsOwn() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        // The start loses its stream, and the reconciliation its answer asks for cannot read
+        // the listing: only this one environment has answered since the session dropped.
+        await backend.script("startEnvironment", .disconnect())
+        await backend.script("listEnvironments", .disconnect())
+        model.start(environment.id)
+        await waitUntil { model.operations.isEmpty && model.statuses[environment.id] != nil }
+        // Long enough for that reconciliation to fail.
+        try? await Task.sleep(for: .milliseconds(200))
+        guard case .interrupted = model.launchState else {
+            Issue.record("expected the app to stay interrupted until a full check succeeds, got \(model.launchState)")
+            return
+        }
+        // Once the listing answers again, the reconciliation is what restores Ready.
+        await backend.script("listEnvironments", .succeed())
+        await model.refreshStatus(of: environment.id)
+        await waitUntil { model.launchState == .ready }
+        #expect(model.launchState == .ready, "the full check re-read the listing and every environment")
     }
 
     @Test func theQuitConfirmationNamesOwnershipItCannotEstablish() async {

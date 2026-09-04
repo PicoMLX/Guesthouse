@@ -64,6 +64,9 @@ struct ErrorRecoveryView: View {
                 Text(note).font(.callout).foregroundStyle(.secondary).accessibilityLabel("Note: \(note)")
             }
         }
+        // One failure replaced directly by another keeps this view's position, and with it a
+        // note describing an option that belonged to the failure that is gone.
+        .onChange(of: presentation) { note = nil }
         .padding(10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)

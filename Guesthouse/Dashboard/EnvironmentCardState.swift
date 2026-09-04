@@ -83,6 +83,8 @@ struct EnvironmentCardState: Equatable, Identifiable {
         /// running. The status is unread, but nothing is being checked.
         statusCheckFailed: Bool = false,
         unknownOutcome: OperationID? = nil,
+        /// The failure of this environment's last status query, when that is what failed.
+        statusQueryFailure: GuesthouseError? = nil,
         reconciling: Bool = false,
         logs: [RedactedLine] = [],
         retryAvailable: Bool = true,
@@ -98,11 +100,14 @@ struct EnvironmentCardState: Equatable, Identifiable {
         }()
         // While an operation runs, a failure this window just caused — a cancellation the
         // runtime refused — is the news the user is waiting for; the status's standing
-        // attention is not new and would otherwise hide it (MVP-PLAN.md §2).
-        let attention: GuesthouseError? = (operation != nil ? lastError : nil) ?? statusAttention ?? lastError
+        // attention is not new and would otherwise hide it (MVP-PLAN.md §2). An operation only
+        // the status reports counts the same way: a recovered operation has no local record,
+        // so a refused cancellation of one used to sit behind the standing attention and the
+        // user could believe the stop they asked for had been accepted.
+        let running = operation != nil || status?.inFlightOperation != nil
+        let attention: GuesthouseError? = (running ? lastError : nil) ?? statusAttention ?? lastError
         self.attention = attention
         recoveryActions = attention?.recoveryActions ?? []
-        canDismiss = statusAttention == nil && lastError != nil
         phase = operation?.phase
         // An operation the status reports without a local counterpart (recovered after a
         // relaunch or a dropped connection) gets the same progress and Cancel controls.
@@ -120,11 +125,22 @@ struct EnvironmentCardState: Equatable, Identifiable {
         let unknown = unknownOutcome != nil || reportedUnknown
         outcomeUnknown = unknown
         recovery = if let unknownOutcome {
-            RecoveryPresentation(unknownOutcomeOf: unknownOutcome)
+            // The outcome stays unknown, and the failure of the check that would settle it is
+            // shown with it: another bare Check button would hide why the last one failed.
+            RecoveryPresentation(unknownOutcomeOf: unknownOutcome, inspectionFailure: statusQueryFailure)
         } else if let attention {
-            // A problem the status keeps reporting is not dismissible: clearing the local
-            // error would leave the identical panel in place.
-            RecoveryPresentation(error: attention, retryAvailable: retryAvailable, retryBlockedReason: retryBlockedReason, dismissAvailable: attention != statusAttention)
+            RecoveryPresentation(
+                error: attention,
+                retryAvailable: retryAvailable,
+                retryBlockedReason: retryBlockedReason,
+                dismissBlockedReason: Self.dismissBlock(attention: attention, statusAttention: statusAttention, statusQueryFailure: statusQueryFailure),
+                // The check's own failure is answered by another check. Its error may carry no
+                // action that does anything here — `.invalidRequest` and `.unauthorizedCaller`
+                // offer only Dismiss, which is disabled while the state is unread — and the
+                // card would then be a message with no control the user can press, its status
+                // nil and Start refused (AGENTS.md: every error carries a recovery that works).
+                inspectionOffered: attention == statusQueryFailure
+            )
         } else {
             nil
         }
@@ -147,7 +163,21 @@ struct EnvironmentCardState: Equatable, Identifiable {
         availability[action] ?? .disabled(reason: "Not available")
     }
 
-    private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checkFailed: Bool) -> String {
+    /// Why the failure cannot be dismissed, when it cannot. A problem the status keeps
+    /// reporting would leave the identical panel in place; the check's own failure carries the
+    /// card's only way to ask again, and dismissing it would leave the card on "Checking
+    /// environment" with no action at all while the state is still unread.
+    private static func dismissBlock(attention: GuesthouseError, statusAttention: GuesthouseError?, statusQueryFailure: GuesthouseError?) -> String? {
+        if attention == statusAttention {
+            return "The runtime still reports this, so dismissing it would change nothing. It clears when the development Mac reports otherwise."
+        }
+        if attention == statusQueryFailure {
+            return "This is the check itself failing, and the development Mac's state is still unread. Check the environment again; the message clears once a check succeeds."
+        }
+        return nil
+    }
+
+    private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checkFailed: Bool = false) -> String {
         if let operation {
             return operation.phase.map { describe($0) } ?? "Starting…"
         }

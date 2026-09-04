@@ -157,15 +157,92 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let events = try await collect(stream)
         #expect(events.first?.caseName == "accepted", "the operation id is learned before any traffic")
         #expect(events.last?.caseName == "completed")
-        #expect(events.count <= 2 * RuntimeClient.consumerBufferLimit + 2, "the excess is bounded, not kept whole")
-        // A log is read for its end: the newest lines reach the consumer, the middle is what
-        // the bound drops.
-        let texts = events.compactMap { if case .log(_, let line) = $0 { line.text } else { nil } }
+        // Held traffic is handed over, never replayed: a consumer that catches up is given the
+        // backlog it has not seen, and never the same line twice or more than was sent.
+        #expect(events.count <= flood.count + 1, "nothing is delivered twice")
+        // A log is read for its end: the newest lines reach the consumer, and whatever the
+        // bound had to drop is older than they are.
+        let numbers = events.compactMap { event -> Int? in
+            guard case .log(_, let line) = event else { return nil }
+            return Int(line.text.dropFirst("line ".count))
+        }
         // The guarantee is the end of the log, not one exact line: the terminal event must
         // still fit, so the last slot or two can go to it rather than to a log line.
-        let last = try #require(texts.last.flatMap { Int($0.dropFirst("line ".count)) })
-        #expect(last > lines - 16, "the tail is what reaches a consumer that never kept up, not the beginning")
-        #expect(!texts.contains("line \(lines / 2)"), "the middle is what the bound drops, not the two ends")
+        let last = try #require(numbers.last)
+        #expect(last > lines - 16, "the tail is what reaches a consumer that fell behind, not the beginning")
+        #expect(Set(numbers).count == numbers.count, "no line is handed over twice")
+        #expect(numbers == numbers.sorted(), "and none arrives behind a newer one")
+    }
+
+    @Test func theNewestLogWindowArrivesWholeAndInOrder() async throws {
+        let lines = RuntimeClient.consumerBufferLimit * 3
+        let flood = (0..<lines).map { index in RuntimeEvent.log(OperationID(), Redactor().redact(lines: ["line \(index)"])[0]) } + [.completed(OperationID())]
+        let transport = FakeTransport(.acceptThenStream(flood))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        try await Task.sleep(for: .milliseconds(200))
+        let events = try await collect(stream)
+        let numbers = events.compactMap { event -> Int? in
+            guard case .log(_, let line) = event else { return nil }
+            return Int(line.text.dropFirst("line ".count))
+        }
+        // Every line a consumer receives is newer than the one before it: a line held back
+        // while the stream was full is never handed over after a newer one.
+        #expect(numbers == numbers.sorted(), "the log a consumer reads never goes backwards")
+        // The window a reader keeps is the newest lines, contiguous: a tail of a few dozen
+        // recent lines followed by much older ones is not the end of the log.
+        let window = 500
+        let tail = Array(numbers.suffix(window))
+        #expect(tail.count == window)
+        #expect(tail == Array((lines - window)..<lines), "the newest window arrives whole")
+    }
+
+    @Test func theNewestLogWindowSurvivesTrafficInterleavedWithIt() async throws {
+        // Real operations report progress while they log. The reserve is sized for the window
+        // a reader keeps, which is a count of lines, so this traffic must not take the lines'
+        // room: counting every event alike leaves a window of a couple of hundred lines.
+        // Logs plus the interleaved progress must stay under `inboxTrafficLimit`: past it the
+        // newest events are refused at ingress, which is a different bound than this test is
+        // about.
+        let lines = RuntimeClient.consumerBufferLimit * 2
+        let operation = OperationID()
+        var flood: [RuntimeEvent] = []
+        for index in 0..<lines {
+            flood.append(.log(operation, Redactor().redact(lines: ["line \(index)"])[0]))
+            if index.isMultiple(of: 2) { flood.append(.progress(operation, ProgressPhase(kind: .copying))) }
+        }
+        flood.append(.completed(operation))
+        let transport = FakeTransport(.acceptThenStream(flood))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        try await Task.sleep(for: .milliseconds(200))
+        let events = try await collect(stream)
+        #expect(events.last?.caseName == "completed", "the result still fits after the tail")
+        let numbers = events.compactMap { event -> Int? in
+            guard case .log(_, let line) = event else { return nil }
+            return Int(line.text.dropFirst("line ".count))
+        }
+        #expect(numbers == numbers.sorted(), "the log a consumer reads never goes backwards")
+        let window = 500
+        let tail = Array(numbers.suffix(window))
+        #expect(tail.count == window)
+        #expect(tail == Array((lines - window)..<lines), "the newest window arrives whole despite the interleaved progress")
+    }
+
+    @Test func aConsumerThatNeverReadsStillLearnsTheOperationEnded() async throws {
+        // Probes are droppable traffic: without a reserve of their own they fill the whole
+        // buffer while a consumer is away, and `.bufferingOldest` then refuses the terminal
+        // event — the stream would end normally with no result in it.
+        let operation = OperationID()
+        let droppable = RuntimeClient.consumerBufferLimit * RuntimeClient.trafficProbeInterval
+        let flood = (0..<droppable).map { _ in RuntimeEvent.progress(operation, ProgressPhase(kind: .copying)) } + [.failed(operation, .guestNotReachable(EnvironmentID()))]
+        let transport = FakeTransport(.acceptThenStream(flood))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        // Long enough for the whole flood to be routed while nothing is reading the stream.
+        try await Task.sleep(for: .milliseconds(500))
+        let events = try await withDeadline { try await collected(from: stream) }
+        #expect(events.last?.caseName == "failed", "the operation's result is never crowded out by the probes that measure the room")
     }
 
     @Test func lateEventsForAFinishedOperationAreDropped() async throws {
@@ -510,6 +587,50 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         for _ in 0..<400 where measured.value == nil { try await Task.sleep(for: .milliseconds(5)) }
         #expect(measured.value == RuntimeClient.inboxTrafficLimit, "traffic the client has not reached yet is bounded at ingress")
         _ = held
+    }
+
+    @Test func theNewestLogsSurviveAnInboxThatSaturates() async throws {
+        // The ingress bound used to refuse everything past its limit, so a service that
+        // outruns the actor for the rest of an operation had its whole tail dropped before the
+        // client could choose a window from it: the last thing the log said was never in the
+        // client at all.
+        let transport = FakeTransport(.acceptLater)
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<400 where transport.sentCount == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        transport.deliverPendingAccept()
+        let id = try #require(transport.lastAcceptedID)
+        let collector = Task { try await withDeadline { try await collected(from: stream) } }
+        // Read in real time, so what the consumer misses is what the ingress refused rather
+        // than what its own buffer could not hold.
+        try await Task.sleep(for: .milliseconds(50))
+        let lines = RuntimeClient.inboxTrafficLimit + 1_000
+        transport.beforeSend = {
+            let incoming = transport.lock.withLock { transport.incoming }
+            // The client is inside this send, so nothing here can be drained while it runs.
+            for index in 0..<lines { incoming?(.log(id, Redactor().redact(lines: ["line \(index)"])[0])) }
+            incoming?(.completed(id))
+        }
+        _ = client.send(.runtimeVersion)
+        let events = try await collector.value
+        let numbers = events.compactMap { event -> Int? in
+            guard case .log(_, let line) = event else { return nil }
+            return Int(line.text.dropFirst("line ".count))
+        }
+        #expect(numbers == numbers.sorted(), "the tail is carried in ahead of the terminal event, never behind newer lines")
+        #expect(numbers.last == lines - 1, "the last thing the operation said reaches the consumer")
+        #expect(numbers.count >= RuntimeClient.consumerTailReserve, "and a whole window of it, not just the last line")
+        #expect(numbers.count < lines, "the bound still holds: what a saturated inbox gives up is the middle")
+    }
+
+    @MainActor @Test func probingStopsBeforeItSpendsTheWindowItMeasuresFor() {
+        // A probe occupies a slot of the consumer's buffer like any other yield, so one that
+        // keeps going down to the terminal event's own reserve hands the operation's end a
+        // buffer with a few slots left in it: the promised newest-line window becomes an old
+        // prefix with a handful of recent lines behind it.
+        #expect(RuntimeClient.probeFloor >= RuntimeClient.consumerTailReserve + RuntimeClient.terminalReserve)
+        #expect(RuntimeClient.probeFloor < RuntimeClient.trafficFloor, "there is still a band the probes may measure in")
+        #expect(RuntimeClient.consumerTailReserve >= AppModel.OperationState.maximumLogLines, "the reserve covers the window the model keeps")
     }
 
     @Test func aReplyThatArrivesAfterCancellationReleasesItsKey() async throws {

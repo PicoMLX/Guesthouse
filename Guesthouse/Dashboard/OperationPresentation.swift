@@ -29,39 +29,61 @@ struct RecoveryPresentation: Equatable {
     ///     retry, so the option says so instead of doing nothing.
     ///   - retryBlockedReason: why replaying that request would be refused right now, such as
     ///     another development Mac running.
-    ///   - dismissAvailable: false for a problem the status keeps reporting: dismissing the
-    ///     local error would leave the identical panel in place, so the option explains that
-    ///     instead of appearing to do nothing.
-    init(error: GuesthouseError, retryAvailable: Bool = true, retryBlockedReason: String? = nil, dismissAvailable: Bool = true) {
+    ///   - dismissBlockedReason: why the failure cannot be dismissed, when it cannot: a
+    ///     problem the status keeps reporting would leave the identical panel in place, and
+    ///     the check's own failure carries the card's only way to ask again. The option
+    ///     explains that instead of appearing to do nothing.
+    ///   - inspectionOffered: whether the failure is one another status check would answer.
+    ///     Such a failure gets a Check of its own when nothing else it carries can be pressed,
+    ///     so a panel is never left as a message with every control disabled.
+    init(error: GuesthouseError, retryAvailable: Bool = true, retryBlockedReason: String? = nil, dismissBlockedReason: String? = nil, inspectionOffered: Bool = false) {
         let unknown: Bool = if case .operationOutcomeUnknown = error { true } else { false }
         title = unknown ? "Checking environment" : "Needs attention"
         message = error.userMessage
         outcomeUnknown = unknown
-        options = error.recoveryActions.map {
-            Self.option(for: $0, outcomeUnknown: unknown, retryAvailable: retryAvailable, retryBlockedReason: retryBlockedReason, dismissAvailable: dismissAvailable)
+        let offered = error.recoveryActions.map {
+            Self.option(for: $0, outcomeUnknown: unknown, retryAvailable: retryAvailable, retryBlockedReason: retryBlockedReason, dismissBlockedReason: dismissBlockedReason)
+        }
+        // Added only when nothing else would work: an error that already offers a working
+        // Try again or Check must not grow a second button that does the same thing.
+        options = if inspectionOffered, !offered.contains(where: { $0.availability == .enabled }) {
+            [Self.option(for: .inspectState, outcomeUnknown: unknown)] + offered
+        } else {
+            offered
         }
     }
 
     /// The distinct state after a lost connection: the runtime is asked again before anything
     /// else is offered, and there is no Retry and nothing to dismiss (MVP-PLAN.md §3).
-    init(unknownOutcomeOf operation: OperationID) {
+    ///
+    /// - Parameter inspectionFailure: why the check that would settle the outcome did not
+    ///   succeed, when it did not. The outcome stays unknown, so nothing that mutates is
+    ///   offered; the failure's own message and its safe recovery are shown alongside the
+    ///   check, rather than another bare Check button that explains nothing.
+    init(unknownOutcomeOf operation: OperationID, inspectionFailure: GuesthouseError? = nil) {
         let error = GuesthouseError.operationOutcomeUnknown(operation)
         title = "Checking environment"
-        message = error.userMessage + " Guesthouse is asking the runtime what actually happened before offering anything else."
+        message = if let inspectionFailure {
+            error.userMessage + " The check that would settle it did not succeed: " + inspectionFailure.userMessage
+        } else {
+            error.userMessage + " Guesthouse is asking the runtime what actually happened before offering anything else."
+        }
         outcomeUnknown = true
+        // Retry would mutate over an unestablished outcome, and dismissing would hide it, so
+        // neither is carried over from the inspection failure's own actions.
+        let safe = (inspectionFailure?.recoveryActions ?? []).filter { $0 != .retry && $0 != .inspectState && $0 != .cancel }
         options = [Self.option(for: .inspectState, outcomeUnknown: true)]
+            + safe.map { Self.option(for: $0, outcomeUnknown: true) }
     }
 
-    static func option(for action: RecoveryAction, outcomeUnknown: Bool, retryAvailable: Bool = true, retryBlockedReason: String? = nil, dismissAvailable: Bool = true) -> Option {
+    static func option(for action: RecoveryAction, outcomeUnknown: Bool, retryAvailable: Bool = true, retryBlockedReason: String? = nil, dismissBlockedReason: String? = nil) -> Option {
         switch action {
         case .retry:
             Option(action: action, title: "Try again", availability: Self.retryAvailability(outcomeUnknown: outcomeUnknown, retryAvailable: retryAvailable, blockedReason: retryBlockedReason))
         case .inspectState:
             Option(action: action, title: "Check environment", availability: .enabled)
         case .cancel:
-            Option(action: action, title: "Dismiss", availability: dismissAvailable
-                   ? .enabled
-                   : .disabled(reason: "The runtime still reports this, so dismissing it would change nothing. It clears when the development Mac reports otherwise."))
+            Option(action: action, title: "Dismiss", availability: dismissBlockedReason.map { .disabled(reason: $0) } ?? .enabled)
         case .repair(let kind):
             Option(action: action, title: "Repair \(Self.name(of: kind))…", availability: .notImplemented(note: "Targeted repairs arrive with the repair flows (MVP-PLAN.md §9)."))
         case .openConsole:
@@ -120,6 +142,10 @@ struct OperationProgressPresentation: Equatable {
     let fraction: Double?
     let cancelability: Cancelability
 
+    /// Said of an operation the runtime has accepted but reported no step for. Named so the
+    /// dialog and the tests that assert it cannot drift apart.
+    static let unreportedPhaseReason = "Guesthouse has not been told which step this operation is on yet. It will stop at the next step that can be interrupted; if there is none, the operation finishes on its own."
+
     init(phase: ProgressPhase?, request: RuntimeRequest, accepted: Bool = true) {
         title = phase.map(EnvironmentCardState.describe) ?? Self.describe(request)
         fraction = phase?.fraction
@@ -130,6 +156,12 @@ struct OperationProgressPresentation: Equatable {
             // request and honors it at the next step that can be interrupted, and an operation
             // with no such step left finishes normally. The dialog says exactly that.
             cancelability = .deferred(reason: "\"\(title)\" cannot be interrupted. Guesthouse will stop at the next step that can be; if there is none, the operation finishes on its own.")
+        } else if phase == nil {
+            // Accepted, but no step reported yet. `EnvironmentLifecycle.cancel` treats a
+            // missing phase as deferred because the first phase of both start and stop is
+            // protected, so presenting Cancel as immediate here would skip the confirmation
+            // and promise something the runtime will not do.
+            cancelability = .deferred(reason: Self.unreportedPhaseReason)
         } else {
             cancelability = .immediate
         }
@@ -140,7 +172,11 @@ struct OperationProgressPresentation: Equatable {
     init(recoveredOperation: OperationID) {
         title = "Operation in progress…"
         fraction = nil
-        cancelability = .immediate
+        // Which step it is on is exactly what a recovered operation does not carry, and
+        // `EnvironmentLifecycle.cancel` defers a cancellation during a protected phase and
+        // lets a stop finish normally. Promising an immediate stop would misdescribe what
+        // Cancel does, so the conservative case is presented (MVP-PLAN.md §2).
+        cancelability = .deferred(reason: "Guesthouse did not start this operation, so it cannot tell which step it is on. It will stop at the next step that can be interrupted; if there is none, the operation finishes on its own.")
     }
 
     private static func describe(_ request: RuntimeRequest) -> String {

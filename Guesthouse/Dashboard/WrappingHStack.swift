@@ -27,6 +27,15 @@ nonisolated enum WrappingRows {
         if !current.isEmpty { rows.append(current) }
         return rows
     }
+
+    /// The width each item is actually given. A control wider than the row it is alone on is
+    /// held to the row's width: the layout reports no more than the width it was offered, so
+    /// a child placed at its own intrinsic size draws outside the card instead of wrapping or
+    /// truncating inside it. An enlarged accessibility text size or a longer localized title
+    /// is enough to reach this.
+    static func fittedWidths(of widths: [CGFloat], in width: CGFloat) -> [CGFloat] {
+        widths.map { min($0, width) }
+    }
 }
 
 /// A row of controls that wraps onto further lines when the width runs out.
@@ -39,8 +48,9 @@ struct WrappingHStack: Layout {
     var lineSpacing: CGFloat = 8
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
-        let available = proposal.width ?? sizes.reduce(0) { $0 + $1.width + spacing }
+        let intrinsic = subviews.map { $0.sizeThatFits(.unspecified) }
+        let available = proposal.width ?? intrinsic.reduce(0) { $0 + $1.width + spacing }
+        let sizes = Self.fitted(subviews, intrinsic: intrinsic, within: available)
         let rows = WrappingRows.rows(of: sizes.map(\.width), spacing: spacing, in: available)
         let width = rows.map { row in row.reduce(0) { $0 + sizes[$1].width } + spacing * CGFloat(row.count - 1) }.max() ?? 0
         let heights = rows.map { row in row.map { sizes[$0].height }.max() ?? 0 }
@@ -48,8 +58,22 @@ struct WrappingHStack: Layout {
         return CGSize(width: min(width, available), height: height)
     }
 
+    /// The size each control is placed at. One wider than the whole row is measured again at
+    /// the row's width, so the height it reports is the height it will actually draw at once
+    /// its title wraps, and the placement below cannot hand it more width than the card has.
+    private static func fitted(_ subviews: Subviews, intrinsic: [CGSize], within width: CGFloat) -> [CGSize] {
+        zip(subviews.indices, intrinsic).map { index, size in
+            guard size.width > width else { return size }
+            let squeezed = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+            // A control that will not shrink is still held to the row, so it truncates inside
+            // the card rather than drawing past its edge.
+            return CGSize(width: WrappingRows.fittedWidths(of: [squeezed.width], in: width)[0], height: squeezed.height)
+        }
+    }
+
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let intrinsic = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sizes = Self.fitted(subviews, intrinsic: intrinsic, within: bounds.width)
         let rows = WrappingRows.rows(of: sizes.map(\.width), spacing: spacing, in: bounds.width)
         var y = bounds.minY
         for row in rows {

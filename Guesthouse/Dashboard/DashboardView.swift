@@ -19,7 +19,6 @@ struct DashboardView: View {
                             EnvironmentCardView(
                                 state: card,
                                 start: { model.start(card.id) },
-                                check: { Task { await model.refreshStatus(of: card.id) } },
                                 cancel: { model.cancel(card.id) },
                                 recover: { model.perform($0, for: card.id) }
                             )
@@ -79,8 +78,6 @@ struct SlotView: View {
 struct EnvironmentCardView: View {
     let state: EnvironmentCardState
     let start: () -> Void
-    /// Re-reads this environment's state; what the `inspectState` and `retry` recoveries do.
-    let check: () -> Void
     let cancel: () -> Void
     let recover: (RecoveryAction) -> Void
     @State private var note: String?
@@ -88,15 +85,6 @@ struct EnvironmentCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if let attention = state.attention {
-                Label(attention.userMessage, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .accessibilityLabel("Needs attention: \(attention.userMessage)")
-                // The failure's own recovery, on the card that reports it: a card error is
-                // otherwise text with no way out once Start is disabled. A failure the status
-                // itself keeps reporting is not offered a dismissal, which would clear nothing.
-                RecoveryActionRow(actions: state.recoveryActions, check: check, dismiss: state.canDismiss ? dismiss : nil)
-            }
             if let progress = state.progress {
                 OperationProgressView(presentation: progress, cancel: cancel)
             }

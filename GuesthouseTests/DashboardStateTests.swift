@@ -506,10 +506,17 @@ import Testing
         await model.refresh()
         model.start(environment.id)
         await waitUntil { model.lastRequests[environment.id] != nil && model.operations.isEmpty && model.unknownOutcomes.isEmpty }
-        #expect(model.launchState == .ready, "the status query answered, so the outcome is settled")
         let requests = await backend.receivedRequests
         #expect(requests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1, "never replayed")
-        #expect(requests.last == .environmentStatus(environment.id), "re-checked after the interruption")
+        guard let start = requests.firstIndex(where: { if case .startEnvironment = $0 { true } else { false } }) else {
+            Issue.record("expected the start to have been sent"); return
+        }
+        #expect(requests[requests.index(after: start)] == .environmentStatus(environment.id), "re-checked after the interruption")
+        // The environment answered, so the outcome is settled — but one status is not the
+        // listing or the other environments, and Ready is what the reconciliation that answer
+        // asks for establishes.
+        await waitUntil { model.launchState == .ready }
+        #expect(model.launchState == .ready)
     }
 
     @Test func aCheckThatFailedIsNotShownAsOneStillRunning() async throws {
@@ -556,19 +563,21 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.operations[environment.id] != nil }
+        // The runtime's own id for the operation, which is what a cancellation names: the
+        // model's local label stands in only until the runtime accepts the request.
+        await waitUntil { model.operations[environment.id]?.acceptedID != nil }
         // A check fails while the start is still running, so the environment carries a
         // query-failure marker when the start reports its own outcome.
         await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
         await model.refreshStatus(of: environment.id)
         await backend.script("environmentStatus", .succeed())
-        let operation = try #require(model.operations[environment.id]?.id)
+        let operation = try #require(model.operations[environment.id]?.acceptedID)
         for try await _ in backend.send(.cancelOperation(operation)) {}
         await waitUntil { model.operations.isEmpty && model.statuses[environment.id] != nil }
         #expect(model.lastErrors[environment.id] == .canceled, "the operation's own result is not cleared as if it were the stale query failure")
         let card = try #require(model.cardStates().first)
         #expect(card.attention == .canceled)
-        #expect(card.canDismiss, "and the failure the app is holding can be cleared")
+        #expect(offersDismissal(card), "and the failure the app is holding can be cleared")
         model.dismissError(environment.id)
         #expect(model.lastErrors[environment.id] == nil)
     }
@@ -668,8 +677,16 @@ import Testing
         let error = GuesthouseError.anotherEnvironmentRunning(EnvironmentID())
         #expect(error.recoveryActions == [.cancel], "an error the card can only dismiss needs a control that dismisses it")
         let held = EnvironmentCardState(environment: environment, status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready), operation: nil, lastError: error)
-        #expect(held.canDismiss)
+        #expect(offersDismissal(held))
         let reported = EnvironmentCardState(environment: environment, status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(error)), operation: nil, lastError: nil)
-        #expect(!reported.canDismiss)
+        #expect(!offersDismissal(reported))
     }
+}
+
+/// Whether the card's recovery panel offers a dismissal that would actually do something: the
+/// `cancel` option is the Dismiss control, and it is disabled when dismissing would change
+/// nothing (the card's own reason travels in the option's availability).
+@MainActor private func offersDismissal(_ card: EnvironmentCardState) -> Bool {
+    guard let option = card.recovery?.options.first(where: { $0.action == .cancel }) else { return false }
+    return option.availability == .enabled
 }
