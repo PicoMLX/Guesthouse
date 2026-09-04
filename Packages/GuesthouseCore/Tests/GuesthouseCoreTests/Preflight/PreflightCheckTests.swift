@@ -214,6 +214,27 @@ struct StubProbe: HostProbe {
         }
     }
 
+    @Test func anUnwritableDestinationIsNotReportedAsUsableSpace() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Unwritable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: base.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: base.path)
+        // Permission bits do not restrain root, so only an ordinary user can prove this.
+        if getuid() != 0 {
+            let probe = SystemHostProbe()
+            #expect(throws: HostProbeError.destinationNotWritable(path: base.path)) { try probe.freeBytes(at: base) }
+            #expect(throws: HostProbeError.destinationNotWritable(path: base.path)) { try probe.freeBytes(at: base.appending(path: "Guesthouse")) }
+        }
+
+        var stub = StubProbe()
+        stub.free = .failure(HostProbeError.destinationNotWritable(path: root.path))
+        let report = run(stub)
+        guard case .undetermined(let detail, let recovery) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
+        #expect(detail.contains("cannot write"))
+        #expect(recovery.contains(.openSettings))
+        #expect(!report.canProceed, "a destination that cannot be written is not a satisfied storage check")
+    }
+
     @Test func everyFailureCarriesARecoveryAction() {
         var probe = StubProbe()
         probe.cpuArchitecture = .intel

@@ -130,6 +130,13 @@ public struct SystemHostProbe: HostProbe {
         guard stat(existing.path, &found) == 0, (found.st_mode & S_IFMT) == S_IFDIR else {
             throw HostProbeError.notADirectory(path: existing.path)
         }
+        // Capacity on a directory this user cannot write is not space a development Mac can
+        // use: the VM directory could never be created there, whether the folder's
+        // permissions changed or the volume is mounted read-only. Asked before the capacity,
+        // so an unusable destination is never reported as free space.
+        guard access(existing.path, W_OK) == 0 else {
+            throw HostProbeError.destinationNotWritable(path: existing.path)
+        }
         let values = try existing.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         guard let capacity = values.volumeAvailableCapacityForImportantUsage else {
             throw CocoaError(.fileReadUnknown)
@@ -155,6 +162,8 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
     case volumeUnavailable(path: String)
     /// Something that is not a directory occupies the destination path.
     case notADirectory(path: String)
+    /// The destination is a directory this user cannot write, so nothing can be created in it.
+    case destinationNotWritable(path: String)
 
     public var userMessage: String {
         switch self {
@@ -162,6 +171,8 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
             "The volume that holds \(GuesthouseError.sanitize(path, limit: 200)) is not available, so Guesthouse cannot tell how much space it has. Connect the volume, or choose a storage location on this Mac."
         case .notADirectory(let path):
             "\(GuesthouseError.sanitize(path, limit: 200)) is not a folder, so Guesthouse cannot store a development Mac there. Choose another storage location."
+        case .destinationNotWritable(let path):
+            "Guesthouse cannot write to \(GuesthouseError.sanitize(path, limit: 200)), so it cannot create a development Mac there. Choose another storage location, or give yourself write access to that folder."
         }
     }
 
@@ -170,6 +181,7 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
         switch self {
         case .volumeUnavailable: [.retry, .openSettings, .cancel]
         case .notADirectory: [.openSettings, .cancel]
+        case .destinationNotWritable: [.openSettings, .retry, .cancel]
         }
     }
 
