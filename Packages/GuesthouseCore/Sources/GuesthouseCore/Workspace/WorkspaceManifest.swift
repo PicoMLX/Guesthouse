@@ -78,6 +78,12 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
                 // replace the pinned dependency, so such a repository is refused outright
                 // rather than checked out under a name that means something else.
                 let identity = repository.remote.name.lowercased()
+                // A repository name no checkout directory can carry has no recovery through
+                // renaming: `DirectoryName` refuses the very name the identity rule requires,
+                // so the repository itself is what has to go.
+                guard DirectoryName(repository.remote.name) != nil else {
+                    throw .unsupportedPackageName(repository.remote.name)
+                }
                 guard repository.checkoutName.identity == identity else {
                     throw .checkoutNameDoesNotMatchRepository(checkout: repository.checkoutName.rawValue, repository: repository.remote.name)
                 }
@@ -85,11 +91,14 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
                     throw .duplicatePackageIdentity(identity)
                 }
             }
-            guard seenNames.insert(repository.checkoutName.identity).inserted else {
-                throw .duplicateCheckoutName(repository.checkoutName.rawValue)
-            }
+            // The repeated remote is reported before the checkout name it implies: one
+            // repository selected twice takes the same default folder, and asking for a
+            // rename would only expose the duplicate remote on the next validation.
             guard seenRemotes.insert(repository.remote.identity).inserted else {
                 throw .duplicateRemote(repository.remote.canonical)
+            }
+            guard seenNames.insert(repository.checkoutName.identity).inserted else {
+                throw .duplicateCheckoutName(repository.checkoutName.rawValue)
             }
             guard repository.remote.isSupportedHost else {
                 throw .unsupportedHost(repository.remote.host)
@@ -97,13 +106,27 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
             guard !repository.baseBranch.collides(with: repository.taskBranch) else {
                 throw .taskBranchCollidesWithBaseBranch(repository.checkoutName.rawValue)
             }
+            // Both branches are repository content, and both are written back into
+            // `workspace.json`, so they are held to the same credential rule as the scheme,
+            // the destination, and the project path: a ref named after a token would
+            // otherwise be persisted verbatim and shown in the GUI.
+            guard !Self.looksLikeCredential(repository.baseBranch.rawValue),
+                  !Self.looksLikeCredential(repository.taskBranch.rawValue)
+            else { throw .credentialInBranchName(repository.checkoutName.rawValue) }
             if let pullRequest = repository.draftPullRequest {
                 guard pullRequest.isValid(for: repository.remote) else { throw .invalidPullRequestReference(repository.checkoutName.rawValue) }
             }
         }
 
-        guard Self.isRelativeProjectPath(appProjectPath) else { throw .invalidAppProjectPath(appProjectPath) }
-        guard !sharedScheme.isEmpty, !sharedScheme.contains("/"), !Self.containsControlCharacters(sharedScheme) else { throw .invalidScheme(sharedScheme) }
+        // The project path comes from discovery inside the guest and is persisted verbatim, so
+        // it is held to the same credential rule as the scheme and the destination: a token that
+        // named a `.xcodeproj` would otherwise be written back into `workspace.json`.
+        guard Self.isRelativeProjectPath(appProjectPath), !Self.looksLikeCredential(appProjectPath) else {
+            throw .invalidAppProjectPath(appProjectPath)
+        }
+        guard !sharedScheme.isEmpty, !sharedScheme.contains("/"), !Self.containsControlCharacters(sharedScheme),
+              sharedScheme.utf8.count <= Self.maximumSchemeBytes, !Self.looksLikeCredential(sharedScheme)
+        else { throw .invalidScheme(sharedScheme) }
         guard testDestination.isValid else { throw .invalidTestDestination(testDestination.specifier) }
         // Last, so a structural problem is reported before an incomplete clone is.
         if stage == .supported, let unclone = repositories.first(where: { $0.baseSHA == nil }) {
@@ -117,6 +140,18 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     /// The project path is only part of the path the guest builds from it (`Workspaces/<name>/
     /// repos/<checkout>/…`), so it is bounded well inside macOS's 1024-byte pathname limit.
     static let maximumProjectPathBytes = 512
+    /// A shared scheme is a `<name>.xcscheme` file in the project, so a name that cannot leave
+    /// room for that suffix within one directory entry names no scheme `xcodebuild` can find.
+    static let maximumSchemeBytes = maximumPathComponentBytes - ".xcscheme".utf8.count
+
+    /// Whether the redaction layer recognizes a credential in this value.
+    ///
+    /// The bare device-code shape is excluded on purpose: without context it also matches a
+    /// plausible scheme name such as `PROD-2024`, and refusing that would reject a workspace
+    /// Xcode builds. Every other pattern names something no `.xcscheme` file is called.
+    static func looksLikeCredential(_ text: String) -> Bool {
+        Redactor().redact(fieldValue: text) != Redactor.applyDeviceCodePattern(to: text)
+    }
 
     static func isRelativeProjectPath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), path.hasSuffix(".xcodeproj"), !containsControlCharacters(path),
@@ -155,15 +190,23 @@ public struct WorkspaceRepository: Codable, Hashable, Sendable {
     /// Recorded when the clone is made; `nil` until then.
     public var baseSHA: CommitSHA?
     public var taskBranch: BranchName
+    /// The commit last pushed to `taskBranch`, recorded the moment the push completes.
+    ///
+    /// It sits beside the repository rather than inside `draftPullRequest` because a push can
+    /// succeed and the pull request that follows it fail (MVP-PLAN.md §7): the reference cannot
+    /// exist until GitHub has issued a number, and resume must still be able to tell a finished
+    /// push from one that was never attempted.
+    public var publishedSHA: CommitSHA?
     public var draftPullRequest: PullRequestReference?
 
-    public init(role: Role, remote: RemoteURL, checkoutName: DirectoryName? = nil, baseBranch: BranchName, baseSHA: CommitSHA? = nil, taskBranch: BranchName, draftPullRequest: PullRequestReference? = nil) {
+    public init(role: Role, remote: RemoteURL, checkoutName: DirectoryName? = nil, baseBranch: BranchName, baseSHA: CommitSHA? = nil, taskBranch: BranchName, publishedSHA: CommitSHA? = nil, draftPullRequest: PullRequestReference? = nil) {
         self.role = role
         self.remote = remote
         self.checkoutName = checkoutName ?? DirectoryName.derived(from: remote.name)
         self.baseBranch = baseBranch
         self.baseSHA = baseSHA
         self.taskBranch = taskBranch
+        self.publishedSHA = publishedSHA
         self.draftPullRequest = draftPullRequest
     }
 }
@@ -171,13 +214,10 @@ public struct WorkspaceRepository: Codable, Hashable, Sendable {
 public struct PullRequestReference: Codable, Hashable, Sendable {
     public var number: Int
     public var url: URL?
-    /// The commit the PR head pointed at when Guesthouse last pushed.
-    public var headSHA: CommitSHA?
 
-    public init(number: Int, url: URL? = nil, headSHA: CommitSHA? = nil) {
+    public init(number: Int, url: URL? = nil) {
         self.number = number
         self.url = url
-        self.headSHA = headSHA
     }
 
     /// A positive number, and if a link is recorded, the HTTPS pull-request page of exactly
@@ -185,7 +225,13 @@ public struct PullRequestReference: Codable, Hashable, Sendable {
     public func isValid(for remote: RemoteURL) -> Bool {
         guard number > 0 else { return false }
         guard let url else { return true }
-        return url.absoluteString.lowercased() == "\(remote.canonical.lowercased())/pull/\(number)"
+        // The route itself is a case-sensitive URL path, so only the scheme, host, owner, and
+        // repository are compared without regard to case, as GitHub resolves them: a `/PULL/`
+        // link does not open the recorded pull request.
+        let text = url.absoluteString
+        let route = "/pull/\(number)"
+        guard text.hasSuffix(route) else { return false }
+        return text.dropLast(route.count).lowercased() == remote.canonical.lowercased()
     }
 }
 
@@ -204,11 +250,23 @@ public struct TestDestination: Codable, Hashable, Sendable {
 
     public static let macOS = TestDestination(platform: "macOS")
 
-    /// Non-empty platform, and no value that would add or change a key in the specifier.
+    /// Xcode's own platform, device, and OS values are a few dozen bytes; a field beyond this
+    /// names no destination, and the whole specifier stays well inside the argument the guest
+    /// can pass to `xcodebuild`.
+    static let maximumFieldBytes = 128
+    static let maximumSpecifierBytes = 512
+
+    /// Non-empty platform, no value that would add or change a key in the specifier, nothing
+    /// so large that the invocation could not carry it, and no credential.
+    ///
+    /// The fields come from destination discovery, which reports names a person chose: a
+    /// simulator or Mac renamed to a token would otherwise be persisted in `workspace.json`
+    /// and shown back in the GUI, so they are held to the same credential rule as the scheme.
     public var isValid: Bool {
-        guard !platform.isEmpty else { return false }
+        guard !platform.isEmpty, specifier.utf8.count <= Self.maximumSpecifierBytes else { return false }
         return [platform, name ?? "x", os ?? "x"].allSatisfy { value in
             !value.isEmpty && !value.contains(",") && !value.contains("=") && !WorkspaceManifest.containsControlCharacters(value)
+                && value.utf8.count <= Self.maximumFieldBytes && !WorkspaceManifest.looksLikeCredential(value)
         }
     }
 
@@ -228,12 +286,17 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case duplicateRemote(String)
     case unsupportedHost(String)
     case taskBranchCollidesWithBaseBranch(String)
+    /// A branch name the redaction layer reads as a credential, named by its checkout.
+    case credentialInBranchName(String)
     case missingBaseSHA(String)
     case invalidPullRequestReference(String)
     case invalidAppProjectPath(String)
     case invalidScheme(String)
     case invalidTestDestination(String)
     case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
+    /// A package repository whose own name cannot be a checkout directory, so the identity
+    /// rule can never be satisfied by renaming anything.
+    case unsupportedPackageName(String)
     case duplicatePackageIdentity(String)
     /// The manifest names a development Mac other than the one it was read from.
     case environmentMismatch
@@ -256,10 +319,12 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "Repositories on \(GuesthouseError.sanitize(host)) are not supported yet; only github.com is."
         case .taskBranchCollidesWithBaseBranch(let name):
             "The task branch for \(GuesthouseError.sanitize(name)) cannot exist alongside its base branch. Choose a branch name that is not the base branch, its case variant, or a prefix of it."
+        case .credentialInBranchName(let name):
+            "A branch chosen for \(GuesthouseError.sanitize(name)) reads as a token, and Guesthouse does not save credentials into the workspace file. Choose branches whose names are not secrets."
         case .missingBaseSHA(let name):
             "Guesthouse has no record of the commit \(GuesthouseError.sanitize(name)) was cloned at, so whether that clone finished is unknown until the development Mac is inspected."
         case .invalidPullRequestReference(let name):
-            "The draft pull request recorded for \(GuesthouseError.sanitize(name)) does not belong to that repository, so it was ignored. Publishing will create a fresh draft."
+            "The draft pull request recorded for \(GuesthouseError.sanitize(name)) belongs to another repository, so Guesthouse will not open this workspace. Remove that pull request from the workspace's settings; publishing then creates a fresh draft."
         case .invalidAppProjectPath(let path):
             "\(GuesthouseError.sanitize(path)) is not a project path inside the app repository."
         case .invalidScheme(let scheme):
@@ -270,6 +335,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "The workspace file in the development Mac could not be read (\(reason.value)). Guesthouse can rebuild it from the repositories you selected."
         case .checkoutNameDoesNotMatchRepository(let checkout, let repository):
             "The package repository \(GuesthouseError.sanitize(repository)) must be checked out as \(GuesthouseError.sanitize(repository)), not \(GuesthouseError.sanitize(checkout)), or Xcode will not use the local copy."
+        case .unsupportedPackageName(let repository):
+            "The package repository \(GuesthouseError.sanitize(repository)) cannot be checked out under its own name, which is what Xcode needs to use the local copy: a folder name is at most 64 letters, digits, dots, dashes, or underscores and cannot begin with a dot. Remove that repository from the workspace, or choose another one."
         case .duplicatePackageIdentity(let identity):
             "Two package repositories share the identity \(GuesthouseError.sanitize(identity)); Xcode could not tell them apart. Remove one of them from the workspace."
         case .environmentMismatch:
@@ -301,7 +368,26 @@ public extension WorkspaceManifest {
     /// Reads a manifest that came from the guest. Structural failures become
     /// `WorkspaceValidationError.malformed`, which carries a message and recovery actions,
     /// rather than a bare `DecodingError` the app cannot present.
+    /// `workspace.json` describes a handful of repositories. Anything beyond this is not a
+    /// manifest, and a guest-controlled file must be refused by size before a decoder walks it.
+    static let maximumEncodedSize = 64 * 1024
+
+    /// Just the version, so a file this build cannot decode is still recognized as one a newer
+    /// Guesthouse wrote rather than reported as damaged.
+    private struct VersionEnvelope: Decodable {
+        var schemaVersion: SchemaVersion
+    }
+
     static func decode(_ data: Data) throws(WorkspaceValidationError) -> WorkspaceManifest {
+        guard data.count <= Self.maximumEncodedSize else {
+            throw WorkspaceValidationError.malformed(reason: SanitizedText("the file is larger than a workspace can be"))
+        }
+        // The version comes first: a newer schema may have renamed or removed a field the
+        // current shape requires, and the answer to that is to update Guesthouse, not to
+        // rebuild a file that is not damaged.
+        if let envelope = try? JSONDecoder().decode(VersionEnvelope.self, from: data), envelope.schemaVersion != .current {
+            throw WorkspaceValidationError.unsupportedSchemaVersion(envelope.schemaVersion.rawValue)
+        }
         do {
             return try JSONDecoder().decode(WorkspaceManifest.self, from: data)
         } catch {

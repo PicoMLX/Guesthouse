@@ -28,7 +28,10 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
             // Display controls could make the confirmation read differently from the ref.
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator: return false
-            default: break
+            // Noncharacters are reserved against interchange and reach the publish
+            // confirmation as the same missing-glyph marker, so two distinct pushed branches
+            // would read alike. `WorkspaceManifest` refuses them in its own text as well.
+            default: if scalar.properties.isNoncharacterCodePoint { return false }
             }
         }
         guard name.utf8.count <= maximumTotalBytes else { return false }
@@ -43,7 +46,13 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
     /// Identity for collision checks. Case is folded because the guest file system folds it, and
     /// the composition of accented characters because the file system treats canonically
     /// equivalent spellings as one loose-ref path.
-    public var identity: String { rawValue.precomposedStringWithCanonicalMapping.lowercased() }
+    ///
+    /// Full Unicode case folding, not `lowercased()`: the latter leaves the Greek final sigma
+    /// `ς` alone while mapping `Σ` to `σ`, so a base and a task branch that the file system
+    /// folds together would still look like two names.
+    public var identity: String {
+        rawValue.folding(options: .caseInsensitive, locale: nil).precomposedStringWithCanonicalMapping
+    }
 
     /// Whether one name is a slash-component prefix of the other, which Git cannot store as
     /// two refs (`release` and `release/feature`), or the two are the same name in another case.

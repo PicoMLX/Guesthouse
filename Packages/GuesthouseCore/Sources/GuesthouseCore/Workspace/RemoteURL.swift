@@ -83,10 +83,11 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
     public static func == (lhs: RemoteURL, rhs: RemoteURL) -> Bool { lhs.identity == rhs.identity }
     public func hash(into hasher: inout Hasher) { hasher.combine(identity) }
 
-    /// An account name cannot hold `.` or `_` and cannot exceed 39 characters, so an owner that
-    /// no GitHub account could carry is refused here rather than at a clone that cannot resolve.
+    /// An account name cannot hold `.` or `_`, cannot exceed 39 characters, and takes only
+    /// single hyphens, so an owner that no GitHub account could carry is refused here rather
+    /// than at a clone that cannot resolve.
     private static func isValidOwner(_ owner: String) -> Bool {
-        (1...39).contains(owner.count) && !owner.hasPrefix("-") && !owner.hasSuffix("-")
+        (1...39).contains(owner.count) && !owner.hasPrefix("-") && !owner.hasSuffix("-") && !owner.contains("--")
             && owner.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
     }
 
