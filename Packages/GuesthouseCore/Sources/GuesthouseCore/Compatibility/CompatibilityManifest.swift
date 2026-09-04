@@ -196,9 +196,42 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
     /// `recoveryActions` straight to the GUI, so both invariants below have to survive from
     /// construction to the moment the rule fires.
     public struct KnownIncompatibility: Codable, Hashable, Sendable {
-        /// What stays available when a rule fires: the console, work export, and stopping the
-        /// environment (the persistent stop control is never an error button).
-        public static let defaultRecoveryActions: [RecoveryAction] = [.openConsole, .exportWork, .cancel]
+        /// What stays available when a rule fires: a targeted repair of the tools whose
+        /// combination is blocked, the console, work export, and stopping the environment (the
+        /// persistent stop control is never an error button).
+        ///
+        /// The repair leads: a blocked combination that offered only console access and export
+        /// would refuse every new handoff with no way out of it, and MVP-PLAN.md §5 asks for a
+        /// route back rather than a dead end.
+        public static let defaultRecoveryActions: [RecoveryAction] = [.repair(.tools), .openConsole, .exportWork, .cancel]
+
+        /// A rule's own actions with everything §5 requires of a blocked state added back.
+        ///
+        /// MVP-PLAN.md §5 asks for an idle-time repair path for known-incompatible versions and
+        /// says to "preserve console access, shutdown, and work export in **every** state", so
+        /// this is not something a rule gets to choose. Expecting each rule to name the right
+        /// actions itself was enough while the manifest was written here, but the rules are data:
+        /// a `[.cancel]` in a decoded manifest, or an updated one that simply lists fewer, would
+        /// otherwise hand the GUI a blocked handoff and a single dead end.
+        ///
+        /// The rule's own actions keep their order and lead, because they were written for this
+        /// combination — except that a repair goes in front of them when the rule names none,
+        /// which is where `defaultRecoveryActions` puts it and why. A repair the rule does name
+        /// counts as the repair whatever it repairs: some incompatibilities are not fixed by the
+        /// tools flow, and offering a second button that cannot help is worse than none.
+        static func completed(_ actions: [RecoveryAction]) -> [RecoveryAction] {
+            let namesARepair = actions.contains { if case .repair = $0 { true } else { false } }
+            var completed: [RecoveryAction] = namesARepair ? [] : [.repair(.tools)]
+            completed += actions
+            for required in defaultRecoveryActions {
+                // A repair is present either way by now, its own or the default one; asking
+                // whether *this* repair is present would add the tools flow beside it.
+                if case .repair = required { continue }
+                guard !completed.contains(required) else { continue }
+                completed.append(required)
+            }
+            return completed
+        }
 
         public let hostMacOS: VersionRange?
         public let hostMacOSBuild: String?
@@ -256,7 +289,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             self.githubCLIVersion = githubCLIVersion
             self.provisioningScriptVersion = provisioningScriptVersion
             self.reason = reason
-            self.recoveryActions = recoveryActions.isEmpty ? Self.defaultRecoveryActions : recoveryActions
+            self.recoveryActions = Self.completed(recoveryActions)
         }
 
         private static func isBlank(_ text: String) -> Bool {
