@@ -62,7 +62,16 @@ public struct SnapshotMigrator: Sendable {
             guard let migration = migrations[version.rawValue] else {
                 throw StateStoreError.migrationMissing(from: version)
             }
-            document = try migration.apply(document)
+            do {
+                document = try migration.apply(document)
+            } catch let failure as StateStoreError {
+                throw failure
+            } catch {
+                // A migration is free to throw whatever its transform ran into. Letting that
+                // escape would hand the user a raw Foundation error with no message of ours and
+                // no recovery action (AGENTS.md: every error carries both).
+                throw StateStoreError.migrationFailed(from: version)
+            }
             let next = try Self.version(of: document)
             // Exactly one step, never past `current`: a migration that skips a version would
             // leave the intermediate transformations unapplied.
@@ -106,6 +115,9 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     case corruptSnapshot
     case inconsistentSnapshot(reason: String)
     case corruptJournal(line: Int)
+    /// A journal line is well formed but written in a record format this build cannot read.
+    /// Kept apart from damage: the fix is a newer Guesthouse, not an inspection.
+    case unsupportedJournalFormat(line: Int, format: Int)
     /// A record reused an operation id with a different environment or operation.
     case inconsistentRecord(OperationID)
     /// A new operation was started on an environment whose earlier operation has no known
@@ -114,6 +126,8 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     case newerSchemaVersion(found: SchemaVersion, current: SchemaVersion)
     case migrationMissing(from: SchemaVersion)
     case migrationProducedWrongVersion(from: SchemaVersion, produced: SchemaVersion)
+    /// A migration itself failed for a reason of its own.
+    case migrationFailed(from: SchemaVersion)
     /// Two migrations claim the same version, so which one applies is undefined.
     case duplicateMigration(from: SchemaVersion)
     case fileUnwritable(name: String)
@@ -131,6 +145,8 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
             "The saved list of development Macs is inconsistent (\(reason)). Guesthouse will inspect the actual virtual machines before offering anything."
         case .corruptJournal(let line):
             "The operation journal is damaged at line \(line). Guesthouse will inspect the actual state before allowing new operations."
+        case .unsupportedJournalFormat(let line, let format):
+            "The operation journal was written by a newer Guesthouse (record format \(format) at line \(line); this version reads format \(JournalRecord.currentFormat)). Update Guesthouse to continue."
         case .inconsistentRecord:
             "A journal record disagreed with the operation it belongs to, so it was not written. This is a bug in Guesthouse, not something you did."
         case .operationUnresolved:
@@ -141,6 +157,8 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
             "The saved state (format \(from.rawValue)) cannot be upgraded by this version of Guesthouse."
         case .migrationProducedWrongVersion(let from, let produced):
             "Upgrading the saved state from format \(from.rawValue) produced format \(produced.rawValue), which is not the next step. This is a bug in Guesthouse."
+        case .migrationFailed(let from):
+            "Upgrading the saved state from format \(from.rawValue) did not succeed, so nothing was changed on disk."
         case .duplicateMigration(let from):
             "This version of Guesthouse offers two different upgrades of saved state from format \(from.rawValue), so it did not apply either. This is a bug in Guesthouse."
         case .fileUnwritable(let name):
@@ -157,7 +175,7 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
         switch self {
         case .insecureDirectory: [.openSettings, .cancel]
         case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord, .operationUnresolved, .unencodable: [.inspectState, .cancel]
-        case .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion, .duplicateMigration: [.reinstallApp, .cancel]
+        case .unsupportedJournalFormat, .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion, .migrationFailed, .duplicateMigration: [.reinstallApp, .cancel]
         case .fileUnwritable: [.freeDiskSpace, .openSettings, .cancel]
         case .fileUnreadable: [.inspectState, .openSettings, .cancel]
         }

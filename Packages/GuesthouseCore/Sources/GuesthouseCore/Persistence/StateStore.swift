@@ -89,16 +89,54 @@ public actor StateStore {
             throw StateStoreError.unencodable(name: Self.snapshotFileName)
         }
 
+        // The file about to be replaced is inspected first. A rename repoints this directory
+        // entry only, so a second name for the current snapshot would keep those bytes and the
+        // permissions they carry, which is the thing `requirePrivateRegularFile` refuses
+        // everywhere else (MVP-PLAN.md §3, "Local storage").
+        if let existing = try openStateFile(Self.snapshotFileName, creating: false) {
+            close(existing)
+        }
+
         removeStaleTempFiles()
         let tempName = Self.tempPrefix + UUID().uuidString
-        let descriptor = openat(directory, tempName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        // The lock is what tells another store's `removeStaleTempFiles` that this temporary is a
+        // live transaction rather than a leftover, so it is taken as part of creating the file
+        // rather than afterwards: `O_EXLOCK` leaves no instant in which the temporary exists
+        // unlocked, and cleanup running in such an instant would unlink the file this writer is
+        // about to rename into place, failing the save on a perfectly healthy directory. A
+        // filesystem that does not implement it falls back to locking the descriptor, which is
+        // the narrowest window still available there.
+        var descriptor = openat(directory, tempName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK, 0o600)
+        var locked = descriptor >= 0
+        if descriptor < 0, errno == ENOTSUP {
+            descriptor = openat(directory, tempName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            locked = false
+        }
         guard descriptor >= 0 else { throw StateStoreError.fileUnwritable(name: Self.snapshotFileName) }
+        if !locked, !Self.lock(descriptor, LOCK_EX) {
+            close(descriptor)
+            unlinkat(directory, tempName, 0)
+            throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
+        }
+        // `openat` masks the mode it is given with the process umask, and the rename below
+        // publishes this temporary as the snapshot itself: a umask that clears the owner's read
+        // bit would put an `environments.json` in place that the next launch cannot open, and
+        // `saveSnapshot` would still have returned successfully. The check every other state
+        // file passes puts the mode back and drops an access control list the directory may
+        // have handed the new file (MVP-PLAN.md §3, "Local storage"). It runs under the lock,
+        // not in front of it, for the reason above.
+        do {
+            try Self.requirePrivateRegularFile(descriptor, name: Self.snapshotFileName)
+        } catch {
+            close(descriptor)
+            unlinkat(directory, tempName, 0)
+            throw error
+        }
+        defer { close(descriptor) }
         do {
             try Self.writeAll(descriptor, data, name: Self.snapshotFileName)
             try Self.fullySynchronize(descriptor, name: Self.snapshotFileName)
-            close(descriptor)
         } catch {
-            close(descriptor)
             unlinkat(directory, tempName, 0)
             throw error
         }
@@ -143,6 +181,11 @@ public actor StateStore {
 
         let state = try refreshJournal(descriptor)
         try validateIdentity(of: record, against: state)
+        // The record before this one is complete but unterminated, so its newline is written
+        // here; without it the two lines would fuse into one unreadable record.
+        if state.unterminatedRecord {
+            line.insert(0x0A, at: line.startIndex)
+        }
         do {
             if state.truncatedTail {
                 guard ftruncate(descriptor, off_t(state.byteCount)) == 0 else {
@@ -154,6 +197,10 @@ public actor StateStore {
             }
             try Self.writeAll(descriptor, line, name: Self.journalFileName)
             try Self.fullySynchronize(descriptor, name: Self.journalFileName)
+            // Durable, but only in the file this descriptor names. If the entry now names some
+            // other file, the next launch reads that one and never sees this operation, which is
+            // exactly the blind retry the journal exists to prevent.
+            try Self.requireEntryStillNames(descriptor, in: directory, name: Self.journalFileName)
         } catch {
             // The file no longer matches what was read, so nothing about it is remembered.
             journal = JournalState()
@@ -166,6 +213,12 @@ public actor StateStore {
         // The record now ends the file; any torn tail was truncated above.
         journal.adopt(record, bytes: line.count)
         journal.truncatedTail = false
+        journal.unterminatedRecord = false
+        // The write moved the file's timestamps, so the remembered version is taken again:
+        // otherwise the next refresh would read the whole journal back as if someone else had
+        // rewritten it.
+        var written = stat()
+        journal.file = fstat(descriptor, &written) == 0 ? FileVersion(written) : nil
     }
 
     /// Reads every record and lists the operations that never reached a terminal outcome.
@@ -186,10 +239,19 @@ public actor StateStore {
         var info = stat()
         guard fstat(descriptor, &info) == 0 else { throw StateStoreError.fileUnreadable(name: Self.journalFileName) }
         var state = journal
-        // A different file, or one that lost bytes, invalidates everything read before it.
-        if state.file != FileIdentity(info) || off_t(state.byteCount) > info.st_size {
+        let version = FileVersion(info)
+        // A different file, one rewritten in place, or one that lost bytes, invalidates
+        // everything read before it.
+        if state.file != version || off_t(state.byteCount) > info.st_size {
+            if state.file?.identity != version.identity {
+                // A file this store never synchronized the entry of. An earlier one's entry
+                // says nothing about this one: the replacement may have arrived through an
+                // unsynchronized restore or rename, and a power loss would take it along with
+                // the `started` record `begin` has already reported.
+                journalEntryIsDurable = false
+            }
             state = JournalState()
-            state.file = FileIdentity(info)
+            state.file = version
         }
         if off_t(state.byteCount) == info.st_size {
             state.truncatedTail = false
@@ -206,42 +268,80 @@ public actor StateStore {
     /// line that cannot be trusted.
     private func fold(_ data: Data, into state: inout JournalState) throws {
         state.truncatedTail = false
+        state.unterminatedRecord = false
         var lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+        var unterminated: Data.SubSequence?
         if let last = lines.last, last.isEmpty {
             lines.removeLast()
         } else if !lines.isEmpty {
-            state.truncatedTail = true
-            lines.removeLast()
+            unterminated = lines.removeLast()
         }
         for line in lines {
             // Every valid line contributes exactly one record, so this is its number in the
             // file even though only the new bytes were read.
             let number = state.records.count + 1
             // An empty line between records means bytes were lost; it is never skipped.
-            guard !line.isEmpty, let record = try? decoder.decode(JournalRecord.self, from: line) else {
+            guard !line.isEmpty, let record = try decode(line, number: number), accepts(record, in: state) else {
                 throw StateStoreError.corruptJournal(line: number)
-            }
-            if let identity = state.identities[record.id] {
-                guard record.outcome != .started,
-                      !state.settled.contains(record.id),
-                      identity.environment == record.environmentID,
-                      identity.operation == record.operation
-                else {
-                    throw StateStoreError.corruptJournal(line: number)
-                }
-            } else {
-                guard record.outcome == .started else { throw StateStoreError.corruptJournal(line: number) }
             }
             state.adopt(record, bytes: line.count + 1)
         }
+        guard let unterminated else { return }
+        // A complete record that lost only its newline — a restore or a repair can leave one —
+        // is a record, not a torn write. Dropping it would hide a `started` mutation and let the
+        // next one run on that environment without inspecting anything.
+        guard let record = try decode(unterminated, number: state.records.count + 1), accepts(record, in: state) else {
+            state.truncatedTail = true
+            return
+        }
+        state.adopt(record, bytes: unterminated.count)
+        state.unterminatedRecord = true
+    }
+
+    /// Decodes one journal line. A line this build cannot read because it was written in a newer
+    /// record format is told apart from a damaged one: the fix is an update, not an inspection.
+    private func decode(_ line: Data.SubSequence, number: Int) throws -> JournalRecord? {
+        if let declared = try? decoder.decode(RecordFormat.self, from: line), !JournalRecord.canRead(declared.format) {
+            // Only a number above this build's is a newer Guesthouse's. Readable formats start
+            // at 1, so zero or a negative one names no release at all: it is damage, and the
+            // update the other error asks for cannot repair it, while inspecting the actual
+            // state can.
+            guard declared.format > JournalRecord.currentFormat else {
+                throw StateStoreError.corruptJournal(line: number)
+            }
+            throw StateStoreError.unsupportedJournalFormat(line: number, format: declared.format)
+        }
+        return try? decoder.decode(JournalRecord.self, from: line)
+    }
+
+    /// Just the format of a line, read before the record itself so an unreadable format is
+    /// reported as one rather than as damage.
+    private struct RecordFormat: Decodable {
+        let format: Int
+    }
+
+    /// Whether replay may adopt `record`. The journal can also be written by a restore or a
+    /// repair tool, so replay applies the rules `append` applies rather than trusting the file.
+    private func accepts(_ record: JournalRecord, in state: JournalState) -> Bool {
+        guard record.isSelfConsistent else { return false }
+        guard let identity = state.identities[record.id] else {
+            // A second start for one environment is a state the store itself refuses to create;
+            // adopting both would leave recovery with two mutations and no way to tell which of
+            // them to inspect.
+            return record.outcome == .started
+                && !state.inFlight.values.contains { $0.environmentID == record.environmentID }
+        }
+        return record.outcome != .started
+            && !state.settled.contains(record.id)
+            && identity.environment == record.environmentID
+            && identity.operation == record.operation
     }
 
     private func validateIdentity(of record: JournalRecord, against state: JournalState) throws {
-        // An unknown-outcome failure names the operation it belongs to. A record naming another
-        // one would leave recovery with two identities for a single mutation.
-        if case .failed(.operationOutcomeUnknown(let reported)) = record.outcome, reported != record.id {
-            throw StateStoreError.inconsistentRecord(record.id)
-        }
+        // A record that disagrees with itself — naming another operation, another development
+        // Mac, or another stage than the one it belongs to — would leave recovery with two
+        // answers to the question of what to inspect.
+        guard record.isSelfConsistent else { throw StateStoreError.inconsistentRecord(record.id) }
         switch (record.outcome, state.identities[record.id]) {
         case (.started, nil):
             // A new mutation on an environment whose earlier one has no known outcome would be
@@ -271,6 +371,7 @@ public actor StateStore {
     /// `O_NONBLOCK` keeps a named pipe left in place of a state file from blocking the store
     /// until someone opens the other end; `fstat` then refuses it like any other non-file.
     private func openStateFile(_ name: String, creating: Bool) throws -> Int32? {
+        try requireAnchoredDirectoryIsCurrent()
         let flags = (creating ? O_RDWR | O_CREAT : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         var descriptor = openat(directory, name, flags, 0o600)
         // Two writers that reach a state file which does not exist yet can both be told the
@@ -300,6 +401,33 @@ public actor StateStore {
         return descriptor
     }
 
+    /// The directory this store anchored at startup must still be the one `rootURL` names. If it
+    /// was renamed, removed, or replaced, every write below the cached descriptor lands in a
+    /// directory nobody will look in again: `begin` would report a `started` record durable while
+    /// the next launch, opening the directory now at `rootURL`, finds no record of the mutation.
+    private func requireAnchoredDirectoryIsCurrent() throws {
+        var anchored = stat()
+        var current = stat()
+        guard fstat(directory, &anchored) == 0 else {
+            throw StateStoreError.insecureDirectory(reason: "cannot be read")
+        }
+        guard lstat(rootURL.path, &current) == 0, FileIdentity(current) == FileIdentity(anchored) else {
+            throw StateStoreError.insecureDirectory(reason: "the folder was renamed, removed, or replaced while Guesthouse was using it")
+        }
+    }
+
+    /// Confirms the directory entry still names the file this descriptor is open on.
+    static func requireEntryStillNames(_ descriptor: Int32, in directory: Int32, name: String) throws {
+        var opened = stat()
+        var entry = stat()
+        guard fstat(descriptor, &opened) == 0,
+              fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+              FileIdentity(opened) == FileIdentity(entry)
+        else {
+            throw StateStoreError.fileUnwritable(name: name)
+        }
+    }
+
     private func readStateFile(_ name: String) throws -> Data? {
         guard let descriptor = try openStateFile(name, creating: false) else { return nil }
         defer { close(descriptor) }
@@ -327,12 +455,22 @@ public actor StateStore {
     /// Removes an inherited or restored access control list. A mode of `0600` says nothing
     /// about an ACL, and `fchmod` does not clear one, so another principal could still read or
     /// write a file the store considers private.
-    private static func removeExtendedACL(_ descriptor: Int32, name: String) throws {
-        guard let existing = acl_get_fd(descriptor) else { return }
-        var entry: acl_entry_t?
-        let hasEntry = acl_get_entry(existing, ACL_FIRST_ENTRY.rawValue, &entry) == 0
+    static func removeExtendedACL(_ descriptor: Int32, name: String) throws {
+        errno = 0
+        guard let existing = acl_get_fd(descriptor) else {
+            // A file with no list at all is reported as a failure with `ENOENT`. Any other
+            // reason means the list could not be read, and an unreadable list is not an absent
+            // one: the store cannot establish that no other principal has access, so it refuses
+            // the file rather than assuming the answer it wants (MVP-PLAN.md §3).
+            guard errno == ENOENT else {
+                throw StateStoreError.insecureDirectory(reason: "\(name) access control cannot be read")
+            }
+            return
+        }
+        // Whatever the list holds is replaced rather than inspected. Telling "this list has no
+        // entries" apart from "these entries could not be read" is exactly the distinction that
+        // must not be guessed, and an empty list is the right answer to both.
         acl_free(UnsafeMutableRawPointer(existing))
-        guard hasEntry else { return }
         guard let empty = acl_init(0) else {
             throw StateStoreError.insecureDirectory(reason: "\(name) cannot be made private")
         }
@@ -446,23 +584,73 @@ public actor StateStore {
     }
 
     private static func createDirectory(_ url: URL) throws {
-        let missing = directoriesToCreate(for: url)
-        do {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        } catch {
-            throw StateStoreError.fileUnwritable(name: url.lastPathComponent)
+        // One level at a time rather than `withIntermediateDirectories`, which is content with
+        // a directory that already exists: what the survey found missing and what this attempt
+        // actually made are two different lists as soon as a second initialization is creating
+        // the same root. Only what this one made can be rolled back, or a failure here would
+        // take the other store's journal with it.
+        var created: [URL] = []
+        for directory in directoriesToCreate(for: url).reversed() {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                created.append(directory)
+            } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                continue
+            } catch {
+                // A chain this attempt cannot finish is removed again, for the same reason
+                // `makeCreatedDirectoriesDurable` removes one it cannot make durable: leaving
+                // the ancestors behind makes the next attempt find them present, create
+                // nothing, and synchronize nothing, so the store comes up anchored on entries a
+                // power loss can still take — with the journal a `begin` has already reported
+                // durable inside them. Deepest first, and `rmdir` only, so a directory that is
+                // not this attempt's own and empty stays where it is.
+                for orphan in created.reversed() { rmdir(orphan.path) }
+                throw StateStoreError.fileUnwritable(name: url.lastPathComponent)
+            }
         }
-        // Every new entry is made durable in its own parent, not just the deepest one:
-        // otherwise a power loss could take an unsynchronized ancestor and with it a journal
-        // whose `begin` has already returned, inviting a blind retry after the reboot.
-        for created in missing.reversed() {
-            try synchronizeDirectory(at: created.deletingLastPathComponent())
+        // Deepest first, the order the rollback and the synchronization both walk.
+        try makeCreatedDirectoriesDurable(created.reversed(), synchronize: synchronizeDirectory(at:))
+    }
+
+    /// Makes every new entry durable in its own parent, not just the deepest one: otherwise a
+    /// power loss could take an unsynchronized ancestor and with it a journal whose `begin` has
+    /// already returned, inviting a blind retry after the reboot.
+    ///
+    /// A chain that could not be made durable is removed again rather than left behind. Leaving
+    /// it would make the next attempt find the directories present, create nothing, and
+    /// synchronize nothing, so the store would come up anchored on an ancestry that a power loss
+    /// can still take away.
+    ///
+    /// `created` holds only what the caller actually made, deepest first, and each entry is
+    /// removed only while it is empty. Between them those two rules keep the rollback to this
+    /// attempt's own work: a directory another initialization created, or one it has already put
+    /// a journal or a snapshot in, is not this attempt's to erase, and erasing it would destroy
+    /// the operation record that store needs to avoid a blind retry.
+    static func makeCreatedDirectoriesDurable(_ created: [URL], synchronize: (URL) throws -> Void) throws {
+        for directory in created.reversed() {
+            do {
+                try synchronize(directory.deletingLastPathComponent())
+            } catch {
+                // Deepest first, so a parent this attempt made is empty by the time it is
+                // reached and a parent holding anything else stays.
+                for orphan in created {
+                    rmdir(orphan.path)
+                }
+                throw error
+            }
         }
     }
 
     private func removeStaleTempFiles() {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: rootURL.path) else { return }
         for name in names where name.hasPrefix(Self.tempPrefix) {
+            let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard descriptor >= 0 else { continue }
+            defer { close(descriptor) }
+            // A temporary another writer still holds is that writer's live snapshot, not a
+            // leftover. Unlinking it would make its rename fail on a perfectly healthy
+            // directory, reported to the user as a storage failure.
+            guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { continue }
             unlinkat(directory, name, 0)
         }
     }
@@ -480,12 +668,36 @@ private struct FileIdentity: Hashable {
     }
 }
 
+/// The identity plus the timestamps that move when the file's bytes are rewritten. A restore or
+/// a repair that puts different records into the same inode, at the same length or a greater
+/// one, is otherwise indistinguishable from the file the remembered replay was read from, and
+/// the store would authorize a second mutation against a journal it has not actually read.
+private struct FileVersion: Hashable {
+    let identity: FileIdentity
+    let modified: Int64
+    let modifiedNanoseconds: Int
+    let changed: Int64
+    let changedNanoseconds: Int
+
+    init(_ info: stat) {
+        identity = FileIdentity(info)
+        modified = Int64(info.st_mtimespec.tv_sec)
+        modifiedNanoseconds = info.st_mtimespec.tv_nsec
+        changed = Int64(info.st_ctimespec.tv_sec)
+        changedNanoseconds = info.st_ctimespec.tv_nsec
+    }
+}
+
 /// The replay of the journal bytes read so far.
 private struct JournalState {
-    var file: FileIdentity?
-    /// Bytes of complete, validated lines. Anything past this is a torn tail.
+    var file: FileVersion?
+    /// Bytes of complete, validated lines, including the final record's missing newline when
+    /// `unterminatedRecord` is set. Anything past this is a torn tail.
     var byteCount = 0
     var truncatedTail = false
+    /// The last record is complete but its newline is missing, so the next append writes one
+    /// before its own line rather than fusing the two.
+    var unterminatedRecord = false
     var records: [JournalRecord] = []
     var inFlight: [OperationID: JournalRecord] = [:]
     var identities: [OperationID: (environment: EnvironmentID, operation: JournalOperation)] = [:]

@@ -43,7 +43,15 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         case failed(GuesthouseError)
         /// Contact was lost; the true outcome must be reconciled before anything is retried.
         case unknown
+        /// Inspection established that the mutation did not take effect. Terminal, and the only
+        /// truthful way to settle an operation whose outcome was unknown and turned out to be
+        /// nothing: `completed` would claim it succeeded, and every "unknown" outcome leaves the
+        /// environment blocked against the new operation recovery is there to allow.
+        case notApplied
     }
+
+    /// Whether this build can read a record written in `format`.
+    public static func canRead(_ format: Int) -> Bool { (1...currentFormat).contains(format) }
 
     public let format: Int
     public let id: OperationID
@@ -64,7 +72,7 @@ public struct JournalRecord: Codable, Hashable, Sendable {
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let format = try c.decode(Int.self, forKey: .format)
-        guard (1...Self.currentFormat).contains(format) else {
+        guard Self.canRead(format) else {
             throw DecodingError.dataCorruptedError(forKey: .format, in: c, debugDescription: "journal record format \(format) is not readable by this build")
         }
         self.format = format
@@ -86,7 +94,26 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         switch outcome {
         case .started, .checkpoint, .unknown: true
         case .failed(.operationOutcomeUnknown), .failed(.canceled): true
-        case .completed, .failed: false
+        case .completed, .notApplied, .failed: false
+        }
+    }
+
+    /// Whether the record agrees with itself. A journal can also be written by a restore or a
+    /// repair tool, so the identities and stages a record carries are checked against the ones
+    /// it belongs to when it is appended and again when it is replayed: a record naming two
+    /// operations, two environments, or two stages leaves recovery unable to say which mutation
+    /// to inspect (AGENTS.md: an interrupted operation has an unknown outcome until the actual
+    /// state is inspected).
+    public var isSelfConsistent: Bool {
+        switch outcome {
+        case .failed(.operationOutcomeUnknown(let reported)):
+            reported == id
+        case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)):
+            reported == environmentID
+        case .checkpoint(let reached):
+            operation == .provision(stage: reached)
+        default:
+            true
         }
     }
 }
