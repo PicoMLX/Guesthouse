@@ -11,9 +11,7 @@ struct QuitSheet: View {
             switch model.quitFlow {
             case .idle, .confirming:
                 Text("Quit Guesthouse?").font(.headline)
-                Text(model.runningEnvironments.isEmpty
-                     ? "No development Mac is running."
-                     : "Quitting stops \(model.runningEnvironments.count == 1 ? "the running development Mac" : "all running development Macs") first.")
+                Text(model.quitConfirmationMessage)
                 Text(model.quitWarning).font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
@@ -44,22 +42,9 @@ struct QuitSheet: View {
                         .accessibilityLabel("Cancel quitting")
                 }
             case .stopFailed(let error):
-                Text("A development Mac did not stop").font(.headline)
-                Text(error.userMessage)
-                if model.canForceStop {
-                    Text("Force-stopping is like pulling the power: unsaved work inside the guest can be lost.").font(.callout).foregroundStyle(.red)
-                } else {
-                    Text("Guesthouse must check the development Mac's state before offering anything else.").font(.callout).foregroundStyle(.secondary)
-                }
-                HStack {
-                    Spacer()
-                    Button("Cancel") { model.cancelQuit() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel quitting")
-                    if model.canForceStop {
-                        Button("Force stop and quit", role: .destructive) { model.forceStopAndQuit() }.accessibilityLabel("Force stop and quit")
-                    } else {
-                        Button("Check Environment") { model.inspectAndContinueQuit() }.keyboardShortcut(.defaultAction).accessibilityLabel("Check environment before quitting")
-                    }
-                }
+                failure(title: "A development Mac did not stop", message: error.userMessage)
+            case .checkFailed(let interruption):
+                failure(title: "Guesthouse could not check what is running", message: interruption.userMessage)
             case .forceStopping:
                 Text("Force-stopping…").font(.headline)
                 ProgressView().accessibilityLabel("Force-stopping development Macs")
@@ -78,6 +63,38 @@ struct QuitSheet: View {
         }
         .padding(20)
         .frame(minWidth: 420)
+    }
+
+    /// A failure the Quit sheet cannot get past on its own. What it offers next to Cancel is
+    /// the failure's own recovery, so an error prescribing a repair or a reinstall is never
+    /// answered with a check that only returns the same error (AGENTS.md: every error carries
+    /// a user-facing message and at least one recovery action).
+    @ViewBuilder
+    private func failure(title: String, message: String) -> some View {
+        Text(title).font(.headline)
+        Text(message)
+        switch model.quitRecovery {
+        case .forceStop:
+            Text("Force-stopping is like pulling the power: unsaved work inside the guest can be lost.").font(.callout).foregroundStyle(.red)
+        case .check:
+            Text("Guesthouse must check the development Mac's state before offering anything else.").font(.callout).foregroundStyle(.secondary)
+        case .guidance(let guidance):
+            Text(guidance).font(.callout).foregroundStyle(.secondary)
+        case nil:
+            EmptyView()
+        }
+        HStack {
+            Spacer()
+            Button("Cancel") { model.cancelQuit() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel quitting")
+            switch model.quitRecovery {
+            case .forceStop:
+                Button("Force stop and quit", role: .destructive) { model.forceStopAndQuit() }.accessibilityLabel("Force stop and quit")
+            case .check:
+                Button("Check Environment") { model.inspectAndContinueQuit() }.keyboardShortcut(.defaultAction).accessibilityLabel("Check environment before quitting")
+            case .guidance, nil:
+                EmptyView()
+            }
+        }
     }
 
     private func describe(_ id: EnvironmentID?, _ phase: ProgressPhase?) -> String {

@@ -31,6 +31,9 @@ final class AppModel {
         case stopping(EnvironmentID?, ProgressPhase?)
         /// Graceful stop failed; the sheet offers the warned force-stop, or a check first.
         case stopFailed(GuesthouseError)
+        /// The pre-stop check lost its answer. Nothing was mutated, so the interruption's own
+        /// read-only recovery is offered instead of an operation outcome the app never had.
+        case checkFailed(RuntimeConnectionInterrupted)
         case forceStopping(EnvironmentID?)
         /// Everything stopped; AppKit has been told to terminate.
         case terminating
@@ -57,6 +60,9 @@ final class AppModel {
     private var gracefulFailures: Set<EnvironmentID> = []
     /// The model's own reconciliation task, so closing a window cannot cancel it.
     private var refreshTask: Task<Void, Never>?
+    /// Set for as long as that task is alive. Taken before the task starts, so two presses in
+    /// one turn cannot both start one.
+    private var refreshIsRunning = false
     /// Set when a reconciliation ended `unavailable`: further connection drops no longer
     /// reconnect on their own, so the app stays on the recovery the error prescribes.
     private var automaticReconciliationSuspended = false
@@ -65,6 +71,14 @@ final class AppModel {
     /// Bumped by every `refresh()`; a refresh whose generation is no longer current does not
     /// publish its result.
     private var refreshGeneration: UInt64 = 0
+    /// How many reconciliations are reading from the runtime right now. A loss reported while
+    /// one is running belongs to that reconciliation, which reports it itself.
+    private var reconciliationsInFlight = 0
+    /// A loss left to the reconciliation that was reading when it arrived. The client throws
+    /// into the streams it cut off, but a reconciliation whose last query had already been
+    /// answered has nothing left to throw into, so the loss is kept here and settles that
+    /// reconciliation's own result instead of being discarded.
+    private var lossLeftToReconciliation: RuntimeConnectionInterrupted?
 
     /// - Parameters:
     ///   - backend: the runtime, or a fake for previews and tests.
@@ -84,12 +98,19 @@ final class AppModel {
         interruptionObservation.cancel()
     }
 
-    /// Picks the real client, or the fake when `GUESTHOUSE_FAKE_RUNTIME=1` or when the app is
-    /// hosting unit tests, so a test run never launches the runtime service.
+    /// Picks the real client, or the fake when the app is hosting unit tests, so a test run
+    /// never launches the runtime service.
+    ///
+    /// `GUESTHOUSE_FAKE_RUNTIME=1` selects the fake too, but only in a development build. In a
+    /// shipped app an environment variable must not be able to replace the runtime with an
+    /// empty in-memory one: reconciliation would then find no environments, and Quit would
+    /// conclude there is nothing to stop and approve termination with a real VM still running
+    /// (MVP-PLAN.md §2).
     static func makeBackend(environment: [String: String] = ProcessInfo.processInfo.environment) -> any RuntimeBackend {
-        if environment["GUESTHOUSE_FAKE_RUNTIME"] == "1" || environment["XCTestConfigurationFilePath"] != nil {
-            return FakeRuntimeBackend()
-        }
+        if environment["XCTestConfigurationFilePath"] != nil { return FakeRuntimeBackend() }
+        #if DEBUG
+        if environment["GUESTHOUSE_FAKE_RUNTIME"] == "1" { return FakeRuntimeBackend() }
+        #endif
         return RuntimeClient()
     }
 
@@ -100,10 +121,39 @@ final class AppModel {
     /// to the refresh that replaced it.
     /// Starts a reconciliation owned by the model. A window that closes cannot cancel it, so
     /// the menu bar and any surviving window still leave "Checking environment".
+    ///
+    /// A Quit in progress owns its own reconciliation and reads its decision out of the state
+    /// that one publishes. A refresh started here would retire that generation, leaving the
+    /// Quit to read "checking" as a check that failed and stranding the sheet on a failure the
+    /// newer result disproves — so while the sheet is up, its check is the one that runs
+    /// (MVP-PLAN.md §2). `canCheckEnvironment` lets a menu say so rather than do nothing.
     func startRefresh() {
+        guard canCheckEnvironment else { return }
+        startRefreshTask()
+    }
+
+    /// Whether a check may be started from outside the Quit flow. A check that is already
+    /// reading answers for the one being asked for, so the menu shows the action as
+    /// unavailable rather than appearing to do nothing.
+    var canCheckEnvironment: Bool { quitFlow == .idle && !refreshIsRunning }
+
+    /// One model-owned reconciliation at a time, and a second request joins it rather than
+    /// replacing it.
+    ///
+    /// Cancelling the local task does not cancel the request the service is already working on:
+    /// the client only notes that the consumer went away, and `RuntimeService` keeps counting
+    /// that request against the session until it replies. So a check started for every press
+    /// while a slow one is in flight would spend the session's eight-request cap on checks
+    /// nobody is waiting for, and the next real request would be refused as `tooManyInFlight`
+    /// and published as an unavailable runtime — for a service that is merely slow
+    /// (MVP-PLAN.md §2). The check in flight is the fresh one; joining it is the whole answer.
+    private func startRefreshTask() {
+        guard !refreshIsRunning else { return }
+        refreshIsRunning = true
         refreshTask = Task { [weak self] in
             guard let self else { return }
             await self.refresh()
+            self.refreshIsRunning = false
         }
     }
 
@@ -115,9 +165,22 @@ final class AppModel {
         // automatic reconciliation without relaunching the app.
         automaticReconciliationSuspended = false
         launchState = .checkingEnvironment
+        reconciliationsInFlight += 1
         let outcome = await reconcile()
+        reconciliationsInFlight -= 1
+        // Left set for the refresh that replaced this one: a retired result publishes nothing,
+        // so it must not consume the loss its successor still has to answer for.
         guard generation == refreshGeneration, !Task.isCancelled else { return }
-        switch outcome {
+        // A loss that arrived while this reconciliation was reading was left to it to report,
+        // because the client throws into the streams the same loss cut off. When every query
+        // had already been answered nothing threw, and nothing else will: `connectionDropped`
+        // only reaches accepted operations. This result therefore describes a session that is
+        // gone, and publishing it as Ready would leave that state on screen until the user
+        // happened to ask again, so the loss settles the refresh instead (MVP-PLAN.md §2).
+        var settled = outcome
+        if let loss = lossLeftToReconciliation, case .ready = outcome { settled = .interrupted(loss) }
+        lossLeftToReconciliation = nil
+        switch settled {
         case .ready(let listed, let fresh):
             environments = listed
             statuses = fresh
@@ -174,7 +237,16 @@ final class AppModel {
         switch quitFlow {
         case .idle:
             break
-        case .confirming, .stopFailed:
+        case .confirming, .stopFailed, .checkFailed:
+            // A suspended reconciliation means the sheet already shows a failure that carries
+            // its own recovery and that another check only reproduces. The service closing an
+            // incompatible session behind that failure would otherwise reopen it, reach the
+            // same verdict, and relaunch the service for as long as the sheet is up.
+            guard !automaticReconciliationSuspended else {
+                quitGeneration &+= 1
+                quitFlow = quitFailure()
+                return
+            }
             // The sheet is open on state that is now stale: nothing is offered again until
             // the environments have been read back. That reconciliation refreshes the model
             // itself, and it is the only one started here: a second refresh would retire its
@@ -196,11 +268,19 @@ final class AppModel {
         // its own recovery; replacing it with the generic interrupted screen would lose that
         // guidance and leave a check as the only offer.
         guard !automaticReconciliationSuspended else { return }
-        launchState = .interrupted(interruption)
-        refreshTask = Task { [weak self] in
-            guard let self else { return }
-            await self.refresh()
+        // The real client yields this notification before it throws into the streams the same
+        // loss cut off, so a reconciliation may still be reading. It reports the loss itself;
+        // replacing it here would retire its generation, suppress the suspension its failure
+        // sets, and reconnect in a loop to a service that keeps crashing. It is remembered
+        // rather than dropped, because a reconciliation whose queries were already answered
+        // has no stream left for the loss to arrive in and would otherwise publish a session
+        // that is gone as Ready.
+        guard reconciliationsInFlight == 0 else {
+            lossLeftToReconciliation = interruption
+            return
         }
+        launchState = .interrupted(interruption)
+        startRefreshTask()
     }
 
     /// Re-reads the environments for an interrupted Quit sheet and returns it to its options,
@@ -208,11 +288,46 @@ final class AppModel {
     private func reconcileForQuit(generation: UInt64) async {
         await refresh()
         guard generation == quitGeneration, case .checking = quitFlow else { return }
-        quitFlow = launchState == .ready ? .confirming : .stopFailed(launchStateError())
+        quitFlow = launchState == .ready ? .confirming : quitFailure()
     }
 
     var runningEnvironments: [DevelopmentEnvironment] {
         environments.filter { statuses[$0.id]?.vm == .running }
+    }
+
+    /// What the menu bar says about a reconciled state. Ownership the runtime could not
+    /// establish is named, never folded into "no development Mac running": that would report
+    /// an unproven stopped state as fact (MVP-PLAN.md §4).
+    var runningSummary: String {
+        let running = runningEnvironments.count
+        let uncertain = uncertainEnvironments.count
+        guard uncertain > 0 else {
+            return running == 0 ? "No development Mac running" : "\(running) running"
+        }
+        let unproven = "\(uncertain) development Mac\(uncertain == 1 ? "" : "s") Guesthouse cannot identify"
+        return running == 0 ? unproven : "\(running) running, \(unproven)"
+    }
+
+    /// What the Quit confirmation says about the state it is about to act on.
+    ///
+    /// Ownership the runtime could not establish is named here as it is in the menu bar, never
+    /// folded into "no development Mac is running": that reports an unproven stopped state as
+    /// fact, and this is the sentence the user's Quit-or-Cancel decision is made on. The stop
+    /// itself refuses over an uncertain environment, so promising a clean quit here would be
+    /// contradicted a moment later (MVP-PLAN.md §4).
+    var quitConfirmationMessage: String {
+        let running = runningEnvironments.count
+        let uncertain = uncertainEnvironments.count
+        let stops = running == 1
+            ? "Quitting stops the running development Mac first."
+            : "Quitting stops all running development Macs first."
+        guard uncertain > 0 else {
+            return running == 0 ? "No development Mac is running." : stops
+        }
+        let unproven = uncertain == 1
+            ? "Guesthouse cannot tell whether one development Mac is running, and cannot stop it until that is checked."
+            : "Guesthouse cannot tell whether \(uncertain) development Macs are running, and cannot stop them until that is checked."
+        return running == 0 ? unproven : "\(stops) \(unproven)"
     }
 
     /// Environments whose VM ownership the runtime could not establish. Neither stop mode is
@@ -265,20 +380,53 @@ final class AppModel {
         }
     }
 
+    /// What the Quit sheet offers next to Cancel. Taken from the failure itself: a check is
+    /// offered only when the failure's own recovery calls for one, so a failure prescribing a
+    /// repair or a reinstall is not answered with a check that returns the same failure and
+    /// leaves the sheet without the applicable recovery.
+    enum QuitRecovery: Equatable {
+        case forceStop
+        case check
+        /// The failure prescribes something the Quit sheet cannot do; its guidance is shown.
+        case guidance(String)
+    }
+
+    var quitRecovery: QuitRecovery? {
+        switch quitFlow {
+        case .stopFailed(let error):
+            if canForceStop { return .forceStop }
+            let actions = error.recoveryActions
+            guard actions.contains(.inspectState) || actions.contains(.retry) else {
+                return .guidance(error.recoverySuggestion ?? "Cancel to stay in Guesthouse and deal with this first.")
+            }
+            return .check
+        case .checkFailed(let interruption):
+            return interruption.recoveryActions.contains(.retry) ? .check : .guidance(interruption.recoveryMessage)
+        default:
+            return nil
+        }
+    }
+
     /// The user accepted the force-stop warning.
     func forceStopAndQuit() {
         guard canForceStop else { return }
         quitCancelRequested = false
         quitGeneration &+= 1
         let generation = quitGeneration
-        quitFlow = .forceStopping(nil)
-        quitTask = Task { await stopAll(mode: .force, generation: generation) }
+        quitFlow = .checking
+        // The statuses on screen were read before the graceful stop failed, and the sheet then
+        // waited for a person to read a warning. An environment can have been started outside
+        // Guesthouse, or restarted after it stopped, in that time; forcing from that snapshot
+        // would approve termination with a VM still running. State is read back first, and the
+        // targets are chosen from it — only the environments whose graceful stop actually
+        // failed are forced, anything else is still asked to shut down (MVP-PLAN.md §2).
+        quitTask = Task { await stopAllAfterReconciling(mode: .force, generation: generation) }
     }
 
     /// After an unknown outcome or uncertain ownership the sheet offers a check: reconcile, then
     /// return to the confirmation with the real state, or show why the check failed.
     func inspectAndContinueQuit() {
-        guard case .stopFailed = quitFlow, !canForceStop else { return }
+        guard quitRecovery == .check else { return }
         quitGeneration &+= 1
         let generation = quitGeneration
         quitFlow = .checking
@@ -296,8 +444,13 @@ final class AppModel {
         case .stopping(_, let phase?) where !phase.cancelable:
             quitCancelRequested = true
         case .stopping(.some, nil):
-            // A stop the runtime has accepted but not yet described may already be in a
-            // phase it will not interrupt; the cancellation waits for its outcome.
+            // A stop that has not described a phase yet: it may not even be accepted. Neither
+            // can be abandoned here. Every phase a stop reports is one the runtime protects,
+            // so a `cancelOperation` — the one the client sends the moment an acceptance names
+            // the operation, and the one it would send now — is deferred there exactly as it
+            // is deferred here, and the guest shuts down either way. Dropping the stream would
+            // only lose the outcome the sheet needs to tell a refused shutdown from a failure,
+            // so the cancellation waits for it (MVP-PLAN.md §2).
             quitCancelRequested = true
         case .forceStopping:
             quitCancelRequested = true
@@ -311,7 +464,7 @@ final class AppModel {
             quitFlow = .idle
             quitTask = nil
             terminationDecision(false)
-        case .stopping, .stopFailed:
+        case .stopping, .stopFailed, .checkFailed:
             quitTask?.cancel()
             finishCancel(reconcile: true)
         }
@@ -324,25 +477,35 @@ final class AppModel {
         quitTask = nil
         quitFlow = .idle
         terminationDecision(false)
-        if reconcile { Task { await refresh() } }
+        // Through the model's own task, so this check is the one a later press joins rather
+        // than an unstructured one that would run alongside it on the same session.
+        if reconcile { startRefreshTask() }
     }
 
-    private func launchStateError() -> GuesthouseError {
-        if case .unavailable(let error) = launchState { return error }
-        return .operationOutcomeUnknown(OperationID())
-    }
-
-    /// Stop targets come from reconciled state, never from what was cached before the sheet.
-    private func stopAllAfterReconciling(mode: StopMode, generation: UInt64) async {
-        if launchState != .ready {
-            await refresh()
-            guard generation == quitGeneration, case .checking = quitFlow else { return }
-            guard launchState == .ready else {
-                quitFlow = .stopFailed(launchStateError())
-                return
-            }
-            quitFlow = .stopping(nil, nil)
+    /// How a check that did not end `ready` is presented on the sheet. A lost answer keeps its
+    /// own read-only recovery: inventing an operation id for it would tell the user a mutation
+    /// may have completed and replace the retry it prescribes with an inspection.
+    private func quitFailure() -> QuitFlow {
+        switch launchState {
+        case .unavailable(let error): .stopFailed(error)
+        case .interrupted(let interruption): .checkFailed(interruption)
+        case .checkingEnvironment, .ready: .checkFailed(RuntimeConnectionInterrupted())
         }
+    }
+
+    /// Stop targets come from reconciled state, never from what was cached before the sheet:
+    /// a VM started outside Guesthouse changes nothing the app can observe, so a cached Ready
+    /// is not evidence about what is running (MVP-PLAN.md §2).
+    private func stopAllAfterReconciling(mode: StopMode, generation: UInt64) async {
+        guard generation == quitGeneration, !Task.isCancelled else { return }
+        quitFlow = .checking
+        await refresh()
+        guard generation == quitGeneration, case .checking = quitFlow else { return }
+        guard launchState == .ready else {
+            quitFlow = quitFailure()
+            return
+        }
+        quitFlow = mode == .force ? .forceStopping(nil) : .stopping(nil, nil)
         // An operation the runtime still reports is unresolved, whatever the VM state says:
         // quitting over it could leave a VM the app never saw start.
         if let busy = statuses.values.first(where: { $0.inFlightOperation != nil }), let operation = busy.inFlightOperation {
@@ -356,6 +519,10 @@ final class AppModel {
     /// graceful stop already failed: the rest are always asked to shut down first, so a
     /// second VM is never hard-stopped without being asked (MVP-PLAN.md §2).
     private func stopAll(mode: StopMode, generation: UInt64) async {
+        // A retired attempt reaches here only after the sheet already answered AppKit; the
+        // guard keeps it from resurrecting a failure over that answer, or over a newer Quit.
+        guard generation == quitGeneration else { return }
+        if Task.isCancelled || quitCancelRequested { finishCancel(reconcile: true); return }
         if let uncertain = uncertainEnvironments.first {
             quitFlow = .stopFailed(.vmOwnershipUncertain(uncertain.id))
             return
@@ -366,16 +533,23 @@ final class AppModel {
             let force = mode == .force && gracefulFailures.contains(environment.id)
             let effective: StopMode = force ? .force : .graceful(deadline: Self.gracefulStopDeadline)
             quitFlow = force ? .forceStopping(environment.id) : .stopping(environment.id, nil)
+            // Only a stop the runtime took on can have failed gracefully. A request refused
+            // before acceptance — a service still initializing answers `runtimeStarting`
+            // without reaching the lifecycle — never asked the guest to shut down, so it must
+            // not unlock the force-stop that MVP-PLAN.md §2 reserves for a refused shutdown.
+            var accepted = false
             do {
                 for try await event in backend.send(.stopEnvironment(environment.id, effective)) {
                     guard generation == quitGeneration else { return }
                     switch event {
+                    case .accepted:
+                        accepted = true
                     case .progress(_, let phase):
                         if case .stopping = quitFlow { quitFlow = .stopping(environment.id, phase) }
                     case .status(let status):
                         statuses[status.environmentID] = status
                     case .failed(_, let error):
-                        gracefulFailures.insert(environment.id)
+                        if accepted { gracefulFailures.insert(environment.id) }
                         // A cancellation deferred by a protected phase is honored here too:
                         // the user asked to stay, and the outcome is now known.
                         if quitCancelRequested { finishCancel(reconcile: true); return }

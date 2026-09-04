@@ -24,7 +24,10 @@ struct GuesthouseApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        // A single-instance scene: "Show Guesthouse" activates the dashboard it already has.
+        // A `WindowGroup` would open another one on every click, and each copy observes the
+        // shared quit flow, so one Quit request would raise a confirmation sheet per window.
+        Window("Guesthouse", id: "main") {
             MainWindow(model: model, delegate: delegate)
                 .environment(model)
                 .environment(debugProbe)
@@ -39,6 +42,7 @@ struct GuesthouseApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .option])
                 Button("Validate Xcode for Import…") { debugProbe.importXcodeCandidate() }
                 Button("Check Environment") { model.startRefresh() }
+                    .disabled(!model.canCheckEnvironment)
             }
             #endif
         }
@@ -77,15 +81,18 @@ struct MenuBarContent: View {
     var body: some View {
         switch model.launchState {
         case .checkingEnvironment: Text("Checking environment…")
-        case .ready: Text(model.runningEnvironments.isEmpty ? "No development Mac running" : "\(model.runningEnvironments.count) running")
+        case .ready: Text(model.runningSummary)
         case .interrupted: Text("Runtime connection lost")
         case .unavailable(let error): Text(error.userMessage)
         }
         Divider()
         Button("Show Guesthouse") { NSApp.activate(); openWindow(id: "main") }
         // The check belongs to the model: a menu that closes must not cancel it, and it is
-        // the reconciliation that lifts a suspension a previous failure imposed.
+        // the reconciliation that lifts a suspension a previous failure imposed. While the Quit
+        // sheet is up, the sheet's own check is the one that runs, so this one is offered as
+        // unavailable rather than silently doing nothing.
         Button("Check Environment") { model.startRefresh() }
+            .disabled(!model.canCheckEnvironment)
         Divider()
         Button("Quit Guesthouse") { NSApp.terminate(nil) }
     }

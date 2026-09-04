@@ -34,7 +34,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func presentQuit(_ model: AppModel) {
         _ = model.handleQuitRequest()
         NSApp.activate()
-        let mainWindowVisible = NSApp.windows.contains { $0.isVisible && ($0.identifier?.rawValue.hasPrefix("main") ?? false) }
-        if !mainWindowVisible { openMainWindow?() }
+        // A window in the Dock cannot show a sheet, and activating the app does not bring it
+        // back out, so it is restored explicitly before anything is decided from what is
+        // visible. Without this a Quit from the menu bar extra or the Dock could attach the
+        // confirmation to a minimized window and leave AppKit waiting on `.terminateLater`
+        // with no choice on screen (MVP-PLAN.md §2).
+        let mainWindows = NSApp.windows.filter { $0.identifier?.rawValue.hasPrefix("main") ?? false }
+        for window in mainWindows where window.isMiniaturized { window.deminiaturize(nil) }
+        // The reopen is asked for whenever no main window is on screen, which includes one
+        // still coming back from the Dock: for a single-instance `Window` scene that is the
+        // same window being raised, never a second one.
+        if !mainWindows.contains(where: \.isVisible) { openMainWindow?() }
     }
 }

@@ -16,6 +16,10 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         case succeed(phases: [ProgressPhase] = [], status: EnvironmentStatus? = nil)
         /// `accepted`, the given phases, then `failed(error)`. For queries, `failed` with a fresh id.
         case fail(after: [ProgressPhase] = [], error: GuesthouseError)
+        /// `failed(error)` without `accepted`: the service refused the request before it was
+        /// journaled, as it does while its lifecycle is still initializing. Nothing was
+        /// attempted, so nothing is in flight and no operation id is ever handed out.
+        case refuse(error: GuesthouseError)
         /// `accepted`, then nothing until the consumer cancels or sends `cancelOperation` for
         /// the id; the fake then ends with `failed(.canceled)`.
         case hang
@@ -171,7 +175,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             switch scenario {
             case .disconnect:
                 continuation.finish(throwing: RuntimeConnectionInterrupted())
-            case .fail(_, let error):
+            case .fail(_, let error), .refuse(let error):
                 continuation.yield(.failed(OperationID(), error))
                 continuation.finish()
             case .hang:
@@ -206,7 +210,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 // consumer-driven cancellation is recorded as the request it is.
                 releaseReservation(of: id)
                 continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
-            case .fail(_, let error):
+            case .fail(_, let error), .refuse(let error):
                 releaseReservation(of: id)
                 continuation.yield(.failed(id, error))
                 continuation.finish()
@@ -232,6 +236,15 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             break
         }
 
+        // A refusal happens before the request is journaled, so it hands out no operation id
+        // and leaves nothing in flight: the caller learns that nothing was attempted.
+        if case .refuse(let error) = scenario {
+            advanceTurn()
+            await pause()
+            continuation.yield(.failed(OperationID(), error))
+            continuation.finish()
+            return
+        }
         let id = binding.seededOperationID ?? OperationID()
         // `accepted` means journaled and in flight, so the environment's stored status names
         // the operation from here until its terminal event, whether or not a caller seeded it.
@@ -240,6 +253,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         advanceTurn()
 
         switch scenario {
+        case .refuse:
+            // Answered above, before any operation id existed.
+            break
         case .succeed(let phases, let status):
             for phase in phases {
                 guard await progress(id, phase, continuation) else { return }

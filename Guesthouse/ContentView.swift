@@ -24,11 +24,15 @@ struct ContentView: View {
             case .interrupted(let interruption):
                 Image(systemName: "bolt.slash").imageScale(.large)
                 Text(interruption.userMessage)
-                Button("Check Environment") { Task { await model.refresh() } }
+                // The model owns its reconciliation: a window that closes cannot cancel it,
+                // repeated clicks replace the check in flight instead of piling concurrent
+                // request streams onto one session until the service refuses them, and a check
+                // the Quit sheet owns is not overtaken by one started here.
+                Button("Check Environment") { model.startRefresh() }
             case .unavailable(let error):
                 Image(systemName: "exclamationmark.triangle").imageScale(.large)
                 Text(error.userMessage)
-                RecoveryActionRow(error: error) { Task { await model.refresh() } }
+                RecoveryActionRow(error: error) { model.startRefresh() }
             }
             #if DEBUG
             Text(debugProbe.result)
