@@ -63,7 +63,7 @@ import Testing
     }
 
     @Test func schemaVersionsBaseSHAsAndPullRequestsAreValidated() {
-        #expect(throws: WorkspaceValidationError.unsupportedSchemaVersion(99)) { try manifest(repositories: [app(sha: sha)], schema: SchemaVersion(99)).validate() }
+        #expect(throws: WorkspaceValidationError.unsupportedSchemaVersion(99)) { try manifest(repositories: [app(sha: sha)], schema: SchemaVersion(99)!).validate() }
         #expect(throws: WorkspaceValidationError.missingBaseSHA("App")) { try manifest(repositories: [app()]).validate() }
         #expect(throws: Never.self) { try manifest(repositories: [app()]).validate(stage: .setup) }
         #expect(throws: Never.self) { try manifest(repositories: [app(sha: sha)]).validate() }
