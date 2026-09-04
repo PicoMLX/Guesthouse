@@ -236,7 +236,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     /// Undoes the reservation `send` made for a cancellation request that did not succeed.
     private nonisolated func releaseReservation(of id: OperationID) {
-        configuration.withLock { $0.explicitCancellations.remove(id) }
+        configuration.withLock { _ = $0.explicitCancellations.remove(id) }
     }
 
     private func clearInFlight(_ id: OperationID) {
