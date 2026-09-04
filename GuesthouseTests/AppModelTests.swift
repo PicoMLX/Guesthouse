@@ -278,7 +278,6 @@ import Testing
         #expect(!model.canForceStop, "the error asks for inspection, so forcing past it is not offered")
     }
 
-    @Test func aQuitConfirmationWaitsForAnOperationTheRuntimeReports() async {
     @Test func twoRapidStartsSendOneRequest() async {
         let backend = FakeRuntimeBackend(delay: .milliseconds(20))
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
@@ -319,9 +318,14 @@ import Testing
         await model.refresh()
         _ = model.handleQuitRequest()
         model.confirmStopAndQuit()
-        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
-        #expect(model.quitFlow == .stopFailed(.operationOutcomeUnknown(recovered)))
-        #expect(decision.values.isEmpty, "a quit never terminates over an operation the runtime still reports")
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(model.quitFlow == .stopping(environment.id, nil), "a recovered operation keeps the quit waiting")
+        #expect(decision.values.isEmpty)
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        await waitUntil { model.quitFlow == .terminating }
+        #expect(decision.values == [true])
+        let stops = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { return true }; return false }
+        #expect(stops.count == 1, "the VM the recovered start produced is stopped before quitting")
     }
 
     @Test func anInterruptionWhileTheSheetIsOpenReconcilesBeforeOfferingAgain() async {
@@ -351,14 +355,6 @@ import Testing
         model.startRefresh()
         await waitUntil { await backend.receivedRequests.count > before }
         #expect(await backend.receivedRequests.count > before, "an explicit check still reconnects")
-        try? await Task.sleep(for: .milliseconds(300))
-        #expect(model.quitFlow == .stopping(environment.id, nil), "a recovered operation keeps the quit waiting")
-        #expect(decision.values.isEmpty)
-        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
-        await waitUntil { model.quitFlow == .terminating }
-        #expect(decision.values == [true])
-        let stops = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { return true }; return false }
-        #expect(stops.count == 1, "the VM the recovered start produced is stopped before quitting")
     }
 
     @Test func theInFlightPreviewShowsItsScriptedPhases() async {

@@ -637,12 +637,6 @@ final class AppModel {
         // The mode still decides how they are stopped: only the environments whose graceful
         // stop already failed are force-stopped.
         quitFlow = mode == .force ? .forceStopping(nil) : .stopping(nil, nil)
-        // An operation the runtime still reports is unresolved, whatever the VM state says:
-        // quitting over it could leave a VM the app never saw start.
-        if let busy = statuses.values.first(where: { $0.inFlightOperation != nil }), let operation = busy.inFlightOperation {
-            quitFlow = .stopFailed(.operationOutcomeUnknown(operation))
-            return
-        }
         await stopAll(mode: mode, generation: generation)
     }
 
