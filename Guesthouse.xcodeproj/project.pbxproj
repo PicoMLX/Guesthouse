@@ -32,6 +32,7 @@
 		F8976E97304933D30071C234 /* GuesthouseTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GuesthouseTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8976EA1304933D30071C234 /* GuesthouseUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GuesthouseUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8ACD8A93049406300550943 /* MVP-PLAN.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MVP-PLAN.md"; sourceTree = "<group>"; };
+		921BF84465C14B2296CA65E2 /* GuesthouseCore */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = GuesthouseCore; path = Packages/GuesthouseCore; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -82,6 +83,7 @@
 			isa = PBXGroup;
 			children = (
 				F8ACD8A93049406300550943 /* MVP-PLAN.md */,
+				921BF84465C14B2296CA65E2 /* GuesthouseCore */,
 				F8976E8C304933D10071C234 /* Guesthouse */,
 				F8976E9A304933D30071C234 /* GuesthouseTests */,
 				F8976EA4304933D30071C234 /* GuesthouseUITests */,
@@ -503,9 +505,9 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Guesthouse.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Guesthouse";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Guesthouse Codex VM.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Guesthouse Codex VM";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
 			name = Debug;
@@ -529,9 +531,9 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Guesthouse.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Guesthouse";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Guesthouse Codex VM.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Guesthouse Codex VM";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
 			name = Release;
@@ -554,7 +556,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				TEST_TARGET_NAME = Guesthouse;
 				XROS_DEPLOYMENT_TARGET = 26.5;
@@ -579,7 +581,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				TEST_TARGET_NAME = Guesthouse;
 				XROS_DEPLOYMENT_TARGET = 26.5;
