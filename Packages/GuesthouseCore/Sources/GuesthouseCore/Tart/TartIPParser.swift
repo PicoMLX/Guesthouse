@@ -49,7 +49,7 @@ extension GuestIPAddress: Codable {
     }
 }
 
-public enum TartIPParser {
+public enum TartIPParser: Sendable {
     /// `tart ip` prints exactly one address on success. Anything else, including several lines
     /// or a message, is a failure; the caller classifies stderr separately.
     public static func parse(_ stdout: String) throws(TartParseError) -> GuestIPAddress {

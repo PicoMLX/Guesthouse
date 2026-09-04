@@ -28,15 +28,16 @@ public enum TartFailure: Hashable, Sendable {
     case unknown(RedactedLine)
 }
 
-public enum TartErrorClassifier {
+public enum TartErrorClassifier: Sendable {
     public static func classify(stderr: String, exitStatus: Int32) -> TartFailure {
         let text = stderr.lowercased()
         func has(_ phrase: String) -> Bool { text.contains(phrase) }
 
-        if has("the specified vm") && has("does not exist") { return .vmNotFound }
+        // One phrase, not two fragments that a multi-diagnostic stderr could supply separately.
+        if text.contains(#/the specified vm "[^"]*" does not exist/#) { return .vmNotFound }
         if text.contains(#/vm "[^"]*" is already running/#) { return .alreadyRunning }
         if text.contains(#/vm "[^"]*" is not running/#) { return .notRunning }
-        if has("no ip address found") { return .noIPAddress }
+        if has("no ip address found, is your vm running?") { return .noIPAddress }
         if has("failed to lock ") { return .lockHeld }
         if has("vm directory is already initialized") { return .directoryAlreadyInitialized }
         if has("seems to be already in use, unmount it first") || has("already in use, try umounting it") { return .diskInUse }
