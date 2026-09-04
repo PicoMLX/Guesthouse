@@ -59,6 +59,14 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         guard Set(provisioning.keys).isSubset(of: slotIDs) else {
             throw .inconsistentSnapshot(reason: "provisioning state for an unknown environment")
         }
+        // A record's own version is checked too. The outer version says what this build wrote;
+        // an environment carrying a different one was never understood by whatever produced it
+        // and must be migrated, not read or rewritten as if it were current.
+        for environment in environments {
+            guard environment.schemaVersion == SchemaVersion.current else {
+                throw .inconsistentSnapshot(reason: "a development Mac record with another schema version")
+            }
+        }
         // The values are checked the way their decoder checks them, so a snapshot is never
         // written that the next load would call corrupt.
         for state in provisioning.values {

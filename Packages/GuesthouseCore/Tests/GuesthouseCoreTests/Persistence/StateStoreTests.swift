@@ -93,7 +93,7 @@ import Testing
         try await store.append(JournalRecord(id: done, environmentID: environment, operation: .startEnvironment, timestamp: now, outcome: .checkpoint(.runtimeReady)))
         try await store.append(JournalRecord(id: done, environmentID: environment, operation: .startEnvironment, timestamp: now, outcome: .completed))
         let failed = try await store.begin(.importXcode, for: environment, at: now)
-        try await store.append(JournalRecord(id: failed, environmentID: environment, operation: .importXcode, timestamp: now, outcome: .failed(.canceled)))
+        try await store.append(JournalRecord(id: failed, environmentID: environment, operation: .importXcode, timestamp: now, outcome: .failed(.runtimeMissing)))
         let lost = try await store.begin(.stopEnvironment, for: environment, at: now)
         try await store.append(JournalRecord(id: lost, environmentID: environment, operation: .stopEnvironment, timestamp: now, outcome: .unknown))
 
@@ -156,6 +156,21 @@ import Testing
         await #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(99), current: .current)) {
             try await store.loadSnapshot()
         }
+    }
+
+    @Test func everyOperationKeepsItsDetailThroughTheJournal() async throws {
+        let store = try StateStore(rootURL: root)
+        var expected: [JournalOperation] = []
+        for operation in JournalOperation.allCases {
+            let environment = EnvironmentID()
+            let id = try await store.begin(operation, for: environment)
+            try await store.append(JournalRecord(id: id, environmentID: environment, operation: operation, timestamp: Date(), outcome: .completed))
+            expected.append(operation)
+        }
+        let recorded = try await store.replay().records.filter { $0.outcome == .started }.map(\.operation)
+        #expect(recorded == expected)
+        #expect(recorded.contains(.provision(stage: .sshPaired)))
+        #expect(recorded.contains(.repair(kind: .credentials)))
     }
 
     @Test func migrationsRunInSequenceAndMissingStepFails() throws {

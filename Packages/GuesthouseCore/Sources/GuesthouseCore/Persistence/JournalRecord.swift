@@ -2,14 +2,25 @@ import Foundation
 
 /// The closed set of operations the journal can record. A misspelled or unsupported kind is a
 /// compile error, so replay always knows which state inspection an in-flight record needs.
-public enum JournalOperation: String, Codable, Hashable, Sendable, CaseIterable {
+///
+/// Two of them are recorded with the detail that inspection needs: the stage a provisioning
+/// attempt was working toward, and which of the five targeted repairs was running. Without
+/// them an operation interrupted before its first checkpoint would only say "provision" or
+/// "repair", and the snapshot's last completed stage is not proof of what had started.
+public enum JournalOperation: Codable, Hashable, Sendable, CaseIterable {
     case startEnvironment
     case stopEnvironment
-    case provision
+    case provision(stage: ProvisioningStage)
     case importXcode
     case deleteEnvironment
     case exportWork
-    case repair
+    case repair(kind: RepairKind)
+
+    public static var allCases: [JournalOperation] {
+        [.startEnvironment, .stopEnvironment, .importXcode, .deleteEnvironment, .exportWork]
+            + ProvisioningStage.allCases.map { .provision(stage: $0) }
+            + RepairKind.allCases.map { .repair(kind: $0) }
+    }
 }
 
 /// One line of the append-only operation journal.
@@ -66,10 +77,15 @@ public struct JournalRecord: Codable, Hashable, Sendable {
 
     /// Whether this record leaves the operation in flight. A failure whose error says the
     /// outcome is unknown is not terminal: the mutation's result is still unestablished.
+    ///
+    /// A cancellation is one of those. It can reach the runtime after the host mutation has
+    /// partly or fully happened, which is why `GuesthouseError.canceled` offers inspection as
+    /// its first recovery action; the operation stays unresolved until that inspection has
+    /// settled it (AGENTS.md: never retry a mutating operation blindly).
     public var leavesInFlight: Bool {
         switch outcome {
         case .started, .checkpoint, .unknown: true
-        case .failed(.operationOutcomeUnknown): true
+        case .failed(.operationOutcomeUnknown), .failed(.canceled): true
         case .completed, .failed: false
         }
     }

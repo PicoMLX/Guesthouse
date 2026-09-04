@@ -18,10 +18,20 @@ public struct SnapshotMigrator: Sendable {
 
     public let current: SchemaVersion
     private let migrations: [Int: Migration]
+    /// A version two migrations claim to upgrade. Reported when a migration is attempted
+    /// rather than trapped at construction: a duplicate in a future migration list would
+    /// otherwise kill the app during static setup, before saved state could be inspected.
+    private let ambiguousVersion: SchemaVersion?
 
     public init(current: SchemaVersion = .current, migrations: [Migration]) {
         self.current = current
-        self.migrations = Dictionary(uniqueKeysWithValues: migrations.map { ($0.from.rawValue, $0) })
+        var byVersion: [Int: Migration] = [:]
+        var ambiguous: SchemaVersion?
+        for migration in migrations where byVersion.updateValue(migration, forKey: migration.from.rawValue) != nil {
+            ambiguous = ambiguous ?? migration.from
+        }
+        self.migrations = byVersion
+        ambiguousVersion = ambiguous
     }
 
     /// The migrations shipped with this build.
@@ -30,16 +40,18 @@ public struct SnapshotMigrator: Sendable {
     /// treated as version 0 and receive the key; nothing else about them changes.
     public static let standard = SnapshotMigrator(migrations: [
         Migration(from: SchemaVersion(0)) { data in
-            guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            var object = try SnapshotMigrator.object(in: data)
+            object["schemaVersion"] = 1
+            guard let upgraded = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
                 throw StateStoreError.corruptSnapshot
             }
-            object["schemaVersion"] = 1
-            return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            return upgraded
         }
     ])
 
     /// Returns the document at `current`, and the version it was found at.
     public func migrate(_ data: Data) throws -> (data: Data, from: SchemaVersion) {
+        if let ambiguousVersion { throw StateStoreError.duplicateMigration(from: ambiguousVersion) }
         var version = try Self.version(of: data)
         let original = version
         var document = data
@@ -62,12 +74,24 @@ public struct SnapshotMigrator: Sendable {
         return (document, original)
     }
 
-    static func version(of data: Data) throws -> SchemaVersion {
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    /// The document's top-level object. Syntactically invalid JSON is corruption like any
+    /// other, reported with the store's recovery actions rather than as a Foundation error.
+    static func object(in data: Data) throws -> [String: Any] {
+        guard let parsed = try? JSONSerialization.jsonObject(with: data), let object = parsed as? [String: Any] else {
             throw StateStoreError.corruptSnapshot
         }
+        return object
+    }
+
+    static func version(of data: Data) throws -> SchemaVersion {
+        let object = try object(in: data)
         guard let raw = object["schemaVersion"] else { return SchemaVersion(0) }
-        guard let value = raw as? Int else { throw StateStoreError.corruptSnapshot }
+        // `true` and `false` arrive as boolean `NSNumber`s, which cast to 1 and 0. A document
+        // whose version reads `false` would otherwise look unversioned and be rewritten as
+        // version 1 instead of being reported as corrupt.
+        guard CFGetTypeID(raw as CFTypeRef) != CFBooleanGetTypeID(), let value = raw as? Int else {
+            throw StateStoreError.corruptSnapshot
+        }
         return SchemaVersion(value)
     }
 }
@@ -87,7 +111,12 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     case newerSchemaVersion(found: SchemaVersion, current: SchemaVersion)
     case migrationMissing(from: SchemaVersion)
     case migrationProducedWrongVersion(from: SchemaVersion, produced: SchemaVersion)
+    /// Two migrations claim the same version, so which one applies is undefined.
+    case duplicateMigration(from: SchemaVersion)
     case fileUnwritable(name: String)
+    case fileUnreadable(name: String)
+    /// A value in memory cannot be written as JSON, so it was never saved.
+    case unencodable(name: String)
 
     public var userMessage: String {
         switch self {
@@ -109,8 +138,14 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
             "The saved state (format \(from.rawValue)) cannot be upgraded by this version of Guesthouse."
         case .migrationProducedWrongVersion(let from, let produced):
             "Upgrading the saved state from format \(from.rawValue) produced format \(produced.rawValue), which is not the next step. This is a bug in Guesthouse."
+        case .duplicateMigration(let from):
+            "This version of Guesthouse offers two different upgrades of saved state from format \(from.rawValue), so it did not apply either. This is a bug in Guesthouse."
         case .fileUnwritable(let name):
             "Guesthouse could not write \(name) in its state folder."
+        case .fileUnreadable(let name):
+            "Guesthouse could not read \(name) in its state folder."
+        case .unencodable(let name):
+            "Guesthouse could not save \(name): one of the values could not be written. Nothing was changed on disk."
         }
     }
 
@@ -118,9 +153,10 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     public var recoveryActions: [RecoveryAction] {
         switch self {
         case .insecureDirectory: [.openSettings, .cancel]
-        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord, .operationUnresolved: [.inspectState, .cancel]
-        case .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion: [.reinstallApp, .cancel]
+        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord, .operationUnresolved, .unencodable: [.inspectState, .cancel]
+        case .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion, .duplicateMigration: [.reinstallApp, .cancel]
         case .fileUnwritable: [.freeDiskSpace, .openSettings, .cancel]
+        case .fileUnreadable: [.inspectState, .openSettings, .cancel]
         }
     }
 
