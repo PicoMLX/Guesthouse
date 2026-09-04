@@ -132,6 +132,9 @@ final class AppModel {
     /// is running from one that already ended in failure, so a query nobody is waiting for is
     /// never presented as one still in progress.
     private var statusQueriesInFlight: [EnvironmentID: Int] = [:]
+    /// The poll of operations only a status reports. Held so an inspection that discovers one
+    /// joins the loop already running instead of stacking a second one on it.
+    private var recoveredPollTask: Task<Void, Never>?
 
     /// - Parameters:
     ///   - backend: the runtime, or a fake for previews and tests.
@@ -440,6 +443,16 @@ final class AppModel {
            let name = environments.first(where: { $0.id == busy })?.name {
             return "An operation is in progress on \(name)."
         }
+        // An operation whose outcome was never established may already have started its VM,
+        // and an environment still being read back may be about to report one. Neither is a
+        // state to start a second development Mac over (AGENTS.md: an interrupted operation
+        // has an unknown outcome until the actual state is inspected).
+        if let unknown = unknownOutcomes.keys.first, let name = environments.first(where: { $0.id == unknown })?.name {
+            return "Guesthouse does not know yet what its last operation on \(name) did. Check that development Mac first."
+        }
+        if let checking = reconciling.first, let name = environments.first(where: { $0.id == checking })?.name {
+            return "\(name) is being checked after its last operation."
+        }
         // An environment that has not answered its last check says nothing about its VM or
         // about an operation on it. The runtime runs one VM and one operation at a time, so
         // nothing is started until it answers (MVP-PLAN.md §2).
@@ -555,6 +568,10 @@ final class AppModel {
             // Only an actual status answer settles an unknown outcome; a failed or empty
             // reply leaves it unknown.
             if received { unknownOutcomes[id] = nil }
+            // The answer may name an operation nobody is streaming (the original event stream
+            // was lost, or it was started before this launch). It is polled from here, so a
+            // card never stays busy for an operation that has since finished.
+            if statuses[id]?.inFlightOperation != nil, operations[id] == nil { startRecoveredOperationPoll() }
         } catch {
             // A reconciliation that began after this query did has read the actual state
             // since, so its result stands: replacing it here would delete the status it just
@@ -596,12 +613,23 @@ final class AppModel {
                 statusUnread: statuses[environment.id] == nil,
                 statusCheckFailed: statusQueryFailures.contains(environment.id) && statusQueriesInFlight[environment.id] == nil,
                 unknownOutcome: unknownOutcomes[environment.id],
+                reconciling: reconciling.contains(environment.id),
                 logs: operations[environment.id]?.logs ?? lastLogs[environment.id] ?? [],
                 retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
+                retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
                 runtimeVersion: runtimeVersion
             )
         }
+    }
+
+    /// Why replaying the last request would be refused, or nil. Retry re-sends whatever
+    /// failed, so a replayed start answers to the same one-VM, one-operation guard as Start
+    /// itself, and the card names the environment that is in the way rather than sending a
+    /// request the runtime must reject.
+    private func startRetryBlock(for id: EnvironmentID, block: String?) -> String? {
+        guard case .startEnvironment? = lastRequests[id] else { return nil }
+        return block
     }
 
     /// Asks the runtime to cancel the environment's in-flight operation.
@@ -628,6 +656,12 @@ final class AppModel {
         switch action {
         case .retry:
             guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id), let request = lastRequests[id] else { return }
+            // A replayed start is one more start: the runtime still runs one operation and one
+            // VM at a time, and sending past that would replace the useful original error.
+            if case .startEnvironment = request, globalStartBlock != nil { return }
+            // Reserved before the first suspension, so two rapid activations of Try again —
+            // or a Start pressed straight after it — cannot both pass this guard.
+            operations[id] = OperationState(id: OperationID(), request: request)
             Task { await run(request, for: id) }
         case .inspectState:
             Task { await refreshStatus(of: id) }
@@ -700,6 +734,9 @@ final class AppModel {
                 case .completed:
                     recordOperationError(nil, for: id)
                     completed = true
+                    // The request succeeded, so it is no longer what Try again would replay: a
+                    // problem a later status reports on its own must not re-send this one.
+                    lastRequests[id] = nil
                 default: break
                 }
             }
@@ -724,6 +761,8 @@ final class AppModel {
         if !completed || !described { statuses[id] = nil }
         lastLogs[id] = operations.removeValue(forKey: id)?.logs
         reconciling.insert(id)
+        // A status that still names an operation (the connection dropped while the runtime
+        // kept working) is polled until it settles; `refreshStatus` starts that itself.
         await refreshStatus(of: id)
         reconciling.remove(id)
         // The runtime may still be running the operation this app stopped listening to. A
@@ -946,6 +985,13 @@ final class AppModel {
                     quitFlow = .stopFailed(lastErrors[environment.id] ?? .operationOutcomeUnknown(OperationID()))
                     return false
                 }
+            }
+            // An operation the app never saw finish may have started a VM this quit would
+            // then leave running. The status queries above settle every outcome they can
+            // answer; one that is still open stops the quit and asks for a check instead.
+            if let unknown = unknownOutcomes.first {
+                quitFlow = .stopFailed(.operationOutcomeUnknown(unknown.value))
+                return false
             }
             let busy = operations.keys.first ?? statuses.values.first(where: { $0.inFlightOperation != nil })?.environmentID
             guard let busy else { return true }

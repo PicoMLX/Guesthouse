@@ -19,7 +19,7 @@ struct OperationProgressView: View {
                 Button("Cancel") {
                     switch presentation.cancelability {
                     case .immediate: cancel()
-                    case .confirmFirst: confirming = true
+                    case .deferred: confirming = true
                     case .unavailable: break
                     }
                 }
@@ -29,11 +29,13 @@ struct OperationProgressView: View {
             }
             Text(presentation.title).font(.callout).foregroundStyle(.secondary)
         }
-        .confirmationDialog("Cancel now?", isPresented: $confirming, titleVisibility: .visible) {
-            Button("Cancel anyway", role: .destructive) { cancel() }
+        // Nothing is interrupted here, so the choice is not destructive and does not claim to
+        // stop anything now: the runtime stops at the next step it may stop at.
+        .confirmationDialog("Cancel at the next step?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Cancel when possible") { cancel() }
             Button("Keep going", role: .cancel) {}
         } message: {
-            if case .confirmFirst(let reason) = presentation.cancelability { Text(reason) }
+            if case .deferred(let reason) = presentation.cancelability { Text(reason) }
         }
     }
 }
@@ -49,9 +51,11 @@ struct ErrorRecoveryView: View {
             Label(presentation.title, systemImage: presentation.outcomeUnknown ? "questionmark.circle" : "exclamationmark.triangle")
                 .font(.headline)
             Text(presentation.message).font(.callout)
-            HStack(spacing: 8) {
+            // An error's options are as many and as long as the error makes them; four of
+            // them do not fit one line of a card at the grid's narrow column.
+            WrappingHStack(spacing: 8, lineSpacing: 8) {
                 ForEach(presentation.options) { option in
-                    AvailabilityButton(option.title, availability: option.availability) { choose(option) }
+                    AvailabilityButton(option.title, availability: option.availability, role: option.buttonRole) { choose(option) }
                         .buttonStyle(.bordered)
                         .accessibilityLabel(option.title)
                 }

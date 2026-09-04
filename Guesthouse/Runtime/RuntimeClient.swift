@@ -356,8 +356,8 @@ actor RuntimeClient: RuntimeBackend {
         yieldTracking(event, to: continuation, id: id)
     }
 
-    /// Yields and records the room the stream reports it has left, which is how a consumer
-    /// that has caught up is noticed.
+
+
     private func yieldTracking(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
         if case .enqueued(let remaining) = continuation.yield(event) {
             consumerRoom[id] = remaining

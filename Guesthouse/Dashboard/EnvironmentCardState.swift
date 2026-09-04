@@ -83,8 +83,10 @@ struct EnvironmentCardState: Equatable, Identifiable {
         /// running. The status is unread, but nothing is being checked.
         statusCheckFailed: Bool = false,
         unknownOutcome: OperationID? = nil,
+        reconciling: Bool = false,
         logs: [RedactedLine] = [],
         retryAvailable: Bool = true,
+        retryBlockedReason: String? = nil,
         startBlockedElsewhere: String? = nil,
         runtimeVersion: RuntimeVersionInfo? = nil
     ) {
@@ -94,7 +96,10 @@ struct EnvironmentCardState: Equatable, Identifiable {
             if case .needsAttention(let error)? = status?.readiness { return error }
             return nil
         }()
-        let attention: GuesthouseError? = statusAttention ?? lastError
+        // While an operation runs, a failure this window just caused — a cancellation the
+        // runtime refused — is the news the user is waiting for; the status's standing
+        // attention is not new and would otherwise hide it (MVP-PLAN.md §2).
+        let attention: GuesthouseError? = (operation != nil ? lastError : nil) ?? statusAttention ?? lastError
         self.attention = attention
         recoveryActions = attention?.recoveryActions ?? []
         canDismiss = statusAttention == nil && lastError != nil
@@ -108,25 +113,34 @@ struct EnvironmentCardState: Equatable, Identifiable {
         } else {
             nil
         }
-        outcomeUnknown = unknownOutcome != nil
+        // The runtime reports an unresolved operation as an error on the status too; that is
+        // the same unknown state as a locally lost stream and is presented as one, rather than
+        // as a settled "Needs attention" beside a panel that says it is still checking.
+        let reportedUnknown: Bool = if case .operationOutcomeUnknown = attention { true } else { false }
+        let unknown = unknownOutcome != nil || reportedUnknown
+        outcomeUnknown = unknown
         recovery = if let unknownOutcome {
             RecoveryPresentation(unknownOutcomeOf: unknownOutcome)
         } else if let attention {
-            RecoveryPresentation(error: attention, retryAvailable: retryAvailable)
+            // A problem the status keeps reporting is not dismissible: clearing the local
+            // error would leave the identical panel in place.
+            RecoveryPresentation(error: attention, retryAvailable: retryAvailable, retryBlockedReason: retryBlockedReason, dismissAvailable: attention != statusAttention)
         } else {
             nil
         }
         self.logs = logs
-        // A status the last query could not read is not a check in progress: that query ended,
-        // and the card names the failure it is already showing rather than turning an error
-        // with its own recovery into an indefinite spinner nobody can end.
+        // A status still being read back after an operation is not a state to act on either:
+        // the model refuses everything until the answer lands, and the card says so. A status
+        // the last query could not read is different: that query ended, so the card names the
+        // failure it is already showing rather than spinning on a check nobody can end.
+        let checking = unknown || reconciling
         let unread = statusUnread || status == nil
-        isBusy = (unread && !statusCheckFailed) || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil || unknownOutcome != nil
-        statusText = unknownOutcome != nil ? "Checking environment…" : Self.statusText(for: status, operation: operation, checkFailed: statusCheckFailed)
+        isBusy = (unread && !statusCheckFailed) || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil || checking
+        statusText = checking ? "Checking environment…" : Self.statusText(for: status, operation: operation, checkFailed: statusCheckFailed)
         details = Self.details(for: environment, status: status, runtimeVersion: runtimeVersion)
         // A status nobody has read back yet is not a state to act on: Start stays disabled
         // until the environment answers again.
-        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, outcomeUnknown: unknownOutcome != nil, blockedElsewhere: startBlockedElsewhere)
+        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, checking: checking, blockedElsewhere: startBlockedElsewhere)
     }
 
     func availability(of action: Action) -> Availability {
@@ -193,17 +207,20 @@ struct EnvironmentCardState: Equatable, Identifiable {
         ]
     }
 
-    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, outcomeUnknown: Bool, blockedElsewhere: String?) -> [Action: Availability] {
+    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?) -> [Action: Availability] {
         var table: [Action: Availability] = [:]
         for action in Action.allCases where action != .start {
             table[action] = .notImplemented(note: Self.notImplementedNote(for: action))
         }
-        table[.start] = startAvailability(for: status, operation: operation, attention: attention, outcomeUnknown: outcomeUnknown, blockedElsewhere: blockedElsewhere)
+        table[.start] = startAvailability(for: status, operation: operation, attention: attention, checking: checking, blockedElsewhere: blockedElsewhere)
         return table
     }
 
-    private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, outcomeUnknown: Bool, blockedElsewhere: String?) -> Availability {
-        guard !outcomeUnknown, let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
+    /// - Parameter checking: the outcome of the last operation is unknown, or its status is
+    ///   still being read back. Either way the model refuses a start, so the card must not
+    ///   offer one that silently does nothing.
+    private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?) -> Availability {
+        guard !checking, let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
         if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
         // A failure the runtime says is not retryable is not answered by pressing Start again.
         if let attention, !attention.isRetryable { return .disabled(reason: attention.userMessage) }

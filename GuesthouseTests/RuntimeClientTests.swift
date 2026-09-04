@@ -67,8 +67,11 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
             reply(.success(.accepted(id)))
             let incoming = lock.withLock { self.incoming }
             for event in events {
+                // Every event that names an operation is re-addressed to the accepted id, logs
+                // included: an event addressed to any other id is not this operation's.
                 switch event {
                 case .progress(_, let phase): incoming?(.progress(id, phase))
+                case .log(_, let line): incoming?(.log(id, line))
                 case .completed: incoming?(.completed(id))
                 case .failed(_, let error): incoming?(.failed(id, error))
                 default: incoming?(event)
@@ -144,8 +147,9 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         return events
     }
 
-    @Test func theAcceptedEventArrivesBeforeAnyTraffic() async throws {
-        let flood = (0..<(RuntimeClient.consumerBufferLimit * 2)).map { index in RuntimeEvent.log(OperationID(), Redactor().redact(lines: ["line \(index)"])[0]) } + [.completed(OperationID())]
+    @Test func theAcceptedEventArrivesBeforeAnyTrafficAndTheTailSurvives() async throws {
+        let lines = RuntimeClient.consumerBufferLimit * 3
+        let flood = (0..<lines).map { index in RuntimeEvent.log(OperationID(), Redactor().redact(lines: ["line \(index)"])[0]) } + [.completed(OperationID())]
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
@@ -153,7 +157,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let events = try await collect(stream)
         #expect(events.first?.caseName == "accepted", "the operation id is learned before any traffic")
         #expect(events.last?.caseName == "completed")
-        #expect(events.count <= RuntimeClient.consumerBufferLimit + 2, "the excess was dropped, not buffered")
+        #expect(events.count <= 2 * RuntimeClient.consumerBufferLimit + 2, "the excess is bounded, not kept whole")
+        // A log is read for its end: the newest lines reach the consumer, the middle is what
+        // the bound drops.
+        let texts = events.compactMap { if case .log(_, let line) = $0 { line.text } else { nil } }
+        #expect(texts.last == "line \(lines - 1)", "the operation's last line reaches a consumer that never kept up")
     }
 
     @Test func lateEventsForAFinishedOperationAreDropped() async throws {
@@ -245,7 +253,7 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let events = try await collect(stream)
         #expect(events.contains { if case .accepted = $0 { true } else { false } })
         #expect(events.last?.caseName == "completed")
-        #expect(events.count <= RuntimeClient.consumerBufferLimit + 2)
+        #expect(events.count <= 2 * RuntimeClient.consumerBufferLimit + 2)
     }
 
     @Test func aFailedSendDoesNotLeaveAnAbandonedMarker() async throws {

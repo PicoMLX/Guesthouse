@@ -328,6 +328,39 @@ import Testing
         #expect(stops.count == 1, "the VM the recovered start produced is stopped before quitting")
     }
 
+    @Test func quitRefusesToTerminateWhileAnyOutcomeIsUnknown() async {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "One", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Two", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        for environment in [first, second] {
+            await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        }
+        let (model, decision) = makeModel(backend)
+        await model.refresh()
+        // The start disconnects and the check after it fails, so nobody knows whether the VM
+        // came up.
+        await backend.script("startEnvironment", .disconnect())
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        model.start(first.id)
+        await waitUntil { model.unknownOutcomes[first.id] != nil && model.operations.isEmpty }
+        // The runtime then stops listing that environment, so the per-environment checks below
+        // can no longer settle it. Its outcome is still open, and a quit must not walk past it.
+        await backend.script("environmentStatus", .succeed())
+        await backend.setEnvironments([second])
+        await model.refresh()
+        #expect(model.launchState == .ready)
+        #expect(model.unknownOutcomes[first.id] != nil, "no status answered for it, so nothing settled it")
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        guard case .stopFailed(let error) = model.quitFlow, error.caseName == "operationOutcomeUnknown" else {
+            Issue.record("expected the quit to stop on the unknown outcome, got \(model.quitFlow)"); return
+        }
+        #expect(decision.values.isEmpty, "AppKit is never told to terminate over an unknown outcome")
+        #expect(!model.canForceStop, "the state is checked, never forced past")
+    }
+
     @Test func anInterruptionWhileTheSheetIsOpenReconcilesBeforeOfferingAgain() async {
         let backend = FakeRuntimeBackend()
         _ = await runningEnvironment(backend)

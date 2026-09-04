@@ -1,16 +1,17 @@
 import Foundation
 import GuesthouseCore
+import SwiftUI
 import Testing
 @testable import Guesthouse
 
-/// A backend that replays a fixed event list for every request.
+/// A backend that replays a fixed event list per request case name.
 final class ScriptedBackend: RuntimeBackend, Sendable {
-    let events: [RuntimeEvent]
-    init(events: [RuntimeEvent]) { self.events = events }
+    let events: [String: [RuntimeEvent]]
+    init(_ events: [String: [RuntimeEvent]]) { self.events = events }
 
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
         AsyncThrowingStream { continuation in
-            for event in events { continuation.yield(event) }
+            for event in events[request.caseName] ?? [] { continuation.yield(event) }
             continuation.finish()
         }
     }
@@ -19,21 +20,47 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
 @MainActor
 @Suite struct OperationPresentationTests {
     static let environment = EnvironmentID()
+    /// One value per `GuesthouseError` case: the presentation contract is only as covered as
+    /// this list, so it is checked against the complete case inventory below.
     static let everyError: [GuesthouseError] = [
         .unsupportedHost(.notAppleSilicon), .unsupportedHost(.macOSTooOld(found: "15.6", minimum: "26.4")),
         .unsupportedHost(.insufficientMemory(foundBytes: 8 << 30, minimumBytes: 16 << 30)),
+        .unsupportedHost(.architectureUnknown),
         .insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 50_000_000_000, volumePath: "/"),
         .downloadVerificationFailed(artifact: "Tart 2.36.0", check: .digest), .runtimeMissing,
+        .runtimeStarting, .runtimeStateUnavailable(reason: "disk full"),
+        .runtimeStorageUnavailable(reason: "the location is not writable", problem: .unwritable),
+        .runtimeStorageUnavailable(reason: "something else occupies the location", problem: .unsafeLocation),
         .runtimeVerificationFailed(check: .signature), .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
         .guestNotReachable(environment), .hostKeyChanged(environment), .credentialsLocked(.guestKeychain),
         .credentialsLocked(.hostKeychain), .loginExpired(.github), .loginExpired(.codex),
         .toolMismatch(tool: "codex", found: nil, expected: "0.50.0"), .xcodeComponentsIncomplete(missing: ["iOS 26.4 Simulator"]),
-        .vmSlotUnavailable(maximum: 2), .operationOutcomeUnknown(OperationID()), .unauthorizedCaller,
-        .protocolMismatch(client: 2, service: 1), .invalidRequest(.pathEscapesAllowedRoot), .canceled,
+        .vmSlotUnavailable(maximum: 2), .environmentNotFound(environment), .environmentAlreadyRunning(environment),
+        .anotherEnvironmentRunning(environment), .environmentPreserved(environment),
+        .vmOwnershipUncertain(environment), .gracefulStopTimedOut(environment),
+        .operationInFlight(OperationID()), .operationOutcomeUnknown(OperationID()), .unauthorizedCaller,
+        .protocolMismatch(client: 2, service: 1), .invalidRequest(.pathEscapesAllowedRoot),
+        .xcodeSelectionRejected(.notXcode), .canceled,
     ]
 
-    func waitUntil(_ condition: @MainActor () -> Bool) async {
+    /// Every case `GuesthouseError.caseName` can return. Adding a case is a compile error
+    /// there, and this list is what makes it a test failure here.
+    static let everyCaseName: Set<String> = [
+        "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeMissing",
+        "runtimeStarting", "runtimeStateUnavailable", "runtimeStorageUnavailable",
+        "runtimeVerificationFailed", "runtimeIncompatible", "guestNotReachable", "hostKeyChanged",
+        "credentialsLocked", "loginExpired", "toolMismatch", "xcodeComponentsIncomplete",
+        "vmSlotUnavailable", "environmentNotFound", "environmentAlreadyRunning",
+        "anotherEnvironmentRunning", "environmentPreserved", "vmOwnershipUncertain",
+        "gracefulStopTimedOut", "operationInFlight", "operationOutcomeUnknown", "unauthorizedCaller",
+        "protocolMismatch", "invalidRequest", "xcodeSelectionRejected", "canceled",
+    ]
+
+    /// Waits for a condition, and reports when it never became true: a wait that silently
+    /// times out leaves the assertions after it testing something else.
+    func waitUntil(_ condition: @MainActor () -> Bool, _ description: String = "condition", sourceLocation: SourceLocation = #_sourceLocation) async {
         for _ in 0..<600 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
+        if !condition() { Issue.record("timed out waiting for \(description)", sourceLocation: sourceLocation) }
     }
 
     func stoppedEnvironment(_ backend: FakeRuntimeBackend) async -> DevelopmentEnvironment {
@@ -45,7 +72,7 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
 
     @Test func everyErrorYieldsAtLeastOneOption() {
         let covered = Set(Self.everyError.map(\.caseName))
-        #expect(covered.count == 18, "every case is represented (variants of one case share its name)")
+        #expect(covered == Self.everyCaseName, "every error case is represented in the presentation test")
         for error in Self.everyError {
             let presentation = RecoveryPresentation(error: error)
             #expect(!presentation.options.isEmpty, "\(error.caseName)")
@@ -170,8 +197,12 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
         #expect(measured.title == EnvironmentCardState.describe(ProgressPhase(kind: .waitingForNetwork)))
         let protected = OperationProgressPresentation(phase: ProgressPhase(kind: .copying, cancelable: false), request: request)
         #expect(protected.fraction == nil)
-        guard case .confirmFirst(let reason) = protected.cancelability else { Issue.record("expected a confirmation"); return }
-        #expect(reason.contains("should not be interrupted"))
+        guard case .deferred(let reason) = protected.cancelability else { Issue.record("expected a deferred cancellation"); return }
+        // The runtime defers the request to the next cancelable phase rather than interrupting
+        // this one, so the confirmation must not promise an immediate stop or warn about repair.
+        #expect(reason.contains("cannot be interrupted"))
+        #expect(reason.contains("next step that can be"))
+        #expect(!reason.contains("needing repair"))
         let early = OperationProgressPresentation(phase: nil, request: request)
         #expect(early.title == "Starting the development Mac…")
     }
@@ -185,11 +216,14 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.operations[environment.id]?.id == operation }
+        // The runtime's id lands in `acceptedID`; the provisional `id` the app reserved with
+        // is never replaced and nothing is ever canceled by it.
+        await waitUntil({ model.operations[environment.id]?.acceptedID == operation }, "the runtime's id to be accepted")
+        #expect(model.operations[environment.id]?.id != operation)
         let card = try #require(model.cardStates().first)
         #expect(card.progress?.cancelability == .immediate)
         model.cancel(environment.id)
-        await waitUntil { model.operations.isEmpty }
+        await waitUntil({ model.operations.isEmpty }, "the canceled operation to end")
         #expect(model.lastErrors[environment.id] == .canceled)
         #expect(await backend.receivedRequests.contains(.cancelOperation(operation)))
     }
@@ -234,29 +268,103 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
         #expect(card.recovery?.options.contains { $0.action == .retry } == false)
         #expect(card.availability(of: .start) == .disabled(reason: "Checking environment"))
         model.perform(.retry, for: environment.id)
-        await waitUntil { false }
+        // Long enough for a request the guard should have refused to reach the fake.
+        try? await Task.sleep(for: .milliseconds(100))
         let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }
         #expect(starts.count == 1, "retry is refused while the outcome is unknown")
         await backend.script("environmentStatus", .succeed())
+        // The interrupted start is still marked in flight in the runtime's own status; the
+        // inspection is what settles it, so the runtime is told the VM is idle again first.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
         model.perform(.inspectState, for: environment.id)
-        await waitUntil { model.unknownOutcomes.isEmpty }
+        // The inspection is an operation of its own: Start comes back once it has finished,
+        // not the moment the unknown outcome is settled.
+        await waitUntil { model.unknownOutcomes.isEmpty && model.operations.isEmpty && model.reconciling.isEmpty }
         #expect(model.cardStates().first?.availability(of: .start) == .enabled)
     }
 
-    @Test func logsAreCollectedForTheOperationAndCapped() async throws {
+    /// The bound belongs to the model, so it is driven through one: an operation that logs
+    /// more than the cap must leave the newest lines behind, not the oldest.
+    @Test func theModelKeepsOnlyTheNewestLogLinesOfAnOperation() async throws {
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
         let operation = OperationID()
-        var events: [RuntimeEvent] = [.accepted(operation)]
-        for index in 0..<600 { events.append(.log(operation, RedactedLine(literal: "line"))) ; _ = index }
-        events.append(.completed(operation))
-        let backend = ScriptedBackend(events: events)
+        let total = 600
+        let lines = Redactor().redact(lines: (0..<total).map { "line \($0)" })
+        let backend = ScriptedBackend([
+            "listEnvironments": [.environments([environment])],
+            "environmentStatus": [.status(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))],
+            "startEnvironment": [.accepted(operation)] + lines.map { .log(operation, $0) } + [.completed(operation)],
+        ])
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
-        let card = EnvironmentCardState(environment: environment, status: nil, operation: nil, lastError: nil, logs: [RedactedLine(literal: "a")])
-        #expect(card.logs.count == 1)
-        var state = AppModel.OperationState(id: operation, request: .startEnvironment(environment.id, StartOptions()))
-        for _ in 0..<600 { state.logs.append(RedactedLine(literal: "line")) }
-        #expect(state.logs.count == 600)
-        #expect(AppModel.OperationState.maximumLogLines == 500)
+        model.start(environment.id)
+        await waitUntil({ model.operations.isEmpty && model.lastLogs[environment.id] != nil }, "the operation to finish")
+        let kept = try #require(model.lastLogs[environment.id])
+        #expect(kept.count == AppModel.OperationState.maximumLogLines)
+        #expect(kept.first?.text == "line \(total - AppModel.OperationState.maximumLogLines)")
+        #expect(kept.last?.text == "line \(total - 1)")
+        #expect(model.cardStates().first?.logs == kept, "the card shows what the model kept")
+    }
+
+    @Test func aRefusedCancellationIsShownWhileTheStatusAlsoNeedsAttention() async throws {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(20))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        // A start that is running while the guest has no confirmed address: the status already
+        // needs attention, which must not hide what the cancellation just reported.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.guestNotReachable(environment.id))))
+        await backend.script("startEnvironment", .hang)
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil({ model.operations[environment.id]?.acceptedID != nil }, "the operation to be accepted")
+        let accepted = try #require(model.operations[environment.id]?.acceptedID)
+        await backend.script("cancelOperation", .fail(error: .operationInFlight(accepted)))
+        model.cancel(environment.id)
+        await waitUntil({ model.lastErrors[environment.id] != nil }, "the refusal to be recorded")
+        #expect(model.cardStates().first?.attention == .operationInFlight(accepted), "the refusal is what the card explains")
+        await backend.script("cancelOperation", .succeed())
+        model.cancel(environment.id)
+        await waitUntil({ model.operations.isEmpty }, "the canceled operation to end")
+    }
+
+    @Test func aStatusReportedUnknownOutcomeIsPresentedAsUnknown() throws {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let status = EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.operationOutcomeUnknown(OperationID())))
+        let card = EnvironmentCardState(environment: environment, status: status, operation: nil, lastError: nil)
+        #expect(card.outcomeUnknown, "the runtime's own unresolved record is the same unknown state")
+        #expect(card.isBusy)
+        #expect(card.statusText == "Checking environment…")
+        #expect(card.recovery?.title == "Checking environment")
+        #expect(card.availability(of: .start) == .disabled(reason: "Checking environment"))
+    }
+
+    @Test func aProblemTheStatusKeepsReportingCannotBeDismissed() throws {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let status = EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.guestNotReachable(environment.id)))
+        let reported = EnvironmentCardState(environment: environment, status: status, operation: nil, lastError: nil)
+        let dismiss = try #require(reported.recovery?.options.first { $0.action == .cancel })
+        guard case .disabled(let reason) = dismiss.availability else { Issue.record("Dismiss should not claim to clear a status error"); return }
+        #expect(reason.contains("still reports this"))
+        let local = EnvironmentCardState(environment: environment, status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready), operation: nil, lastError: .guestNotReachable(environment.id))
+        #expect(local.recovery?.options.first { $0.action == .cancel }?.availability == .enabled, "a failure this window recorded is dismissible")
+    }
+
+    @Test func deletingAnEnvironmentIsOfferedAsDestructive() throws {
+        let presentation = RecoveryPresentation(error: .vmSlotUnavailable(maximum: 2))
+        let delete = try #require(presentation.options.first { $0.action == .deleteEnvironment })
+        #expect(delete.isDestructive)
+        #expect(delete.buttonRole == .destructive, "the role reaches the rendered button")
+        #expect(presentation.options.filter { $0.action != .deleteEnvironment }.allSatisfy { $0.buttonRole == nil })
+    }
+
+    @Test func recoveryControlsWrapInsteadOfOverflowingTheCard() {
+        // Four options at a card's narrow column: the row breaks rather than truncating.
+        let widths: [CGFloat] = [120, 150, 110, 130]
+        #expect(WrappingRows.rows(of: widths, spacing: 8, in: 300) == [[0, 1], [2, 3]])
+        #expect(WrappingRows.rows(of: widths, spacing: 8, in: 1_000) == [[0, 1, 2, 3]])
+        // A control wider than the row still gets one of its own rather than being dropped.
+        #expect(WrappingRows.rows(of: [400, 50], spacing: 8, in: 100) == [[0], [1]])
+        #expect(WrappingRows.rows(of: [], spacing: 8, in: 300).isEmpty)
     }
 }
