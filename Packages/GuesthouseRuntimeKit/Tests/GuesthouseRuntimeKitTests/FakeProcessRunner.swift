@@ -14,6 +14,9 @@ actor FakeProcessRunner: ProcessRunning {
         /// How long the command takes before it answers, so a test can act while it is in
         /// flight without having to end it.
         var delay: Duration = .zero
+        /// The program itself cannot be started, as when the runtime bundle has been removed.
+        /// Nothing runs, so the command has no exit status of its own.
+        var failsToLaunch = false
     }
 
     private(set) var invocations: [ProcessInvocation] = []
@@ -57,8 +60,14 @@ actor FakeProcessRunner: ProcessRunning {
     func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
         invocations.append(invocation)
         let command = invocation.arguments.first ?? ""
+        let delay = (script[command] ?? fixed).delay
+        if delay > .zero { try? await Task.sleep(for: delay) }
+        // Read after the delay, so a test can change what a command answers while that command
+        // is already in flight.
         let reply = script[command] ?? fixed
-        if reply.delay > .zero { try? await Task.sleep(for: reply.delay) }
+        if reply.failsToLaunch {
+            throw ProcessLaunchError.executableNotFound(invocation.executable.lastPathComponent)
+        }
         if reply.hangs {
             // A real process, so the supervisor can record a pid and a start time. When the
             // invocation's executable exists (a fixture bundle whose binary is a copy of

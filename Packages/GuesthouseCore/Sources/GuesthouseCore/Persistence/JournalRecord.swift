@@ -118,7 +118,10 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)):
             reported == environmentID
         case .checkpoint(let reached):
-            operation == .provision(stage: reached)
+            // A provisioning record must name the stage it reached. Other operations reach
+            // checkpoints too — a start is journaled once the VM is supervised — and their
+            // kind says nothing about which stage that was.
+            if case .provision(let stage) = operation { stage == reached } else { true }
         default:
             true
         }

@@ -62,7 +62,8 @@ import Testing
     }
 
     @Test func anUnreadableProcessIsNeverReportedAsExited() async throws {
-        let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: root))
+        let store = try ProcessIdentityStore(directory: root)
+        let supervisor = OperationSupervisor(store: store)
         let environment = EnvironmentID()
         let arguments = ["-e", "sleep 47", "run", environment.tartVMName]
         let fixture = URL(fileURLWithPath: "/usr/bin/perl")
@@ -71,15 +72,19 @@ import Testing
         let identity = ProcessIdentity(pid: live.pid, startTime: live.startTime, executablePath: live.executablePath, argumentsDigest: live.argumentsDigest, vmName: environment.tartVMName, environmentID: environment, recordedAt: Date())
         #expect(supervisor.observe(identity) == .present(live))
 
-        // PID 1 is launchd: it exists, and this process cannot read its arguments, so the
-        // process table declines to describe it. Supervision must not read that as an exit.
-        guard case .unavailable = LiveProcessEnumerator().observe(pid: 1) else {
-            Issue.record("launchd is readable here, so it no longer stands in for an unobservable process")
+        // A process this user owns whose arguments the kernel declines to describe: the one
+        // shape that is genuinely unobservable. PID 1 is not it — launchd belongs to root, so
+        // the recorded process it once was is certainly gone.
+        let blind = LiveProcessEnumerator(kernel: .init(pids: { LiveProcessEnumerator.listAllPIDs() }, arguments: { _ in nil }))
+        guard case .unavailable = blind.observe(pid: run.processIdentifier) else {
+            Issue.record("an owned process with unreadable arguments must be unobservable")
             return
         }
-        let unreadable = ProcessIdentity(pid: 1, startTime: identity.startTime, executablePath: "/sbin/launchd", argumentsDigest: identity.argumentsDigest, vmName: identity.vmName, environmentID: environment, recordedAt: Date())
-        #expect(supervisor.observe(unreadable) == .unavailable)
-        #expect(supervisor.verify(unreadable) == nil, "unreadable is still not verified")
+        #expect(LiveProcessEnumerator().observe(pid: 1) == .absent, "another account's process is not the one we recorded")
+        let unreadable = ProcessIdentity(pid: run.processIdentifier, startTime: identity.startTime, executablePath: live.executablePath, argumentsDigest: identity.argumentsDigest, vmName: identity.vmName, environmentID: environment, recordedAt: Date())
+        let blindSupervisor = OperationSupervisor(store: store, enumerator: blind)
+        #expect(blindSupervisor.observe(unreadable) == .unavailable)
+        #expect(blindSupervisor.verify(unreadable) == nil, "unreadable is still not verified")
 
         run.terminate(gracePeriod: .milliseconds(100))
         _ = await run.exit()
@@ -154,8 +159,8 @@ import Testing
         let enumerator = LiveProcessEnumerator()
         #expect(enumerator.observe(pid: 2_000_000_000) == .absent)
         #expect(enumerator.observe(pid: 0) == .absent)
-        // launchd exists but its arguments are not readable by an ordinary user.
-        guard case .unavailable = enumerator.observe(pid: 1) else { Issue.record("expected launchd to be unobservable"); return }
+        // launchd exists, but it belongs to root: whatever was recorded under that PID is gone.
+        #expect(enumerator.observe(pid: 1) == .absent)
         let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["39"], timeout: .seconds(20)))
         defer { run.terminate(gracePeriod: .milliseconds(100)) }
         guard case .present(let live) = enumerator.observe(pid: run.processIdentifier) else { Issue.record("expected the spawned process"); return }
@@ -165,8 +170,13 @@ import Testing
     @Test func anUnobservableRecordedProcessIsUncertainNotExited() async throws {
         let store = try ProcessIdentityStore(directory: root)
         let environment = EnvironmentID()
-        try await store.record(ProcessIdentity(pid: 1, startTime: Date(timeIntervalSince1970: 0), executablePath: "/sbin/launchd", argumentsDigest: "sha256:0", vmName: environment.tartVMName, environmentID: environment, recordedAt: Date()))
-        let verdicts = await OperationSupervisor(store: store).reconcile(environments: []) { _ in .absent }
+        // A live process of this user's whose arguments the kernel will not describe: the
+        // reconciler must not read that refusal as an exit.
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["37"], timeout: .seconds(20)))
+        defer { run.terminate(gracePeriod: .milliseconds(100)) }
+        let blind = LiveProcessEnumerator(kernel: .init(pids: { LiveProcessEnumerator.listAllPIDs() }, arguments: { _ in nil }))
+        try await store.record(ProcessIdentity(pid: run.processIdentifier, startTime: Date(timeIntervalSince1970: 0), executablePath: "/bin/sleep", argumentsDigest: "sha256:0", vmName: environment.tartVMName, environmentID: environment, recordedAt: Date()))
+        let verdicts = await OperationSupervisor(store: store, enumerator: blind).reconcile(environments: []) { _ in .absent }
         #expect(verdicts[environment] == .uncertain(.processUnobservable))
     }
 

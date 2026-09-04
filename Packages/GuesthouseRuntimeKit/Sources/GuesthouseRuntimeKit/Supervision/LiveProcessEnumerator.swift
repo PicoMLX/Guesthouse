@@ -86,6 +86,11 @@ public struct LiveProcessEnumerator: Sendable {
     public func observe(pid: Int32) -> Observation {
         guard pid > 0 else { return .absent }
         if kill(pid, 0) != 0, errno == ESRCH { return .absent }
+        // A process that has exited but not been reaped still answers `kill(pid, 0)`, and its
+        // arguments are gone with it. That is an exit, not an unreadable process, and the same
+        // goes for a PID that now belongs to another account: neither can be the VM we started.
+        guard let state = processInfo(pid: pid) else { return .unavailable(reason: "process state unreadable") }
+        guard Self.isOwnedAndRunning(state) else { return .absent }
         guard let first = startTime(pid: pid) else { return .unavailable(reason: "start time unreadable") }
         guard let path = executablePath(pid: pid) else { return .unavailable(reason: "executable path unreadable") }
         guard let arguments = kernel.arguments(pid) else { return .unavailable(reason: "arguments unreadable") }
@@ -100,35 +105,71 @@ public struct LiveProcessEnumerator: Sendable {
         return .present(LiveProcess(pid: pid, startTime: first, executablePath: path, argumentsDigest: Self.digest(of: arguments), claimedVMName: Self.claimedVMName(in: arguments)))
     }
 
+    /// How long the scan gives a process that is exec'ing to publish its arguments, and how
+    /// many times it asks again. Both are spent once per scan and only when something could
+    /// not be described, which is rare; the window itself is measured in microseconds.
+    static let settleInterval: UInt32 = 5_000
+    static let settleAttempts = 3
+
     /// Every readable process whose arguments name `vmName`, and whether any process could
     /// not be read. Used to notice a launch that has not taken the VM's lock yet.
     public func claimants(ofVM vmName: String) -> Candidates {
         var found: [LiveProcess] = []
         var unreadable = false
         guard let candidates = kernel.pids() else { return Candidates(processes: found, unreadable: true) }
-        for candidate in candidates {
-            guard let arguments = kernel.arguments(candidate) else {
-                // A running process of this user's whose arguments the kernel declined to
-                // describe could be the launch that has not taken the VM's lock yet. One that
-                // belongs to somebody else, or that has already exited, never could be: the
-                // service launches Tart as this user, and those failures are the ordinary
-                // answer for every other process on the Mac. An ownership lookup the kernel
-                // also refused says nothing either way, and reading that as somebody else's
-                // process would turn an interrupted start into a free environment.
-                switch ownership(of: candidate) {
-                case .own, .unavailable: unreadable = true
-                case .notOurs: break
-                }
-                continue
-            }
-            guard Self.claimedVMName(in: arguments) == vmName else { continue }
-            switch observe(pid: candidate) {
+        func consider(_ pid: Int32, arguments: [String]) {
+            guard Self.claimedVMName(in: arguments) == vmName else { return }
+            switch observe(pid: pid) {
             case .present(let process): found.append(process)
             case .unavailable: unreadable = true
             case .absent: break
             }
         }
-        return Candidates(processes: found, unreadable: unreadable)
+        // A running process of this user's whose arguments the kernel declined to describe
+        // could be the launch that has not taken the VM's lock yet, so it is asked again
+        // below rather than dismissed. One that belongs to somebody else, or that has exited
+        // or begun exiting, never could be: the service launches Tart as this user, and those
+        // failures are the ordinary answer for every other process on the Mac.
+        var undescribed: [Int32] = []
+        for candidate in candidates {
+            if let arguments = kernel.arguments(candidate) {
+                consider(candidate, arguments: arguments)
+            } else {
+                switch ownership(of: candidate) {
+                case .own: undescribed.append(candidate)
+                // The kernel would not say whose it is, so the scan cannot claim to be complete.
+                case .unavailable: unreadable = true
+                case .notOurs: break
+                }
+            }
+        }
+        // `proc_listallpids` reports a process from the moment it is created, but the kernel
+        // only publishes its argument vector part-way through `exec`; for that window — under
+        // a millisecond — it answers exactly as it does for a process it will never describe.
+        // A Mac is always starting something, so a single read is not evidence that a process
+        // is unidentifiable: whatever the first pass could not describe is asked again once it
+        // has had time to settle, and only silence that outlasts that is reported as silence.
+        // Without this, an unrelated program the Mac happened to be launching would leave the
+        // environment `uncertain` and refuse to start it.
+        for _ in 0..<Self.settleAttempts where !undescribed.isEmpty {
+            usleep(Self.settleInterval)
+            var stillUndescribed: [Int32] = []
+            for candidate in undescribed {
+                // It may have finished exiting while the scan settled; then it never held the VM.
+                switch ownership(of: candidate) {
+                case .own: break
+                case .unavailable: unreadable = true; continue
+                case .notOurs: continue
+                }
+                guard let arguments = kernel.arguments(candidate) else {
+                    stillUndescribed.append(candidate)
+                    continue
+                }
+                consider(candidate, arguments: arguments)
+            }
+            undescribed = stillUndescribed
+        }
+        return Candidates(processes: found, unreadable: unreadable || !undescribed.isEmpty)
     }
 
     /// The identity of one running process, or `nil` if it does not exist or cannot be read.
@@ -185,8 +226,19 @@ public struct LiveProcessEnumerator: Sendable {
             // A PID that is simply gone answers `ESRCH`; anything else is a refusal.
             return kill(pid, 0) != 0 && errno == ESRCH ? .notOurs : .unavailable
         }
-        let mine = info.kp_eproc.e_ucred.cr_uid == getuid() && info.kp_proc.p_stat != Int8(SZOMB)
-        return mine ? .own : .notOurs
+        return Self.isOwnedAndRunning(info) ? .own : .notOurs
+    }
+
+    /// Whether `info` describes a running process this user owns. Every process belonging to
+    /// another account is excluded, and so is one that has exited: a zombie, and equally one
+    /// that has only begun exiting. Both have left user space for good, both have already lost
+    /// the argument vector that would identify them, and neither will ever take a VM's lock.
+    /// Testing for `SZOMB` alone would race the teardown, and lose that race often enough to
+    /// read the ordinary end of an unrelated program as a process that cannot be identified.
+    static func isOwnedAndRunning(_ info: kinfo_proc) -> Bool {
+        info.kp_eproc.e_ucred.cr_uid == getuid()
+            && info.kp_proc.p_stat != Int8(SZOMB)
+            && info.kp_proc.p_flag & P_WEXIT == 0
     }
 
     func executablePath(pid: Int32) -> String? {

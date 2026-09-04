@@ -50,6 +50,14 @@ public actor EnvironmentLifecycle {
     private var unresolved: [EnvironmentID: JournalRecord] = [:]
     private var inFlight: InFlight?
     private var reconciledAt: Date?
+    /// Set while an inventory failure has kept adoption from running, so a later listing tries
+    /// again instead of hiding a hand-created VM for the rest of the service's life.
+    private var adoptionPending = true
+
+    /// How long a terminal event may wait for the courtesy status that precedes it. The
+    /// operation is already durable by then, and a `tart list` that hangs must not keep the
+    /// client believing the work is still in flight (MVP-PLAN.md §2).
+    static let statusRefreshBudget = Duration.seconds(2)
 
     public init(dependencies: Dependencies) {
         deps = dependencies
@@ -77,8 +85,16 @@ public actor EnvironmentLifecycle {
         // launch: reconciliation marks the saved environments uncertain and inspection reads
         // the inventory again, whereas a throw here leaves the service permanently failed and
         // unable to answer even a status request (MVP-PLAN.md §4).
-        guard let inventory = try? await deps.backend.list() else { return }
-        let known = Set(snapshot.environments.map(\.id))
+        guard let inventory = try? await deps.backend.list() else {
+            adoptionPending = true
+            return
+        }
+        try await adopt(inventory)
+    }
+
+    private func adopt(_ inventory: [TartVMInfo]) async throws {
+        adoptionPending = false
+        var known = Set(snapshot.environments.map(\.id))
         var changed = false
         for vm in inventory where vm.source == .local {
             guard let id = Self.managedEnvironment(named: vm.name), !known.contains(id) else { continue }
@@ -87,6 +103,9 @@ public actor EnvironmentLifecycle {
             } catch {
                 continue
             }
+            // The CLI's output is untrusted: a name it repeats must adopt one environment, not
+            // append a second record that makes every later snapshot save fail.
+            known.insert(id)
             snapshot.environments.append(DevelopmentEnvironment(id: id, name: vm.name, createdAt: Date()))
             changed = true
         }
@@ -101,6 +120,17 @@ public actor EnvironmentLifecycle {
         else { return nil }
         let id = EnvironmentID(uuid: uuid)
         return id.tartVMName == name ? id : nil
+    }
+
+    /// The registered VM's own entry in a `tart list`, which can only be a local one.
+    ///
+    /// Adoption manages local bundles alone, and an environment is registered against the
+    /// bundle in `TART_HOME`. An OCI entry carrying the same name is a pulled image, not that
+    /// bundle: matching on the name alone would let a registered bundle be deleted and the
+    /// start still journal and launch, against an image Tart may go and fetch rather than
+    /// against the VM the environment was registered with (MVP-PLAN.md §4).
+    static func localVM(named name: String, in inventory: [TartVMInfo]) -> TartVMInfo? {
+        inventory.first { $0.name == name && $0.source == .local }
     }
 
     /// Re-derives ownership of every environment from the live process table and the VM
@@ -131,11 +161,12 @@ public actor EnvironmentLifecycle {
                 }
             case .ownedRunning(let live):
                 await adoptSurvivor(id, live: live)
-                // A running VM settles an interrupted start. It does not settle an interrupted
-                // stop: the `tart stop` an interrupted service left behind, and the guest
-                // shutdown it asked for, can still finish afterwards, so that operation's
-                // outcome is not established by this observation (MVP-PLAN.md §3).
-                if unresolved[id]?.operation != .stopEnvironment {
+                // A running VM settles an interrupted start and nothing else. The `tart stop` an
+                // interrupted service left behind, and the guest shutdown it asked for, can
+                // still finish afterwards; an interrupted import, provisioning, export, delete
+                // or repair changed things a running VM says nothing about. Each of those waits
+                // for its own state-specific check (MVP-PLAN.md §3).
+                if unresolved[id]?.operation == .startEnvironment {
                     await settleInterruptedOperation(id)
                 }
             case .uncertain:
@@ -144,6 +175,10 @@ public actor EnvironmentLifecycle {
         }
         self.verdicts = verdicts
         if inventory != nil {
+            // A readable inventory with no verdict and no supervised process establishes that
+            // no VM of ours is running, which settles a start or a stop and nothing else:
+            // `settledByVMState` keeps every other kind of record unresolved until the check
+            // that inspects what it actually changed can answer for it.
             for id in unresolved.keys where verdicts[id] == nil && supervised[id] == nil {
                 await settleInterruptedOperation(id)
             }
@@ -151,8 +186,47 @@ public actor EnvironmentLifecycle {
         reconciledAt = Date()
     }
 
+    /// Whether observing the VM itself establishes this operation's outcome.
+    ///
+    /// Starting and stopping a VM are exactly the operations the VM's own state answers for. An
+    /// import, a provisioning stage, an export, a delete, or a repair changed the filesystem or
+    /// the guest, and a VM that is running or absent says nothing about how far any of them
+    /// got; each waits for the check that inspects what it actually touched (MVP-PLAN.md §3).
+    static func settledByVMState(_ operation: JournalOperation) -> Bool {
+        switch operation {
+        case .startEnvironment, .stopEnvironment: true
+        case .provision, .importXcode, .deleteEnvironment, .exportWork, .repair: false
+        }
+    }
+
+    /// Settles a journal `begin` whose failure does not say whether the record landed.
+    ///
+    /// `begin` synchronizes the `started` line before the journal's own directory entry, so a
+    /// failure at that second step throws over a record a later read in this same service sees.
+    /// Left alone, nothing here would track it: status would report the environment ready while
+    /// the store refuses every later mutation for it as `operationUnresolved`, and no inspection
+    /// would try to settle it until the service restarted. Nothing had run when the write
+    /// failed — the launch and the signal both come after it — so a record that did land is
+    /// closed as `notApplied`, which is the truthful terminal outcome for a mutation that never
+    /// took effect; when even that cannot be written, the operation is held as unresolved so
+    /// the next inspection can settle it (MVP-PLAN.md §3).
+    func reconcileIndeterminateBegin(_ operation: OperationID, kind: JournalOperation, environment: EnvironmentID) async {
+        // A journal that cannot be read now leaves the same unknown, and the environment has to
+        // carry it: reporting nothing would license the very blind retry the journal prevents.
+        guard let replay = try? await deps.store.replay() else {
+            unresolved[environment] = JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .started)
+            return
+        }
+        guard let record = replay.inFlight[operation] else { return }
+        do {
+            try await deps.store.append(JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .notApplied))
+        } catch {
+            unresolved[environment] = record
+        }
+    }
+
     private func settleInterruptedOperation(_ id: EnvironmentID) async {
-        guard let record = unresolved[id] else { return }
+        guard let record = unresolved[id], Self.settledByVMState(record.operation) else { return }
         do {
             try await deps.store.append(JournalRecord(id: record.id, environmentID: id, operation: record.operation, timestamp: Date(), outcome: .reconciled))
             unresolved[id] = nil
@@ -186,8 +260,18 @@ public actor EnvironmentLifecycle {
 
     // MARK: - Queries
 
-    public func environments() -> [DevelopmentEnvironment] {
-        snapshot.environments
+    public func environments() async throws -> [DevelopmentEnvironment] {
+        // A hand-created VM that an unreadable inventory hid at launch is adopted on the next
+        // listing. Without this it would stay invisible — never listed, so never inspected and
+        // never reconciled — until the service process happened to restart (MVP-PLAN.md §4).
+        //
+        // An inventory that still cannot be read is reported rather than swallowed. The launch
+        // deliberately survives it, but a listing that could not be completed is not a list:
+        // answering with the snapshot alone would present "we could not look" as "there is
+        // nothing", and the user would never be offered the repair or the state inspection the
+        // failure carries.
+        if adoptionPending { try await adopt(self.inventory()) }
+        return snapshot.environments
     }
 
     public func status(of id: EnvironmentID) async throws -> EnvironmentStatus {
@@ -203,32 +287,8 @@ public actor EnvironmentLifecycle {
             await reconcile()
         }
         let inventory = try await self.inventory()
-        let vm: EnvironmentStatus.VMState
-        var readiness: EnvironmentStatus.Readiness
-        if let live = supervised[id], isAlive(live) {
-            vm = .running
-            // Asked again on every inspection rather than cached once: Tart's NAT address can
-            // change while the same VM process lives, most visibly after the host sleeps, and
-            // a stale address sends SSH and Screen Sharing to the wrong endpoint (§4).
-            supervised[id]?.address = try? await deps.backend.ip(vmName: environment.tartVMName, wait: .seconds(0))
-            // Running without a confirmed address is not ready: nothing guest-dependent works.
-            readiness = supervised[id]?.address != nil ? .ready : .needsAttention(.guestNotReachable(id))
-        } else if case .uncertain(let reason)? = verdicts[id] {
-            vm = .uncertain(reason: SanitizedText(Self.describe(reason), limit: 200))
-            readiness = .needsAttention(.vmOwnershipUncertain(id))
-        } else if let info = inventory.first(where: { $0.name == environment.tartVMName }) {
-            if info.running {
-                // Running according to Tart with no supervised process and no owned verdict.
-                vm = .uncertain(reason: "running without a recorded owner")
-                readiness = .needsAttention(.vmOwnershipUncertain(id))
-            } else {
-                vm = .stopped
-                readiness = .ready
-            }
-        } else {
-            vm = .notFound
-            readiness = .needsAttention(.environmentNotFound(id))
-        }
+        let (vm, initialReadiness) = try await vmState(of: environment, inventory: inventory)
+        var readiness = initialReadiness
         // A preserved slot is reported as such, so the GUI does not offer a start the
         // lifecycle would refuse.
         if snapshot.slots.state(of: id) == .preserved {
@@ -239,14 +299,79 @@ public actor EnvironmentLifecycle {
         if let record = unresolved[id] {
             readiness = .needsAttention(.operationOutcomeUnknown(record.id))
         }
+        // The address the field promises is one a guest connection can be made to, so it is
+        // answered from the state just computed rather than from the supervised entry alone. A
+        // VM that exited moments ago is observed as absent and reported stopped while its entry
+        // still holds the address it had until the exit watcher runs, and handing that out
+        // would point SSH and Screen Sharing at an endpoint this VM no longer owns (§4).
+        let address: GuestIPAddress? = if case .running = vm { supervised[id]?.address } else { nil }
         return EnvironmentStatus(
             environmentID: id,
             vm: vm,
             readiness: readiness,
             inFlightOperation: inFlight?.environment == id ? inFlight?.id : nil,
-            guestAddress: supervised[id]?.address,
+            guestAddress: address,
             reconciledAt: reconciledAt
         )
+    }
+
+    /// What the VM is doing, and what that asks of the user.
+    ///
+    /// The supervised process is asked of the kernel rather than remembered, and a process
+    /// table that declines to describe it is uncertainty, never an exit: reporting "cannot be
+    /// read" as "stopped" would show a VM that may still be running as available and license a
+    /// start over it (MVP-PLAN.md §4).
+    private func vmState(of environment: DevelopmentEnvironment, inventory: [TartVMInfo]) async throws -> (EnvironmentStatus.VMState, EnvironmentStatus.Readiness) {
+        let id = environment.id
+        switch supervised[id].map({ deps.supervisor.observe($0.identity) }) ?? .absent {
+        case .present:
+            // Asked again on every inspection rather than cached once: Tart's NAT address can
+            // change while the same VM process lives, most visibly after the host sleeps, and
+            // a stale address sends SSH and Screen Sharing to the wrong endpoint (§4).
+            let address: GuestIPAddress?
+            do {
+                address = try await deps.backend.ip(vmName: environment.tartVMName, wait: .seconds(0))
+            } catch TartInvocationError.runtimeReplaced {
+                // The inventory above proved the runtime a moment ago; it can be replaced
+                // between that and this probe. Guesthouse then refused to execute it and no
+                // guest was contacted, so swallowing this would send the user to inspect a
+                // guest that was never asked, instead of to repair the runtime (§3).
+                throw GuesthouseError.runtimeVerificationFailed(check: .signature)
+            } catch is ProcessLaunchError {
+                // Same window, and the same distinction: the runtime program could not be
+                // started at all, which reinstalling it repairs.
+                throw GuesthouseError.runtimeMissing
+            } catch {
+                // Everything else this probe reports — a timeout, no lease yet, a VM Tart says
+                // is not running — is about the guest, and is the readiness below.
+                address = nil
+            }
+            // The lookup suspends. A VM that ended while it was in flight was released by its
+            // exit watcher, and an address is no evidence about a process that is gone, so the
+            // answer is recomputed from what is true now.
+            guard let current = supervised[id], case .present = deps.supervisor.observe(current.identity) else { break }
+            supervised[id]?.address = address
+            // Running without a confirmed address is not ready: nothing guest-dependent works.
+            return (.running, address != nil ? .ready : .needsAttention(.guestNotReachable(id)))
+        case .unavailable:
+            return (
+                .uncertain(reason: SanitizedText(Self.describe(.processUnobservable), limit: 200)),
+                .needsAttention(.vmOwnershipUncertain(id))
+            )
+        case .absent:
+            break
+        }
+        if case .uncertain(let reason)? = verdicts[id] {
+            return (.uncertain(reason: SanitizedText(Self.describe(reason), limit: 200)), .needsAttention(.vmOwnershipUncertain(id)))
+        }
+        guard let info = Self.localVM(named: environment.tartVMName, in: inventory) else {
+            return (.notFound, .needsAttention(.environmentNotFound(id)))
+        }
+        // Running according to Tart with no supervised process and no owned verdict.
+        guard !info.running else {
+            return (.uncertain(reason: "running without a recorded owner"), .needsAttention(.vmOwnershipUncertain(id)))
+        }
+        return (.stopped, .ready)
     }
 
     // MARK: - Operations
@@ -257,6 +382,14 @@ public actor EnvironmentLifecycle {
     public func start(_ id: EnvironmentID, options: StartOptions, events: @escaping EventSink) async throws -> OperationID {
         guard let environment = snapshot.environments.first(where: { $0.id == id }) else { throw GuesthouseError.environmentNotFound(id) }
         try refuseIfBlocked(id)
+        // Any slot whose ownership is unknown may still have a VM running: its recorded process
+        // could not be read, or its inventory could not be. Starting a second VM over that is
+        // what the one-running-VM invariant forbids (MVP-PLAN.md §4).
+        if let other = verdicts.keys.sorted(by: { $0.tartVMName < $1.tartVMName }).first(where: { key in
+            if case .uncertain? = verdicts[key] { return key != id } else { return false }
+        }) {
+            throw GuesthouseError.vmOwnershipUncertain(other)
+        }
         guard snapshot.slots.state(of: id) == .active else { throw GuesthouseError.environmentPreserved(id) }
         if supervised[id] != nil { throw GuesthouseError.environmentAlreadyRunning(id) }
         if let other = supervised.keys.first(where: { $0 != id }) { throw GuesthouseError.anotherEnvironmentRunning(other) }
@@ -265,36 +398,90 @@ public actor EnvironmentLifecycle {
         // both pass the checks and launch two instances against one disk.
         let operation = OperationID()
         inFlight = InFlight(id: operation, environment: id, task: nil)
+        let inventory: [TartVMInfo]
         do {
-            let inventory = try await self.inventory()
-            if let info = inventory.first(where: { $0.name == environment.tartVMName }), info.running {
-                throw GuesthouseError.environmentAlreadyRunning(id)
+            inventory = try await self.inventory()
+            // A registered VM whose bundle is gone from the store cannot be started. Without
+            // this, `tart run` is launched, exits before its identity can be recorded, and the
+            // failure reads as unavailable saved state instead of the missing VM it is.
+            guard let info = Self.localVM(named: environment.tartVMName, in: inventory) else {
+                throw GuesthouseError.environmentNotFound(id)
             }
+            if info.running { throw GuesthouseError.environmentAlreadyRunning(id) }
             // Every running app-managed VM counts against the one-running-VM invariant,
             // including a `guesthouse-<uuid>` the snapshot does not know: adoption may have
             // found no free slot for it, but it is still one of ours and still running (§4).
-            if let other = inventory.filter(\.running).compactMap({ Self.managedEnvironment(named: $0.name) }).first(where: { $0 != id }) {
+            let runningManaged = inventory.filter(\.running).compactMap { Self.managedEnvironment(named: $0.name) }.filter { $0 != id }
+            // One that has no slot is ours by name only; nothing records that Guesthouse
+            // started it. It is reported as the uncertain ownership it is, which offers the
+            // inspection and the console the developer needs, rather than a "stop it first"
+            // for a VM `stop` would refuse as unregistered (§4).
+            if let unadopted = runningManaged.first(where: { other in !snapshot.environments.contains { $0.id == other } }) {
+                throw GuesthouseError.vmOwnershipUncertain(unadopted)
+            }
+            if let other = runningManaged.first {
                 throw GuesthouseError.anotherEnvironmentRunning(other)
             }
+            // The inventory alone cannot say the VM is free: a `tart run` for it may have
+            // spawned without having taken the lock yet. The process table is asked for
+            // claimants immediately before the journal entry, and again before the launch (§4).
+            try await refuseIfAnySlotIsClaimed(startingFor: id, inventory: inventory)
+        } catch {
+            inFlight = nil
+            throw error
+        }
+        do {
             _ = try await deps.store.begin(.startEnvironment, for: id, id: operation)
         } catch {
             inFlight = nil
+            await reconcileIndeterminateBegin(operation, kind: .startEnvironment, environment: id)
             throw error
         }
         let token = deps.supervisor.hold("startEnvironment \(operation)")
         inFlight?.task = Task { [weak self] () async -> Void in
             guard let self else { return }
-            await self.performStart(operation, environment: environment, options: options, token: token, events: events)
+            await self.performStart(operation, environment: environment, options: options, inventory: inventory, token: token, events: events)
         }
         return operation
     }
 
-    private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, token: OperationSupervisor.Token, events: EventSink) async {
+    /// Refuses a start while any registered slot has a claimant, or an ownership that cannot be
+    /// established.
+    ///
+    /// Every slot is scanned, not only the one being started: a `tart run` that has spawned but
+    /// not yet taken its lock is in no inventory, and it may be claiming any of them, so
+    /// launching over it would put two VMs on one disk and break the one-running-VM invariant
+    /// (MVP-PLAN.md §4). The scan reads the process table, which only answers for the instant
+    /// it was taken — callers repeat it after every suspension that precedes the launch.
+    private func refuseIfAnySlotIsClaimed(startingFor id: EnvironmentID, inventory: [TartVMInfo]) async throws {
+        let running = Set(inventory.filter(\.running).map(\.name))
+        let registered = Dictionary(uniqueKeysWithValues: snapshot.environments.map { ($0.id, $0) })
+        let fresh = await deps.supervisor.reconcile(environments: Array(registered.keys)) { other in
+            guard let environment = registered[other] else { return .absent }
+            return running.contains(environment.tartVMName) ? .present : .absent
+        }
+        // The environment being started is answered for first and the rest in a stable order,
+        // so one process table always produces the same refusal.
+        for other in fresh.keys.sorted(by: { ($0 == id ? "" : $0.tartVMName) < ($1 == id ? "" : $1.tartVMName) }) {
+            guard case .uncertain? = fresh[other] else { continue }
+            verdicts[other] = fresh[other]
+            throw GuesthouseError.vmOwnershipUncertain(other)
+        }
+    }
+
+    private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, inventory: [TartVMInfo], token: OperationSupervisor.Token, events: EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
         let arguments = TartBackend.runArguments(vmName: environment.tartVMName, console: options.console)
         do {
             report(operation, ProgressPhase(kind: .startingVM, cancelable: false), events)
+            // The claimant scan that preceded the journal entry was already stale when the
+            // awaited write returned: another `tart run` can have spawned in between and be
+            // taking the lock now. The process table is therefore read once more here, with
+            // nothing but the launch after it. The inventory is the one already fetched — a VM
+            // that took a lock since has a process this scan finds anyway, and a second `tart
+            // list` would let a hanging inventory hold up a launch it cannot inform.
+            try await refuseIfAnySlotIsClaimed(startingFor: id, inventory: inventory)
             let run = try await deps.backend.run(vmName: environment.tartVMName, console: options.console)
             drainOutput(of: run)
             let identity: ProcessIdentity
@@ -320,13 +507,22 @@ public actor EnvironmentLifecycle {
             // An address says nothing if the process that was to own it is gone: a VM that
             // exited while the lookup was suspended was released by its exit watcher, and a
             // start that ends with no running VM has not completed.
-            guard supervised[id]?.pid == run.processIdentifier else {
+            guard let live = supervised[id], live.pid == run.processIdentifier else {
                 throw GuesthouseError.guestNotReachable(id)
+            }
+            // The watcher is asynchronous and may not have noticed an exit yet, so the kernel
+            // is asked directly rather than trusting the entry that is still there. A process
+            // table that will not answer leaves the outcome unestablished, not complete (§4).
+            switch deps.supervisor.observe(live.identity) {
+            case .present: break
+            case .absent: throw GuesthouseError.guestNotReachable(id)
+            case .unavailable: throw GuesthouseError.operationOutcomeUnknown(operation)
             }
             supervised[id]?.address = address
             try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .startEnvironment, timestamp: Date(), outcome: .completed))
-            // The operation is complete whatever a best-effort status refresh does now.
-            if let status = try? await status(of: id) { events(.status(status)) }
+            // The operation is complete whatever a best-effort status refresh does now, so the
+            // refresh is bounded: an inventory that hangs must not delay the terminal event.
+            if let status = await refreshedStatus(of: id) { events(.status(status)) }
             events(.completed(operation))
         } catch is CancellationError {
             await fail(operation, kind: .startEnvironment, environment: id, with: .canceled, events: events)
@@ -353,18 +549,25 @@ public actor EnvironmentLifecycle {
         // The slot is taken before the first suspension, so two stops cannot both pass the
         // ownership check and signal the same VM.
         inFlight = InFlight(id: operation, environment: id, task: nil)
-        let alreadyStopped: Bool
         do {
-            alreadyStopped = try await requireOwnershipToStop(environment)
+            // Proven here so a stop this service may not perform is refused before it is
+            // journaled; proven again in the task, because this answer is stale by then.
+            _ = try await requireOwnershipToStop(environment)
+        } catch {
+            inFlight = nil
+            throw error
+        }
+        do {
             _ = try await deps.store.begin(.stopEnvironment, for: id, id: operation)
         } catch {
             inFlight = nil
+            await reconcileIndeterminateBegin(operation, kind: .stopEnvironment, environment: id)
             throw error
         }
         let token = deps.supervisor.hold("stopEnvironment \(operation)")
         inFlight?.task = Task { [weak self] () async -> Void in
             guard let self else { return }
-            await self.performStop(operation, environment: environment, mode: mode, alreadyStopped: alreadyStopped, token: token, events: events)
+            await self.performStop(operation, environment: environment, mode: mode, token: token, events: events)
         }
         return operation
     }
@@ -379,27 +582,46 @@ public actor EnvironmentLifecycle {
     /// force-stop was confirmed, is not an ownership problem.
     private func requireOwnershipToStop(_ environment: DevelopmentEnvironment) async throws -> Bool {
         if let live = supervised[environment.id], isAlive(live) { return false }
-        if isOwned(verdicts[environment.id]) { return false }
+        // A verdict is one reconciliation's memory. The process it named can have exited since,
+        // and another launch can have taken the same VM name; authorizing a stop from the
+        // remembered verdict alone would let Guesthouse shut down a machine that is no longer
+        // the one it recorded, so the recorded identity is asked of the kernel again (§4).
+        if case .ownedRunning(let recorded)? = verdicts[environment.id],
+           let identity = await deps.supervisor.identity(for: environment.id),
+           identity.pid == recorded.pid,
+           deps.supervisor.verify(identity) != nil {
+            return false
+        }
         switch await observe(environment) {
         case .stopped: return true
         case .running, .unknown: throw GuesthouseError.vmOwnershipUncertain(environment.id)
         }
     }
 
-    private func performStop(_ operation: OperationID, environment: DevelopmentEnvironment, mode: StopMode, alreadyStopped: Bool, token: OperationSupervisor.Token, events: EventSink) async {
+    private func performStop(_ operation: OperationID, environment: DevelopmentEnvironment, mode: StopMode, token: OperationSupervisor.Token, events: EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
         do {
+            // Ownership was proven before the journal write suspended, and that answer only
+            // described the instant it was taken: the owned process can have exited since and
+            // another launch taken the same VM name, and the observed stopped state can have
+            // become a running VM again. Both signals act by name or by PID, so ownership is
+            // established once more here, immediately before either of them, and an ownership
+            // that changed is reported as uncertain rather than stopped (MVP-PLAN.md §4).
+            let alreadyStopped = try await requireOwnershipToStop(environment)
             switch mode {
             case .graceful(let deadline):
                 report(operation, ProgressPhase(kind: .stoppingVM, cancelable: false), events)
                 if !alreadyStopped {
+                    // One deadline covers the whole graceful stop. `tart stop` and the wait for
+                    // the process hosting the VM share it, so a normal Quit never takes close
+                    // to twice what the caller asked for (MVP-PLAN.md §2).
+                    let end = ContinuousClock.now.advanced(by: deadline)
                     try await gracefulStop(operation, environment: environment, deadline: deadline)
                     // Tart's command has returned, but the process hosting the VM may still be
-                    // unwinding, and Quit waits for both. The wait is bounded by the deadline
-                    // the caller asked for: the run itself was launched with a year-long
-                    // timeout, so an unbounded wait here would never end (MVP-PLAN.md §2).
-                    guard await waitForVMProcess(of: id, within: deadline) else {
+                    // unwinding, and Quit waits for both. The run itself was launched with a
+                    // year-long timeout, so an unbounded wait here would never end.
+                    guard await waitForVMProcess(of: id, until: end) else {
                         throw GuesthouseError.operationOutcomeUnknown(operation)
                     }
                 }
@@ -413,7 +635,7 @@ public actor EnvironmentLifecycle {
                         // An adopted survivor has no run to end; its process is signaled directly.
                         try await terminateAdopted(live, operation: operation)
                     } else {
-                        try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(10))
+                        try await endUnsupervisedVM(environment, operation: operation)
                     }
                 }
             }
@@ -421,7 +643,9 @@ public actor EnvironmentLifecycle {
                 throw GuesthouseError.runtimeStateUnavailable(reason: SanitizedText(Self.describe(failure), limit: 200))
             }
             try await deps.store.append(JournalRecord(id: operation, environmentID: id, operation: .stopEnvironment, timestamp: Date(), outcome: .completed))
-            if let status = try? await status(of: id) { events(.status(status)) }
+            // The stop is already durable, so the courtesy status is bounded: an inventory that
+            // hangs must not hold Quit past the deadline for a stop that already succeeded.
+            if let status = await refreshedStatus(of: id) { events(.status(status)) }
             events(.completed(operation))
         } catch is CancellationError {
             await fail(operation, kind: .stopEnvironment, environment: id, with: .canceled, events: events)
@@ -429,6 +653,11 @@ public actor EnvironmentLifecycle {
             await fail(operation, kind: .stopEnvironment, environment: id, with: error, events: events)
         } catch let error as TartInvocationError {
             await fail(operation, kind: .stopEnvironment, environment: id, with: Self.map(error, environment: id), events: events)
+        } catch is ProcessLaunchError {
+            // `tart` itself could not be launched, so nothing was asked of the VM. Guesthouse's
+            // saved state is not involved, and reinstalling the runtime — not inspecting
+            // state — is what helps, exactly as on the start path.
+            await fail(operation, kind: .stopEnvironment, environment: id, with: .runtimeMissing, events: events)
         } catch {
             await fail(operation, kind: .stopEnvironment, environment: id, with: .runtimeStateUnavailable(reason: SanitizedText(Self.describe(error), limit: 200)), events: events)
         }
@@ -445,7 +674,13 @@ public actor EnvironmentLifecycle {
         do {
             try await deps.backend.stop(vmName: environment.tartVMName, deadline: deadline)
         } catch TartInvocationError.timedOut {
-            switch await observe(environment) {
+            // The caller's whole budget is spent by definition on this branch, and when the
+            // supervised process is already gone `observe` falls through to `tart list`, whose
+            // own timeout is longer than a graceful stop's entire deadline: a Quit would sit
+            // tens of seconds past what the user asked for. The read gets a short courtesy
+            // window instead, and one that does not answer inside it is the unknown outcome
+            // this branch already reports for a state it cannot read (MVP-PLAN.md §2).
+            switch await observe(environment, within: Self.statusRefreshBudget) {
             case .running: throw GuesthouseError.gracefulStopTimedOut(environment.id)
             case .stopped: return
             case .unknown: throw GuesthouseError.operationOutcomeUnknown(operation)
@@ -467,18 +702,50 @@ public actor EnvironmentLifecycle {
     /// A run this service launched and a survivor adopted after a relaunch are waited for the
     /// same way — by asking the kernel about the recorded identity — so an adopted VM's Tart
     /// process is waited for too, and only a definite absence counts as an exit (§4).
-    private func waitForVMProcess(of id: EnvironmentID, within deadline: Duration) async -> Bool {
+    private func waitForVMProcess(of id: EnvironmentID, until end: ContinuousClock.Instant) async -> Bool {
         guard let live = supervised[id] else { return true }
         let identity = live.identity
-        return await poll(until: deadline) { deps.supervisor.observe(identity) == .absent }
+        return await poll(until: end) { deps.supervisor.observe(identity) == .absent }
     }
 
-    private func poll(until deadline: Duration, _ finished: () -> Bool) async -> Bool {
-        let end = ContinuousClock.now.advanced(by: deadline)
+    private func poll(until end: ContinuousClock.Instant, _ finished: () -> Bool) async -> Bool {
         while true {
             if finished() { return true }
             if ContinuousClock.now >= end { return false }
             try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    /// Ends the VM for a force stop when no supervised process is left to signal.
+    ///
+    /// The supervised process can have exited between the ownership preflight and this task,
+    /// in which case the requested stopped state is already reached and no command is needed:
+    /// `tart stop` would answer `notRunning`, and that would be reported as a failure for a
+    /// stop that succeeded (MVP-PLAN.md §2, Quit).
+    func endUnsupervisedVM(_ environment: DevelopmentEnvironment, operation: OperationID) async throws {
+        switch await observe(environment) {
+        case .stopped: return
+        case .running: try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(10))
+        case .unknown: throw GuesthouseError.operationOutcomeUnknown(operation)
+        }
+    }
+
+    /// A status read that gives up at `statusRefreshBudget`, for the courtesy refresh that
+    /// precedes a terminal event. The operation it follows is already journaled, so a `tart
+    /// list` that never answers must cost the client nothing.
+    private func refreshedStatus(of id: EnvironmentID) async -> EnvironmentStatus? {
+        await withTaskGroup(of: EnvironmentStatus?.self) { group in
+            group.addTask { [weak self] in
+                guard let self else { return nil }
+                return try? await self.status(of: id)
+            }
+            group.addTask {
+                try? await Task.sleep(for: Self.statusRefreshBudget)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 
@@ -495,7 +762,25 @@ public actor EnvironmentLifecycle {
             }
         }
         guard let inventory = try? await deps.backend.list() else { return .unknown }
-        return inventory.contains { $0.name == environment.tartVMName && $0.running } ? .running : .stopped
+        return Self.localVM(named: environment.tartVMName, in: inventory)?.running == true ? .running : .stopped
+    }
+
+    /// `observe`, giving up at `budget` with `.unknown`. Cancelling the group ends the query
+    /// process too, so the wait really is bounded rather than merely abandoned.
+    private func observe(_ environment: DevelopmentEnvironment, within budget: Duration) async -> VMObservation {
+        await withTaskGroup(of: VMObservation.self) { group in
+            group.addTask { [weak self] in
+                guard let self else { return .unknown }
+                return await self.observe(environment)
+            }
+            group.addTask {
+                try? await Task.sleep(for: budget)
+                return .unknown
+            }
+            let first = await group.next() ?? .unknown
+            group.cancelAll()
+            return first
+        }
     }
 
     /// Cancels the in-flight operation if it is the one named. While the reported phase is
@@ -504,7 +789,11 @@ public actor EnvironmentLifecycle {
     /// outcome, so a second stop is never attempted over an unknown one.
     public func cancel(_ operation: OperationID) {
         guard let current = inFlight, current.id == operation else { return }
-        if let phase = current.phase, !phase.cancelable {
+        // No phase yet means the operation has not reported one. Its first phase is a protected
+        // one for both start and stop, and the task may not even exist yet, so cancelling here
+        // would either be dropped or land on a task about to begin mutating; the request is
+        // deferred to the next cancelable phase instead.
+        guard let phase = current.phase, phase.cancelable else {
             inFlight?.cancelRequested = true
             return
         }
@@ -622,9 +911,14 @@ public actor EnvironmentLifecycle {
             try await deps.store.append(JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .failed(error)))
             // A recorded outcome that is itself unknown settles nothing: the environment stays
             // blocked, and status keeps asking for inspection, until actual state says what
-            // the mutation did. The journal agrees; `leavesInFlight` reads it the same way.
-            if case .operationOutcomeUnknown = error {
+            // the mutation did. A cancellation is the same — the work may have been half done
+            // when the task stopped — and `JournalRecord.leavesInFlight` reads both that way,
+            // so both are tracked here or only a service restart would rediscover them.
+            switch error {
+            case .operationOutcomeUnknown, .canceled:
                 unresolved[environment] = JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .started)
+            default:
+                break
             }
         } catch {
             // The journal still says "in flight". Until the actual state is inspected the
@@ -637,10 +931,10 @@ public actor EnvironmentLifecycle {
         events(.failed(operation, error))
     }
 
-    private func isOwned(_ verdict: OwnershipVerdict?) -> Bool {
-        if case .ownedRunning? = verdict { return true }
-        return false
-    }
+    /// Test seams: what the lifecycle is doing right now, before any progress has been
+    /// reported for it.
+    var inFlightOperationID: OperationID? { inFlight?.id }
+    var inFlightPhase: ProgressPhase? { inFlight?.phase }
 
     static func describe(_ reason: OwnershipVerdict.UncertaintyReason) -> String {
         switch reason {
@@ -676,6 +970,11 @@ public actor EnvironmentLifecycle {
             return try await deps.backend.list()
         } catch let error as TartInvocationError {
             throw Self.mapInventory(error)
+        } catch is ProcessLaunchError {
+            // The runtime program itself could not be started, which reinstalling it repairs.
+            // Guesthouse's saved state is not involved, so it must not be what the user is
+            // sent to inspect.
+            throw GuesthouseError.runtimeMissing
         }
     }
 
@@ -683,16 +982,20 @@ public actor EnvironmentLifecycle {
     /// answers for commands addressed at one VM.
     public static func mapInventory(_ error: TartInvocationError) -> GuesthouseError {
         switch error {
-        case .unparseableOutput: .runtimeIncompatible(found: nil, required: TartPin.releaseTag)
+        case .unparseableOutput: .runtimeIncompatible(found: nil, required: SanitizedText(TartPin.releaseTag))
         case .timedOut: .runtimeStateUnavailable(reason: SanitizedText("the list of virtual machines did not answer in time", limit: 200))
+        case .runtimeReplaced: .runtimeVerificationFailed(check: .signature)
         case .failed: .runtimeStateUnavailable(reason: SanitizedText("the list of virtual machines could not be read", limit: 200))
         }
     }
 
     public static func map(_ error: TartInvocationError, environment: EnvironmentID) -> GuesthouseError {
         switch error {
-        case .unparseableOutput: .runtimeIncompatible(found: nil, required: TartPin.releaseTag)
+        case .unparseableOutput: .runtimeIncompatible(found: nil, required: SanitizedText(TartPin.releaseTag))
         case .timedOut: .guestNotReachable(environment)
+        // Guesthouse refused to execute a host runtime that is no longer the verified file.
+        // Nothing was run and no guest was probed; reinstalling the runtime is what helps.
+        case .runtimeReplaced: .runtimeVerificationFailed(check: .signature)
         case .failed(let failure):
             switch failure {
             case .vmNotFound: .environmentNotFound(environment)

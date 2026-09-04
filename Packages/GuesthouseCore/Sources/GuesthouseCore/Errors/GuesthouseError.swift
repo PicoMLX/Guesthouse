@@ -128,8 +128,6 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "This Mac has \(found.value); Guesthouse needs \(required.value). Development Macs cannot run here."
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
-        case .unsupportedHost(.wrongArchitecture(let found, let required)):
-            "This Mac's processor is \(found.value). Guesthouse needs \(required) for this configuration."
         case .unsupportedHost(.architectureUnknown):
             "Guesthouse could not determine this Mac's processor type. Check this Mac again; if it keeps failing, export diagnostics."
         case .unsupportedHost(.macOSTooOld(let found, let minimum)):

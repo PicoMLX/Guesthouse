@@ -27,9 +27,6 @@ struct ServiceLog: Sendable {
 /// Callers are authenticated twice: the listener only accepts sessions whose peer is signed by
 /// this app's team with this app's signing identifier, and every message is checked again
 /// against the same requirement before it is decoded (MVP-PLAN.md §3, "Authenticate callers").
-///
-/// Queries reply synchronously. Lifecycle operations reply `accepted` once the journal has
-/// the operation, then stream progress, status, and the result to the session.
 final class RuntimeService: Sendable {
     static let serviceName = "com.starlingprotocol.Guesthouse.Runtime"
     /// The only process allowed to talk to this service.
@@ -70,6 +67,14 @@ final class RuntimeService: Sendable {
     }
     /// Lifecycle operations, available once a verified runtime bundle exists.
     private let lifecycleState = Mutex<LifecycleState>(.initializing)
+    /// What lifecycle initialization needs, kept from discovery so a failure the user repairs
+    /// can be retried while the service runs.
+    private let lifecycleInputs = Mutex<LifecycleInputs?>(nil)
+
+    struct LifecycleInputs: Sendable {
+        let backend: TartBackend
+        let storage: RuntimeStorage
+    }
 
     /// Accepts a session and returns a per-session handler that tracks in-flight requests.
     func acceptSession(_ session: XPCSession) -> SessionHandler {
@@ -80,9 +85,9 @@ final class RuntimeService: Sendable {
     /// Returns a synchronous reply, or `nil` when the reply is sent later through `message.reply`.
     ///
     /// `refusal` is read rather than passed in, because another request on the same session can
-    /// refuse it while this one is still being decoded. `finished` is called when a reply the
-    /// service sends later, from an operation, has been handed to the transport: a synchronous
-    /// answer is finished by the caller instead.
+    /// refuse it while this one is still being decoded. `finished` is called exactly once, by
+    /// whoever hands the reply to the transport: the caller for a synchronous answer, the
+    /// operation's own reply box for one that is sent later.
     func handle(_ message: XPCReceivedMessage, session: XPCSession, inFlight: Int, refusal: () -> RuntimeEvent?, finished: @escaping @Sendable () -> Void = {}, refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
         // A message that asks for no reply is never decoded or dispatched. An operation whose
         // ID, acceptance, and terminal event have nowhere to go is a host mutation the client
@@ -104,7 +109,7 @@ final class RuntimeService: Sendable {
         // request pipelined behind the refusal still gets an actionable answer. The session is
         // closed by its lifetime once every reply it owes has been handed over.
         if let refused = refusal() {
-            return reply(RuntimeDispatcher.refused(refused), session: session, message: message, reason: "session refused")
+            return reply(RuntimeDispatcher.refused(refused), session: session, message: message, finished: finished, reason: "session refused")
         }
         guard message.senderSatisfies(Self.peerRequirement) else {
             log.error(RedactedLine(literal: "message from a peer that does not satisfy the requirement; closing session"))
@@ -128,7 +133,6 @@ final class RuntimeService: Sendable {
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error(RedactedLine(literal: "undecodable request rejected"))
-            finished()
             if case .reply(let event) = RuntimeDispatcher.undecodable() { return event }
             return RuntimeEvent.failed(OperationID(), .invalidRequest(.malformed))
         }
@@ -144,7 +148,6 @@ final class RuntimeService: Sendable {
         switch decision {
         case .reply(let event):
             log.error(Self.line("rejected request:", event.caseName))
-            finished()
             return event
         case .replyAndClose(let event):
             log.error(Self.line("refusing session:", reason))
@@ -152,7 +155,6 @@ final class RuntimeService: Sendable {
             // rejection has been handed to the transport would discard the very answer the
             // client needs. `SessionHandler` closes it once the session owes nothing more.
             refuse(event)
-            finished()
             return event
         case .dispatch(let request):
             return perform(request, message: message, session: session, finished: finished)
@@ -175,13 +177,17 @@ final class RuntimeService: Sendable {
             case .ready(let ready):
                 lifecycle = ready
             case .failed(let error):
-                finished()
-                return RuntimeEvent.failed(OperationID(), error)
+                // The saved state that failed can be repaired while the service runs, and
+                // `runtimeStateUnavailable` sends the user to Inspect State to do exactly
+                // that. Inspection is routed through here too, so a cached failure would
+                // outlive the repair until the service process happened to be replaced: the
+                // request is answered with the error it has and initialization is tried again.
+                retryLifecycleInitialization()
+                    return RuntimeEvent.failed(OperationID(), error)
             case .initializing:
                 // A verified runtime still bringing up its state is not incompatible with itself.
                 let info = tartInfo.withLock { $0 }
-                finished()
-                return RuntimeEvent.failed(OperationID(), info?.problem ?? .runtimeStarting)
+                    return RuntimeEvent.failed(OperationID(), info?.problem ?? .runtimeStarting)
             }
             let reply = ReplyBox(message, onReply: finished)
             let sink = SessionSink(session: session, log: log)
@@ -189,7 +195,6 @@ final class RuntimeService: Sendable {
             return nil
         case .importXcode:
             log.notice(Self.line("operation not implemented yet:", request.caseName))
-            finished()
             return RuntimeEvent.failed(OperationID(), .invalidRequest(.unsupportedOperation))
         }
     }
@@ -198,7 +203,7 @@ final class RuntimeService: Sendable {
         do {
             switch request {
             case .listEnvironments:
-                reply.send(RuntimeEvent.environments(await lifecycle.environments()))
+                reply.send(RuntimeEvent.environments(try await lifecycle.environments()))
             case .environmentStatus(let id):
                 reply.send(RuntimeEvent.status(try await lifecycle.status(of: id)))
             case .startEnvironment(let id, let options):
@@ -218,7 +223,7 @@ final class RuntimeService: Sendable {
         } catch {
             // A dependency failure (Tart, the state store, supervision) is reported as the
             // runtime problem it is, with its recovery actions; never as a malformed request.
-            log.error("operation failed: \(request.caseName, privacy: .public) \(Self.describe(error), privacy: .public)")
+            log.error(Self.line("operation failed:", "\(request.caseName) \(Self.describe(error))"))
             reply.send(RuntimeEvent.failed(OperationID(), Self.mapDependencyFailure(error, request: request)))
         }
     }
@@ -245,7 +250,7 @@ final class RuntimeService: Sendable {
 
     func sessionEnded(_ error: XPCRichError) {
         // The rich error's description is opaque and may quote context; log a fixed message.
-        log.notice("session ended")
+        log.notice(RedactedLine(literal: "session ended"))
     }
 
     var versionInfo: RuntimeVersionInfo {
@@ -365,18 +370,49 @@ final class RuntimeService: Sendable {
         }
         tartInfo.withLock { $0 = .init(version: version.description, verified: true) }
         log.notice(Self.line("Tart located and verified:", version.description))
+        let inputs = LifecycleInputs(backend: backend, storage: storage)
+        lifecycleInputs.withLock { $0 = inputs }
+        await startLifecycle(inputs)
+    }
+
+    /// Loads state and brings the lifecycle up, or records why it could not.
+    private func startLifecycle(_ inputs: LifecycleInputs) async {
         do {
-            let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: storage.url(for: .state)))
-            let store = try StateStore(rootURL: storage.url(for: .state))
-            let lifecycle = EnvironmentLifecycle(dependencies: .init(backend: backend, supervisor: supervisor, store: store))
+            let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: inputs.storage.url(for: .state)))
+            let store = try StateStore(rootURL: inputs.storage.url(for: .state))
+            let lifecycle = EnvironmentLifecycle(dependencies: .init(backend: inputs.backend, supervisor: supervisor, store: store))
             try await lifecycle.prepare()
             lifecycleState.withLock { $0 = .ready(lifecycle) }
-            let count = await lifecycle.environments().count
-            log.notice(Self.line("lifecycle ready; environments:", "\(count)"))
+            // The count is only for the log. A listing that cannot be completed is a real
+            // failure for a client that asked for one, but it must not undo a lifecycle that
+            // is otherwise ready.
+            if let count = try? await lifecycle.environments().count {
+                log.notice(Self.line("lifecycle ready; environments:", "\(count)"))
+            } else {
+                log.notice(RedactedLine(literal: "lifecycle ready; the list of virtual machines could not be read"))
+            }
         } catch {
             // The runtime itself is fine; its state is not. The two are reported apart.
             log.error(Self.line("lifecycle could not start:", Self.describe(error)))
             lifecycleState.withLock { $0 = .failed(Self.mapDependencyFailure(error, request: .listEnvironments)) }
+        }
+    }
+
+    /// Tries lifecycle initialization once more after a failure. Moving out of `failed` is what
+    /// claims the attempt, so overlapping requests start one retry between them; while it runs,
+    /// requests are answered as the initialization it is.
+    private func retryLifecycleInitialization() {
+        guard let inputs = lifecycleInputs.withLock({ $0 }) else { return }
+        let claimed = lifecycleState.withLock { state -> Bool in
+            guard case .failed = state else { return false }
+            state = .initializing
+            return true
+        }
+        guard claimed else { return }
+        Task {
+            xpc_transaction_begin()
+            defer { xpc_transaction_end() }
+            await self.startLifecycle(inputs)
         }
     }
 
@@ -458,9 +494,6 @@ final class RuntimeService: Sendable {
     }
 }
 
-    func sessionEnded(_ error: XPCRichError) {
-        // The rich error's description is opaque and may quote context; log a fixed message.
-        log.notice(RedactedLine(literal: "session ended"))
 /// Lets a message be answered after an asynchronous operation. `XPCReceivedMessage` is only
 /// ever touched from the task that replies.
 final class ReplyBox: @unchecked Sendable {
@@ -499,9 +532,9 @@ final class ReplyBox: @unchecked Sendable {
 /// client treats a dropped session as an unknown outcome and re-queries status.
 final class SessionSink: @unchecked Sendable {
     private let session: XPCSession
-    private let log: Logger
+    private let log: ServiceLog
 
-    init(session: XPCSession, log: Logger) {
+    init(session: XPCSession, log: ServiceLog) {
         self.session = session
         self.log = log
     }
@@ -510,7 +543,8 @@ final class SessionSink: @unchecked Sendable {
         do {
             try session.send(event)
         } catch {
-            log.error("could not push \(event.caseName, privacy: .public) to the client")
+            var state = Redactor.StreamState()
+            log.error(Redactor().redact(line: "could not push to the client: \(event.caseName)", state: &state))
         }
     }
 }

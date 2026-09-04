@@ -20,9 +20,6 @@ public struct TartBackend: Sendable {
         self.verifiedBundle = verifiedBundle
     }
 
-    /// The most records a parsed command may produce before its output is refused.
-    static let maximumCapturedRecords = 512
-
     /// Refuses to launch when the bundle is not the one that passed verification.
     func requireVerifiedBundle() throws {
         guard let verifiedBundle else { return }
@@ -85,9 +82,20 @@ public struct TartBackend: Sendable {
     }
 
     /// `tart ip <vm> --wait <seconds>`: the guest's address once it has one.
+    ///
+    /// The caller's wait bounds the whole invocation, not only Tart's own waiting: the command
+    /// is ended at that deadline and reaped inside a short grace period. A fifteen-second slack
+    /// and the runner's five-second default grace used to turn the status probe's zero-second
+    /// lookup into twenty seconds of blocked inspection, and a ninety-second start into a
+    /// hundred and ten (MVP-PLAN.md §2). A short floor is kept so a probe that asks for no
+    /// waiting can still be answered by a Tart that already knows the address.
     public func ip(vmName: String, wait: Duration) async throws -> GuestIPAddress {
         let seconds = max(0, Int(wait.components.seconds))
-        let output = try await capture(["ip", vmName, "--wait", String(seconds)], timeout: wait + .seconds(15))
+        let output = try await capture(
+            ["ip", vmName, "--wait", String(seconds)],
+            timeout: max(wait, Self.minimumIPDeadline),
+            terminationGracePeriod: Self.ipTerminationGrace
+        )
         do {
             return try TartIPParser.parse(output.stdout)
         } catch {
@@ -127,6 +135,12 @@ public struct TartBackend: Sendable {
 
     static let neverForceSeconds = 86_400
 
+    /// The least an address lookup is given, so a zero-wait probe can still be answered.
+    static let minimumIPDeadline = Duration.seconds(2)
+    /// How long a timed-out address lookup may take to be reaped, counted on top of its
+    /// deadline. Deliberately far below the runner's five-second default.
+    static let ipTerminationGrace = Duration.milliseconds(500)
+
     // MARK: - Helpers
 
     struct Captured {
@@ -134,12 +148,13 @@ public struct TartBackend: Sendable {
         let stderr: String
     }
 
-    private func capture(_ arguments: [String], timeout: Duration) async throws -> Captured {
+    private func capture(_ arguments: [String], timeout: Duration, terminationGracePeriod: Duration = .seconds(5)) async throws -> Captured {
         let run = try await launch(ProcessInvocation(
             executable: bundle.executable,
             arguments: arguments,
             environment: storage.environmentForTart(),
-            timeout: timeout
+            timeout: timeout,
+            terminationGracePeriod: terminationGracePeriod
         ))
         // A canceled operation ends the query process too, so a start canceled while waiting
         // for the address does not keep `tart ip` waiting for its own timeout.

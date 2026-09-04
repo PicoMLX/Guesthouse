@@ -432,14 +432,17 @@ import Testing
         _ = try await store.begin(.startEnvironment, for: environment)
         let future = JournalRecord(id: OperationID(), environmentID: environment, operation: .stopEnvironment, timestamp: Date(), outcome: .started)
         var text = String(decoding: try JSONEncoder().encode(future), as: UTF8.self)
-        text = text.replacingOccurrences(of: "\"format\":1", with: "\"format\":2")
+        // One past what this build writes: a format from a newer Guesthouse, whatever the
+        // current number happens to be.
+        let unreadable = JournalRecord.currentFormat + 1
+        text = text.replacingOccurrences(of: "\"format\":\(JournalRecord.currentFormat)", with: "\"format\":\(unreadable)")
         let handle = try FileHandle(forWritingTo: await store.journalURL)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data((text + "\n").utf8))
         try handle.close()
         let reopened = try StateStore(rootURL: root)
-        await #expect(throws: StateStoreError.unsupportedJournalFormat(line: 2, format: 2)) { try await reopened.replay() }
-        #expect(StateStoreError.unsupportedJournalFormat(line: 2, format: 2).recoveryActions.contains(.reinstallApp))
+        await #expect(throws: StateStoreError.unsupportedJournalFormat(line: 2, format: unreadable)) { try await reopened.replay() }
+        #expect(StateStoreError.unsupportedJournalFormat(line: 2, format: unreadable).recoveryActions.contains(.reinstallApp))
     }
 
     /// Formats start at 1, so a record declaring zero or a negative one came from damage rather
