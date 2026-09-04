@@ -30,7 +30,7 @@ struct StubProbe: HostProbe {
         #expect(report.canProceed)
         for kind in PreflightCheckKind.allCases {
             guard case .pass(let detail) = report.result(kind)!.outcome else { Issue.record("\(kind) not pass"); continue }
-            #expect(!detail.isEmpty)
+            #expect(!detail.value.isEmpty)
         }
         #expect(report.result(.macOSVersion)!.outcome == .pass(detail: "macOS 26.5.2 (25F84)"))
         #expect(report.result(.codexDesktop)!.outcome == .pass(detail: "Codex desktop 1.2.3 (456) at /Applications/ChatGPT.app"))
@@ -41,7 +41,7 @@ struct StubProbe: HostProbe {
         let missing = run(StubProbe())
         #expect(missing.canProceed)
         guard case .warn(let detail, _) = missing.result(.codexDesktop)!.outcome else { Issue.record("expected warn"); return }
-        #expect(detail.contains("not installed"))
+        #expect(detail.value.contains("not installed"))
     }
 
     @Test func intelHostFails() {
@@ -61,7 +61,7 @@ struct StubProbe: HostProbe {
         var probe = StubProbe()
         probe.physicalMemoryBytes = 24 * ResourcePreset.gibibyte
         guard case .warn(let detail, _) = run(probe).result(.memory)!.outcome else { Issue.record("expected warn"); return }
-        #expect(detail.contains("32 GB is recommended"))
+        #expect(detail.value.contains("32 GB is recommended"))
         #expect(run(probe).canProceed)
 
         probe.physicalMemoryBytes = 8 * ResourcePreset.gibibyte
@@ -87,7 +87,7 @@ struct StubProbe: HostProbe {
         let hostile = URL(fileURLWithPath: "/Volumes/Ext\u{202E}gnol/Guesthouse")
         let report = PreflightCheck.run(probe: probe, storageRoot: hostile, now: Date(timeIntervalSince1970: 1_800_000_000))
         guard case .undetermined(let detail, _) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
-        #expect(!detail.contains("\u{202E}"))
+        #expect(!detail.value.contains("\u{202E}"))
         #expect(!report.storage.storageRootPath.contains("\u{202E}"))
     }
 
@@ -118,9 +118,9 @@ struct StubProbe: HostProbe {
         var probe = StubProbe()
         probe.applications["com.openai.chat"] = InstalledApplication(url: URL(fileURLWithPath: "/Applications/Chat\u{202E}GPT.app"), version: "1.2\n.3", build: String(repeating: "9", count: 300))
         guard case .pass(let detail) = run(probe).result(.codexDesktop)!.outcome else { Issue.record("expected pass"); return }
-        #expect(!detail.contains("\u{202E}"))
-        #expect(!detail.contains("\n"))
-        #expect(!detail.contains(String(repeating: "9", count: 100)))
+        #expect(!detail.value.contains("\u{202E}"))
+        #expect(!detail.value.contains("\n"))
+        #expect(!detail.value.contains(String(repeating: "9", count: 100)))
     }
 
     @Test func lowDiskFailsWithPreciseNumbersAndUnknownDiskBlocks() {
@@ -170,7 +170,7 @@ struct StubProbe: HostProbe {
         }
         let report = PreflightCheck.run(probe: UnmountedProbe(), storageRoot: URL(fileURLWithPath: "/Volumes/External/Guesthouse"), now: Date(timeIntervalSince1970: 1_800_000_000))
         guard case .undetermined(let detail, let recovery) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
-        #expect(detail.contains("not available"))
+        #expect(detail.value.contains("not available"))
         #expect(recovery.first == .retry)
         #expect(!report.canProceed, "there is no disk to check, so setup does not continue")
     }
@@ -186,6 +186,19 @@ struct StubProbe: HostProbe {
         if case .fail(let error) = failure {
             #expect(error.userMessage.contains("Apple silicon") && error.userMessage.contains("Intel"))
         }
+    }
+
+    /// Both sides of the mismatch are sanitized where the value is built, not where it is shown,
+    /// so what a decoded payload put in either is bounded and redacted in the encoded form too.
+    @Test func theRequiredArchitectureIsSanitizedInTheEncodedPayloadToo() throws {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let error = GuesthouseError.unsupportedHost(.wrongArchitecture(found: "Intel", required: SanitizedText("Apple silicon \(token)")))
+        #expect(!error.userMessage.contains(token))
+        let json = String(decoding: try JSONEncoder().encode(error), as: UTF8.self)
+        #expect(!json.contains(token))
+        #expect(json.contains("[redacted:github-token]"))
+        let restored = try JSONDecoder().decode(GuesthouseError.self, from: Data(json.utf8))
+        #expect(restored == error)
     }
 
     @Test func aReportMissingACheckNeverProceeds() {
@@ -230,9 +243,83 @@ struct StubProbe: HostProbe {
         stub.free = .failure(HostProbeError.destinationNotWritable(path: root.path))
         let report = run(stub)
         guard case .undetermined(let detail, let recovery) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
-        #expect(detail.contains("cannot write"))
+        #expect(detail.value.contains("cannot write"))
         #expect(recovery.contains(.openSettings))
         #expect(!report.canProceed, "a destination that cannot be written is not a satisfied storage check")
+    }
+
+    @Test func theOperatingSystemBuildIsSanitizedBeforeItReachesTheResult() {
+        var probe = StubProbe()
+        probe.operatingSystemBuild = "25F84\u{202E}\n" + String(repeating: "9", count: 300)
+        guard case .pass(let detail) = run(probe).result(.macOSVersion)!.outcome else { Issue.record("expected pass"); return }
+        #expect(!detail.value.contains("\u{202E}"))
+        #expect(!detail.value.contains("\n"))
+        #expect(!detail.value.contains(String(repeating: "9", count: 100)))
+    }
+
+    @Test func anUnrepresentableRequirementIsNamedAtFullSize() {
+        let error = GuesthouseError.insufficientDisk(requiredBytes: .max, availableBytes: 512, volumePath: SanitizedText("/Volumes/Work"))
+        #expect(error.userMessage.contains(UInt64.max.formatted()), "a requirement above Int64 must not be presented as half of itself")
+    }
+
+    @Test func aDestinationThatCannotBeTraversedIsNotUsableSpace() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Unsearchable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: base.path) }
+        // Writable but not searchable: nothing can be created in it, so its capacity is not
+        // space a development Mac can use.
+        try FileManager.default.setAttributes([.posixPermissions: 0o200], ofItemAtPath: base.path)
+        // Permission bits do not restrain root, so only an ordinary user can prove this.
+        if getuid() != 0 {
+            #expect(throws: HostProbeError.destinationNotWritable(path: base.path)) { try SystemHostProbe().freeBytes(at: base) }
+        }
+    }
+
+    @Test func onlyAFilesystemDenialRulesOutTheDestination() {
+        #expect(SystemHostProbe.rulesOutDestination(EACCES))
+        #expect(SystemHostProbe.rulesOutDestination(EROFS), "a read-only volume cannot be written by any process")
+        #expect(!SystemHostProbe.rulesOutDestination(EPERM), "the sandboxed app's own refusal says nothing about a folder the runtime service writes")
+    }
+
+    @Test func aLeftoverMountPointIsNeverMeasuredOnTheStartupDisk() throws {
+        let container = FileManager.default.temporaryDirectory.appending(path: "Volumes-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: container) }
+        let leftover = container.appending(path: "External")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let probe = SystemHostProbe()
+        #expect(throws: HostProbeError.volumeUnavailable(path: leftover.path)) {
+            try probe.freeBytes(at: leftover.appending(path: "Guesthouse"), mountContainer: container.path)
+        }
+        #expect(throws: HostProbeError.volumeUnavailable(path: leftover.path)) {
+            try probe.freeBytes(at: leftover, mountContainer: container.path)
+        }
+        // A destination that names no mount point is still measured normally.
+        #expect(throws: Never.self) { _ = try probe.freeBytes(at: leftover.appending(path: "Guesthouse")) }
+    }
+
+    /// A link outside the folder that holds mount points can lead inside one. The spelled path
+    /// names no mount point, so the leftover-folder check used to be skipped while the capacity
+    /// lookup followed the link and answered with the startup disk's space for a volume that is
+    /// not mounted.
+    @Test func aLinkIntoALeftoverMountPointIsNotMeasuredEither() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "LinkedVolume-\(UUID().uuidString)")
+        let container = base.appending(path: "Volumes")
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: base) }
+        let leftover = container.appending(path: "External")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let link = base.appending(path: "Development Macs")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: leftover)
+        #expect(SystemHostProbe.volumeMountPoint(of: link, container: container.path) == nil, "the path as spelled names no mount point")
+        let probe = SystemHostProbe()
+        let unmounted = leftover.resolvingSymlinksInPath().path
+        #expect(throws: HostProbeError.volumeUnavailable(path: unmounted)) {
+            try probe.freeBytes(at: link, mountContainer: container.path)
+        }
+        #expect(throws: HostProbeError.volumeUnavailable(path: unmounted)) {
+            try probe.freeBytes(at: link.appending(path: "Guesthouse"), mountContainer: container.path)
+        }
     }
 
     @Test func everyFailureCarriesARecoveryAction() {
@@ -269,5 +356,40 @@ struct StubProbe: HostProbe {
         #expect(try probe.freeBytes(at: FileManager.default.temporaryDirectory) > 0)
         #expect(probe.installedApplication(bundleIdentifier: "com.apple.finder")?.url.lastPathComponent == "Finder.app")
         #expect(probe.installedApplication(bundleIdentifier: "com.example.does.not.exist") == nil)
+    }
+
+    /// A guest allocation plus host headroom that cannot be represented is a failure in its own
+    /// right. Deciding it with a `UInt64.max` floor let a probe that answers `UInt64.max` past
+    /// it: `.max < .max` is false, so the check recorded a pass for an allocation no Mac has.
+    @Test func anUnrepresentableMemoryFloorAlwaysFails() throws {
+        var policy = ResourcePolicy()
+        policy.hostMemoryHeadroomBytes = .max
+        let preset = try #require(ResourcePreset(name: "huge", memoryBytes: 1, cpuCount: 4, diskBytes: 1, verification: .experimental))
+        var probe = StubProbe()
+        probe.physicalMemoryBytes = .max
+        let report = PreflightCheck.run(probe: probe, policy: policy, storageRoot: root, preset: preset, now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(report.result(.memory)!.outcome == .fail(.unsupportedHost(.insufficientMemory(foundBytes: .max, minimumBytes: .max))))
+        #expect(!report.canProceed)
+    }
+
+    /// A result does not only come from `run`. One decoded from a diagnostics file or received
+    /// over the wire carries whatever the sender put in it, and `detail` is presented and
+    /// re-encoded, so it is bounded and redacted by its own type rather than by its author.
+    @Test func aDecodedDetailIsSanitizedLikeEveryOtherOutsideValue() throws {
+        let hostile = "one-time code is AB12-CD34 \u{202E}reversed\nsecond line " + String(repeating: "9", count: 2_000)
+        let json = try JSONEncoder().encode(["pass": ["detail": hostile]])
+        let outcome = try JSONDecoder().decode(PreflightResult.Outcome.self, from: json)
+        guard case .pass(let detail) = outcome else { Issue.record("expected pass"); return }
+        #expect(!detail.value.contains("AB12-CD34"))
+        #expect(!detail.value.contains("\u{202E}"))
+        #expect(!detail.value.contains("\n"))
+        #expect(detail.value.unicodeScalars.count <= SanitizedText.maximumLimit + 1)
+        // What `encode(to:)` writes is the sanitized text, not what came in.
+        let reencoded = String(decoding: try JSONEncoder().encode(outcome), as: UTF8.self)
+        #expect(!reencoded.contains("AB12-CD34"))
+        // A detail built by `run` is a sentence, and survives the round trip whole.
+        let advice = PreflightResult.detail(String(repeating: "a", count: 300))
+        #expect(advice.value.unicodeScalars.count == 300)
+        #expect(try JSONDecoder().decode(SanitizedText.self, from: JSONEncoder().encode(advice)) == advice)
     }
 }
