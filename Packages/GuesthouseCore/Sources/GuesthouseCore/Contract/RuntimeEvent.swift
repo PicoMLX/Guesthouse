@@ -119,8 +119,11 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
         case stopped
         case running
         /// Ownership could not be established (for example a PID that no longer matches).
-        /// Start is refused until a person or a repair resolves it.
-        case uncertain(reason: String)
+        /// Start is refused until a person or a repair resolves it. The reason is formed from
+        /// runtime and process-identity diagnostics, which quote CLI text: `SanitizedText`
+        /// bounds and redacts it at construction and again when decoded, so it reaches GUI
+        /// status under the same rules as an observation or an error.
+        case uncertain(reason: SanitizedText)
     }
 
     public enum Readiness: Codable, Hashable, Sendable {
@@ -163,20 +166,38 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
 extension ObservedTuple {
     /// Every string bounded and redacted; capabilities capped in number and length.
     public func sanitizedForWire() -> ObservedTuple {
-        func clean(_ value: String?) -> String? { value.map { Self.bounded($0, limit: 256) } }
+        mapped(string: { Self.bounded($0, limit: 256) }, capabilities: Self.boundedCapabilities)
+    }
+
+    /// The same bounds for an observation that has already crossed the wire: the sender is
+    /// another process, so every string is redacted and bounded again. No identity is derived
+    /// here, and a generated `[exact:…]` suffix is left as it arrived rather than read as
+    /// forged marker text, so a status the sender sanitized is evaluated by the receiver under
+    /// the identity it was sent with. A peer that invents a suffix gains nothing: it supplies
+    /// every other field of the observation as well.
+    func boundedForDecoding() -> ObservedTuple {
+        mapped(
+            string: { GuesthouseError.sanitize($0, limit: 256) },
+            capabilities: { values in
+                CompatibilityTuple.normalize(values.prefix(Self.maximumCapabilities).map { GuesthouseError.sanitize($0, limit: 128) })
+            }
+        )
+    }
+
+    private func mapped(string clean: (String) -> String, capabilities: ([String]) -> [String]) -> ObservedTuple {
         var copy = self
-        copy.hostMacOSBuild = clean(hostMacOSBuild)
-        copy.codexDesktopVersion = clean(codexDesktopVersion)
-        copy.codexDesktopBuild = clean(codexDesktopBuild)
-        copy.codexDesktopPath = clean(codexDesktopPath)
-        copy.tartVersion = clean(tartVersion)
-        copy.guestMacOSBuild = clean(guestMacOSBuild)
-        copy.xcodeBuild = clean(xcodeBuild)
-        copy.codexCLIVersion = clean(codexCLIVersion)
-        copy.codexCLIPath = clean(codexCLIPath)
-        copy.codexCLICapabilities = codexCLICapabilities.map { Self.boundedCapabilities($0) }
-        copy.githubCLIVersion = clean(githubCLIVersion)
-        copy.provisioningScriptVersion = clean(provisioningScriptVersion)
+        copy.hostMacOSBuild = hostMacOSBuild.map(clean)
+        copy.codexDesktopVersion = codexDesktopVersion.map(clean)
+        copy.codexDesktopBuild = codexDesktopBuild.map(clean)
+        copy.codexDesktopPath = codexDesktopPath.map(clean)
+        copy.tartVersion = tartVersion.map(clean)
+        copy.guestMacOSBuild = guestMacOSBuild.map(clean)
+        copy.xcodeBuild = xcodeBuild.map(clean)
+        copy.codexCLIVersion = codexCLIVersion.map(clean)
+        copy.codexCLIPath = codexCLIPath.map(clean)
+        copy.codexCLICapabilities = codexCLICapabilities.map(capabilities)
+        copy.githubCLIVersion = githubCLIVersion.map(clean)
+        copy.provisioningScriptVersion = provisioningScriptVersion.map(clean)
         return copy
     }
 
@@ -185,9 +206,13 @@ extension ObservedTuple {
     /// carries a digest of the exact observation, so two different observations never
     /// collapse into one verified compatibility tuple.
     static func bounded(_ value: String, limit: Int) -> String {
-        // A value that already contains the identity marker is neutralized first, so untrusted
-        // text cannot forge the suffix this function appends and impersonate another value.
-        let value = value.replacingOccurrences(of: identityMarker, with: "[exact\u{FFFD}:")
+        // Untrusted text must not be able to forge the suffix this function appends. Escaping
+        // the escape before the marker keeps that neutralization injective: were the marker
+        // alone rewritten, `foo[exact:` and `foo[exact\u{FFFD}:` would both arrive at the
+        // latter and two different observations would share one identity.
+        let value = value
+            .replacingOccurrences(of: identityEscape, with: identityEscape + identityEscape)
+            .replacingOccurrences(of: identityMarker, with: "[exact\(identityEscape):")
         let (sanitized, wasRedacted) = GuesthouseError.sanitizeReporting(value, limit: limit)
         // A redacted value stands for a secret: it gets no digest, since that would let a
         // guess be confirmed. Whether redaction happened comes from the sanitizer itself, not
@@ -195,22 +220,37 @@ extension ObservedTuple {
         // normalized carries a digest, counted against the same limit.
         guard sanitized != value, !wasRedacted else { return sanitized }
         let room = max(16, limit - identitySuffixLength)
-        return "\(GuesthouseError.sanitize(value, limit: room)) \(identityMarker)\(digest(of: value))]"
+        return "\(GuesthouseError.sanitize(value, limit: room)) \(identityMarker)\(digest(of: inspected(value, limit: limit)))]"
     }
 
     /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
     static let identitySuffixLength = 22
     static let identityMarker = "[exact:"
+    static let identityEscape = "\u{FFFD}"
     static let maximumCapabilities = 64
 
+    /// The prefix the sanitizer actually reads: the bound plus the lookahead that catches a
+    /// credential starting inside it. Only this much may be hashed, because a secret that
+    /// begins past it is never inspected, leaves `wasRedacted` false, and would otherwise be
+    /// published as a digest that confirms a guess offline.
+    static func inspected(_ value: String, limit: Int) -> String {
+        String(String.UnicodeScalarView(value.unicodeScalars.prefix(limit + GuesthouseError.sanitizeLookahead)))
+    }
+
     /// The first `maximumCapabilities` entries, each bounded; when entries are dropped, one
-    /// final entry names how many and carries a digest of the whole list, so two capability
-    /// sets that share a prefix keep different identities.
+    /// further entry names how many and carries a digest of the whole list, so two capability
+    /// sets that share a prefix keep different identities. That entry wears the same identity
+    /// marker as a bounded value, so a literal capability shaped like it is neutralized and
+    /// cannot pass a different capability set off as a capped one. The list is canonical, so
+    /// it survives the normalization a receiver applies. The digest is over the bounded
+    /// entries: an entry past the cap is never inspected, and hashing it raw would publish a
+    /// digest of whatever secret it holds.
     static func boundedCapabilities(_ values: [String]) -> [String] {
-        guard values.count > maximumCapabilities else { return values.map { bounded($0, limit: 128) } }
-        let kept = values.prefix(maximumCapabilities - 1).map { bounded($0, limit: 128) }
+        let entries = values.map { bounded($0, limit: 128) }
+        guard values.count > maximumCapabilities else { return CompatibilityTuple.normalize(entries) }
+        let kept = Array(entries.prefix(maximumCapabilities - 1))
         let omitted = values.count - kept.count
-        return kept + ["[\(omitted) more; exact:\(digest(ofList: values))]"]
+        return CompatibilityTuple.normalize(kept + ["\(omitted) more \(identityMarker)\(digest(ofList: entries))]"])
     }
 
     /// A digest over a length-prefixed encoding, so no two different lists can produce the

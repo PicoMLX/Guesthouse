@@ -237,7 +237,7 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
             provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion)
         )
         // A decoded observation is untrusted: it came from another process or from disk.
-        self = sanitizedForWire()
+        self = boundedForDecoding()
     }
 
     public init(_ tuple: CompatibilityTuple) {

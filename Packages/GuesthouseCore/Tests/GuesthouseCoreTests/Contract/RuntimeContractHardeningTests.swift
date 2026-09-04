@@ -108,7 +108,7 @@ import Testing
         let second = ObservedTuple(codexCLICapabilities: other).sanitizedForWire().codexCLICapabilities
         #expect(first?.count == 64)
         #expect(first != second, "two lists that share their first entries keep different identities")
-        #expect(first?.last?.contains("137 more") == true)
+        #expect(first?.contains { $0.contains("137 more") } == true)
         let few = ObservedTuple(codexCLICapabilities: ["a", "b"]).sanitizedForWire().codexCLICapabilities
         #expect(few == ["a", "b"], "a list under the cap is untouched")
     }
@@ -148,6 +148,66 @@ import Testing
         let decoded = try JSONDecoder().decode(ProgressPhase.self, from: Data(#"{"kind":"copying","fraction":7,"cancelable":true}"#.utf8))
         #expect(decoded.fraction == nil)
         _ = try JSONEncoder().encode(RuntimeEvent.progress(OperationID(), ProgressPhase(kind: .copying, fraction: .nan)))
+    }
+
+    @Test func neutralizingAnIdentityMarkerIsInjective() {
+        let plain = ObservedTuple(codexCLIPath: "/opt/tool [exact:0123456789ab]").sanitizedForWire().codexCLIPath
+        let alreadyEscaped = ObservedTuple(codexCLIPath: "/opt/tool [exact\u{FFFD}:0123456789ab]").sanitizedForWire().codexCLIPath
+        #expect(plain != alreadyEscaped, "neutralizing a marker never maps two reported values onto one identity")
+    }
+
+    @Test func aLiteralCapabilityCannotImpersonateACappedList() {
+        let capped = ObservedTuple(codexCLICapabilities: (0..<200).map { "cap\($0)" }).sanitizedForWire().codexCLICapabilities ?? []
+        // A probe reporting the capped list verbatim stays under the cap, so its entries are
+        // taken literally; the omitted-count entry must not survive that as an identity.
+        let forged = ObservedTuple(codexCLICapabilities: capped).sanitizedForWire().codexCLICapabilities ?? []
+        #expect(Set(forged) != Set(capped), "a literal capability cannot pass a different set off as a capped one")
+    }
+
+    @Test func textBeyondTheInspectedWindowIsNeverHashed() {
+        // The sanitizer reads the bound plus its lookahead and nothing more, so a secret that
+        // begins past that window is not redacted; a digest over it would confirm a guess.
+        let unseen = String(repeating: "a", count: 800)
+        let first = ObservedTuple(codexCLIPath: unseen + "device-code-one").sanitizedForWire().codexCLIPath
+        let second = ObservedTuple(codexCLIPath: unseen + "device-code-two").sanitizedForWire().codexCLIPath
+        #expect(first == second, "values differing only outside the inspected window carry no distinguishing digest")
+        #expect(first?.contains("[exact:") == true)
+    }
+
+    @Test func aSanitizedStatusSurvivesTheWireUnchanged() throws {
+        let observed = ObservedTuple(
+            codexDesktopPath: String(repeating: "a", count: 400),
+            codexCLICapabilities: (0..<200).map { "cap\($0)" }
+        )
+        let status = EnvironmentStatus(environmentID: EnvironmentID(), vm: .stopped, readiness: .ready, observed: observed)
+        #expect(status.observed.codexDesktopPath?.contains("[exact:") == true)
+        let decoded = try JSONDecoder().decode(EnvironmentStatus.self, from: JSONEncoder().encode(status))
+        #expect(decoded == status, "the receiver evaluates the identity the sender computed, not a re-escaped one")
+    }
+
+    @Test func credentialShapedDisplayNamesAreRefused() {
+        // The bundle name ends where the extension begins, which is no word boundary at all.
+        for bad in ["ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab.app", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"] {
+            #expect(throws: RequestValidationError.invalidDisplayName, "\(bad)") {
+                try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: bad))
+            }
+        }
+        // A decomposed name is ordinary on this filesystem; only a credential is refused.
+        for good in ["Xcode.app", "Cafe\u{301}.app"] {
+            #expect(throws: Never.self, "\(good)") {
+                try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: good))
+            }
+        }
+    }
+
+    @Test func anUncertainReasonIsBoundedAndRedacted() throws {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let state = EnvironmentStatus.VMState.uncertain(reason: SanitizedText("pid 42 \u{1B}[31mheld \(token)"))
+        guard case .uncertain(let reason) = state else { Issue.record("not uncertain"); return }
+        #expect(!reason.value.contains(token))
+        #expect(!reason.value.contains("\u{1B}"))
+        let decoded = try JSONDecoder().decode(EnvironmentStatus.VMState.self, from: Data(#"{"uncertain":{"reason":"\#(token)"}}"#.utf8))
+        #expect(decoded == .uncertain(reason: "[redacted:github-token]"))
     }
 
     @Test func observedValuesAreBoundedAndRedactedOnTheWire() throws {
