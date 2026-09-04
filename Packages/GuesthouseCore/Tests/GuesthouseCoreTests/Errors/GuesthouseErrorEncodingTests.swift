@@ -68,11 +68,22 @@ import Testing
         #expect(message.contains("https://[redacted:userinfo]"))
     }
 
-    @Test func escapesInsideATokenAreStrippedBeforeRedaction() {
+    @Test func escapesInsideATokenTakeTheWholeTokenWithThem() {
+        // The styling sits between two characters the token is made of, so its `m` may have been
+        // the token's own. The run goes rather than the marker naming what the strip left behind.
         let styled = "ghp_\u{1B}[31mABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\u{1B}[0m"
         let message = GuesthouseError.toolMismatch(tool: "gh", found: SanitizedText(styled), expected: "1").userMessage
         #expect(!message.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
-        #expect(message.contains("[redacted:github-token]"))
+        #expect(message.contains("[redacted:spliced-escape]"))
+    }
+
+    @Test func anEscapedAuthorityAtTheBoundIsRedactedToo() {
+        // The same URL as above in the spelling JSON gives it. The cutoff repair recognizes both,
+        // because the redactor's own userinfo rule does.
+        let value = "https:\\/\\/user:" + String(repeating: "p", count: 700) + "@example.com/repo.git"
+        let message = GuesthouseError.downloadVerificationFailed(artifact: SanitizedText(value), check: .digest).userMessage
+        #expect(!message.contains("pppp"))
+        #expect(message.contains("https:\\/\\/[redacted:userinfo]"))
     }
 
     @Test func toolNamesAreSanitizedInTheEncodedPayloadToo() throws {
@@ -107,6 +118,19 @@ import Testing
         let negative = try JSONDecoder().decode(MissingComponents.self, from: Data(#"{"listed":["a"],"omitted":-9}"#.utf8))
         #expect(negative.omitted == 0)
         #expect(negative.count == 1)
+    }
+
+    @Test func policyVersionsAreStoredSanitizedToo() throws {
+        // The tested version is the app's own, but a decoded payload chooses it, and the
+        // encoded form is what gets journaled and exported.
+        let tool = #"{"toolMismatch":{"tool":"gh","found":"1.0","expected":"\#(token)"}}"#
+        let decodedTool = try JSONDecoder().decode(GuesthouseError.self, from: Data(tool.utf8))
+        #expect(!String(decoding: try JSONEncoder().encode(decodedTool), as: UTF8.self).contains(token))
+        #expect(decodedTool.userMessage.contains("[redacted:github-token]"))
+
+        let runtime = #"{"runtimeIncompatible":{"found":"1.0","required":"\#(token)"}}"#
+        let decodedRuntime = try JSONDecoder().decode(GuesthouseError.self, from: Data(runtime.utf8))
+        #expect(!String(decoding: try JSONEncoder().encode(decodedRuntime), as: UTF8.self).contains(token))
     }
 
     @Test func cancellationRequiresInspectionBeforeRetry() {

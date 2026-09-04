@@ -210,6 +210,67 @@ import Testing
         #expect(GuesthouseError.protocolMismatch(client: 2, service: 1).recoveryActions.first == .reinstallApp)
     }
 
+    @Test func parameterizedAndNonCSISplicesAreAlsoRedacted() {
+        // The escape carries a parameter, and the second is not a CSI at all, but in both the
+        // terminator is the device code's own `C`.
+        #expect(GuesthouseError.sanitize("AB12-\u{1B}[0CD34") == "[redacted:spliced-escape]")
+        #expect(GuesthouseError.sanitize("AB12-\u{1B}(CD34") == "[redacted:spliced-escape]")
+    }
+
+    @Test func sequencesATerminalWritesLeaveTheValueAlone() {
+        #expect(GuesthouseError.sanitize("\u{1B}[32m2.36\u{1B}[m") == "2.36")
+        #expect(GuesthouseError.sanitize("\u{1B}(B2.36.0\u{1B}[m\u{1B}(B") == "2.36.0")
+    }
+
+    @Test func aCharsetDesignationInsideARunIsStillASplice() {
+        // `ESC ( B` is what a terminal writes, but `B` and `0` are characters a device code is
+        // made of, so one standing between two of them may have been the value's own.
+        #expect(GuesthouseError.sanitize("AB12-\u{1B}(BD34") == "[redacted:spliced-escape]")
+        #expect(GuesthouseError.sanitize("AB12-\u{1B}(0CD34") == "[redacted:spliced-escape]")
+    }
+
+    @Test func anSGRInsideARunIsStillASplice() {
+        // `m` is a Base64URL character too, and the JWT rule is structural rather than a prefix
+        // and a length: a JOSE header that loses one character to `ESC [` standing in front of
+        // its own `m` no longer decodes, and the whole token would be reported in the clear.
+        let header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjEifQ"
+        let jwt = "\(header).eyJzdWIiOiIxIn0.c2lnbmF0dXJl"
+        #expect(GuesthouseError.sanitize(jwt) == "[redacted:jwt]")
+        let spliced = jwt.replacingOccurrences(of: "Imtp", with: "I\u{1B}[mtp")
+        #expect(!GuesthouseError.sanitize(spliced).contains("c2lnbmF0dXJl"))
+        #expect(GuesthouseError.sanitize(spliced) == "[redacted:spliced-escape]")
+    }
+
+    @Test func aCredentialPaddedOutOfTheWindowDoesNotSurviveAsAFragment() {
+        // Exactly enough marks to push the code's last character past the window.
+        let marks = String(repeating: "\u{0301}", count: GuesthouseError.sanitizeLookahead + SanitizedText.defaultLimit - 8)
+        let padded = "AB12-CD3" + marks + "4"
+        #expect(!GuesthouseError.sanitize(padded).contains("AB12-CD3"))
+    }
+
+    @Test func aControlStringInsideARunIsASpliceToo() {
+        // A control string's payload runs to a terminator the sender chooses, so an OSC planted
+        // between two characters of a value takes as much of it as the sender likes. Here it
+        // takes the device code's separator: stripping alone left `AB12CD34`, which no pattern
+        // recognizes and which is the whole code.
+        #expect(GuesthouseError.sanitize("AB12\u{1B}]\u{07}CD34") == "[redacted:spliced-escape]")
+        #expect(GuesthouseError.sanitize("AB12-\u{1B}]x\u{07}D34") == "[redacted:spliced-escape]")
+        #expect(GuesthouseError.sanitize("AB12\u{1B}Pxx\u{1B}\\CD34") == "[redacted:spliced-escape]")
+        // At the edge of a run it is the title sequence a terminal really writes, and the value
+        // beside it keeps its own text.
+        #expect(GuesthouseError.sanitize("\u{1B}]0;window title\u{07}2.36.0") == "2.36.0")
+    }
+
+    @Test func aJWTGluedToANameSurvivesNeitherTheCutoffNorTheWindow() {
+        // Truncation takes the second dot, so the complete-JWT rule cannot match and the cutoff
+        // repair is the only thing left. It has to look for the JOSE header after the `_` the
+        // way `redactedJWT` does, or `artifact_` in front of it hides the header from it.
+        let header = "eyJhbGciOiJIUzI1NiJ9"
+        let payload = String(repeating: "a", count: 700)
+        let sanitized = GuesthouseError.sanitize("artifact_\(header).\(payload).c2lnbmF0dXJl")
+        #expect(sanitized == "artifact_[redacted:jwt]")
+    }
+
     @Test func operationIDEncodesAsBareUUID() throws {
         let id = OperationID()
         let data = try JSONEncoder().encode(id)
