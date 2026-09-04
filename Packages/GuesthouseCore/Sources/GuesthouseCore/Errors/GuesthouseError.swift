@@ -16,7 +16,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case hostKeyChanged(EnvironmentID)
     case credentialsLocked(CredentialStore)
     case loginExpired(Provider)
-    case toolMismatch(tool: String, found: SanitizedText?, expected: String)
+    case toolMismatch(tool: SanitizedText, found: SanitizedText?, expected: String)
     case xcodeComponentsIncomplete(missing: MissingComponents)
     case vmSlotUnavailable(maximum: Int)
     case operationOutcomeUnknown(OperationID)
@@ -95,7 +95,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired(let provider):
             "Your \(Self.name(of: provider)) sign-in on the development Mac has expired."
         case .toolMismatch(let tool, let found, let expected):
-            "The development Mac has \(Self.sanitize(tool)) \(found?.value ?? "missing") but the tested version is \(Self.sanitize(expected))."
+            "The development Mac has \(tool.value) \(found?.value ?? "missing") but the tested version is \(Self.sanitize(expected))."
         case .xcodeComponentsIncomplete(let missing):
             "Xcode is installed on the development Mac but is missing required components: \(Self.list(missing))."
         case .vmSlotUnavailable(let maximum):
@@ -208,20 +208,31 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     static let sanitizeLookahead = 512
 
     public static func sanitize(_ value: String, limit: Int = 80) -> String {
+        // This is public API, so the bound is clamped rather than trusted: an extreme limit
+        // would otherwise overflow the window arithmetic and a negative one would hand
+        // `prefix` an invalid length, trapping instead of returning sanitized text.
+        let limit = min(max(limit, 1), SanitizedText.maximumLimit)
         // Only the window plus one scalar is ever looked at, so the cost is independent of the
         // input's size.
         let window = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead + 1)
         let truncated = window.count > limit + Self.sanitizeLookahead
         let bounded = String(String.UnicodeScalarView(window.prefix(limit + Self.sanitizeLookahead)))
         // Complete escape sequences go first, so styling inside a token cannot leave a
-        // fragment behind once the bare control scalars are dropped. Combining marks go too:
-        // a mark inside a token would otherwise split it out of the redactor's reach.
-        let stripped = Redactor.stripTerminalEscapes(bounded)
+        // fragment behind once the bare control scalars are dropped. A sequence that can only
+        // have borrowed its terminator from the value goes further and takes its whole run
+        // with it, because stripping it would silently repair a credential into something the
+        // patterns below no longer recognize. Combining marks go too: a mark inside a token
+        // would otherwise split it out of the redactor's reach.
+        let stripped = Redactor.stripTerminalEscapes(Redactor.redactEscapeSplicedRuns(bounded))
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
                  .nonspacingMark, .spacingMark, .enclosingMark:
                 false
+            case .spaceSeparator:
+                // A no-break or ideographic space splits a credential exactly as a control
+                // character does. The ordinary space is a real word boundary and stays.
+                scalar == " "
             default:
                 true
             }
@@ -230,6 +241,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             // A URL authority still open at the cut may be userinfo whose terminating `@` fell
             // outside the window: treat the whole remainder as a credential.
             normalized = normalized.replacing(#/(:\/\/)[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
+            // A JWT whose payload is longer than the window loses the second `.` the redactor
+            // matches on, so a token that began inside the visible prefix would be emitted in
+            // the clear. A JOSE header followed by a segment running to the cut is one.
+            normalized = normalized.replacing(#/\b([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*$/#) { match in
+                Redactor.isJOSEHeader(match.1) ? Redactor.marker("jwt") : String(match.0)
+            }
         }
         let redacted = Redactor().redact(fieldValue: normalized)
         let scalars = redacted.unicodeScalars

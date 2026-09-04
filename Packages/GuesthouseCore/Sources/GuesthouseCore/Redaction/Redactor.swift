@@ -279,6 +279,19 @@ public struct Redactor: Sendable {
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
     }
 
+    /// Replaces every whitespace-delimited run holding a CSI sequence that carries no
+    /// parameters and ends on a letter.
+    ///
+    /// Styling always carries parameters (`ESC [ 0 m`), so such a sequence is either
+    /// meaningless in a value or an introducer planted directly in front of a character of a
+    /// secret, which then serves as the sequence's terminator and disappears with it:
+    /// `AB12-ESC[CD34` would otherwise be stripped to `AB12-D34`, a near-complete device code
+    /// no pattern below recognizes. The run is dropped whole rather than repaired, since
+    /// nothing tells us which characters were the value's.
+    static func redactEscapeSplicedRuns(_ text: String) -> String {
+        text.replacing(patterns.escapeSplicedRun, with: marker("spliced-escape"))
+    }
+
     // MARK: - Rules
 
     static func marker(_ kind: String) -> String { "[redacted:\(kind)]" }
@@ -303,6 +316,9 @@ public struct Redactor: Sendable {
         let controlStringEnd = #/\u{9C}|\u{1B}\\/#
         /// An OSC ends at either of those or at BEL.
         let oscEnd = #/\u{07}|\u{9C}|\u{1B}\\/#
+        /// A parameterless CSI ending on a letter, with the whole run of non-space characters
+        /// around it: the terminator may be a character of that run rather than styling.
+        let escapeSplicedRun = #/\S*(?:\u{1B}\[|\u{9B})[A-Za-z]\S*/#
         /// A folded header: the label alone on a line, value on the next. Both delimiters the
         /// label rule below accepts count, since `Authorization=` on a line of its own leaves
         /// its value on the next line exactly as `Authorization:` does.

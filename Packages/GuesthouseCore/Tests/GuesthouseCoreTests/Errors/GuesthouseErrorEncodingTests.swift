@@ -75,6 +75,40 @@ import Testing
         #expect(message.contains("[redacted:github-token]"))
     }
 
+    @Test func toolNamesAreSanitizedInTheEncodedPayloadToo() throws {
+        let error = GuesthouseError.toolMismatch(tool: SanitizedText("gh \(token)"), found: nil, expected: "1")
+        let json = String(decoding: try JSONEncoder().encode(error), as: UTF8.self)
+        #expect(!json.contains(token))
+        #expect(json.contains("[redacted:github-token]"))
+        let injected = #"{"toolMismatch":{"tool":"\#(token)","found":"1.0","expected":"1"}}"#
+        let decoded = try JSONDecoder().decode(GuesthouseError.self, from: Data(injected.utf8))
+        guard case .toolMismatch(let tool, _, _) = decoded else { Issue.record("wrong case: \(decoded)"); return }
+        #expect(tool.value == "[redacted:github-token]")
+    }
+
+    @Test func componentNamesPastTheCapAreCountedWithoutBeingDecoded() throws {
+        // The trailing entries are not even strings: reaching the cap must stop the decoder
+        // from materializing and sanitizing what it is only going to count.
+        let entries = (0..<20).map { "\"c\($0)\"" } + Array(repeating: "0", count: 5)
+        let payload = #"{"listed":[\#(entries.joined(separator: ","))],"omitted":0}"#
+        let decoded = try JSONDecoder().decode(MissingComponents.self, from: Data(payload.utf8))
+        #expect(decoded.listed.count == 20)
+        #expect(decoded.omitted == 5)
+        #expect(decoded.listed.last?.value == "c19")
+    }
+
+    @Test func anOverflowingOmittedCountSaturates() throws {
+        let entries = (0..<25).map { "\"c\($0)\"" }.joined(separator: ",")
+        let payload = #"{"listed":[\#(entries)],"omitted":\#(Int.max)}"#
+        let decoded = try JSONDecoder().decode(MissingComponents.self, from: Data(payload.utf8))
+        #expect(decoded.omitted == .max)
+        #expect(decoded.count == .max)
+        #expect(GuesthouseError.xcodeComponentsIncomplete(missing: decoded).userMessage.contains("more"))
+        let negative = try JSONDecoder().decode(MissingComponents.self, from: Data(#"{"listed":["a"],"omitted":-9}"#.utf8))
+        #expect(negative.omitted == 0)
+        #expect(negative.count == 1)
+    }
+
     @Test func cancellationRequiresInspectionBeforeRetry() {
         #expect(GuesthouseError.canceled.recoveryActions.first == .inspectState)
         #expect(!GuesthouseError.canceled.isRetryable)
