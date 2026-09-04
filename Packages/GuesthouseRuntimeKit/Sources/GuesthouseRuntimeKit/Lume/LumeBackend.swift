@@ -54,7 +54,7 @@ public struct LumeBackend: Sendable {
         guard Self.bundlePath(bundle, belongsTo: storage) else {
             throw LumeInvocationError.storageMismatch
         }
-        guard let current = LumeBundle.locate(in: storage),
+        guard let current = try LumeBundle.locate(in: storage),
               bundle.matchesVerifiedFiles(in: current)
         else {
             throw LumeInvocationError.bundleChanged
@@ -91,7 +91,7 @@ public struct LumeBackend: Sendable {
     /// Separated from signature verification so the managed-path recheck has focused regression
     /// coverage without weakening or substituting the production signature gate.
     static func relocateForLaunch(_ bundle: VerifiedLumeBundle, in storage: RuntimeStorage) throws -> LumeBundle {
-        guard let current = LumeBundle.locate(in: storage),
+        guard let current = try LumeBundle.locate(in: storage),
               bundle.matchesVerifiedFiles(in: current)
         else { throw LumeInvocationError.bundleChanged }
         return current
@@ -151,9 +151,7 @@ public struct LumeBackend: Sendable {
         // threat boundary excludes a hostile process already running as the host user; the
         // eventual installer must use `LumeRuntimeCoordinator.shared.withExclusiveAccess(for:)`
         // while atomically placing the new bundle in this private directory.
-        let executable: URL
-        do { executable = try verifyBeforeLaunch() }
-        catch { throw LumeInvocationError.bundleChanged }
+        let executable = try revalidatedExecutable()
         try Task.checkCancellation()
         let run: ProcessRun
         do {
@@ -170,8 +168,7 @@ public struct LumeBackend: Sendable {
         } catch {
             // A path swap can surface as a launch error in the narrow interval after the first
             // check. Reverify before preserving the earlier `verified` verdict.
-            do { _ = try verifyBeforeLaunch() }
-            catch { throw LumeInvocationError.bundleChanged }
+            _ = try revalidatedExecutable()
             throw error
         }
         let (stdout, exit) = await withTaskCancellationHandler {
@@ -188,6 +185,20 @@ public struct LumeBackend: Sendable {
         if exit.outputTruncated { throw LumeInvocationError.outputTruncated }
         guard exit.succeeded else { throw LumeInvocationError.failed(status: Self.exitStatus(exit)) }
         return stdout
+    }
+
+    /// Preserve unsafe-storage diagnostics while collapsing other verification failures into the
+    /// public "bundle changed" result. This keeps remediation accurate without exposing verifier
+    /// internals to callers.
+    private func revalidatedExecutable() throws -> URL {
+        do {
+            try storage.verifyLumeInvocationDirectories()
+            return try verifyBeforeLaunch()
+        } catch let error as RuntimeStorageError {
+            throw error
+        } catch {
+            throw LumeInvocationError.bundleChanged
+        }
     }
 
     private static func exitStatus(_ exit: ProcessExit) -> Int32 {

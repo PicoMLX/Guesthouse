@@ -154,18 +154,42 @@ public struct LumeBundle: Hashable, Sendable {
         storage.url(for: .runtime).appending(path: LumePin.releaseTag).appending(path: LumePin.bundleName)
     }
 
-    public static func locate(in storage: RuntimeStorage) -> LumeBundle? {
+    /// Returns `nil` only when the pinned release or app is absent. An existing managed path
+    /// that is a link, the wrong type, foreign-owned, or uninspectable is a storage failure;
+    /// callers must not misreport that unsafe state as a missing runtime.
+    public static func locate(in storage: RuntimeStorage) throws -> LumeBundle? {
         let runtimeRoot = storage.url(for: .runtime)
         let release = runtimeRoot.appending(path: LumePin.releaseTag)
         let url = expectedLocation(in: storage)
         // Recheck every app-managed component: any could have been replaced after storage
         // initialization. System aliases above `storage.root` are deliberately irrelevant.
-        guard (try? RuntimeStorage.verify(storage.root)) != nil,
-              (try? RuntimeStorage.verify(runtimeRoot)) != nil,
-              Self.isUnlinkedItem(release, kind: S_IFDIR),
-              Self.isUnlinkedItem(url, kind: S_IFDIR)
-        else { return nil }
+        try RuntimeStorage.verify(storage.root)
+        try RuntimeStorage.verify(runtimeRoot)
+        guard try managedDirectoryExists(release), try managedDirectoryExists(url) else {
+            return nil
+        }
         return LumeBundle(url: url)
+    }
+
+    private static func managedDirectoryExists(_ url: URL) throws -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            let failure = errno
+            if failure == ENOENT { return false }
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
+        }
+        switch info.st_mode & S_IFMT {
+        case S_IFLNK:
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "symbolic link")
+        case S_IFDIR:
+            break
+        default:
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "not a directory")
+        }
+        guard info.st_uid == getuid() else {
+            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "owned by another user")
+        }
+        return true
     }
 
     public func verify() throws(LumeVerificationError) -> VerifiedLumeBundle {

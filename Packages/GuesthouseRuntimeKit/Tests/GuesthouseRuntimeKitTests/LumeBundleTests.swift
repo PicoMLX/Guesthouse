@@ -78,10 +78,10 @@ private struct DummyLumeBundle {
 
     @Test func locateUsesOnlyThePrivatePinnedDirectory() throws {
         let storage = try RuntimeStorage(root: root.appending(path: "storage"))
-        #expect(LumeBundle.locate(in: storage) == nil)
+        #expect(try LumeBundle.locate(in: storage) == nil)
         let expected = LumeBundle.expectedLocation(in: storage)
         try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: true)
-        #expect(LumeBundle.locate(in: storage)?.url == expected)
+        #expect(try LumeBundle.locate(in: storage)?.url == expected)
         #expect(expected.path.hasSuffix("/runtime/lume-v0.5.3/lume.app"))
     }
 
@@ -92,7 +92,22 @@ private struct DummyLumeBundle {
         let release = storage.url(for: .runtime).appending(path: LumePin.releaseTag)
         try FileManager.default.createSymbolicLink(at: release, withDestinationURL: outside)
         try FileManager.default.createDirectory(at: outside.appending(path: LumePin.bundleName), withIntermediateDirectories: true)
-        #expect(LumeBundle.locate(in: storage) == nil)
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: release.path, reason: "symbolic link")) {
+            try LumeBundle.locate(in: storage)
+        }
+    }
+
+    @Test func locateReportsASymlinkedAppAsUnsafeStorage() throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "symlinked-app-storage"))
+        let outside = root.appending(path: "outside-app")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let app = LumeBundle.expectedLocation(in: storage)
+        try FileManager.default.createDirectory(at: app.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: app, withDestinationURL: outside)
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: app.path, reason: "symbolic link")) {
+            try LumeBundle.locate(in: storage)
+        }
     }
 
     @Test func locateRechecksTheRuntimeRootAfterStorageInitialization() throws {
@@ -105,7 +120,9 @@ private struct DummyLumeBundle {
             at: moved.appending(path: "\(LumePin.releaseTag)/\(LumePin.bundleName)"),
             withIntermediateDirectories: true
         )
-        #expect(LumeBundle.locate(in: storage) == nil)
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: runtime.path, reason: "symbolic link")) {
+            try LumeBundle.locate(in: storage)
+        }
     }
 
     @Test func missingMetadataAndExecutableAreRejectedBeforeExecution() async throws {
