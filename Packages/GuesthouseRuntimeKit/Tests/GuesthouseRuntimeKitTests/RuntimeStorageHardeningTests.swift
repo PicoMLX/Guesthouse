@@ -66,7 +66,7 @@ import Testing
         // write to can be renamed away and replaced, and everything written afterwards would
         // land in the replacement.
         let open = root.appending(path: "open")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: open, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o777])
         let inside = open.appending(path: "storage")
         let error = #expect(throws: RuntimeStorageError.self) { _ = try RuntimeStorage(root: inside) }
@@ -84,7 +84,7 @@ import Testing
         // Following an ancestor link validates the directory it points at, but the directories
         // above that target are where a rename would happen, and a lexical walk never sees
         // them. Here every folder the caller named is safe and only the resolved chain is not.
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let exposed = root.appending(path: "exposed")
         try FileManager.default.createDirectory(at: exposed, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o777])
         let target = exposed.appending(path: "target")
@@ -108,7 +108,7 @@ import Testing
     func aContainingFolderThatGrantsOthersThroughItsAccessControlListIsRefused() throws {
         // Mode 0755 says nothing about access control entries, and an entry granting another
         // principal add or delete rights makes the folder just as replaceable as mode 0777.
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let guarded = root.appending(path: "guarded")
         try FileManager.default.createDirectory(at: guarded, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
 
@@ -153,7 +153,7 @@ import Testing
 
     @Test func aNonDirectoryRootAncestorIsRefusedAndPreserved() throws {
         let blocker = root.appending(path: "not-a-directory")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try Data("keep me".utf8).write(to: blocker)
 
         #expect(throws: RuntimeStorageError.insecureDirectory(path: blocker.path, reason: "not a directory")) {
