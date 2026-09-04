@@ -13,8 +13,9 @@ struct ContentView: View {
     @Environment(DebugRuntimeProbe.self) private var debugProbe
     @State private var showingDiagnostics = false
     @State private var showingWizard = false
-    /// Owned here, and handed to the dashboard, so both entry points into setup share one
-    /// stage: a recomputation while the sheet is open keeps the check in progress too.
+    /// The wizard's model and its presentation both live here, above the switch, so that a
+    /// runtime failure that swaps the dashboard for the interrupted screen cannot take the
+    /// open setup sheet with it, and so both entry points into setup share one stage.
     @State private var wizard = SetupWizardModel()
 
     var body: some View {
@@ -24,7 +25,7 @@ struct ContentView: View {
                 ProgressView().accessibilityLabel("Checking environment")
                 Text("Checking environment…")
             case .ready:
-                DashboardView(wizard: wizard)
+                DashboardView(openSetup: { showingWizard = true })
             case .interrupted(let interruption):
                 Image(systemName: "bolt.slash").imageScale(.large)
                 Text(interruption.userMessage)

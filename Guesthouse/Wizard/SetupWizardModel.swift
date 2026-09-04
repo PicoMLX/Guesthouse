@@ -51,31 +51,55 @@ final class CheckThisMacModel {
     private(set) var report: PreflightReport?
     private(set) var isChecking = false
     private let probe: any HostProbe
-    private let storageRoot: URL
+    /// How the account's canonical root is resolved. Called once per check, never cached: the
+    /// lookup reads the account record, which can fail transiently, and an answer held for the
+    /// life of the process would leave the disk check undetermined behind a "Try again" that
+    /// could only repeat the failure (AGENTS.md: every error carries a recovery that works).
+    /// It still answers nil when the record cannot be read, which leaves the disk check
+    /// undetermined rather than naming a path the runtime will not use.
+    private let resolveStorageRoot: @Sendable () -> URL?
+    private let volumeProbe: URL
     private let policy: ResourcePolicy
     /// Identifies one check. A recovery action can start a second check while the first is
     /// still running, and only the newest may publish.
     private var checkGeneration: UInt64 = 0
 
-    init(probe: any HostProbe = SystemHostProbe(), storageRoot: URL = CheckThisMacModel.defaultStorageRoot, policy: ResourcePolicy = .standard) {
+    init(
+        probe: any HostProbe = SystemHostProbe(),
+        storageRoot: @escaping @Sendable () -> URL? = CheckThisMacModel.defaultStorageRoot,
+        volumeProbe: URL = CheckThisMacModel.defaultVolumeProbe,
+        policy: ResourcePolicy = .standard
+    ) {
         self.probe = probe
-        self.storageRoot = storageRoot
+        self.resolveStorageRoot = storageRoot
+        self.volumeProbe = volumeProbe
         self.policy = policy
     }
 
-    /// Where the runtime keeps its data. The sandboxed GUI cannot read inside it; the path is
-    /// shown so the user knows where the VM will live, and its volume is what the disk check
-    /// measures. It is the runtime's canonical root, not this app's container, which is what
-    /// `FileManager`'s own home directory would name here (MVP-PLAN.md §3, "Local storage").
-    static let defaultStorageRoot = RuntimeStorageLocation.defaultRoot()
+    /// Where the runtime keeps its data. The path is shown so the user knows where the VM will
+    /// live, and its volume is what the disk check measures. It is the runtime's canonical
+    /// root, not this app's container, which is what `FileManager`'s own home directory would
+    /// name here (MVP-PLAN.md §3, "Local storage"). nil when the account record could not be
+    /// read: the step then says the location is undetermined instead of showing the wrong one.
+    nonisolated static func defaultStorageRoot() -> URL? { RuntimeStorageLocation.defaultRoot() }
+
+    /// Where the disk check actually looks. A signed build is sandboxed, so the runtime's root
+    /// is outside the container and outside what `Guesthouse.entitlements` grants: probing it
+    /// fails the destination's own write check and leaves the disk verdict undetermined, which
+    /// blocks step 1 with a retry that can only be denied again. This process's home is inside
+    /// the container and under the same account home as the runtime's root, so it names the
+    /// same volume, and the volume is what the check is about.
+    static let defaultVolumeProbe = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
 
     func check() {
         checkGeneration &+= 1
         let generation = checkGeneration
         isChecking = true
-        let probe = probe, storageRoot = storageRoot, policy = policy
+        let probe = probe, resolveStorageRoot = resolveStorageRoot, volumeProbe = volumeProbe, policy = policy
         Task.detached {
-            let report = PreflightCheck.run(probe: probe, policy: policy, storageRoot: storageRoot)
+            // Resolved inside the check, so a lookup that failed once is retried by the very
+            // action the undetermined disk row offers.
+            let report = PreflightCheck.run(probe: probe, policy: policy, storageRoot: resolveStorageRoot(), measuredAt: volumeProbe)
             await MainActor.run {
                 // A check that has been superseded publishes nothing: its answer is older than
                 // the one on screen, and clearing `isChecking` would enable Next over a result
@@ -91,16 +115,24 @@ final class CheckThisMacModel {
     /// fresh result.
     var canProceed: Bool { !isChecking && (report?.canProceed ?? false) }
 
+    /// What the step says while it is working, or nil when it is not. A refresh over an
+    /// existing report says so too: its rows stay on screen as the previous answer, and
+    /// without this the only sign that they no longer stand is Next going dim.
+    var progressMessage: String? {
+        guard isChecking else { return nil }
+        return report == nil ? "Checking this Mac…" : "Checking this Mac again…"
+    }
+
     var rows: [Row] {
         guard let report else { return [] }
         return report.results.map { result in
             switch result.outcome {
             case .pass(let detail):
-                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .pass, detail: detail, recovery: [])
+                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .pass, detail: detail.value, recovery: [])
             case .warn(let detail, let recovery):
-                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .warn, detail: detail, recovery: Self.presentable(recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) }))
+                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .warn, detail: detail.value, recovery: Self.presentable(recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) }))
             case .undetermined(let detail, let recovery):
-                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .undetermined, detail: detail, recovery: Self.presentable(recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) }))
+                Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .undetermined, detail: detail.value, recovery: Self.presentable(recovery.map { RecoveryPresentation.option(for: $0, outcomeUnknown: false) }))
             case .fail(let error):
                 Row(kind: result.kind, title: Self.title(for: result.kind), verdict: .fail, detail: error.userMessage, recovery: Self.presentable(RecoveryPresentation(error: error).options))
             }
@@ -111,11 +143,16 @@ final class CheckThisMacModel {
     var storageSummary: [String] {
         guard let storage = report?.storage else { return [] }
         let format: (UInt64) -> String = { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) }
+        // The location line is omitted when the root is unknown rather than filled in with a
+        // guess: the disk check is already undetermined in that case, and naming this app's
+        // container would tell the user the runtime writes somewhere it never will.
+        let location = storage.storageRootPath.map { "Everything lives under \($0)." }
+            ?? "Guesthouse could not determine where the development Mac would be stored."
         return [
             "The virtual machine runtime download is about \(format(storage.runtimeDownloadEstimateBytes)).",
             "The macOS restore image download is about \(format(storage.restoreImageEstimateBytes)).",
             "The development Mac's disk can grow to \(format(storage.guestDiskBytes)); setup needs \(format(storage.firstSetupAllowanceBytes)) free.",
-            "Everything lives under \(storage.storageRootPath).",
+            location,
         ] + (report?.powerSource == .battery ? ["This Mac is on battery power. Setup downloads and installs a lot; plug it in first."] : [])
     }
 

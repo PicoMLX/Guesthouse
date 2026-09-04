@@ -61,13 +61,16 @@ public struct PreflightResult: Codable, Hashable, Sendable {
 
 /// "What will be downloaded and where the VM will live" (MVP-PLAN.md §2, step 1).
 public struct StorageSummary: Codable, Hashable, Sendable {
-    public var storageRootPath: String
+    /// Where the development Mac will live, or `nil` when the account's canonical root could
+    /// not be resolved. A summary that cannot name the root says nothing rather than naming
+    /// a path the runtime will not use (MVP-PLAN.md §3, "Local storage").
+    public var storageRootPath: String?
     public var runtimeDownloadEstimateBytes: UInt64
     public var restoreImageEstimateBytes: UInt64
     public var guestDiskBytes: UInt64
     public var firstSetupAllowanceBytes: UInt64
 
-    public init(storageRootPath: String, runtimeDownloadEstimateBytes: UInt64, restoreImageEstimateBytes: UInt64, guestDiskBytes: UInt64, firstSetupAllowanceBytes: UInt64) {
+    public init(storageRootPath: String?, runtimeDownloadEstimateBytes: UInt64, restoreImageEstimateBytes: UInt64, guestDiskBytes: UInt64, firstSetupAllowanceBytes: UInt64) {
         self.storageRootPath = storageRootPath
         self.runtimeDownloadEstimateBytes = runtimeDownloadEstimateBytes
         self.restoreImageEstimateBytes = restoreImageEstimateBytes
@@ -103,10 +106,22 @@ public struct PreflightReport: Codable, Hashable, Sendable {
 
 /// The "Check this Mac" step. Pure given a probe; every threshold comes from `ResourcePolicy`.
 public enum PreflightCheck: Sendable {
+    /// - Parameters:
+    ///   - storageRoot: where the development Mac will live; the path the report names. `nil`
+    ///     when the account's canonical root could not be resolved at all, which leaves the
+    ///     disk check undetermined: setup does not continue toward a destination Guesthouse
+    ///     cannot name (MVP-PLAN.md §3 "Local storage").
+    ///   - measuredAt: a path on that same volume the caller is allowed to open, for callers
+    ///     that cannot open the storage root itself. A sandboxed GUI cannot stat its way to
+    ///     the runtime's root, and a disk question nobody could answer blocks setup, so the
+    ///     volume is measured through a reachable path on it while the report still names the
+    ///     root (MVP-PLAN.md §3 "Local storage"). The detail then says where it measured,
+    ///     because measuring the volume is not the same as inspecting the destination.
     public static func run(
         probe: any HostProbe,
         policy: ResourcePolicy = .standard,
-        storageRoot: URL,
+        storageRoot: URL?,
+        measuredAt: URL? = nil,
         preset: ResourcePreset = .recommended,
         now: Date = Date()
     ) -> PreflightReport {
@@ -155,19 +170,35 @@ public enum PreflightCheck: Sendable {
         results.append(PreflightResult(kind: .memory, outcome: memoryOutcome))
 
         let diskOutcome: PreflightResult.Outcome
-        do {
-            let free = try probe.freeBytes(at: storageRoot)
-            if free >= policy.firstSetupAllowanceBytes {
-                diskOutcome = .pass(detail: PreflightResult.detail("\(format(free)) free on the volume that will hold the development Mac"))
-            } else {
-                diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
+        if let storageRoot {
+            // Measuring a proxy path answers a question about the volume, not about the
+            // destination, so a pass that came from one says where it looked instead of
+            // implying the runtime's root was inspected.
+            let measured = measuredAt ?? storageRoot
+            do {
+                let free = try probe.freeBytes(at: measured)
+                if free >= policy.firstSetupAllowanceBytes {
+                    let where_ = measured.standardizedFileURL == storageRoot.standardizedFileURL
+                        ? ""
+                        : " Measured at \(GuesthouseError.sanitize(measured.path, limit: 200)); the destination folder itself is checked when the development Mac is created."
+                    diskOutcome = .pass(detail: PreflightResult.detail("\(format(free)) free on the volume that will hold the development Mac.\(where_)"))
+                } else {
+                    diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
+                }
+            } catch let error as HostProbeError {
+                // The destination is unusable or its volume is not there: not a transient lookup
+                // failure, and never a warning, since there is no disk to check.
+                diskOutcome = .undetermined(detail: PreflightResult.detail(error.userMessage), recovery: error.recoveryActions)
+            } catch {
+                diskOutcome = .undetermined(detail: PreflightResult.detail("Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined, so Guesthouse cannot tell whether the download will fit. Check again, or choose a storage location Guesthouse can read."), recovery: [.retry, .openSettings])
             }
-        } catch let error as HostProbeError {
-            // The destination is unusable or its volume is not there: not a transient lookup
-            // failure, and never a warning, since there is no disk to check.
-            diskOutcome = .undetermined(detail: PreflightResult.detail(error.userMessage), recovery: error.recoveryActions)
-        } catch {
-            diskOutcome = .undetermined(detail: PreflightResult.detail("Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined, so Guesthouse cannot tell whether the download will fit. Check again, or choose a storage location Guesthouse can read."), recovery: [.retry, .openSettings])
+        } else {
+            // No root means no destination and no volume to measure. An unanswerable question
+            // is not a satisfied requirement, so this blocks rather than guessing a path.
+            diskOutcome = .undetermined(
+                detail: PreflightResult.detail("Guesthouse could not read this account's home directory, so it cannot tell where the development Mac would be stored or which disk to measure. Check again; if this continues, log out and back in."),
+                recovery: [.retry]
+            )
         }
         results.append(PreflightResult(kind: .freeDisk, outcome: diskOutcome))
 
@@ -180,7 +211,7 @@ public enum PreflightCheck: Sendable {
         } ?? .warn(detail: PreflightResult.detail("Codex desktop is not installed. Guesthouse can prepare a development Mac without it, but you will need it to open a workspace in Codex."), recovery: [])))
 
         let storage = StorageSummary(
-            storageRootPath: GuesthouseError.sanitize(storageRoot.path, limit: 400),
+            storageRootPath: storageRoot.map { GuesthouseError.sanitize($0.path, limit: 400) },
             runtimeDownloadEstimateBytes: policy.runtimeDownloadEstimateBytes,
             restoreImageEstimateBytes: policy.restoreImageEstimateBytes,
             guestDiskBytes: preset.diskBytes,

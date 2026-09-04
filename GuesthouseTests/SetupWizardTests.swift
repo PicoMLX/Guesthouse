@@ -54,12 +54,32 @@ final class GatedHostProbe: HostProbe, @unchecked Sendable {
     func installedApplication(bundleIdentifier: String) -> InstalledApplication? { nil }
 }
 
+/// Records which path the disk check was asked about.
+final class PathRecordingProbe: HostProbe, @unchecked Sendable {
+    let cpuArchitecture: CPUArchitecture = .appleSilicon
+    let operatingSystemVersion = SemanticVersion([26, 5, 2])
+    let operatingSystemBuild: String? = "25F84"
+    let physicalMemoryBytes: UInt64 = 32 * ResourcePreset.gibibyte
+    let powerSource: PowerSource = .externalPower
+
+    private let lock = NSLock()
+    private var asked: [URL] = []
+    var probedPaths: [URL] { lock.withLock { asked } }
+
+    func freeBytes(at url: URL) throws -> UInt64 {
+        lock.withLock { asked.append(url) }
+        return 500 * ResourcePreset.gigabyte
+    }
+
+    func installedApplication(bundleIdentifier: String) -> InstalledApplication? { nil }
+}
+
 @MainActor
 @Suite struct SetupWizardTests {
     func defaults() -> UserDefaults { UserDefaults(suiteName: "SetupWizardTests-\(UUID().uuidString)")! }
 
     func checked(_ probe: StubHostProbe) async -> CheckThisMacModel {
-        let model = CheckThisMacModel(probe: probe, storageRoot: URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse"))
+        let model = CheckThisMacModel(probe: probe, storageRoot: { URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse") })
         model.check()
         for _ in 0..<400 where model.report == nil { try? await Task.sleep(for: .milliseconds(5)) }
         return model
@@ -156,7 +176,7 @@ final class GatedHostProbe: HostProbe, @unchecked Sendable {
 
     @Test func onlyTheNewestOverlappingCheckPublishesItsResult() async {
         let probe = GatedHostProbe()
-        let model = CheckThisMacModel(probe: probe, storageRoot: URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse"))
+        let model = CheckThisMacModel(probe: probe, storageRoot: { URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse") })
         // A recovery action starts a check while the first one, held in the probe, still runs.
         model.check()
         await waitUntil { probe.callCount >= 1 }
@@ -192,11 +212,46 @@ final class GatedHostProbe: HostProbe, @unchecked Sendable {
         #expect(wizard.canGoNext)
     }
 
-    @Test func theStorageSummaryNamesTheRuntimesRoot() async {
-        #expect(CheckThisMacModel.defaultStorageRoot == RuntimeStorageLocation.defaultRoot())
-        #expect(CheckThisMacModel.defaultStorageRoot.path.hasSuffix("/Library/Application Support/Guesthouse"))
+    @Test func theStorageSummaryNamesTheRuntimesRoot() async throws {
+        #expect(CheckThisMacModel.defaultStorageRoot() == RuntimeStorageLocation.defaultRoot())
+        let root = try #require(CheckThisMacModel.defaultStorageRoot())
+        #expect(root.path.hasSuffix("/Library/Application Support/Guesthouse"))
         let model = await checked(StubHostProbe())
         #expect(model.storageSummary.contains { $0.contains("Everything lives under /Users/dev/Library/Application Support/Guesthouse") })
+    }
+
+    @Test func aRootThatCannotBeResolvedStopsSetupInsteadOfNamingTheWrongPath() async {
+        // The account record is unreadable, so the canonical root is unknown. Naming this
+        // app's container instead would tell the user the runtime writes somewhere it never
+        // will, and would measure the container's volume as though it were the destination's.
+        let model = CheckThisMacModel(probe: StubHostProbe(), storageRoot: { nil })
+        model.check()
+        await waitUntil { model.report != nil && !model.isChecking }
+        #expect(!model.canProceed, "an unknown destination is not a satisfied requirement")
+        guard let disk = model.rows.first(where: { $0.kind == .freeDisk }) else { Issue.record("no disk row"); return }
+        #expect(disk.verdict == .undetermined)
+        #expect(!model.storageSummary.contains { $0.contains("Everything lives under") })
+        #expect(model.storageSummary.contains { $0.contains("could not determine where the development Mac would be stored") })
+    }
+
+    @Test func aRootLookupThatFailedOnceIsResolvedAgainByTheRetry() async {
+        // The account record is unreadable for the first check and readable afterwards. The
+        // lookup is what the undetermined row's "Try again" repeats, so a root cached for the
+        // life of the process would leave setup blocked until the app was relaunched.
+        let root = URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse")
+        let lookups = Counter()
+        let model = CheckThisMacModel(probe: StubHostProbe(), storageRoot: {
+            lookups.increment()
+            return lookups.value > 1 ? root : nil
+        })
+        model.check()
+        await waitUntil { model.report != nil && !model.isChecking }
+        #expect(!model.canProceed)
+        #expect(model.rows.first(where: { $0.kind == .freeDisk })?.verdict == .undetermined)
+        model.check()
+        await waitUntil { model.report != nil && !model.isChecking && model.canProceed }
+        #expect(model.rows.first(where: { $0.kind == .freeDisk })?.verdict == .pass, "the retry resolved the root again")
+        #expect(model.storageSummary.contains { $0.contains(root.path) })
     }
 
     @Test func aCheckThatCouldNotBeMadeStillOffersAnActionTheAppCanPerform() async {
@@ -211,6 +266,29 @@ final class GatedHostProbe: HostProbe, @unchecked Sendable {
                 "setup offers something other than closing when a check cannot be made"
             )
         }
+    }
+
+    @Test func theDiskCheckLooksWhereThisProcessMayActuallyLook() async {
+        let probe = PathRecordingProbe()
+        let root = URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse")
+        let model = CheckThisMacModel(probe: probe, storageRoot: { root })
+        model.check()
+        await waitUntil { model.report != nil && !model.isChecking }
+        #expect(probe.probedPaths == [CheckThisMacModel.defaultVolumeProbe])
+        #expect(CheckThisMacModel.defaultVolumeProbe != root, "the sandboxed app cannot stat its way to the runtime's root")
+        #expect(FileManager.default.isWritableFile(atPath: CheckThisMacModel.defaultVolumeProbe.path), "and the path it does use passes the probe's own write check")
+        #expect(model.storageSummary.contains { $0.contains(root.path) }, "the summary still names where the development Mac will live")
+        #expect(model.canProceed, "a first launch is not stopped by a folder the app was never allowed to open")
+    }
+
+    @Test func aRefreshOverAnExistingReportStillShowsThatItIsWorking() async {
+        let model = await checked(StubHostProbe())
+        #expect(model.progressMessage == nil)
+        #expect(!model.rows.isEmpty)
+        model.check()
+        #expect(model.progressMessage != nil, "the rows on screen are the previous answer, and only this says they are being replaced")
+        await waitUntil { !model.isChecking }
+        #expect(model.progressMessage == nil)
     }
 
     func waitUntil(_ condition: @MainActor () -> Bool) async {

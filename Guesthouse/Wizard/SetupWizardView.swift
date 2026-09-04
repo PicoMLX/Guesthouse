@@ -12,14 +12,23 @@ struct SetupWizardView: View {
             stageList
             Divider()
             VStack(alignment: .leading, spacing: 16) {
-                Text(wizard.current.title).font(.title2).bold()
-                    .accessibilityAddTraits(.isHeader)
-                if wizard.current == .checkThisMac {
-                    CheckThisMacView(model: wizard.checkThisMac)
-                } else {
-                    Text("This step is not implemented yet. It arrives with a later change; the wizard resumes here when it does.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                // The stage's own content scrolls and the footer below does not. Verbose
+                // failure details, a row's recovery buttons and the storage summary together
+                // exceed 520 points on a smaller display or at an accessibility text size, and
+                // a plain stack would clip whatever did not fit — the recovery controls and
+                // the navigation both. Setup has to stay actionable (MVP-PLAN.md §2).
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(wizard.current.title).font(.title2).bold()
+                            .accessibilityAddTraits(.isHeader)
+                        if wizard.current == .checkThisMac {
+                            CheckThisMacView(model: wizard.checkThisMac)
+                        } else {
+                            Text("This step is not implemented yet. It arrives with a later change; the wizard resumes here when it does.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 HStack {
                     Button("Close") { dismiss() }.keyboardShortcut(.cancelAction).accessibilityLabel("Close setup")
@@ -34,7 +43,19 @@ struct SetupWizardView: View {
         .task { wizard.presented() }
     }
 
+    /// Scrolls for the same reason the stage content does: eight steps at an accessibility
+    /// text size are taller than the sheet, and a clipped list hides the later steps.
     private var stageList: some View {
+        ScrollView {
+            stageRows
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 240)
+        .background(.quaternary.opacity(0.3))
+    }
+
+    private var stageRows: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(wizard.stages.enumerated()), id: \.element) { index, stage in
                 HStack(spacing: 8) {
@@ -46,11 +67,7 @@ struct SetupWizardView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Step \(index + 1), \(stage.title)\(stage == wizard.current ? ", current" : "")\(stage.isImplemented ? "" : ", not implemented yet")")
             }
-            Spacer()
         }
-        .padding(16)
-        .frame(width: 240)
-        .background(.quaternary.opacity(0.3))
     }
 }
 
@@ -63,15 +80,18 @@ struct CheckThisMacView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if model.rows.isEmpty, model.isChecking {
-                ProgressView("Checking this Mac…").accessibilityLabel("Checking this Mac")
+            if let progress = model.progressMessage {
+                ProgressView(progress).accessibilityLabel(progress)
             }
             ForEach(model.rows) { row in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Image(systemName: symbol(for: row.verdict)).foregroundStyle(color(for: row.verdict))
                         Text(row.title).bold()
-                        Text(row.detail).foregroundStyle(.secondary)
+                        // A check's detail names a path: where Codex desktop was found, or the
+                        // folder that could not be written. MVP-PLAN.md §2 "Essential screens"
+                        // asks for paths the user can select and copy.
+                        Text(row.detail).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(row.title): \(name(for: row.verdict)). \(row.detail)")
@@ -101,10 +121,13 @@ struct CheckThisMacView: View {
             if let note {
                 Text(note).font(.callout).foregroundStyle(.secondary).accessibilityLabel("Note: \(note)")
             }
-            Button("Check again") { model.check() }
+            // The note explains a recovery that was offered by the report on screen. A new
+            // check replaces that report, so the note is cleared here exactly as it is when a
+            // recovery button starts one: otherwise a note about "Open Settings" outlives the
+            // failing row that offered it and sits under a report that now passes.
+            Button("Check again") { note = nil; model.check() }
                 .disabled(model.isChecking)
                 .accessibilityLabel("Check this Mac again")
-            Spacer()
         }
     }
 
@@ -174,5 +197,8 @@ private func previewWizard(_ probe: PreviewHostProbe) -> SetupWizardModel {
 }
 
 #Preview("All pass") { SetupWizardView(wizard: previewWizard(PreviewHostProbe())) }
-#Preview("Warnings") { SetupWizardView(wizard: previewWizard(PreviewHostProbe(physicalMemoryBytes: 16 * ResourcePreset.gibibyte, powerSource: .battery, applications: [:]))) }
+// Above the floor (the guest's 16 GiB allocation plus 8 GiB of host headroom) and below the
+// recommendation, so this preview shows the warning state it is named for rather than the
+// blocking memory failure 16 GiB produces.
+#Preview("Warnings") { SetupWizardView(wizard: previewWizard(PreviewHostProbe(physicalMemoryBytes: 28 * ResourcePreset.gibibyte, powerSource: .battery, applications: [:]))) }
 #Preview("Failure") { SetupWizardView(wizard: previewWizard(PreviewHostProbe(cpuArchitecture: .intel, freeBytesValue: 20 * ResourcePreset.gigabyte))) }

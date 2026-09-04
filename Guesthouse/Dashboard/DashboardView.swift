@@ -5,18 +5,18 @@ import GuesthouseCore
 /// cards, an empty state that leads to the setup wizard, and the two-slot cap explained.
 struct DashboardView: View {
     @Environment(AppModel.self) private var model
-    @State private var showingWizard = false
     @State private var showingDiagnostics = false
     /// Which environment the sheet is about, so Export writes the failing development Mac's
     /// evidence rather than whichever environment was created first.
     @State private var diagnosticsSubject: EnvironmentID?
-    /// One wizard for the whole window, owned above the dashboard: this view disappears when
-    /// the runtime becomes unavailable, and a second model of its own would then present a
-    /// stage that the one still alive had already advanced past.
-    let wizard: SetupWizardModel
+    /// Setup is opened, not presented, from here. This view is removed the moment the runtime
+    /// connection drops, and a sheet it owned would go with it: a transient failure would
+    /// close the host check in the middle and leave no way back to it, since the interrupted
+    /// screen has no setup entry point of its own.
+    let openSetup: () -> Void
 
-    init(wizard: SetupWizardModel) {
-        self.wizard = wizard
+    init(openSetup: @escaping () -> Void) {
+        self.openSetup = openSetup
     }
 
     var body: some View {
@@ -24,7 +24,7 @@ struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if cards.isEmpty {
-                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { diagnosticsSubject = nil; showingDiagnostics = true }) { showingWizard = true }
+                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { diagnosticsSubject = nil; showingDiagnostics = true }, create: openSetup)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16)], alignment: .leading, spacing: 16) {
                         ForEach(cards) { card in
@@ -36,13 +36,12 @@ struct DashboardView: View {
                                 openDiagnostics: { diagnosticsSubject = card.id; showingDiagnostics = true }
                             )
                         }
-                        SlotView(availability: model.createAvailability) { showingWizard = true }
+                        SlotView(availability: model.createAvailability, create: openSetup)
                     }
                 }
             }
             .padding(20)
         }
-        .sheet(isPresented: $showingWizard) { SetupWizardView(wizard: wizard) }
         .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model, subject: diagnosticsSubject) }
     }
 }
@@ -250,7 +249,7 @@ struct ScenarioPreview: View {
     var body: some View {
         Group {
             if let model {
-                DashboardView(wizard: SetupWizardModel()).environment(model)
+                DashboardView(openSetup: {}).environment(model)
             } else {
                 ProgressView()
             }
