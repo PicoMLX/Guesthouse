@@ -4,9 +4,9 @@ import Foundation
 ///
 /// Pure, so the handshake and validation rules are unit-tested here rather than inside the
 /// XPC service bundle. The service applies the decision: it replies, and for `replyAndClose`
-/// it marks the session refused and closes it on the first later message that finds the
-/// session quiet, so the reply is always delivered first (MVP-PLAN.md §3, "Sandbox and XPC
-/// boundary").
+/// it marks the session refused; `SessionLifetime` below then closes that session once every
+/// reply it owes has been handed to the transport, so the rejection is always delivered first
+/// (MVP-PLAN.md §3, "Sandbox and XPC boundary").
 public enum RuntimeDispatcher: Sendable {
     public enum Decision: Hashable, Sendable {
         /// Reply with this event and keep the session.
@@ -14,11 +14,55 @@ public enum RuntimeDispatcher: Sendable {
         /// Reply with this event, then close the session. Used for protocol mismatches, where
         /// the peer is a different build of Guesthouse and nothing it sends can be trusted.
         case replyAndClose(RuntimeEvent)
-        /// Close the session without replying: it has already been answered with a rejection
-        /// and nothing is outstanding on it.
-        case close
         /// The envelope is valid; run the request.
         case dispatch(RuntimeRequest)
+    }
+
+    /// What one session still owes its peer, so a refused session closes exactly once and
+    /// never before the rejection it was answered with has been handed to the transport.
+    ///
+    /// The service calls `began` when a message arrives, `refuse` when a decision refuses the
+    /// session, and `finished` once that message's reply has been handed over. `finished`
+    /// answers whether this was the last reply a refused session owed, which is the moment to
+    /// close it: waiting instead for another message would leave an incompatible connection
+    /// open for as long as the app runs, because a client told to stop sends nothing more.
+    public struct SessionLifetime: Sendable {
+        public private(set) var inFlight = 0
+        /// The rejection this session was answered with. The first one stands, so a later
+        /// refusal never rewrites why the session is closing.
+        public private(set) var refusal: RuntimeEvent?
+        /// The close has been taken by one caller, so no message is admitted after it.
+        public private(set) var isClosing = false
+
+        public init() {}
+
+        /// One message arrived. Returns how much else the session already owes an answer for,
+        /// or `nil` when the session is already closing.
+        ///
+        /// Admission and the decision to close are one state change, so a message can never be
+        /// admitted in the interval between `finished` answering that the session is quiet and
+        /// the cancel that follows it: such a message would have been answered and then had
+        /// its reply cut off by that cancel, which is the connection interruption the stored
+        /// rejection exists to replace.
+        public mutating func began() -> Int? {
+            guard !isClosing else { return nil }
+            inFlight += 1
+            return inFlight - 1
+        }
+
+        public mutating func refuse(_ rejection: RuntimeEvent) {
+            if refusal == nil { refusal = rejection }
+        }
+
+        /// One reply has been handed to the transport. Answers whether this caller should
+        /// close the session now: it was refused, it owes nothing further, and no other
+        /// caller has already taken the close.
+        public mutating func finished() -> Bool {
+            inFlight -= 1
+            guard refusal != nil, inFlight == 0, !isClosing else { return false }
+            isClosing = true
+            return true
+        }
     }
 
     /// Maximum in-flight requests per session. A well-behaved GUI issues a handful; anything
@@ -58,13 +102,25 @@ public enum RuntimeDispatcher: Sendable {
     /// Decides what to do with a message arriving on a session already answered with a
     /// rejection.
     ///
-    /// A session handler serves pipelined requests, so a new message is no evidence that the
-    /// earlier rejection reached the peer: closing while other requests are still outstanding
-    /// can discard it, leaving a bare connection interruption in place of the protocol
-    /// mismatch or unauthorized-caller recovery. The rejection is repeated while the session
-    /// is busy, and the close waits for the first message that finds it quiet.
-    public static func refused(_ rejection: RuntimeEvent, inFlight: Int) -> Decision {
-        inFlight > 0 ? .reply(rejection) : .close
+    /// It is answered with that same rejection rather than cut off, so a request that was
+    /// already pipelined behind the refusal still receives the protocol-mismatch or
+    /// unauthorized-caller recovery instead of a bare connection interruption. Closing is not
+    /// a decision about this message at all: `SessionLifetime` closes the session once every
+    /// reply it owes, this one included, has been handed to the transport.
+    public static func refused(_ rejection: RuntimeEvent) -> Decision {
+        .reply(rejection)
+    }
+
+    /// Applies a session's refusal to a decision already made for one of its messages.
+    ///
+    /// Two requests can be admitted concurrently and both find the session unrefused; if one
+    /// of them then refuses it, the other must not go on to run. The refusal is therefore
+    /// applied to the decision immediately before it is acted on, rather than trusted from the
+    /// moment the message arrived. Only dispatch is withdrawn: a decision that runs nothing is
+    /// already an answer the peer should have.
+    public static func honoring(_ refusal: RuntimeEvent?, _ decision: Decision) -> Decision {
+        guard let refusal, case .dispatch = decision else { return decision }
+        return refused(refusal)
     }
 
     /// Decides what to do with a decoded envelope.
