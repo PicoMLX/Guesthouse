@@ -295,6 +295,7 @@ import Testing
         model.connectionInterrupted(RuntimeConnectionInterrupted())
         #expect(model.quitFlow == .checking, "the cached state is not offered again unchecked")
         await waitUntil { model.quitFlow == .confirming }
+        #expect(model.quitFlow == .confirming, "the check that reconciled the sheet is the one that decides it")
         #expect(model.launchState == .ready)
     }
 
@@ -311,6 +312,123 @@ import Testing
         model.startRefresh()
         await waitUntil { await backend.receivedRequests.count > before }
         #expect(await backend.receivedRequests.count > before, "an explicit check still reconnects")
+    }
+
+    @Test func anUnavailableRecoverySurvivesTheSessionClosingBehindIt() async {
+        let backend = FakeRuntimeBackend()
+        await backend.script("listEnvironments", .fail(error: .protocolMismatch(client: 2, service: 1)))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        #expect(model.launchState == .unavailable(.protocolMismatch(client: 2, service: 1)))
+        // The service closes the session right after reporting the mismatch.
+        model.connectionInterrupted(RuntimeConnectionInterrupted())
+        #expect(
+            model.launchState == .unavailable(.protocolMismatch(client: 2, service: 1)),
+            "the reinstall guidance is kept instead of being replaced by a generic check"
+        )
+    }
+
+    @Test func aReconciliationThatIsItselfCutOffDoesNotReconnectInALoop() async {
+        let backend = FakeRuntimeBackend()
+        await backend.script("listEnvironments", .disconnect())
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        guard case .interrupted = model.launchState else { Issue.record("expected interrupted, got \(model.launchState)"); return }
+        let before = await backend.receivedRequests.count
+        model.connectionInterrupted(RuntimeConnectionInterrupted())
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(await backend.receivedRequests.count == before, "a service that keeps dropping is not relaunched over and over")
+    }
+
+    @Test func anExplicitCheckRestoresAutomaticReconciliation() async {
+        let backend = FakeRuntimeBackend()
+        _ = await runningEnvironment(backend)
+        await backend.script("listEnvironments", .fail(error: .runtimeMissing))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        #expect(model.launchState == .unavailable(.runtimeMissing))
+        // The user repairs the runtime and asks for a check, as the menu item does.
+        await backend.script("listEnvironments", .succeed())
+        await model.refresh()
+        #expect(model.launchState == .ready)
+        let before = await backend.receivedRequests.count
+        model.connectionInterrupted(RuntimeConnectionInterrupted())
+        await waitUntil { await backend.receivedRequests.count > before }
+        #expect(await backend.receivedRequests.count > before, "a later idle loss reconciles on its own again")
+    }
+
+    @Test func aSupersededStopDoesNotCancelTheQuitThatReplacedIt() async {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(20))
+        let environment = await runningEnvironment(backend)
+        await backend.script("stopEnvironment", .succeed(phases: [ProgressPhase(kind: .stoppingVM)], status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready)))
+        let (model, decision) = makeModel(backend)
+        await model.refresh()
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopping(_, let phase?) = model.quitFlow { return phase.cancelable }; return false }
+        model.cancelQuit()
+        #expect(model.quitFlow == .idle)
+        // A second Quit begins while the abandoned stop is still unwinding.
+        _ = model.handleQuitRequest()
+        #expect(model.quitFlow == .confirming)
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(model.quitFlow == .confirming, "the abandoned attempt did not retire the Quit that replaced it")
+        #expect(decision.values == [false], "and did not answer AppKit a second time")
+    }
+
+    @Test func aFailureFromAnAbandonedQuitDoesNotForceInTheNextAttempt() async {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "One", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Two", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .stopped, readiness: .ready))
+        await backend.setStatus(EnvironmentStatus(environmentID: second.id, vm: .running, readiness: .ready))
+        await backend.script("stopEnvironment", .fail(error: .gracefulStopTimedOut(second.id)))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        // The user stays, and the first environment is running by the time they quit again.
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .running, readiness: .ready))
+        model.cancelQuit()
+        await waitUntil { model.runningEnvironments.count == 2 }
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        #expect(model.canForceStop)
+        await backend.script("stopEnvironment", .succeed())
+        model.forceStopAndQuit()
+        await waitUntil { model.quitFlow == .terminating }
+        let stops = await backend.receivedRequests.compactMap { request -> (EnvironmentID, StopMode)? in
+            if case .stopEnvironment(let id, let mode) = request { return (id, mode) }
+            return nil
+        }
+        #expect(
+            !stops.contains { $0.0 == second.id && $0.1 == .force },
+            "a target whose graceful stop failed in an abandoned Quit is asked to shut down again first"
+        )
+        #expect(stops.contains { $0.0 == second.id && $0.1 != .force })
+    }
+
+    @Test func aQuitOverAnIncompleteCheckIsNeverForcedPast() async {
+        let backend = FakeRuntimeBackend()
+        _ = await runningEnvironment(backend)
+        await backend.script("listEnvironments", .fail(error: .runtimeStarting))
+        let (model, decision) = makeModel(backend)
+        await model.refresh()
+        #expect(model.launchState == .unavailable(.runtimeStarting))
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
+        #expect(model.quitFlow == .stopFailed(.runtimeStarting))
+        #expect(!model.canForceStop, "no stop was attempted, so there is nothing to force past")
+        model.forceStopAndQuit()
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(decision.values.isEmpty, "the app never terminates over a check that did not complete")
+        #expect(model.quitFlow == .stopFailed(.runtimeStarting))
+        let stops = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { return true }; return false }
+        #expect(stops.isEmpty)
     }
 
     @Test func fakeBackendIsChosenFromTheEnvironment() {

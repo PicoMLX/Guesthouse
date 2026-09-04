@@ -38,7 +38,7 @@ struct GuesthouseApp: App {
                 Button("Runtime Version") { debugProbe.requestRuntimeVersion() }
                     .keyboardShortcut("r", modifiers: [.command, .option])
                 Button("Validate Xcode for Import…") { debugProbe.importXcodeCandidate() }
-                Button("Check Environment") { Task { await model.refresh() } }
+                Button("Check Environment") { model.startRefresh() }
             }
             #endif
         }
@@ -83,7 +83,9 @@ struct MenuBarContent: View {
         }
         Divider()
         Button("Show Guesthouse") { NSApp.activate(); openWindow(id: "main") }
-        Button("Check Environment") { Task { await model.refresh() } }
+        // The check belongs to the model: a menu that closes must not cancel it, and it is
+        // the reconciliation that lifts a suspension a previous failure imposed.
+        Button("Check Environment") { model.startRefresh() }
         Divider()
         Button("Quit Guesthouse") { NSApp.terminate(nil) }
     }

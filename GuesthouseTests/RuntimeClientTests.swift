@@ -346,6 +346,15 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         #expect(await client.settledKeyCount() == 0, "finished queries do not accumulate for the life of the client")
     }
 
+    @Test func subscribingToInterruptionsIsCompleteWhenTheStreamIsReturned() async {
+        let client = RuntimeClient(transport: FakeTransport(.reply(.runtimeVersion(RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")))))
+        let interruptions = client.connectionInterruptions()
+        // No suspension between subscribing and this check: a loss arriving now must not find
+        // an observer list that a deferred registration has not reached yet.
+        #expect(client.interruptionObserverCount == 1)
+        _ = interruptions
+    }
+
     @Test func droppedConnectionFailsInFlightOperationsWithTheirID() async {
         let client = RuntimeClient(transport: FakeTransport(.acceptThenDrop))
         var seen: [String] = []

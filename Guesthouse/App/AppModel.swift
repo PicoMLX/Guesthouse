@@ -101,7 +101,6 @@ final class AppModel {
     /// Starts a reconciliation owned by the model. A window that closes cannot cancel it, so
     /// the menu bar and any surviving window still leave "Checking environment".
     func startRefresh() {
-        automaticReconciliationSuspended = false
         refreshTask = Task { [weak self] in
             guard let self else { return }
             await self.refresh()
@@ -111,6 +110,10 @@ final class AppModel {
     func refresh() async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
+        // Every refresh is something the user or a flow asked for, so it lifts the suspension
+        // a previous failure imposed: otherwise repairing the runtime would never restore
+        // automatic reconciliation without relaunching the app.
+        automaticReconciliationSuspended = false
         launchState = .checkingEnvironment
         let outcome = await reconcile()
         guard generation == refreshGeneration, !Task.isCancelled else { return }
@@ -126,6 +129,10 @@ final class AppModel {
             automaticReconciliationSuspended = true
         case .interrupted(let interruption):
             launchState = .interrupted(interruption)
+            // A reconciliation that was itself cut off would otherwise be restarted by the
+            // loss it just suffered, relaunching a service that keeps crashing forever. The
+            // interruption recovery stays on screen until the user asks for another check.
+            automaticReconciliationSuspended = true
         }
     }
 
@@ -169,20 +176,27 @@ final class AppModel {
             break
         case .confirming, .stopFailed:
             // The sheet is open on state that is now stale: nothing is offered again until
-            // the environments have been read back.
+            // the environments have been read back. That reconciliation refreshes the model
+            // itself, and it is the only one started here: a second refresh would retire its
+            // generation, so the sheet would land on a failure the newer refresh disproves.
             quitGeneration &+= 1
             quitFlow = .checking
             let generation = quitGeneration
+            launchState = .interrupted(interruption)
             quitTask = Task { [weak self] in
                 guard let self else { return }
                 await self.reconcileForQuit(generation: generation)
             }
+            return
         case .checking, .stopping, .forceStopping, .terminating:
             // A stop stream reports its own loss; nothing to do here.
             return
         }
-        launchState = .interrupted(interruption)
+        // A suspended reconciliation means the last refresh published a failure that carries
+        // its own recovery; replacing it with the generic interrupted screen would lose that
+        // guidance and leave a check as the only offer.
         guard !automaticReconciliationSuspended else { return }
+        launchState = .interrupted(interruption)
         refreshTask = Task { [weak self] in
             guard let self else { return }
             await self.refresh()
@@ -226,6 +240,9 @@ final class AppModel {
     func confirmStopAndQuit() {
         guard case .confirming = quitFlow else { return }
         quitCancelRequested = false
+        // Failure bookkeeping belongs to one attempt: a target retained from a Quit the user
+        // abandoned would otherwise be force-stopped here without being asked to shut down.
+        gracefulFailures.removeAll()
         quitGeneration &+= 1
         let generation = quitGeneration
         quitFlow = launchState == .ready ? .stopping(nil, nil) : .checking
@@ -237,9 +254,11 @@ final class AppModel {
     /// the app may not own, or one that may already have stopped, is never offered blind.
     /// A force-stop is offered only when the failure itself sanctions repeating the stop:
     /// an error whose recovery is inspection (an operation still in flight, an unknown
-    /// outcome, uncertain ownership) is checked first, never forced past.
+    /// outcome, uncertain ownership) is checked first, never forced past. A failure that no
+    /// graceful stop produced — a quit-time reconciliation that could not complete — has no
+    /// snapshot to force against, so it is never forceable either.
     var canForceStop: Bool {
-        guard case .stopFailed(let error) = quitFlow else { return false }
+        guard case .stopFailed(let error) = quitFlow, !gracefulFailures.isEmpty else { return false }
         switch error {
         case .operationOutcomeUnknown, .vmOwnershipUncertain: return false
         default: return error.recoveryActions.contains(.retry)
@@ -368,15 +387,19 @@ final class AppModel {
                 }
             } catch {
                 launchState = .interrupted(RuntimeConnectionInterrupted())
+                guard generation == quitGeneration else { return }
                 if quitCancelRequested { finishCancel(reconcile: true); return }
                 quitFlow = .stopFailed(.operationOutcomeUnknown(OperationID()))
                 return
             }
             gracefulFailures.remove(environment.id)
         }
+        // A superseded attempt only stops here: cancelling would retire the Quit that replaced
+        // it, clear its task and answer AppKit a second time.
+        guard generation == quitGeneration else { return }
         // The user may have canceled while the last stop was finishing; AppKit is told to
         // terminate only when the decision still stands.
-        guard generation == quitGeneration, !Task.isCancelled, !quitCancelRequested else { finishCancel(reconcile: true); return }
+        guard !Task.isCancelled, !quitCancelRequested else { finishCancel(reconcile: true); return }
         quitFlow = .terminating
         terminationDecision(true)
     }
