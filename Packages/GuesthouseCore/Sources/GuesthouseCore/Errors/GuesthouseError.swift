@@ -231,7 +231,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         // with it, because stripping it would silently repair a credential into something the
         // patterns below no longer recognize. Combining marks go too: a mark inside a token
         // would otherwise split it out of the redactor's reach.
-        let stripped = Redactor.stripTerminalEscapes(Redactor.redactEscapeSplicedRuns(bounded))
+        let spliced = Redactor.redactEscapeSplicedRuns(bounded)
+        let stripped = Redactor.stripTerminalEscapes(spliced)
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
@@ -278,9 +279,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             truncationRedacted = normalized != opened
         }
         let redacted = Redactor().redact(fieldValue: normalized)
-        // The truncation-time replacement counts as redaction: a caller must not treat the
-        // result as merely bounded and attach an identity digest of the credential.
-        let wasRedacted = truncationRedacted || redacted != normalized
+        // The truncation-time replacement counts as redaction, and so does the escape-spliced
+        // run dropped before normalization: both remove credential text, and a caller must not
+        // treat what is left as merely bounded and attach an identity digest of the original.
+        let wasRedacted = spliced != bounded || truncationRedacted || redacted != normalized
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return (redacted, wasRedacted) }
         return (String(String.UnicodeScalarView(scalars.prefix(limit))) + "…", wasRedacted)

@@ -164,7 +164,9 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
 
 
 extension ObservedTuple {
-    /// Every string bounded and redacted; capabilities capped in number and length.
+    /// Every string bounded and redacted; capabilities capped in number and length. A value
+    /// that cannot survive as an identity — one a secret was removed from, or one longer than
+    /// the sanitizer ever reads — becomes unknown instead.
     public func sanitizedForWire() -> ObservedTuple {
         mapped(string: { Self.bounded($0, limit: 256) }, capabilities: Self.boundedCapabilities)
     }
@@ -179,48 +181,72 @@ extension ObservedTuple {
         mapped(
             string: { GuesthouseError.sanitize($0, limit: 256) },
             capabilities: { values in
-                CompatibilityTuple.normalize(values.prefix(Self.maximumCapabilities).map { GuesthouseError.sanitize($0, limit: 128) })
+                Self.canonicalCapabilities(values.prefix(Self.maximumCapabilities).map { GuesthouseError.sanitize($0, limit: 128) })
             }
         )
     }
 
-    private func mapped(string clean: (String) -> String, capabilities: ([String]) -> [String]) -> ObservedTuple {
+    /// `clean` returns `nil` for an observation that cannot serve as an identity, and the field
+    /// becomes unknown rather than being kept as a value two different observations could share.
+    private func mapped(string clean: (String) -> String?, capabilities: ([String]) -> [String]?) -> ObservedTuple {
         var copy = self
-        copy.hostMacOSBuild = hostMacOSBuild.map(clean)
-        copy.codexDesktopVersion = codexDesktopVersion.map(clean)
-        copy.codexDesktopBuild = codexDesktopBuild.map(clean)
-        copy.codexDesktopPath = codexDesktopPath.map(clean)
-        copy.tartVersion = tartVersion.map(clean)
-        copy.guestMacOSBuild = guestMacOSBuild.map(clean)
-        copy.xcodeBuild = xcodeBuild.map(clean)
-        copy.codexCLIVersion = codexCLIVersion.map(clean)
-        copy.codexCLIPath = codexCLIPath.map(clean)
-        copy.codexCLICapabilities = codexCLICapabilities.map(capabilities)
-        copy.githubCLIVersion = githubCLIVersion.map(clean)
-        copy.provisioningScriptVersion = provisioningScriptVersion.map(clean)
+        copy.hostMacOSBuild = hostMacOSBuild.flatMap(clean)
+        copy.codexDesktopVersion = codexDesktopVersion.flatMap(clean)
+        copy.codexDesktopBuild = codexDesktopBuild.flatMap(clean)
+        copy.codexDesktopPath = codexDesktopPath.flatMap(clean)
+        copy.tartVersion = tartVersion.flatMap(clean)
+        copy.guestMacOSBuild = guestMacOSBuild.flatMap(clean)
+        copy.xcodeBuild = xcodeBuild.flatMap(clean)
+        copy.codexCLIVersion = codexCLIVersion.flatMap(clean)
+        copy.codexCLIPath = codexCLIPath.flatMap(clean)
+        copy.codexCLICapabilities = codexCLICapabilities.flatMap(capabilities)
+        copy.githubCLIVersion = githubCLIVersion.flatMap(clean)
+        copy.provisioningScriptVersion = provisioningScriptVersion.flatMap(clean)
         return copy
     }
 
     /// Sanitizing is lossy, and these values are also an identity: a long path and a
     /// decomposed one can bound to the same text. A value the sanitizer changed therefore
     /// carries a digest of the exact observation, so two different observations never
-    /// collapse into one verified compatibility tuple.
-    static func bounded(_ value: String, limit: Int) -> String {
+    /// collapse into one verified compatibility tuple. `nil` means the observation cannot be
+    /// an identity at all, and the field is reported unknown rather than as a value another
+    /// observation could match (MVP-PLAN.md §5: report unknown rather than guess).
+    static func bounded(_ value: String, limit: Int) -> String? {
+        let scalars = value.unicodeScalars
+        let inspectable = limit + GuesthouseError.sanitizeLookahead
+        // Text past the window is never read: it is not redacted and no digest covers it, so
+        // two values that share the window are indistinguishable here. Reporting one of them
+        // as an exact observation would let a changed executable match the connection record
+        // of the one before it. The window is measured, and everything below works on it, so
+        // arbitrarily long CLI output is never copied or scanned in full either.
+        let window = scalars.prefix(inspectable + 1)
+        guard window.count <= inspectable else { return nil }
         // Untrusted text must not be able to forge the suffix this function appends. Escaping
         // the escape before the marker keeps that neutralization injective: were the marker
         // alone rewritten, `foo[exact:` and `foo[exact\u{FFFD}:` would both arrive at the
         // latter and two different observations would share one identity.
-        let value = value
+        let escaped = String(String.UnicodeScalarView(window))
             .replacingOccurrences(of: identityEscape, with: identityEscape + identityEscape)
             .replacingOccurrences(of: identityMarker, with: "[exact\(identityEscape):")
-        let (sanitized, wasRedacted) = GuesthouseError.sanitizeReporting(value, limit: limit)
-        // A redacted value stands for a secret: it gets no digest, since that would let a
-        // guess be confirmed. Whether redaction happened comes from the sanitizer itself, not
-        // from marker text the value could contain. Only a value that was merely bounded or
-        // normalized carries a digest, counted against the same limit.
-        guard sanitized != value, !wasRedacted else { return sanitized }
+        // Escaping grows the text — every escape scalar becomes two — so the string that
+        // reaches the sanitizer can stand outside the window the raw value was measured
+        // against. The window is what makes both answers below honest: past it nothing is
+        // redacted and the digest would cover a tail nobody inspected, publishing a verifier
+        // for whatever credential was placed there. A value that no longer fits is unknown,
+        // for the same reason one that never fit is.
+        guard escaped.unicodeScalars.count <= inspectable else { return nil }
+        let (sanitized, wasRedacted) = GuesthouseError.sanitizeReporting(escaped, limit: limit)
+        // A redacted value stands for a secret. It gets no digest, since that would let a guess
+        // be confirmed, and it is not an identity either: two paths that differ only in the
+        // credential they contain redact to the same text, and calling that an exact value
+        // would reuse one path's verification record for the other. Whether redaction happened
+        // comes from the sanitizer itself, not from marker text the value could contain.
+        guard !wasRedacted else { return nil }
+        // A value the sanitizer left alone is its own identity. One it merely bounded or
+        // normalized carries a digest of the inspected text, counted against the same limit.
+        guard sanitized != escaped else { return sanitized }
         let room = max(16, limit - identitySuffixLength)
-        return "\(GuesthouseError.sanitize(value, limit: room)) \(identityMarker)\(digest(of: inspected(value, limit: limit)))]"
+        return "\(GuesthouseError.sanitize(escaped, limit: room)) \(identityMarker)\(digest(of: escaped))]"
     }
 
     /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
@@ -228,29 +254,58 @@ extension ObservedTuple {
     static let identityMarker = "[exact:"
     static let identityEscape = "\u{FFFD}"
     static let maximumCapabilities = 64
+    /// The most raw entries a probe may report before the answer stops being a capability list.
+    /// Bounding and redacting an entry is real work, and the canonical list is built and sorted
+    /// before `maximumCapabilities` applies, so without this the cost of constructing a status
+    /// would follow whatever the guest printed rather than the bounded shape that goes over the
+    /// wire. Far above any real CLI's capability list, and far below a size worth inspecting.
+    static let maximumReportedCapabilities = 1024
 
-    /// The prefix the sanitizer actually reads: the bound plus the lookahead that catches a
-    /// credential starting inside it. Only this much may be hashed, because a secret that
-    /// begins past it is never inspected, leaves `wasRedacted` false, and would otherwise be
-    /// published as a digest that confirms a guess offline.
-    static func inspected(_ value: String, limit: Int) -> String {
-        String(String.UnicodeScalarView(value.unicodeScalars.prefix(limit + GuesthouseError.sanitizeLookahead)))
+    /// The canonical form of a reported capability list: duplicates collapsed, and the order
+    /// the guest happened to use removed. Bounded by `maximumReportedCapabilities` rather than
+    /// by the wire cap, because the cap is applied *after* this: the identity below is derived
+    /// from the canonical form, and capping before the sort would make it depend on the order
+    /// the probe reported in. `CompatibilityTuple.normalize` refuses to canonicalize a list
+    /// over the wire cap on purpose — a persisted record's count check must still see a flood
+    /// of duplicates rather than the one entry they collapse to — and an observation on the
+    /// wire is capped rather than refused, so it canonicalizes here instead.
+    static func canonicalCapabilities(_ values: [String]) -> [String] {
+        guard values.count <= maximumReportedCapabilities else {
+            return Array(values.prefix(maximumReportedCapabilities + 1))
+        }
+        return Array(Set(values)).sorted()
     }
 
-    /// The first `maximumCapabilities` entries, each bounded; when entries are dropped, one
-    /// further entry names how many and carries a digest of the whole list, so two capability
-    /// sets that share a prefix keep different identities. That entry wears the same identity
-    /// marker as a bounded value, so a literal capability shaped like it is neutralized and
-    /// cannot pass a different capability set off as a capped one. The list is canonical, so
-    /// it survives the normalization a receiver applies. The digest is over the bounded
-    /// entries: an entry past the cap is never inspected, and hashing it raw would publish a
-    /// digest of whatever secret it holds.
-    static func boundedCapabilities(_ values: [String]) -> [String] {
-        let entries = values.map { bounded($0, limit: 128) }
-        guard values.count > maximumCapabilities else { return CompatibilityTuple.normalize(entries) }
-        let kept = Array(entries.prefix(maximumCapabilities - 1))
-        let omitted = values.count - kept.count
-        return CompatibilityTuple.normalize(kept + ["\(omitted) more \(identityMarker)\(digest(ofList: entries))]"])
+    /// The first `maximumCapabilities` entries of the canonical list, each bounded; when entries
+    /// are dropped, one further entry names how many and carries a digest of the whole list, so
+    /// two capability sets that share a prefix keep different identities. That entry wears the
+    /// same identity marker as a bounded value, so a literal capability shaped like it is
+    /// neutralized and cannot pass a different capability set off as a capped one. The digest is
+    /// over the bounded entries: an entry past the cap is never inspected, and hashing it raw
+    /// would publish a digest of whatever secret it holds.
+    ///
+    /// The list is made canonical before it is capped and hashed, not after. A probe may report
+    /// the same capabilities in any order, or twice; which entries the cap keeps and what the
+    /// digest covers must not depend on that, or one capability set would produce two
+    /// identities and revalidate a connection that never changed.
+    ///
+    /// `nil` when any entry is not an identity: dropping just that entry would let two
+    /// different capability sets collapse into one. `nil` too when there are more raw entries
+    /// than `maximumReportedCapabilities`, which is checked before any of them is read: keeping
+    /// a prefix of such a list is not open either, because the digest below would then cover
+    /// the prefix and two different lists that share one would arrive at a single identity.
+    static func boundedCapabilities(_ values: [String]) -> [String]? {
+        guard values.count <= maximumReportedCapabilities else { return nil }
+        var entries: [String] = []
+        for value in values {
+            guard let entry = bounded(value, limit: 128) else { return nil }
+            entries.append(entry)
+        }
+        let canonical = Self.canonicalCapabilities(entries)
+        guard canonical.count > maximumCapabilities else { return canonical }
+        let kept = Array(canonical.prefix(maximumCapabilities - 1))
+        let omitted = canonical.count - kept.count
+        return Self.canonicalCapabilities(kept + ["\(omitted) more \(identityMarker)\(digest(ofList: canonical))]"])
     }
 
     /// A digest over a length-prefixed encoding, so no two different lists can produce the
