@@ -92,7 +92,14 @@ public enum IntegrationWorkspaceGenerator {
             files.append(GeneratedFile(relativePath: resolvedPackagesRelativePath, contents: appResolvedPackages))
         }
         files.append(GeneratedFile(relativePath: WorkspaceLayout.agentsGuideFileName, text: agentsGuide(manifest, layout: layout)))
-        files.append(GeneratedFile(relativePath: WorkspaceLayout.manifestFileName, contents: encodedManifest(manifest)))
+        let encoded = encodedManifest(manifest)
+        // `decodeManifest` refuses a `workspace.json` beyond this size, so writing one would
+        // create a workspace that cannot be opened again. The selection is still the user's to
+        // change here, which it would not be once the directory existed.
+        guard encoded.count <= WorkspaceManifest.maximumEncodedSize else {
+            throw .manifestTooLarge(bytes: encoded.count)
+        }
+        files.append(GeneratedFile(relativePath: WorkspaceLayout.manifestFileName, contents: encoded))
         return files
     }
 
@@ -108,15 +115,36 @@ public enum IntegrationWorkspaceGenerator {
     /// the check and the write cannot redirect it. The repositories belong to Git, not to the
     /// generator.
     public static func write(_ files: [GeneratedFile], to root: URL) throws {
-        do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        } catch {
-            throw GeneratedFileError.unwritable(path: root.lastPathComponent, reason: SanitizedText(error.localizedDescription, limit: 120))
+        // The root is created and opened through its parent, so a guest agent that leaves a
+        // link where the workspace belongs is refused instead of having every generated file
+        // written into whatever it points at.
+        let name = root.lastPathComponent
+        let parent = root.deletingLastPathComponent()
+        // The parent is opened before anything is created, and with no-follow semantics: a
+        // guest agent that leaves a link where the workspace's container belongs would
+        // otherwise have every generated file created through it, since the no-follow open
+        // below checks only the workspace's own component. Only this last component is
+        // checked; the directories above it are the storage location the host chose, which
+        // legitimately reaches through links on macOS (`/var`, an external volume).
+        var parentDescriptor = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        var openError = errno
+        if parentDescriptor < 0, openError == ENOENT {
+            do {
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            } catch {
+                throw GeneratedFileError.unwritable(path: name, reason: SanitizedText(error.localizedDescription, limit: 120))
+            }
+            parentDescriptor = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            openError = errno
         }
-        let rootDescriptor = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        let openError = errno
-        guard rootDescriptor >= 0 else {
-            throw GeneratedFileError.unwritable(path: root.lastPathComponent, reason: systemReason(openError))
+        guard parentDescriptor >= 0 else {
+            // `ELOOP` is a link; `ENOTDIR` is a file where the container belongs.
+            guard openError != ELOOP, openError != ENOTDIR else { throw GeneratedFileError.pathOutsideWorkspace(name) }
+            throw GeneratedFileError.unwritable(path: name, reason: systemReason(openError))
+        }
+        defer { close(parentDescriptor) }
+        guard let rootDescriptor = try openSubdirectory(name, in: parentDescriptor, creating: true, path: name) else {
+            throw GeneratedFileError.unwritable(path: name, reason: systemReason(ENOENT))
         }
         defer { close(rootDescriptor) }
         for file in files {
@@ -130,6 +158,9 @@ public enum IntegrationWorkspaceGenerator {
     /// The components of a generated file's path, refused unless it is a plain relative path
     /// that stays inside the workspace and out of `repos/`.
     static func components(of relativePath: String) throws -> [String] {
+        // A NUL ends the C string the POSIX calls below receive, so `repos\0ignored` would
+        // reach them as `repos` and walk into a repository this guard just cleared.
+        guard !relativePath.utf8.contains(0) else { throw GeneratedFileError.invalidPath(relativePath) }
         let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !relativePath.hasPrefix("/"), !components.isEmpty,
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })

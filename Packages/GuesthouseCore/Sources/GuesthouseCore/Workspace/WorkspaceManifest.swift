@@ -310,6 +310,9 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     /// The app repository builds through a workspace of its own, which the wrapper would not
     /// reproduce (MVP-PLAN.md §6).
     case unsupportedAppWorkspace(String)
+    /// The workspace's own `workspace.json` would be larger than the reader accepts, so the
+    /// workspace could be created but never opened again.
+    case manifestTooLarge(bytes: Int)
     /// The file could not be read as a workspace at all.
     case malformed(reason: SanitizedText)
 
@@ -355,6 +358,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "The workspace in the folder \(GuesthouseError.sanitize(directory)) calls itself \(GuesthouseError.sanitize(manifest)), so Guesthouse cannot tell which workspace it is."
         case .unsupportedAppWorkspace(let workspace):
             "The app repository builds through its own workspace \(GuesthouseError.sanitize(workspace)), whose other projects and schemes Guesthouse cannot reproduce yet. Choose an app that builds from a committed .xcodeproj and shared scheme."
+        case .manifestTooLarge(let bytes):
+            "This workspace describes more repositories, or longer branch names, than a workspace file can hold (\(bytes) bytes, and the limit is \(WorkspaceManifest.maximumEncodedSize)). Remove some repositories from the workspace, then try again."
         }
     }
 
