@@ -151,6 +151,19 @@ import Testing
         #expect(throws: EnvironmentRecordError.malformed) { try DevelopmentEnvironment.decode(Data(#"{"schemaVersion":1}"#.utf8)) }
     }
 
+    @Test func aVersionThatNoReaderWouldAcceptCannotBeConstructed() {
+        #expect(SchemaVersion(0) == nil)
+        #expect(SchemaVersion(-1) == nil)
+        #expect(SchemaVersion(2)?.rawValue == 2)
+    }
+
+    @Test func theUnversionedSentinelIsNeverWritten() {
+        // It names a document that predates versioning; encoding it would produce a record
+        // this build's own decoder refuses.
+        #expect(throws: EncodingError.self) { try JSONEncoder().encode(SchemaVersion.unversioned) }
+        #expect(throws: Never.self) { try JSONEncoder().encode(SchemaVersion.current) }
+    }
+
     @Test func aPersistedSchemaVersionMustBePositive() {
         for value in ["0", "-3"] {
             #expect(throws: DecodingError.self, "version \(value)") { try JSONDecoder().decode(SchemaVersion.self, from: Data(value.utf8)) }
