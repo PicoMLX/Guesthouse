@@ -48,6 +48,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
     private var canceledOperations: Set<OperationID> = []
+    /// Consumer cancellations a reservation kept out of `receivedRequests`. They are replayed
+    /// if that reserved request turns out never to have taken effect.
+    private var suppressedCancellations: Set<OperationID> = []
 
     private var servingTicket: UInt64 = 0
     private var waiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
@@ -162,6 +165,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         }
 
         let id = binding.seededOperationID ?? OperationID()
+        // `accepted` means journaled and in flight, so the environment's stored status names
+        // the operation from here until its terminal event, whether or not a caller seeded it.
+        markInFlight(id, for: request)
         continuation.yield(.accepted(id))
         advanceTurn()
 
@@ -176,7 +182,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // terminal event, so a status query never sees an idle environment mid-stream.
             guard !cancelled(id, continuation) else { return }
             if let status {
-                statuses[status.environmentID] = status
+                // The scripted status is stored with the operation still in flight, since it
+                // does not end until `completed`: a status query during the pause below must
+                // not see an idle environment.
+                var stored = status
+                stored.inFlightOperation = status.inFlightOperation ?? id
+                statuses[status.environmentID] = stored
                 continuation.yield(.status(status))
                 await pause()
                 guard !cancelled(id, continuation) else { return }
@@ -210,6 +221,10 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 guard await progress(id, phase, continuation) else { return }
             }
             await pause()
+            // A consumer that went away during the pause cancelled the operation, exactly as
+            // in the other branches: it is recorded and ends as canceled rather than leaving
+            // a seeded operation in flight behind a connection loss nobody is listening for.
+            guard !cancelled(id, continuation) else { return }
             continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
         }
     }
@@ -235,13 +250,32 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     /// Undoes the reservation `send` made for a cancellation request that did not succeed.
-    private nonisolated func releaseReservation(of id: OperationID) {
+    ///
+    /// A consumer cancellation the reservation suppressed meanwhile is recorded now: the
+    /// request that stood in for it never took effect, so the consumer's own cancellation is
+    /// the only one that happened and `receivedRequests` must show it.
+    private func releaseReservation(of id: OperationID) {
         configuration.withLock { _ = $0.explicitCancellations.remove(id) }
+        guard suppressedCancellations.remove(id) != nil else { return }
+        canceledOperations.insert(id)
+        let ticket = nextTicket()
+        Task { await self.appendCancellation(of: id, ticket: ticket) }
     }
 
     private func clearInFlight(_ id: OperationID) {
         for (environment, status) in statuses where status.inFlightOperation == id {
             statuses[environment]?.inFlightOperation = nil
+        }
+    }
+
+    /// Names the operation in the environment's stored status, when one is stored. A fake with
+    /// no status for that environment stays silent rather than inventing VM and readiness state.
+    private func markInFlight(_ id: OperationID, for request: RuntimeRequest) {
+        switch request {
+        case .startEnvironment(let environment, _), .stopEnvironment(let environment, _), .importXcode(let environment, _):
+            statuses[environment]?.inFlightOperation = id
+        case .runtimeVersion, .environmentStatus, .cancelOperation:
+            break
         }
     }
 
@@ -254,13 +288,23 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     /// that was made before the consumer went away.
     private func recordImplicitCancellation(of id: OperationID) {
         let explicit = configuration.withLock { $0.explicitCancellations.contains(id) }
-        guard Task.isCancelled, !canceledOperations.contains(id), !explicit else { return }
+        guard Task.isCancelled, !canceledOperations.contains(id) else { return }
+        // The reserved request may still fail, so what it suppressed is remembered rather
+        // than dropped: releasing the reservation replays it.
+        if explicit {
+            suppressedCancellations.insert(id)
+            return
+        }
         canceledOperations.insert(id)
-        let ticket = configuration.withLock { configuration -> UInt64 in
+        let ticket = nextTicket()
+        Task { await self.appendCancellation(of: id, ticket: ticket) }
+    }
+
+    private nonisolated func nextTicket() -> UInt64 {
+        configuration.withLock { configuration -> UInt64 in
             defer { configuration.nextTicket += 1 }
             return configuration.nextTicket
         }
-        Task { await self.appendCancellation(of: id, ticket: ticket) }
     }
 
     private func appendCancellation(of id: OperationID, ticket: UInt64) async {

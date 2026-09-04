@@ -141,6 +141,21 @@ import Testing
         #expect(RuntimeConnectionInterrupted().guesthouseError == nil)
     }
 
+    @Test func aQueryInterruptionOffersRetryRatherThanAnUnknownOutcome() async throws {
+        let backend = FakeRuntimeBackend()
+        await backend.script("runtimeVersion", .disconnect())
+        do {
+            for try await _ in backend.send(.runtimeVersion) {}
+            Issue.record("expected an interruption")
+        } catch let error as RuntimeConnectionInterrupted {
+            #expect(error.operationID == nil)
+            #expect(error.recoveryActions == [.retry], "a read-only query has nothing to inspect or cancel")
+            #expect(!error.userMessage.contains("may or may not"))
+            #expect(error.recoveryMessage.isEmpty == false)
+        }
+        #expect(RuntimeConnectionInterrupted(operationID: OperationID()).recoveryActions == [.inspectState, .cancel])
+    }
+
     @Test func queriesReplyWithoutOperationIDs() async throws {
         let backend = FakeRuntimeBackend()
         let status = EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready)
