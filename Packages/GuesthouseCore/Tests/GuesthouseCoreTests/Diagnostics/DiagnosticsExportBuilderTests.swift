@@ -45,6 +45,30 @@ import Testing
         #expect(DiagnosticsExportBuilder.scrubAddresses("ratio 1:2") == "ratio 1:2")
     }
 
+    @Test func punctuationVersionsAndHomePathsAreHandled() {
+        #expect(DiagnosticsExportBuilder.scrub("guest at 2001:db8::1.") == "guest at [redacted:address].")
+        #expect(DiagnosticsExportBuilder.scrub("tool 1.2.3.456 built") == "tool 1.2.3.456 built", "a version is not an address")
+        #expect(DiagnosticsExportBuilder.scrub("guest at 192.168.64.7 answered") == "guest at [redacted:address] answered")
+        #expect(DiagnosticsExportBuilder.scrub("/Users/alice/Library/Logs") == "/Users/[redacted:account]/Library/Logs")
+    }
+
+    @Test func aCredentialContinuedOnTheNextLineIsRedacted() {
+        let redactor = Redactor()
+        let lines = redactor.redact(lines: ["password:", "  hunter2", "next line"])
+        let scrubbed = DiagnosticsExportBuilder.scrubbedStream(lines)
+        #expect(scrubbed[1].contains("[redacted:credential]"))
+        #expect(!scrubbed[1].contains("hunter2"))
+        #expect(scrubbed[2] == "next line")
+    }
+
+    @Test func compatibilityPathsAreScrubbedInTheManifest() {
+        let observed = ObservedTuple(codexDesktopPath: "/Users/alice/Applications/Codex.app", codexCLIPath: "/Users/alice/.codex/bin/codex")
+        let export = DiagnosticsExportBuilder.build(appVersion: "1", appBuild: "1", runtime: nil, compatibility: observed, environments: [], logs: [])
+        let manifest = String(decoding: DiagnosticsExportBuilder.encode(export.manifest), as: UTF8.self)
+        #expect(!manifest.contains("alice"))
+        #expect(manifest.contains("[redacted:account]"))
+    }
+
     @Test func accountIdentifiersAreScrubbed() {
         #expect(DiagnosticsExportBuilder.scrub("Signed in as alice@example.com") == "Signed in as [redacted:account]")
         #expect(DiagnosticsExportBuilder.scrub("Logged in to github.com as octocat") == "Logged in to github.com as [redacted:account]")

@@ -82,7 +82,9 @@ final class AppModel {
     private(set) var reconciling: Set<EnvironmentID> = []
     /// The log of the last finished operation, for the disclosure after it ends.
     private(set) var lastLogs: [EnvironmentID: [RedactedLine]] = [:]
-    /// What the runtime reported about itself at the last refresh.
+    /// What the service reports about itself and the Tart bundle it verified. The per-status
+    /// observation carries no Tart version, so this is where the dashboard's tool-version row
+    /// and the diagnostics bundle's metadata come from (MVP-PLAN.md §2).
     private(set) var runtimeInfo: RuntimeVersionInfo?
     private let redactor = Redactor()
     private(set) var quitFlow: QuitFlow = .idle
@@ -134,7 +136,7 @@ final class AppModel {
     /// What the service reports about itself and the Tart bundle it verified. The per-status
     /// observation carries no Tart version, so this is where the dashboard's tool-version row
     /// comes from (MVP-PLAN.md §2).
-    private(set) var runtimeVersion: RuntimeVersionInfo?
+    private(set) var runtimeInfo: RuntimeVersionInfo?
     /// How many inspections of an environment are still outstanding. A card tells a check that
     /// is running from one that already ended in failure, so a query nobody is waiting for is
     /// never presented as one still in progress.
@@ -286,11 +288,12 @@ final class AppModel {
                 _ = claimStatusGeneration(of: id)
             }
             statuses = published
-            // Assigned whatever the supplementary request answered: a service that could not
-            // describe itself this time has not confirmed the version it gave last time, and
-            // the MVP-PLAN.md §2 tool-version row says Unknown rather than repeating a value
-            // nothing verified.
-            runtimeVersion = version
+            // Assigned whatever the supplementary request answered, and only now, with the
+            // rest of this refresh's result: a service that could not describe itself this
+            // time has not confirmed the version it gave last time, so the tool-version row
+            // says Unknown rather than repeating a value nothing verified, and an overtaken
+            // reconciliation cannot change the metadata diagnostics report.
+            runtimeInfo = version
             // These environments answered, so a failure of an earlier *query* is history,
             // exactly as it is after a single successful status query. A failed operation's
             // error stays: it is what the card explains.
@@ -336,13 +339,6 @@ final class AppModel {
 
     private func reconcile() async -> ReconcileOutcome {
         do {
-            for try await event in backend.send(.runtimeVersion) {
-                switch event {
-                case .runtimeVersion(let info): runtimeInfo = info
-                case .failed(_, let error): return .unavailable(error)
-                default: break
-                }
-            }
             var listed: [DevelopmentEnvironment] = []
             for try await event in backend.send(.listEnvironments) {
                 switch event {
@@ -787,6 +783,10 @@ final class AppModel {
 
     /// Every redacted line the app holds, oldest first, each prefixed with the environment it
     /// belongs to (by UUID, never by address), so two development Macs' lines stay apart.
+    /// The observations for one environment, so an export says which development Mac it is
+    /// describing rather than picking one at random.
+    func observations(of environment: EnvironmentID) -> ObservedTuple { statuses[environment]?.observed ?? ObservedTuple() }
+
     var diagnosticsLines: [RedactedLine] {
         environments.flatMap { environment -> [RedactedLine] in
             let lines = operations[environment.id]?.logs ?? lastLogs[environment.id] ?? []
@@ -798,13 +798,16 @@ final class AppModel {
     /// The bundle "Export diagnostics" writes.
     func diagnosticsExport() -> DiagnosticsExport {
         let info = Bundle.main.infoDictionary ?? [:]
-        let compatibility = statuses.values.first?.observed ?? ObservedTuple()
+        // The manifest describes one environment: the first in creation order, named in the
+        // export, rather than whichever status happened to be first in a dictionary.
+        let subject = environments.first
+        let compatibility = subject.map { observations(of: $0.id) } ?? ObservedTuple()
         return DiagnosticsExportBuilder.build(
             appVersion: info["CFBundleShortVersionString"] as? String ?? "0",
             appBuild: info["CFBundleVersion"] as? String ?? "0",
             runtime: runtimeInfo,
             compatibility: compatibility,
-            environments: environments,
+            environments: subject.map { [$0] } ?? [],
             logs: diagnosticsLines
         )
     }
@@ -829,7 +832,7 @@ final class AppModel {
                 retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
                 retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
-                runtimeVersion: runtimeVersion
+                runtimeVersion: runtimeInfo
             )
         }
     }
@@ -1324,6 +1327,13 @@ final class AppModel {
                         if case .stopping = quitFlow { quitFlow = .stopping(environment.id, phase) }
                     case .status(let status):
                         statuses[status.environmentID] = status
+                    case .log(_, let line):
+                        // Shutdown output belongs in diagnostics: it is what explains a stop
+                        // that failed, and the quit sheet does not show it.
+                        var logs = lastLogs[environment.id] ?? []
+                        logs.append(line)
+                        if logs.count > OperationState.maximumLogLines { logs.removeFirst(logs.count - OperationState.maximumLogLines) }
+                        lastLogs[environment.id] = logs
                     case .failed(_, let error):
                         if accepted { gracefulFailures.insert(environment.id) }
                         // A cancellation deferred by a protected phase is honored here too:

@@ -13,7 +13,7 @@ struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if cards.isEmpty {
-                    EmptyDashboardView(availability: model.createAvailability) { showingWizard = true }
+                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { showingDiagnostics = true }) { showingWizard = true }
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16)], alignment: .leading, spacing: 16) {
                         ForEach(cards) { card in
@@ -38,6 +38,7 @@ struct DashboardView: View {
 
 struct EmptyDashboardView: View {
     let availability: EnvironmentCardState.Availability
+    let openDiagnostics: () -> Void
     let create: () -> Void
 
     var body: some View {
@@ -49,6 +50,9 @@ struct EmptyDashboardView: View {
             AvailabilityButton("Create a development Mac", availability: availability, action: create)
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel("Create a development Mac")
+            // Diagnostics are reachable with no environment too: a fresh install that cannot
+            // get further still needs the screen that says what Guesthouse saw.
+            Button("Diagnostics…", action: openDiagnostics).accessibilityLabel("Open diagnostics")
         }
         .frame(maxWidth: .infinity, minHeight: 300)
     }

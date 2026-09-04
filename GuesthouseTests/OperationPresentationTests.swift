@@ -10,9 +10,24 @@ final class ScriptedBackend: RuntimeBackend, Sendable {
     let events: [String: [RuntimeEvent]]
     init(_ events: [String: [RuntimeEvent]]) { self.events = events }
 
+    /// The queries answered from fixed data, one event list replayed for every operation: the
+    /// shape a diagnostics fixture needs, expressed in the same script.
+    init(events: [RuntimeEvent], environments: [DevelopmentEnvironment] = [], status: EnvironmentStatus? = nil) {
+        var script: [String: [RuntimeEvent]] = [:]
+        script["runtimeVersion"] = [.runtimeVersion(RuntimeVersionInfo(serviceVersion: "9.9", serviceBuild: "1"))]
+        script["listEnvironments"] = [.environments(environments)]
+        if let status { script["environmentStatus"] = [.status(status)] }
+        for name in ["startEnvironment", "stopEnvironment", "cancelOperation", "importXcode"] { script[name] = events }
+        self.events = script
+    }
+
     nonisolated func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
         AsyncThrowingStream { continuation in
-            for event in events[request.caseName] ?? [] { continuation.yield(event) }
+            if let scripted = events[request.caseName] {
+                for event in scripted { continuation.yield(event) }
+            } else if case .environmentStatus(let id) = request {
+                continuation.yield(.status(EnvironmentStatus(environmentID: id, vm: .stopped, readiness: .ready)))
+            }
             continuation.finish()
         }
     }

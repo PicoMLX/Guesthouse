@@ -11,10 +11,12 @@ struct DiagnosticsView: View {
     @State private var filter = ""
     @State private var exportNote: String?
 
-    private var visibleLines: [RedactedLine] {
-        let lines = model.diagnosticsLines
+    /// What the sheet shows is what an export would contain: addresses and account names are
+    /// scrubbed before anything is rendered, filtered, or copied.
+    private var visibleLines: [String] {
+        let lines = model.diagnosticsLines.map { DiagnosticsExportBuilder.scrub($0.text) }
         guard !filter.isEmpty else { return lines }
-        return lines.filter { $0.text.localizedCaseInsensitiveContains(filter) }
+        return lines.filter { $0.localizedCaseInsensitiveContains(filter) }
     }
 
     var body: some View {
@@ -31,7 +33,7 @@ struct DiagnosticsView: View {
                         Text(filter.isEmpty ? "No log lines yet." : "No lines match the filter.").foregroundStyle(.secondary)
                     }
                     ForEach(Array(visibleLines.enumerated()), id: \.offset) { entry in
-                        Text(entry.element.text)
+                        Text(entry.element)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -64,7 +66,7 @@ struct DiagnosticsView: View {
         pasteboard.clearContents()
         // The pasteboard is shared with every other application: what leaves the sheet is
         // scrubbed exactly like the written bundle.
-        pasteboard.setString(visibleLines.map { DiagnosticsExportBuilder.scrub($0.text) }.joined(separator: "\n"), forType: .string)
+        pasteboard.setString(visibleLines.joined(separator: "\n"), forType: .string)
         exportNote = "\(visibleLines.count) lines copied."
     }
 

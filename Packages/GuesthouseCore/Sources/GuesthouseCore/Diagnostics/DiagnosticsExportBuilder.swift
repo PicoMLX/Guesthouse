@@ -59,13 +59,13 @@ public enum DiagnosticsExportBuilder {
         logs: [RedactedLine],
         exportedAt: Date = Date()
     ) -> DiagnosticsExport {
-        let lines = logs.map { scrub($0.text) }
+        let lines = scrubbedStream(logs)
         let manifest = DiagnosticsExport.Manifest(
             exportedAt: exportedAt,
             appVersion: GuesthouseError.sanitize(appVersion),
             appBuild: GuesthouseError.sanitize(appBuild),
             runtime: runtime,
-            compatibility: compatibility,
+            compatibility: scrubbed(compatibility),
             environmentIDs: environments.map(\.id),
             logLineCount: lines.count,
             excludedCategories: excludedCategories
@@ -92,13 +92,35 @@ public enum DiagnosticsExportBuilder {
     /// `inet_pton`, so compressed (`::1`, `2001:db8::1`) and IPv4-mapped forms are caught and
     /// clock times are not.
     static func scrubAddresses(_ text: String) -> String {
-        // IPv6 first, so an IPv4-mapped address (`::ffff:192.0.2.1`) is taken whole.
+        // IPv6 first, so an IPv4-mapped address (`::ffff:192.0.2.1`) is taken whole. Trailing
+        // punctuation is trimmed before validation: a sentence's period is not part of the
+        // address, and leaving it in would let the address through.
         let withoutIPv6 = text.replacing(#/[0-9A-Fa-f:.]{2,45}/#) { match in
             let token = String(text[match.range])
-            guard token.contains(":"), isIPv6(token) else { return token }
-            return "[redacted:address]"
+            guard token.contains(":") else { return token }
+            // Only trailing punctuation is trimmed: a leading colon is part of a compressed
+            // address (`::1`), while a sentence's period at the end is not.
+            let trimmed = Self.trimmingTrailingPunctuation(token)
+            guard !trimmed.isEmpty, isIPv6(trimmed) else { return token }
+            return "[redacted:address]" + token.dropFirst(trimmed.count)
         }
-        return withoutIPv6.replacing(#/\b(?:\d{1,3}\.){3}\d{1,3}\b/#, with: "[redacted:address]")
+        // Only a real IPv4 literal is an address: a four-part version such as `1.2.3.456` is
+        // exactly the information diagnostics exist to keep.
+        return withoutIPv6.replacing(#/\b(?:\d{1,3}\.){3}\d{1,3}\b/#) { match in
+            let token = String(withoutIPv6[match.range])
+            return isIPv4(token) ? "[redacted:address]" : token
+        }
+    }
+
+    static func trimmingTrailingPunctuation(_ token: String) -> String {
+        var trimmed = Substring(token)
+        while let last = trimmed.last, ".,;)]}".contains(last) { trimmed = trimmed.dropLast() }
+        return String(trimmed)
+    }
+
+    static func isIPv4(_ token: String) -> Bool {
+        var buffer = in_addr()
+        return token.withCString { inet_pton(AF_INET, $0, &buffer) } == 1
     }
 
     static func isIPv6(_ token: String) -> Bool {
@@ -113,5 +135,39 @@ public enum DiagnosticsExportBuilder {
             .replacing(#/(?i)\b((?:signed|logged) in (?:to \S+ )?as|account:?|user(?:name)?:?)\s+(?!\[redacted)(\S+)/#) { match in
                 "\(match.output.1) [redacted:account]"
             }
+            // A home directory names its owner: `/Users/alice/…` is an account name in a path.
+            .replacing(#/(/Users/)(?!\[redacted)[^/\s]+/#) { match in
+                "\(match.output.1)[redacted:account]"
+            }
+    }
+
+    /// Scrubs a stream of lines. A credential is often printed over two lines (`password:`
+    /// on one, the value on the next), so a line that ends in a credential label redacts the
+    /// value that follows it.
+    static func scrubbedStream(_ logs: [RedactedLine]) -> [String] {
+        var result: [String] = []
+        var expectingValue = false
+        for line in logs {
+            let scrubbed = scrub(line.text)
+            let trimmed = scrubbed.trimmingCharacters(in: .whitespaces)
+            if expectingValue, !trimmed.isEmpty {
+                result.append(scrubbed.replacingOccurrences(of: trimmed, with: Redactor.marker("credential")))
+                expectingValue = trimmed.isEmpty
+                continue
+            }
+            expectingValue = trimmed.wholeMatch(of: #/(?i)(password|passphrase|secret|token|api[ _-]?key|credential)s?\s*[:=]/#) != nil
+            result.append(scrubbed)
+        }
+        return result
+    }
+
+    /// The observations that may appear in the manifest: paths carry the account name of
+    /// whoever owns them, so they are scrubbed like any other exported value.
+    static func scrubbed(_ tuple: ObservedTuple) -> ObservedTuple {
+        var copy = tuple
+        copy.codexDesktopPath = tuple.codexDesktopPath.map { scrub($0) }
+        copy.codexCLIPath = tuple.codexCLIPath.map { scrub($0) }
+        copy.codexCLICapabilities = tuple.codexCLICapabilities.map { $0.map { scrub($0) } }
+        return copy
     }
 }
