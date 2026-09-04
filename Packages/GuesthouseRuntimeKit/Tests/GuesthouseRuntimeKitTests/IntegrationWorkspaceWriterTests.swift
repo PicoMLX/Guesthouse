@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GuesthouseCore
 import Testing
@@ -42,10 +43,28 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: real.path).isEmpty, "nothing was written through the root link")
     }
 
+    /// The root's own component is opened no-follow, so the folder above it is where a link
+    /// would still redirect every generated file: it is created through that folder's own
+    /// descriptor, and a link left there is refused instead of written through.
+    @Test func aLinkedWorkspaceContainerIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Container-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: base) }
+        let target = base.appending(path: "repository")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // A guest agent leaves a link where the directory holding the workspaces belongs.
+        let container = base.appending(path: WorkspaceLayout.workspacesDirectory)
+        try FileManager.default.createSymbolicLink(at: container, withDestinationURL: target)
+        #expect(throws: GeneratedFileError.self) {
+            try IntegrationWorkspaceWriter.write([GeneratedFile(relativePath: "AGENTS.md", text: "x")], to: container.appending(path: "feature-123"))
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty, "nothing was created through the link")
+    }
+
     @Test func caseFoldedSpellingsOfReposAreRefused() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Root-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        for spelling in ["repos", "REPOS", "Repos", "repo\u{017F}"] {
+        for spelling in ["repos", "REPOS", "Repos", "repo\u{017F}", "ＲＥＰＯＳ"] {
             #expect(throws: GeneratedFileError.self, "\(spelling)") {
                 try IntegrationWorkspaceWriter.write([GeneratedFile(relativePath: "\(spelling)/MyApp/file", text: "x")], to: root)
             }
@@ -142,6 +161,138 @@ import Testing
         try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project), to: root)
         #expect(!FileManager.default.fileExists(atPath: resolved.path))
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "Integration.xcworkspace/contents.xcworkspacedata").path))
+    }
+
+    @Test func aWriteGoesToTheCheckedDirectoryEvenAfterItsEntryIsSwappedForALink() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
+        let elsewhere = FileManager.default.temporaryDirectory.appending(path: "elsewhere-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let rootDescriptor = try IntegrationWorkspaceWriter.openRoot(root)
+        defer { close(rootDescriptor) }
+        let artifacts = try IntegrationWorkspaceWriter.openParent(["artifacts", "notes.txt"], in: rootDescriptor, creating: true, of: "artifacts/notes.txt")
+        defer { close(artifacts) }
+
+        // A guest agent moves the directory the writer just checked aside and leaves a link to
+        // a place of its own in the entry, in the window before the bytes are written.
+        try FileManager.default.moveItem(at: root.appending(path: "artifacts"), to: root.appending(path: "moved"))
+        try FileManager.default.createSymbolicLink(at: root.appending(path: "artifacts"), withDestinationURL: elsewhere)
+
+        try IntegrationWorkspaceWriter.writeFile(Data("notes".utf8), named: "notes.txt", in: artifacts, of: "artifacts/notes.txt")
+        #expect(try Data(contentsOf: root.appending(path: "moved/notes.txt")) == Data("notes".utf8))
+        #expect(!FileManager.default.fileExists(atPath: elsewhere.appending(path: "notes.txt").path), "the swapped link never received the file")
+    }
+
+    /// `openat` and the calls beside it stop at an embedded NUL, so a component carrying one
+    /// compares unequal to `repos` in every check and still opens `repos` itself.
+    @Test func aComponentWithAnEmbeddedNULIsRefused() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
+        let repos = root.appending(path: "repos")
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        #expect(throws: GeneratedFileError.invalidPath("repos\0suffix/MyApp/file")) {
+            try IntegrationWorkspaceWriter.write([GeneratedFile(relativePath: "repos\0suffix/MyApp/file", text: "x")], to: root)
+        }
+        #expect(throws: GeneratedFileError.invalidPath("artifacts/notes\0.txt")) {
+            try IntegrationWorkspaceWriter.write([GeneratedFile(relativePath: "artifacts/notes\0.txt", text: "x")], to: root)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: repos.path).isEmpty, "nothing was written into the repositories")
+    }
+
+    /// `O_NOFOLLOW` only refuses a link, so a root replaced by a different real directory
+    /// between the check and the open would pass it and take every write with it.
+    @Test func aRootReplacedByAnotherDirectoryAfterItIsCheckedIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Pinned-\(UUID().uuidString)")
+        let root = base.appending(path: "workspace")
+        let decoy = base.appending(path: "repos/MyApp")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
+            _ = try IntegrationWorkspaceWriter.openRoot(root) {
+                // A guest agent moves a repository into the root's pathname in the window
+                // between the check and the open, which no link is involved in.
+                try? FileManager.default.removeItem(at: root)
+                try? FileManager.default.moveItem(at: decoy, to: root)
+            }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty, "the substituted repository was not opened for writing")
+    }
+
+    /// A root the writer had to create is bound to its identity the same way: having just made
+    /// it is no evidence that it is still the directory being opened.
+    @Test func aCreatedRootReplacedBeforeItIsOpenedIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "Created-\(UUID().uuidString)")
+        let root = base.appending(path: "workspace")
+        let decoy = base.appending(path: "repos/MyApp")
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
+            _ = try IntegrationWorkspaceWriter.openRoot(root) {
+                try? FileManager.default.removeItem(at: root)
+                try? FileManager.default.moveItem(at: decoy, to: root)
+            }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty, "the substituted repository was not opened for writing")
+    }
+
+    /// A directory the write had to create is bound to the inode Guesthouse made: it is
+    /// created under a name nothing can predict and moved into place, so a checkout the guest
+    /// moves into that name is never what the write goes through.
+    @Test func aDirectoryCreatedForAWriteIsBoundToTheInodeGuesthouseMade() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Bound-\(UUID().uuidString)")
+        let checkout = root.appending(path: "repos/MyApp")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try Data("guest".utf8).write(to: checkout.appending(path: "README.md"))
+        let rootDescriptor = try IntegrationWorkspaceWriter.openRoot(root)
+        defer { close(rootDescriptor) }
+
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace("artifacts/notes.txt")) {
+            _ = try IntegrationWorkspaceWriter.createDirectory("artifacts", in: rootDescriptor, of: "artifacts/notes.txt") {
+                // A guest agent moves a checkout into the name the new directory is about to
+                // take, in the window where no descriptor names it yet.
+                try? FileManager.default.moveItem(at: checkout, to: root.appending(path: "artifacts"))
+            }
+        }
+        let moved = root.appending(path: "artifacts")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: moved.path) == ["README.md"], "nothing was written into the checkout")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).sorted() == ["artifacts", "repos"], "the directory that could not be moved into place was removed")
+    }
+
+    /// Only a directory that is genuinely absent is passed over on the way to a stale entry.
+    /// Anything else would hide a resolution file that survived the regeneration.
+    @Test func aBlockedPathToTheStaleLockfileIsReported() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
+        let blocked = root.appending(path: "\(WorkspaceLayout.integrationWorkspaceName)/xcshareddata")
+        try FileManager.default.createDirectory(at: blocked.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // A file where the directory belongs: the walk cannot go through it, and that is not
+        // the same as the entry simply not being there.
+        try Data("guest".utf8).write(to: blocked)
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace(IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)) {
+            try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project), to: root)
+        }
+    }
+
+    /// Regeneration that reports success while the old resolution file survives would leave it
+    /// pinning dependencies this generation deliberately dropped.
+    @Test func aStaleLockfileThatCannotBeRemovedIsReported() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
+        let resolved = root.appending(path: IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)
+        // A directory the guest left where the file belongs, with something in it: Guesthouse
+        // never deletes a tree it did not create, so this cannot be cleared.
+        try FileManager.default.createDirectory(at: resolved.appending(path: "guest"), withIntermediateDirectories: true)
+        var thrown: GeneratedFileError?
+        do {
+            try IntegrationWorkspaceWriter.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project), to: root)
+            Issue.record("the stale entry was reported as removed")
+        } catch let error as GeneratedFileError {
+            thrown = error
+        }
+        guard case .unwritable(_, let reason)? = thrown else {
+            Issue.record("expected an unwritable failure, got \(String(describing: thrown))")
+            return
+        }
+        let notEmpty = SanitizedText(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTEMPTY)).localizedDescription, limit: 120)
+        #expect(reason == notEmpty, "the reason explains why the entry cannot be removed, not an unrelated errno")
     }
 
     func snapshot(of directory: URL) throws -> [String: Data] {

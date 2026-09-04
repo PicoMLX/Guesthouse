@@ -36,108 +36,6 @@ import Testing
         #expect(!text.contains("-scheme App Scheme"))
     }
 
-    @Test func aLinkedDestinationComponentIsRefused() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "Generated-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let repos = root.appending(path: "repos"); try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
-        try FileManager.default.createSymbolicLink(at: root.appending(path: WorkspaceLayout.integrationWorkspaceName), withDestinationURL: repos)
-        #expect(throws: GeneratedFileError.self) {
-            try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "\(WorkspaceLayout.integrationWorkspaceName)/contents.xcworkspacedata", text: "x")], to: root)
-        }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: repos.path).isEmpty, "nothing was written through the link")
-    }
-
-    @Test func aLinkedWorkspaceRootIsRefused() throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "Base-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: base) }
-        let target = base.appending(path: "repository")
-        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        // A guest agent leaves a link where the workspace root belongs.
-        let root = base.appending(path: "Workspace")
-        try FileManager.default.createSymbolicLink(at: root, withDestinationURL: target)
-        #expect(throws: GeneratedFileError.self) {
-            try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "AGENTS.md", text: "x")], to: root)
-        }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty, "nothing was written through the link")
-    }
-
-    /// The root's own component is opened no-follow, so the container above it is where a link
-    /// would still redirect every generated file.
-    @Test func aLinkedWorkspaceContainerIsRefused() throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "Container-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: base) }
-        let target = base.appending(path: "repository")
-        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        // A guest agent leaves a link where the directory holding the workspaces belongs.
-        let container = base.appending(path: WorkspaceLayout.workspacesDirectory)
-        try FileManager.default.createSymbolicLink(at: container, withDestinationURL: target)
-        #expect(throws: GeneratedFileError.self) {
-            try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "AGENTS.md", text: "x")], to: container.appending(path: "feature-123"))
-        }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty, "nothing was created through the link")
-    }
-
-    /// A workspace whose own file the reader would refuse must not be generated: it could be
-    /// created and then never opened again.
-    @Test func aManifestTooLargeToReadIsRefused() throws {
-        var oversized = manifest()
-        let branch = BranchName("feature/" + String(repeating: "b", count: 200))!
-        oversized.repositories += (0..<200).map { index in
-            WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/PicoMLX/Package\(index)")!, baseBranch: BranchName("main")!, taskBranch: branch)
-        }
-        let error = #expect(throws: WorkspaceValidationError.self) {
-            try IntegrationWorkspaceGenerator.generate(oversized, appProjectLayout: .project)
-        }
-        guard case .manifestTooLarge(let bytes) = error else {
-            Issue.record("the oversized manifest was not refused: \(String(describing: error))")
-            return
-        }
-        #expect(bytes > WorkspaceManifest.maximumEncodedSize)
-        #expect(!(error?.recoveryActions.isEmpty ?? true))
-        // What a workspace of a supportable size generates still reads back.
-        let files = try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project)
-        let json = try #require(files.first { $0.relativePath == WorkspaceLayout.manifestFileName })
-        #expect(json.contents.count <= WorkspaceManifest.maximumEncodedSize)
-        #expect(throws: Never.self) { try IntegrationWorkspaceGenerator.decodeManifest(json.contents) }
-    }
-
-    @Test func anEmbeddedNULNeverReachesAPOSIXCall() throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "NUL-\(UUID().uuidString)")
-        let repos = base.appending(path: "repos")
-        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: base) }
-        // The component is not `repos`, but a C string ends at the NUL and would be.
-        let smuggled = "repos\u{0}ignored/MyApp/file"
-        #expect(throws: GeneratedFileError.invalidPath(smuggled)) { _ = try IntegrationWorkspaceGenerator.components(of: smuggled) }
-        #expect(throws: GeneratedFileError.self) {
-            try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: smuggled, text: "x")], to: base)
-        }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: repos.path).isEmpty, "the repository boundary held")
-    }
-
-    @Test func aWriteGoesToTheCheckedDirectoryEvenAfterItsEntryIsSwappedForALink() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
-        let elsewhere = FileManager.default.temporaryDirectory.appending(path: "elsewhere-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
-        let rootDescriptor = open(root.path, O_RDONLY | O_DIRECTORY)
-        try #require(rootDescriptor >= 0)
-        defer { close(rootDescriptor) }
-        let artifacts = try #require(try IntegrationWorkspaceGenerator.openSubdirectory("artifacts", in: rootDescriptor, creating: true, path: "artifacts/notes.txt"))
-        defer { close(artifacts) }
-
-        // A guest agent moves the directory the generator just checked aside and leaves a link
-        // to a place of its own in the entry, in the window before the bytes are written.
-        try FileManager.default.moveItem(at: root.appending(path: "artifacts"), to: root.appending(path: "moved"))
-        try FileManager.default.createSymbolicLink(at: root.appending(path: "artifacts"), withDestinationURL: elsewhere)
-
-        try IntegrationWorkspaceGenerator.writeAtomically(Data("notes".utf8), named: "notes.txt", in: artifacts, path: "artifacts/notes.txt")
-        #expect(try Data(contentsOf: root.appending(path: "moved/notes.txt")) == Data("notes".utf8))
-        #expect(!FileManager.default.fileExists(atPath: elsewhere.appending(path: "notes.txt").path), "the swapped link never received the file")
-    }
-
     @Test func anAppThatBuildsThroughItsOwnWorkspaceIsRefused() {
         #expect(throws: WorkspaceValidationError.unsupportedAppWorkspace("MyApp.xcworkspace")) {
             try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .existingWorkspace(name: "MyApp.xcworkspace"))
@@ -230,9 +128,7 @@ import Testing
         #expect(throws: WorkspaceValidationError.invalidTimestamp) { try IntegrationWorkspaceGenerator.generate(infinite, appProjectLayout: .project) }
     }
 
-    @Test func writeFailuresAreActionable() throws {
-        let files = try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project)
-        #expect(throws: GeneratedFileError.self) { try IntegrationWorkspaceGenerator.write(files, to: URL(fileURLWithPath: "/dev/null/workspace")) }
+    @Test func writeFailuresAreActionable() {
         for error in [GeneratedFileError.invalidPath("x"), .pathOutsideWorkspace("x"), .unwritable(path: "x", reason: "full")] {
             #expect(!error.userMessage.isEmpty)
             #expect(!error.recoveryActions.isEmpty)
@@ -248,60 +144,5 @@ import Testing
     @Test func invalidManifestsAreRefused() {
         var bad = manifest(); bad.repositories.removeAll { $0.role == .app }
         #expect(throws: WorkspaceValidationError.appRepositoryCount(0)) { try IntegrationWorkspaceGenerator.generate(bad, appProjectLayout: .project) }
-    }
-
-    @Test func writingNeverTouchesTheRepositories() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
-        let project = root.appending(path: "repos/MyApp/MyApp.xcodeproj")
-        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-        let pbxproj = project.appending(path: "project.pbxproj")
-        try Data("original".utf8).write(to: pbxproj)
-        let resolved = root.appending(path: "repos/MyApp/MyApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved")
-        try FileManager.default.createDirectory(at: resolved.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("pins".utf8).write(to: resolved)
-        let before = try snapshot(of: root.appending(path: "repos"))
-
-        let files = try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project, appResolvedPackages: Data(contentsOf: resolved))
-        try IntegrationWorkspaceGenerator.write(files, to: root)
-
-        #expect(try snapshot(of: root.appending(path: "repos")) == before)
-        #expect(FileManager.default.fileExists(atPath: root.appending(path: "Integration.xcworkspace/contents.xcworkspacedata").path))
-        #expect(try Data(contentsOf: root.appending(path: IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)) == Data("pins".utf8))
-        #expect(FileManager.default.fileExists(atPath: root.appending(path: "AGENTS.md").path))
-        #expect(FileManager.default.fileExists(atPath: root.appending(path: "workspace.json").path))
-    }
-
-    @Test func writingRejectsPathsThatEscapeOrEnterRepositories() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root.appending(path: "repos"), withIntermediateDirectories: true)
-        // `repoſ` and `ＲＥＰＯＳ` are `repos` to the file system's case folding, though not to
-        // `lowercased()`, so they would open the repositories the guard is there to protect.
-        for bad in ["./repos/MyApp/file", "repos", "REPOS/MyApp/file", "Repos", "repoſ/MyApp/file", "ＲＥＰＯＳ/MyApp/file", "a/../repos/x", "../outside", "/abs/file", "a//b", ""] {
-            #expect(throws: GeneratedFileError.self, Comment(rawValue: bad)) {
-                try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: bad, text: "x")], to: root)
-            }
-        }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "repos").path).isEmpty)
-        try IntegrationWorkspaceGenerator.write([GeneratedFile(relativePath: "artifacts/notes/readme.txt", text: "ok")], to: root)
-        #expect(FileManager.default.fileExists(atPath: root.appending(path: "artifacts/notes/readme.txt").path))
-    }
-
-    @Test func regenerationWithoutResolvedPackagesRemovesTheStaleCopy() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "workspace-\(UUID().uuidString)")
-        try IntegrationWorkspaceGenerator.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project, appResolvedPackages: Data("pins".utf8)), to: root)
-        let resolved = root.appending(path: IntegrationWorkspaceGenerator.resolvedPackagesRelativePath)
-        #expect(FileManager.default.fileExists(atPath: resolved.path))
-        try IntegrationWorkspaceGenerator.write(try IntegrationWorkspaceGenerator.generate(manifest(), appProjectLayout: .project), to: root)
-        #expect(!FileManager.default.fileExists(atPath: resolved.path))
-        #expect(FileManager.default.fileExists(atPath: root.appending(path: "Integration.xcworkspace/contents.xcworkspacedata").path))
-    }
-
-    func snapshot(of directory: URL) throws -> [String: Data] {
-        var result: [String: Data] = [:]
-        let enumerator = try #require(FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]))
-        for case let url as URL in enumerator where try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
-            result[url.path] = try Data(contentsOf: url)
-        }
-        return result
     }
 }

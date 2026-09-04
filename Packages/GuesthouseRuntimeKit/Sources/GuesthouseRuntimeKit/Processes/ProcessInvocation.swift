@@ -74,20 +74,26 @@ public struct ProcessExit: Hashable, Sendable {
     /// True when output was dropped: the per-run cap was reached, or the consumer fell too
     /// far behind the child.
     public let outputTruncated: Bool
+    /// True when a process this run owned was still itself and refused the signal meant to
+    /// stop it. It may still be running, so whatever it was doing has an unknown outcome
+    /// (MVP-PLAN.md §4) and the caller has to inspect the development Mac rather than repeat
+    /// the operation.
+    public let terminationRefused: Bool
 
-    public init(reason: Reason, timedOut: Bool = false, terminated: Bool = false, standardInputFailed: Bool = false, outputTruncated: Bool = false) {
+    public init(reason: Reason, timedOut: Bool = false, terminated: Bool = false, standardInputFailed: Bool = false, outputTruncated: Bool = false, terminationRefused: Bool = false) {
         self.reason = reason
         self.timedOut = timedOut
         self.terminated = terminated
         self.standardInputFailed = standardInputFailed
         self.outputTruncated = outputTruncated
+        self.terminationRefused = terminationRefused
     }
 
     /// Exit status zero, and nothing interrupted the run: an interrupted mutation that exits
-    /// zero on SIGTERM is not a success.
+    /// zero on SIGTERM is not a success, and neither is one that left a process behind.
     public var succeeded: Bool {
         guard case .status(0) = reason else { return false }
-        return !timedOut && !terminated && !standardInputFailed
+        return !timedOut && !terminated && !standardInputFailed && !terminationRefused
     }
 }
 
