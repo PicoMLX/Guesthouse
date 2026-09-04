@@ -337,6 +337,46 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         #expect(events.count <= 2 * RuntimeClient.consumerBufferLimit + 2)
     }
 
+    @Test func aConsumerThatKeepsUpIsNeverCutOff() async throws {
+        actor Sink {
+            private(set) var logs = 0
+            private(set) var operation: OperationID?
+            func tick() { logs += 1 }
+            func accept(_ id: OperationID) { operation = id }
+        }
+        let transport = FakeTransport(.acceptThenStream([]))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let sink = Sink()
+        let consumer = Task {
+            for try await event in stream {
+                switch event {
+                case .accepted(let id): await sink.accept(id)
+                case .log: await sink.tick()
+                default: break
+                }
+            }
+        }
+        var accepted: OperationID?
+        for _ in 0..<100 where accepted == nil {
+            accepted = await sink.operation
+            if accepted == nil { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        guard let id = accepted else { Issue.record("the operation was never accepted"); return }
+        let incoming = transport.lock.withLock { transport.incoming }
+        let total = RuntimeClient.consumerBufferLimit * 2
+        // Paced like a real operation: the reader is given time to take what was sent, so the
+        // stream's queue never fills. A cap on lifetime traffic would silence the second half.
+        for index in 0..<total {
+            incoming?(.log(id, Redactor().redact(lines: ["line \(index)"])[0]))
+            if index % 32 == 31 { try await Task.sleep(for: .milliseconds(1)) }
+        }
+        incoming?(.completed(id))
+        try await consumer.value
+        let delivered = await sink.logs
+        #expect(delivered > RuntimeClient.consumerBufferLimit, "a consumer that keeps reading is never cut off (\(delivered) of \(total))")
+    }
+
     @Test func aFailedSendDoesNotLeaveAnAbandonedMarker() async throws {
         let transport = FakeTransport(.throwOnSend)
         let client = RuntimeClient(transport: transport)

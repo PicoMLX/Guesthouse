@@ -15,7 +15,18 @@ public struct DiagnosticsExport: Hashable, Sendable {
         public var compatibility: ObservedTuple
         public var environmentIDs: [EnvironmentID]
         public var logLineCount: Int
+        /// The failure the user is reporting when the app could not reach its runtime. On a
+        /// fresh launch there are no environments and no operation logs, so without this the
+        /// bundle would describe nothing at all.
+        public var launchFailure: LaunchFailure?
         public var excludedCategories: [String]
+
+        /// A launch failure as the export records it: what the user was told, in their words.
+        public struct LaunchFailure: Codable, Hashable, Sendable {
+            public var message: String
+            public var recovery: String?
+            public var recoveryActions: [String]
+        }
     }
 
     public static let manifestFileName = "manifest.json"
@@ -57,6 +68,7 @@ public enum DiagnosticsExportBuilder {
         compatibility: ObservedTuple,
         environments: [DevelopmentEnvironment],
         logs: [RedactedLine],
+        launchError: GuesthouseError? = nil,
         exportedAt: Date = Date()
     ) -> DiagnosticsExport {
         let lines = scrubbedStream(logs)
@@ -68,6 +80,13 @@ public enum DiagnosticsExportBuilder {
             compatibility: scrubbed(compatibility),
             environmentIDs: environments.map(\.id),
             logLineCount: lines.count,
+            launchFailure: launchError.map { error in
+                DiagnosticsExport.Manifest.LaunchFailure(
+                    message: scrub(error.userMessage),
+                    recovery: error.recoverySuggestion.map { scrub($0) },
+                    recoveryActions: error.recoveryActions.map { String(describing: $0) }
+                )
+            },
             excludedCategories: excludedCategories
         )
         let excluded = "This export deliberately omits:\n" + excludedCategories.map { "- \($0)" }.joined(separator: "\n") + "\n"
@@ -95,14 +114,17 @@ public enum DiagnosticsExportBuilder {
         // IPv6 first, so an IPv4-mapped address (`::ffff:192.0.2.1`) is taken whole. Trailing
         // punctuation is trimmed before validation: a sentence's period is not part of the
         // address, and leaving it in would let the address through.
-        let withoutIPv6 = text.replacing(#/[0-9A-Fa-f:.]{2,45}/#) { match in
-            let token = String(text[match.range])
-            guard token.contains(":") else { return token }
+        // The candidate must stand on its own: without these boundaries `foo::bar` offers
+        // `::ba`, which is a valid compressed address, and the identifier would be eaten.
+        let withoutIPv6 = text.replacing(#/(^|[^0-9A-Za-z_])([0-9A-Fa-f:.]{2,45})(?![0-9A-Za-z_])/#) { match in
+            let before = String(match.output.1)
+            let token = String(match.output.2)
+            guard token.contains(":") else { return before + token }
             // Only trailing punctuation is trimmed: a leading colon is part of a compressed
             // address (`::1`), while a sentence's period at the end is not.
             let trimmed = Self.trimmingTrailingPunctuation(token)
-            guard !trimmed.isEmpty, isIPv6(trimmed) else { return token }
-            return "[redacted:address]" + token.dropFirst(trimmed.count)
+            guard !trimmed.isEmpty, isIPv6(trimmed) else { return before + token }
+            return before + "[redacted:address]" + token.dropFirst(trimmed.count)
         }
         // Only a real IPv4 literal is an address: a four-part version such as `1.2.3.456` is
         // exactly the information diagnostics exist to keep.
@@ -132,8 +154,13 @@ public enum DiagnosticsExportBuilder {
     /// or "account" become `[redacted:account]`.
     static func scrubIdentities(_ text: String) -> String {
         text.replacing(#/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/#, with: "[redacted:account]")
-            .replacing(#/(?i)\b((?:signed|logged) in (?:to \S+ )?as|account:?|user(?:name)?:?)\s+(?!\[redacted)(\S+)/#) { match in
+            .replacing(#/(?i)\b((?:signed|logged) in (?:to \S+ )?as|account:?|user(?:name)?:?)\s+(?!\[redacted)(?![=:])(\S+)/#) { match in
                 "\(match.output.1) [redacted:account]"
+            }
+            // Structured output writes the same fact without a space: `user=octocat`,
+            // `"account":"alice"`. The label keeps its quoting so the line still parses.
+            .replacing(#/(?i)(["']?\b(?:account|owner|user(?:name)?)["']?\s*[:=]\s*)(["']?)(?!\[redacted)[A-Za-z0-9._%+@-]+(["']?)/#) { match in
+                "\(match.output.1)\(match.output.2)[redacted:account]\(match.output.3)"
             }
             // A home directory names its owner: `/Users/alice/…` is an account name in a path.
             .replacing(#/(/Users/)(?!\[redacted)[^/\s]+/#) { match in

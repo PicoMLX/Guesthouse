@@ -787,9 +787,18 @@ final class AppModel {
     /// describing rather than picking one at random.
     func observations(of environment: EnvironmentID) -> ObservedTuple { statuses[environment]?.observed ?? ObservedTuple() }
 
+    /// Everything the app still holds for one environment: what an earlier operation left
+    /// behind, then what the operation in flight has said. A retry must not hide the failure
+    /// output that explains why it is retrying, so these are joined rather than chosen between.
+    func logs(of environment: EnvironmentID) -> [RedactedLine] {
+        let retained = lastLogs[environment] ?? []
+        let live = operations[environment]?.logs ?? []
+        return Array((retained + live).suffix(OperationState.maximumLogLines))
+    }
+
     var diagnosticsLines: [RedactedLine] {
         environments.flatMap { environment -> [RedactedLine] in
-            let lines = operations[environment.id]?.logs ?? lastLogs[environment.id] ?? []
+            let lines = logs(of: environment.id)
             // Prefixing goes back through the redactor: `RedactedLine` is only ever made there.
             return redactor.redact(lines: lines.map { "\(environment.id.uuid.uuidString) \($0.text)" })
         }
@@ -808,7 +817,10 @@ final class AppModel {
             runtime: runtimeInfo,
             compatibility: compatibility,
             environments: subject.map { [$0] } ?? [],
-            logs: diagnosticsLines
+            logs: diagnosticsLines,
+            // On a launch failure there is nothing else in the bundle: no environments, no
+            // operation output. The error the user is looking at is the report.
+            launchError: unavailableLaunchError
         )
     }
 
@@ -828,7 +840,7 @@ final class AppModel {
                 unknownOutcome: unknownOutcomes[environment.id],
                 statusQueryFailure: statusQueryFailures[environment.id],
                 reconciling: reconciling.contains(environment.id),
-                logs: operations[environment.id]?.logs ?? lastLogs[environment.id] ?? [],
+                logs: logs(of: environment.id),
                 retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
                 retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
@@ -1221,6 +1233,17 @@ final class AppModel {
         case .interrupted(let interruption): .checkFailed(interruption)
         case .checkingEnvironment, .ready: .checkFailed(RuntimeConnectionInterrupted())
         }
+    }
+
+    /// The launch failure the user is looking at, if that is what they are looking at.
+    private var unavailableLaunchError: GuesthouseError? {
+        if case .unavailable(let error) = launchState { return error }
+        return nil
+    }
+
+    private func launchStateError() -> GuesthouseError {
+        if case .unavailable(let error) = launchState { return error }
+        return .operationOutcomeUnknown(OperationID())
     }
 
     /// Stop targets come from reconciled state, never from what was cached before the sheet:

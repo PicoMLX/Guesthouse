@@ -1206,7 +1206,8 @@ import Testing
 
     @Test func tartOutputDuringAnOperationReachesItsEventStream() async throws {
         let runner = tartLikeRunner()
-        await runner.set("run", .init(stdout: ["Booting virtual machine", "token=abcdef0123456789abcdef0123456789"], exit: ProcessExit(reason: .status(1))))
+        let tail = (0..<40).map { "line \($0)" }
+        await runner.set("run", .init(stdout: ["Booting virtual machine", "token=abcdef0123456789abcdef0123456789"] + tail, exit: ProcessExit(reason: .status(1))))
         let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
         try await lifecycle.prepare()
         let events = EventCollector()
@@ -1215,7 +1216,9 @@ import Testing
         let logs = seen.compactMap { event -> (OperationID?, RedactedLine)? in if case .log(let id, let line) = event { return (id, line) } else { return nil } }
         #expect(logs.contains { $0.1.text == "Booting virtual machine" }, "Tart's lines are forwarded as log events")
         #expect(logs.allSatisfy { $0.0 == start })
-        #expect(!logs.contains { $0.1.text.contains("abcdef0123456789") }, "forwarded lines are the redacted ones")    }
+        #expect(!logs.contains { $0.1.text.contains("abcdef0123456789") }, "forwarded lines are the redacted ones")
+        #expect(logs.contains { $0.1.text == "line 39" }, "the last lines written before the exit are forwarded, not lost with the sink")
+    }
 
     @Test func unknownEnvironmentIsRefused() async throws {
         let (lifecycle, _, _) = try await makeLifecycle(runner: tartLikeRunner())

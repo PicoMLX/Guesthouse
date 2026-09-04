@@ -56,7 +56,9 @@ import Testing
         let redactor = Redactor()
         let lines = redactor.redact(lines: ["password:", "  hunter2", "next line"])
         let scrubbed = DiagnosticsExportBuilder.scrubbedStream(lines)
-        #expect(scrubbed[1].contains("[redacted:credential]"))
+        // The redactor's own streaming state now catches this first, so the marker may be its
+        // `secret` rather than the export's `credential`. What matters is that the value is gone.
+        #expect(scrubbed[1].contains("[redacted:"))
         #expect(!scrubbed[1].contains("hunter2"))
         #expect(scrubbed[2] == "next line")
     }
@@ -75,5 +77,30 @@ import Testing
         #expect(DiagnosticsExportBuilder.scrub("user: octocat (admin)") == "user: [redacted:account] (admin)")
         #expect(DiagnosticsExportBuilder.scrub("Contact ops@example.org for help") == "Contact [redacted:account] for help")
         #expect(DiagnosticsExportBuilder.scrub("Xcode 26.6 selected") == "Xcode 26.6 selected")
+    }
+    @Test func qualifiedNamesAreNotMistakenForAddresses() {
+        #expect(DiagnosticsExportBuilder.scrub("foo::bar failed to build") == "foo::bar failed to build")
+        #expect(DiagnosticsExportBuilder.scrub("std::vector<int>::size") == "std::vector<int>::size")
+        #expect(DiagnosticsExportBuilder.scrub("guest at 2001:db8::1 answered") == "guest at [redacted:address] answered")
+    }
+
+    @Test func equalsDelimitedAndQuotedAccountFieldsAreScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("user=octocat") == "user=[redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("account = alice") == "account = [redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("{\"user\":\"alice\"}") == "{\"user\":\"[redacted:account]\"}")
+        #expect(DiagnosticsExportBuilder.scrub("owner=alice@example.com") == "owner=[redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("timeout=30") == "timeout=30", "only account labels are scrubbed")
+    }
+
+    @Test func theLaunchFailureTheUserIsReportingIsInTheManifest() {
+        let error = GuesthouseError.runtimeMissing
+        let export = DiagnosticsExportBuilder.build(
+            appVersion: "1", appBuild: "1", runtime: nil, compatibility: ObservedTuple(),
+            environments: [], logs: [], launchError: error
+        )
+        let failure = export.manifest.launchFailure
+        #expect(failure?.message == error.userMessage)
+        #expect(failure?.recoveryActions.isEmpty == false, "the export names what the user was offered")
+        #expect(String(decoding: DiagnosticsExportBuilder.encode(export.manifest), as: UTF8.self).contains("launchFailure"))
     }
 }

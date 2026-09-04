@@ -63,6 +63,11 @@ public actor EnvironmentLifecycle {
     /// the operation's own event stream, as `log` events. Between operations nobody listens
     /// and the lines are dropped, never buffered.
     private var outputSinks: [EnvironmentID: (operation: OperationID, events: EventSink)] = [:]
+    /// The task forwarding each supervised process's output, so a failure can wait for the
+    /// tail of that output before the sink goes away, and the environments whose output has
+    /// not run out yet.
+    private var drains: [EnvironmentID: Task<Void, Never>] = [:]
+    private var draining: Set<EnvironmentID> = []
 
     public init(dependencies: Dependencies) {
         deps = dependencies
@@ -648,6 +653,7 @@ public actor EnvironmentLifecycle {
                     }
                 }
             }
+            await settleOutput(of: id)
             if let failure = await release(id) {
                 throw GuesthouseError.runtimeStateUnavailable(reason: SanitizedText(Self.describe(failure), limit: 200))
             }
@@ -862,10 +868,29 @@ public actor EnvironmentLifecycle {
     /// diagnostics see what Tart said; otherwise the stream is consumed so the bounded buffer
     /// never fills.
     private func drainOutput(of run: ProcessRun, environment id: EnvironmentID) {
-        Task { [weak self] in
+        draining.insert(id)
+        drains[id] = Task { [weak self] in
             for await output in run.output {
                 await self?.forward(output, from: id)
             }
+            await self?.finishedDraining(id)
+        }
+    }
+
+    private func finishedDraining(_ id: EnvironmentID) {
+        draining.remove(id)
+    }
+
+    /// Waits, briefly, for output already read from the process to reach the operation's
+    /// stream. A process that exits after writing its last lines resumes the exit waiters
+    /// before this task has forwarded them, and those lines are exactly the ones that explain
+    /// the failure. The wait is bounded: a pipe an inherited child still holds open must not
+    /// keep the operation from finishing.
+    private func settleOutput(of id: EnvironmentID, within limit: Duration = .milliseconds(500)) async {
+        guard draining.contains(id) else { return }
+        let deadline = ContinuousClock.now.advanced(by: limit)
+        while draining.contains(id), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
         }
     }
 
@@ -921,6 +946,8 @@ public actor EnvironmentLifecycle {
         if let live = supervised.removeValue(forKey: id) {
             live.token.end()
         }
+        drains.removeValue(forKey: id)
+        draining.remove(id)
         verdicts[id] = failure == nil ? nil : .uncertain(.identityNotForgotten)
         return failure
     }
@@ -928,6 +955,7 @@ public actor EnvironmentLifecycle {
     /// Journals the failure under the operation's own kind (the journal refuses a record whose
     /// kind differs from its `started` record), then reports it.
     private func fail(_ operation: OperationID, kind: JournalOperation, environment: EnvironmentID, with error: GuesthouseError, events: EventSink) async {
+        await settleOutput(of: environment)
         do {
             try await deps.store.append(JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .failed(error)))
             // A recorded outcome that is itself unknown settles nothing: the environment stays
