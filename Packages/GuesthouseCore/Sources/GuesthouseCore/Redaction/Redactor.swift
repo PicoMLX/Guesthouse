@@ -17,8 +17,12 @@ public struct Redactor: Sendable {
         var pemLabel: String?
         /// The previous line was a bare `Authorization:` label; the value follows on this line.
         var expectingAuthorizationValue = false
+        /// The previous line was a bare `password:`-style label; the value follows on this line.
+        var expectingSecretValue = false
         /// The previous line mentioned a code but carried none; the value may follow.
         var expectingDeviceCode = false
+        /// A terminal control string opened on an earlier line and has not been terminated yet.
+        var inControlString = false
 
         public init() {}
     }
@@ -27,26 +31,27 @@ public struct Redactor: Sendable {
 
     /// Redacts a complete text that may contain multiple lines.
     public func redact(_ text: String) -> String {
-        var state = StreamState()
-        return text
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { redact(line: String($0), state: &state).text }
-            .joined(separator: "\n")
+        redact(text, codesAlwaysRedacted: false)
+    }
+
+    /// Redacts text that reached the app from somewhere else — decoded from JSON, received over
+    /// XPC — where the surrounding context that makes a bare device code recognizable is gone.
+    /// Device codes are therefore removed unconditionally, as in `redact(fieldValue:)`.
+    public func redact(untrusted text: String) -> String {
+        redact(text, codesAlwaysRedacted: true)
     }
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     public func redact(line: String, state: inout StreamState) -> RedactedLine {
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token.
-        var text = Self.stripTerminalEscapes(line)
+        var text = Self.stripTerminalEscapes(line, inControlString: &state.inControlString)
 
-        if state.expectingAuthorizationValue {
-            state.expectingAuthorizationValue = false
-            // Any indented continuation is the folded value, however many parameters it has.
-            if text.wholeMatch(of: Self.patterns.foldedContinuation) != nil {
-                return RedactedLine(Self.marker("authorization"))
-            }
-        }
+        // A folded value runs over every consecutive indented line, so the state stays armed
+        // until a line arrives that is not a continuation.
+        let authorizationContinuation = state.expectingAuthorizationValue
+            && text.wholeMatch(of: Self.patterns.foldedContinuation) != nil
+        state.expectingAuthorizationValue = authorizationContinuation
         if text.wholeMatch(of: Self.patterns.authorizationLabelOnly) != nil {
             state.expectingAuthorizationValue = true
             return RedactedLine("Authorization: \(Self.marker("authorization"))")
@@ -72,12 +77,24 @@ public struct Redactor: Sendable {
             }
         }
 
+        // The continuation's own text is all credential, but a PEM block it opens keeps running
+        // over the lines that follow, so the block is detected above before the marker returns.
+        if authorizationContinuation {
+            return RedactedLine(Self.marker("authorization"))
+        }
+
         // A blank line carries nothing and keeps the device-code context for the next one.
         if text.allSatisfy(\.isWhitespace) {
             return RedactedLine(text)
         }
         let codeExpected = state.expectingDeviceCode
         state.expectingDeviceCode = false
+        // The previous line was a label with no value, so this line is the value itself and its
+        // shape is unknown.
+        if state.expectingSecretValue {
+            state.expectingSecretValue = false
+            return RedactedLine(Self.marker("secret"))
+        }
         // A header whose value may continue on an indented line keeps the continuation state.
         if text.contains(Self.patterns.authorizationLabel) {
             state.expectingAuthorizationValue = true
@@ -89,9 +106,7 @@ public struct Redactor: Sendable {
     /// component name) rather than a log line. Context is absent, so the device-code pattern
     /// applies unconditionally instead of only on lines that mention a code.
     public func redact(fieldValue: String) -> String {
-        var state = StreamState()
-        let line = redact(line: fieldValue, state: &state).text
-        return Self.applyDeviceCodePattern(to: line)
+        redact(untrusted: fieldValue)
     }
 
     /// Convenience for a batch of lines from one stream.
@@ -100,11 +115,45 @@ public struct Redactor: Sendable {
         return lines.map { redact(line: $0, state: &state) }
     }
 
+    private func redact(_ text: String, codesAlwaysRedacted: Bool) -> String {
+        var state = StreamState()
+        var result = ""
+        var lineStart = text.startIndex
+        func appendRedacted(_ line: Substring) {
+            let redacted = redact(line: String(line), state: &state).text
+            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted) : redacted
+        }
+        // `\r\n` is one `Character`, so splitting on the newline character would leave a CRLF
+        // stream as a single line and never apply the streaming rules to it. Each terminator is
+        // put back exactly as it came in.
+        for separator in text.matches(of: Self.patterns.lineSeparator) {
+            appendRedacted(text[lineStart..<separator.range.lowerBound])
+            result += separator.0
+            lineStart = separator.range.upperBound
+        }
+        appendRedacted(text[lineStart...])
+        return result
+    }
+
     /// Removes terminal control sequences: CSI in both encodings, OSC/DCS/APC/PM/SOS strings
-    /// with their payloads, two-byte escapes, and bare C1 controls. Applied before any secret
-    /// pattern so styling can never split a token or sit on a word boundary.
+    /// with their payloads, escape sequences with or without intermediate bytes, and bare C1
+    /// controls. Applied before any secret pattern so styling can never split a token or sit on
+    /// a word boundary.
     public static func stripTerminalEscapes(_ text: String) -> String {
         text.replacing(patterns.terminalEscape, with: "")
+    }
+
+    /// The same, for one line of a stream: a control string may open on one line and terminate
+    /// on a later one, and everything in between is its payload, not text to scan. Dropping that
+    /// payload here also keeps the terminator from joining the words on either side of it.
+    static func stripTerminalEscapes(_ line: String, inControlString: inout Bool) -> String {
+        var text = line
+        if inControlString {
+            guard let terminator = text.firstMatch(of: patterns.controlStringEnd) else { return "" }
+            text = String(text[terminator.range.upperBound...])
+        }
+        inControlString = text.contains(patterns.unterminatedControlString)
+        return stripTerminalEscapes(text)
     }
 
     // MARK: - Rules
@@ -114,20 +163,28 @@ public struct Redactor: Sendable {
     /// Compiled patterns. `Regex` is an immutable value type but is not declared `Sendable`,
     /// so this container vouches for it: nothing here is ever mutated after initialization.
     private struct Patterns: @unchecked Sendable {
+        /// Any of the three line terminators, CRLF first so it is never split in half.
+        let lineSeparator = #/\r\n|\n|\r/#
         /// Control strings (OSC, DCS, APC, PM, SOS) up to BEL, ST, or the end of the line; CSI
-        /// introduced by `ESC [` or U+009B; other two-byte escapes; and bare C1 controls.
-        let terminalEscape = #/\u{1B}[\]P_^X][^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}][^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[@-Z\\-_]|[\u{80}-\u{9F}]/#
+        /// introduced by `ESC [` or U+009B; any other escape sequence, including the ones with
+        /// intermediate bytes such as `ESC ( B`; and bare C1 controls.
+        let terminalEscape = #/\u{1B}[\]P_^X][^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}][^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[ -\/]*[0-~]|[\u{80}-\u{9F}]/#
+        /// A control string introducer whose payload reaches the end of the line unterminated.
+        let unterminatedControlString = #/(?:\u{1B}[\]P_^X]|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}])[^\u{07}\u{9C}\u{1B}]*$/#
+        /// The three ways a control string ends: BEL, C1 ST, or the two-byte ST.
+        let controlStringEnd = #/\u{07}|\u{9C}|\u{1B}\\/#
         /// A folded header: the label alone on a line, value on the next.
-        let authorizationLabelOnly = #/\s*"?authorization"?\s*:\s*/#.ignoresCase()
+        let authorizationLabelOnly = #/\s*(?:\\?["'])?authorization(?:\\?["'])?\s*:\s*/#.ignoresCase()
         /// Any authorization label, for lines whose value may continue on the next line.
-        let authorizationLabel = #/\bauthorization\b"?\s*[:=]/#.ignoresCase()
+        let authorizationLabel = #/\bauthorization\b(?:\\?["'])?\s*[:=]/#.ignoresCase()
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
         let pemBegin = #/-----BEGIN ([A-Z0-9 ]+)-----/#
         /// The whole header value, quoted or to the end of the line, so multi-parameter schemes
-        /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted, as in JSON.
-        let authorizationHeader = #/"?\bauthorization\b"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
+        /// Python dictionary, or a JSON string embedded in a log line quotes it.
+        let authorizationHeader = #/(?:\\?["'])?\bauthorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length.
         let bearer = #/\bbearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()
         /// Classic and fine-grained GitHub tokens.
@@ -142,6 +199,12 @@ public struct Redactor: Sendable {
         let urlUserInfo = #/(:\/\/)[^\s\/]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`.
         let labeledSecret = #/"?\b(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
+        /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
+        /// the value on the next line.
+        let secretLabelOnly = #/"?\b(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*$/#.ignoresCase()
+        /// The explicit code fields of an OAuth device flow. Their values are opaque and their
+        /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one.
+        let codeField = #/(?:\\?["'])?\b((?:user|device)[_-]code)\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D`, only on lines that mention a code (including the
         /// `user_code` and `device_code` field names of OAuth device flows), and never when the
         /// match is part of a longer hyphenated identifier such as a UUID.
@@ -161,6 +224,13 @@ public struct Redactor: Sendable {
         text = text.replacing(p.jwt) { match in isJOSEHeader(match.1) ? marker("jwt") : String(match.0) }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
         text = text.replacing(p.labeledSecret) { match in "\(match.1): \(marker("secret"))" }
+        text = text.replacing(p.codeField) { match in "\(match.1): \(marker("device-code"))" }
+        var labelAwaitsValue = false
+        text = text.replacing(p.secretLabelOnly) { match in
+            labelAwaitsValue = true
+            return "\(match.1): \(marker("secret"))"
+        }
+        state.expectingSecretValue = labelAwaitsValue
         let mentionsCode = text.contains(p.mentionsCode)
         if mentionsCode || codeExpected {
             let before = text

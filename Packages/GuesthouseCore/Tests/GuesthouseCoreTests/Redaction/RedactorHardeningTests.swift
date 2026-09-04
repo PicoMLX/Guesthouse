@@ -41,8 +41,13 @@ import Testing
     }
 
     @Test func underscoredCodeFieldsAreRecognized() {
-        #expect(redactor.redact(#"{"user_code":"AB12-CD34"}"#) == #"{"user_code":"[redacted:device-code]"}"#)
-        #expect(redactor.redact("device_code=AB12-CD34") == "device_code=[redacted:device-code]")
+        #expect(redactor.redact(#"{"user_code":"AB12-CD34"}"#) == "{user_code: [redacted:device-code]}")
+        #expect(redactor.redact("device_code=AB12-CD34") == "device_code: [redacted:device-code]")
+    }
+
+    @Test func codeFieldsOfAnyShapeAreRemoved() {
+        #expect(redactor.redact(#"{"device_code":"a1b2c3d4e5f6g7h8"}"#) == "{device_code: [redacted:device-code]}")
+        #expect(redactor.redact("user_code: WDJB.MJHT") == "user_code: [redacted:device-code]")
     }
 
     @Test func deviceCodeContextCarriesToTheNextLine() {
@@ -92,5 +97,70 @@ import Testing
     @Test func decodedRedactedLinesAreRedactedAgain() throws {
         let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""password: hunter2""#.utf8))
         #expect(line.text == "password: [redacted:secret]")
+    }
+
+    @Test func everyContinuationLineOfAFoldedHeaderIsRemoved() {
+        let lines = [
+            "Authorization: Digest username=\"u\",",
+            "  realm=\"r\", nonce=\"n\",",
+            "  response=\"abc123\"",
+            "Accept: */*",
+        ]
+        let out = redactor.redact(lines: lines).map(\.text)
+        #expect(out == [
+            "Authorization: [redacted:authorization]",
+            "[redacted:authorization]",
+            "[redacted:authorization]",
+            "Accept: */*",
+        ])
+    }
+
+    @Test func aPEMBlockOpenedByAContinuationLineKeepsRedacting() {
+        let lines = [
+            "\"Authorization\":",
+            "  -----BEGIN PRIVATE KEY-----",
+            "MIIEfakekeymaterial",
+            "-----END PRIVATE KEY-----",
+            "after",
+        ]
+        let out = redactor.redact(lines: lines).map(\.text)
+        #expect(!out.joined().contains("fakekeymaterial"))
+        #expect(out[2] == "[redacted:private-key]")
+        #expect(out[3] == "[redacted:private-key]")
+        #expect(out.last == "after")
+    }
+
+    @Test func crlfTextIsSplitIntoLines() {
+        let text = "Authorization: Digest username=\"u\",\r\n  nonce=\"n\", response=\"abc123\"\r\nAccept: */*"
+        let out = redactor.redact(text)
+        #expect(!out.contains("abc123"))
+        #expect(out == "Authorization: [redacted:authorization]\r\n[redacted:authorization]\r\nAccept: */*")
+    }
+
+    @Test func aBareSecretLabelRedactsTheValueOnTheNextLine() {
+        #expect(redactor.redact("password:\ncorrect horse battery") == "password: [redacted:secret]\n[redacted:secret]")
+        let json = redactor.redact("{\n  \"token\":\n    \"opaqueCredential\"\n}")
+        #expect(!json.contains("opaqueCredential"))
+        #expect(redactor.redact("token=abc123\nnext line") == "token: [redacted:secret]\nnext line")
+    }
+
+    @Test func aControlStringSpanningLinesKeepsItsPayloadSuppressed() {
+        let out = redactor.redact(lines: ["\u{1B}]0;my", "title\u{1B}\\\(token)"]).map(\.text)
+        #expect(!out.joined().contains(token))
+        #expect(out == ["", "[redacted:github-token]"])
+    }
+
+    @Test func escapesWithIntermediateBytesAreStripped() {
+        #expect(redactor.redact("\u{1B}(B\(token)") == "[redacted:github-token]")
+    }
+
+    @Test func escapedAndSingleQuotedAuthorizationKeysAreRecognized() {
+        #expect(!redactor.redact(#"payload={\"Authorization\":\"Basic dXNlcjpwYXNz\"}"#).contains("dXNlcjpwYXNz"))
+        #expect(redactor.redact("{'Authorization': 'Basic dXNlcjpwYXNz'}") == "{Authorization: [redacted:authorization]}")
+    }
+
+    @Test func decodingRemovesBareDeviceCodes() throws {
+        let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""AB12-CD34""#.utf8))
+        #expect(line.text == "[redacted:device-code]")
     }
 }
