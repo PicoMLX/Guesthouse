@@ -6,7 +6,7 @@ Tracking issue: [#82](https://github.com/PicoMLX/Guesthouse/issues/82)
 
 Candidate: official Lume `0.5.3` (`lume-v0.5.3`)
 
-This is a provider preflight for #82, not one of the Phase-0 gate records registered in `docs/phase0/README.md`. `MVP-PLAN.md` still selects Tart. Record this preflight's human observation on #82; do not create a `docs/phase0` record unless an accepted ADR selects Lume and a separate change updates the plan, gate issues, registry, and template. Source review, CLI help, and unit tests do not pass a named Phase-0 gate.
+This is a provider preflight for #82, not one of the Phase-0 gate records registered in `docs/phase0/README.md`. [MVP-PLAN.md §1, “Initial scope”](../../MVP-PLAN.md#initial-scope) still selects the official Tart application, and [§10, “Phase 0: Prove the complete path”](../../MVP-PLAN.md#phase-0-prove-the-complete-path) governs which hardware experiments become gate records. Record this preflight's human observation on #82; do not create a `docs/phase0` record unless an accepted ADR selects Lume and a separate change updates the plan, gate issues, registry, and template. Source review, CLI help, and unit tests do not pass a named Phase-0 gate.
 
 ## What the automated spike implements
 
@@ -53,24 +53,39 @@ If the independent signature preflight fails, stop here and post a failed provid
 
 1. In the Finder-launched Debug build, choose **Debug → Runtime Version**.
 2. Confirm the service replies immediately with either `checking` or a completed result. After discovery finishes, request it again and confirm it reports Lume `0.5.3`, `verified`, and VNC disable `unavailable`—without relaunching the app or runtime service.
-3. Quit Guesthouse and confirm its embedded runtime service exits before each remove/corrupt/restore mutation, then relaunch the signed app for a fresh discovery. Confirm missing/damaged states are actionable and no rejected executable runs.
+3. Quit Guesthouse and confirm its embedded runtime service exits before each remove/corrupt/restore mutation, then relaunch the signed app for a fresh discovery. Confirm missing/damaged states report the error and its declared recovery choices, and that no rejected executable runs. These choices are diagnostic text in this revision, not wired buttons; do not claim the repair action itself was tested.
 4. Confirm all probe writes stay below Guesthouse's private `state/lume-xdg` and `staging` directories. Record startup/probe duration and whether the UI or XPC connection times out.
 
-### B. Disposable unattended guest
+### B–D. Deferred lifecycle acceptance checklist
 
-1. Only if signature preflight passes, use a controlled developer diagnostic to create one fresh Tahoe guest with `--unattended` and an explicit Guesthouse-private `--storage` path. The app does not expose creation in this PR. Do not use a shared directory.
+Stop after section A in this revision. This checkout has no approved operation that creates, starts, attaches to, stops, or deletes a Lume VM. Do not invoke Lume directly, improvise a shell script, or repurpose the non-mutating capability probe: each would bypass the verified, named-operation boundary required by [MVP-PLAN.md §3, “Sandbox and XPC boundary”](../../MVP-PLAN.md#sandbox-and-xpc-boundary). Sections B–D are acceptance criteria for a later hardware-enabled change, not runnable instructions.
+
+Before running this checklist, a separate reviewed PR must add a named, bounded RuntimeKit-backed lifecycle diagnostic, its typed XPC operation, and a signed Debug-menu operator surface. That diagnostic must:
+
+- accept only a validated environment ID and a user-selected IPSW access grant; the service chooses the pinned executable, VM name, storage path, environment, working directory, and fixed argument arrays;
+- repeat managed-path and full bundle verification immediately before every launch, and hold `LumeRuntimeCoordinator`'s exclusive lease across each lifecycle transition;
+- pass the private VM store explicitly to every applicable command, disable telemetry/update checks, set a private detached log path, forbid host shares, and inherit neither `HOME` nor `PATH`;
+- bound runtime and output, redact all output before it crosses XPC, journal mutations, and reconcile an interrupted or timed-out operation before permitting another mutation;
+- expose attach and graceful-stop as separate named operations, never use Lume's password-bearing convenience shutdown, and require explicit confirmation before the known stopped disposable VM can be deleted; and
+- have unit tests proving the exact executable, arguments, environment, paths, timeouts, output limits, cancellation behavior, and refusal of unsafe storage or a changed bundle.
+
+Do not begin the lifecycle run merely because a developer can construct equivalent command-line arguments. Until that diagnostic lands and the published Lume artifact passes the signature preflight, this revision cannot pass the candidate decision below.
+
+#### B. Disposable unattended guest
+
+1. Only if signature preflight passes, use the approved lifecycle diagnostic to create one fresh Tahoe guest unattended in the explicit Guesthouse-private VM store. Do not use a shared directory.
 2. Record first-boot duration, disk growth, peak memory, console interventions, and every path written outside the approved runtime tree.
 3. Before enabling any provider login, change the account name/password and disable autologin as the product design requires. From a separate pinned OpenSSH connection, prove the original `lume`/`lume` login no longer works after a cold boot. If it still works, mark the provider preflight failed.
 
-### C. Storage and lifecycle
+#### C. Storage and lifecycle
 
-1. Exercise `create`, `get`, `ls`, detached `run`, `attach`, `stop`, and `delete` with the explicit private storage path. Confirm no default Lume VM store is read or changed.
-2. Start detached with display `none` and an explicit private `--log-file`. Close the initiating terminal/window; verify a build in the guest continues.
+1. Exercise the diagnostic's named create, inspect, inventory, detached-run, attach, stop, and confirmed-delete operations. Confirm their fixed invocations all use the explicit private storage path and no default Lume VM store is read or changed.
+2. Start detached with display `none` and an explicit private log path. Close the initiating Guesthouse window without quitting the app; verify a build in the guest continues.
 3. Attach the native display, close it, and attach again. Viewer close must not stop the guest or its build. Record what happens when Guesthouse quits and when it is force-quit; do not infer ownership from a surviving PID alone.
 4. Perform a graceful guest shutdown over separately host-key-pinned OpenSSH, then use Lume only to observe/finish lifecycle state. Test forced stop separately and check disk integrity after boot.
 5. Put the host to sleep during a build. On wake, reconcile process identity, VM state, networking, SSH host key, build outcome, and attach behavior before starting anything new.
 
-### D. VNC containment
+#### D. VNC containment
 
 1. While the guest runs with display `none`, record every listening socket, interface, and owning process created by Lume.
 2. Confirm whether VNC is reachable from another host and another local account. Treat any nonessential exposure as a failed provider preflight, not a documentation follow-up.
@@ -78,6 +93,8 @@ If the independent signature preflight fails, stop here and post a failed provid
 4. Confirm diagnostic export excludes raw Lume logs/session data. If 0.5.3 cannot contain the always-on VNC surface and its credentials acceptably, record a no-go or require a newer pinned release before integration.
 
 ## Decision
+
+This revision can record only the signed XPC observation in section A. It cannot pass the full candidate decision while sections B–D lack the approved diagnostic or while the pinned official artifact fails strict signature validation.
 
 Pass this candidate only when the signed XPC path works, all lifecycle commands honor private storage, detach/reattach and sleep recovery are reproducible, initial credentials are eliminated before secrets arrive, and VNC exposure/secret storage meet the threat model. Otherwise record the precise failure and choose one of: pin a fixed Lume release, carry a narrowly reviewed upstream fix, return to Tart, or build the required Virtualization.framework slice directly.
 
