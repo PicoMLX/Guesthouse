@@ -98,6 +98,35 @@ import Testing
         #expect(error?.recoveryMessage.isEmpty == false)
     }
 
+    @Test func theInventoryCarriesItsFormatVersion() throws {
+        let data = try JSONEncoder().encode(VMSlotInventory())
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["schemaVersion"] != nil, "a persisted record says which format it is in")
+        let newer = Data("{\"schemaVersion\":99,\"slots\":[]}".utf8)
+        let error = #expect(throws: VMSlotError.self) { try JSONDecoder().decode(VMSlotInventory.self, from: newer) }
+        #expect(error == .corruptInventory(reason: .unsupportedSchemaVersion(99)))
+    }
+
+    @Test func aPresetNeedsPositiveResources() throws {
+        #expect(ResourcePreset(name: "x", memoryBytes: 0, cpuCount: 4, diskBytes: 1, verification: .planBaseline) == nil)
+        #expect(ResourcePreset(name: "x", memoryBytes: 1, cpuCount: 0, diskBytes: 1, verification: .planBaseline) == nil)
+        #expect(ResourcePreset(name: "", memoryBytes: 1, cpuCount: 1, diskBytes: 1, verification: .planBaseline) == nil)
+        #expect(ResourcePreset(name: "x", memoryBytes: 1, cpuCount: 1, diskBytes: 1, verification: .planBaseline) != nil)
+        let bad = Data(#"{"name":"x","memoryBytes":0,"cpuCount":4,"diskBytes":1,"verification":"planBaseline"}"#.utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ResourcePreset.self, from: bad) }
+    }
+
+    @Test func anUnreadableEnvironmentRecordIsActionable() throws {
+        #expect(throws: EnvironmentRecordError.malformed) { try DevelopmentEnvironment.decode(Data("nope".utf8)) }
+        let environment = DevelopmentEnvironment(name: "Dev Mac")
+        let data = try JSONEncoder().encode(environment)
+        #expect(try DevelopmentEnvironment.decode(data) == environment)
+        for error in [EnvironmentRecordError.malformed, .unsupportedSchemaVersion(9)] {
+            #expect(!error.userMessage.isEmpty)
+            #expect(!error.recoveryMessage.isEmpty)
+        }
+    }
+
     @Test func structuralDecodeFailuresAreAlsoActionable() {
         for json in ["{}", "{\"slots\":3}", "{\"slots\":[{\"environmentID\":\"not-a-uuid\"}]}"] {
             let error = #expect(throws: VMSlotError.self, "\(json)") {

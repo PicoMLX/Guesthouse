@@ -84,6 +84,8 @@ public enum VMSlotError: Error, Hashable, Sendable {
         /// The file is not a slot inventory at all: a missing or mistyped field, an invalid
         /// identifier, or an unknown slot state.
         case malformed
+        /// The record was written by a newer Guesthouse.
+        case unsupportedSchemaVersion(Int)
     }
 }
 
@@ -101,6 +103,8 @@ extension VMSlotError: LocalizedError {
             "Guesthouse's record of development Macs lists the same one twice, so it cannot be used as it is."
         case .corruptInventory(.malformed):
             "Guesthouse's record of development Macs could not be read."
+        case .corruptInventory(.unsupportedSchemaVersion(let version)):
+            "Guesthouse's record of development Macs was written by a newer version (format \(version)). Update Guesthouse to open it."
         }
     }
 
@@ -123,7 +127,7 @@ extension VMSlotError: LocalizedError {
 
 extension VMSlotInventory: Codable {
     private enum CodingKeys: String, CodingKey {
-        case slots
+        case schemaVersion, slots
     }
 
     public init(from decoder: any Decoder) throws {
@@ -132,7 +136,15 @@ extension VMSlotInventory: Codable {
         let decoded: [Slot]
         do {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            // The record says which format it is in, so a later change can migrate rather
+            // than guess. An unknown (newer) version is refused, never reinterpreted.
+            let version = try container.decodeIfPresent(SchemaVersion.self, forKey: .schemaVersion) ?? .current
+            guard version <= .current else {
+                throw VMSlotError.corruptInventory(reason: .unsupportedSchemaVersion(version.rawValue))
+            }
             decoded = try container.decode([Slot].self, forKey: .slots)
+        } catch let error as VMSlotError {
+            throw error
         } catch {
             throw VMSlotError.corruptInventory(reason: .malformed)
         }
@@ -149,6 +161,7 @@ extension VMSlotInventory: Codable {
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(SchemaVersion.current, forKey: .schemaVersion)
         try container.encode(slots, forKey: .slots)
     }
 }
