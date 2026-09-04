@@ -46,6 +46,25 @@ import Testing
         #expect(throws: RuntimeStorageError.self) { try RuntimeStorage.hasAccessControlEntries(root.appending(path: "missing")) }
     }
 
+    @Test func aWorldWritableContainingFolderIsRefused() throws {
+        // A 0700 directory is only as private as what is above it: an ancestor anyone can
+        // write to can be renamed away and replaced, and everything written afterwards would
+        // land in the replacement.
+        let open = root.appending(path: "open")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: open, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o777])
+        let inside = open.appending(path: "storage")
+        let error = #expect(throws: RuntimeStorageError.self) { _ = try RuntimeStorage(root: inside) }
+        if case .insecureDirectory(_, let reason)? = error {
+            #expect(reason.contains("other users"))
+        } else {
+            Issue.record("expected an insecure-directory refusal, got \(String(describing: error))")
+        }
+        // The same folder with the sticky bit is the rule that makes /tmp safe, and is allowed.
+        try FileManager.default.setAttributes([.posixPermissions: 0o1777], ofItemAtPath: open.path)
+        #expect(throws: Never.self) { _ = try RuntimeStorage(root: open.appending(path: "sticky")) }
+    }
+
     @Test func errorsAreActionable() {
         let insecure = RuntimeStorageError.insecureDirectory(path: "/x", reason: "symbolic link")
         let unwritable = RuntimeStorageError.unwritable(

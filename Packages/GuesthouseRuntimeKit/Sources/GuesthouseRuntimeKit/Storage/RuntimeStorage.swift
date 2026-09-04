@@ -191,6 +191,40 @@ public struct RuntimeStorage: Sendable {
         guard info.st_uid == getuid() else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "owned by another user")
         }
+        try verifyAncestors(of: url)
+    }
+
+    /// A `0700` directory is only as private as the directories above it: another local
+    /// account that can write to an ancestor can rename this one away and put its own
+    /// directory in its place, and everything written afterwards would go there. Every
+    /// ancestor up to the root must therefore be owned by this user or by root, and must not
+    /// be writable by anyone else unless it is sticky (the rule that makes `/tmp` safe).
+    static func verifyAncestors(of url: URL) throws {
+        var candidate = (url.standardizedFileURL.path as NSString).deletingLastPathComponent
+        while !candidate.isEmpty {
+            var info = stat()
+            guard lstat(candidate, &info) == 0 else {
+                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "cannot be inspected")
+            }
+            if info.st_mode & S_IFMT == S_IFLNK {
+                guard stat(candidate, &info) == 0 else {
+                    throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "dangling symbolic link")
+                }
+            }
+            guard info.st_mode & S_IFMT == S_IFDIR else {
+                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "not a directory")
+            }
+            guard info.st_uid == getuid() || info.st_uid == 0 else {
+                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "a containing folder is owned by another user")
+            }
+            let sharedWrite = info.st_mode & (S_IWGRP | S_IWOTH)
+            let sticky = info.st_mode & S_ISVTX
+            guard sharedWrite == 0 || sticky != 0 else {
+                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "a containing folder can be changed by other users")
+            }
+            if candidate == "/" { return }
+            candidate = (candidate as NSString).deletingLastPathComponent
+        }
     }
 
     /// POSIX mode `0700` does not remove access control entries an existing or inherited
