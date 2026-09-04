@@ -100,14 +100,37 @@ public final class OperationSupervisor: Sendable {
         await store.identity(for: environment)
     }
 
+    /// What the process table says about a recorded identity. `absent` is proof the recorded
+    /// process is gone; `unavailable` is the process table declining to answer, which is not
+    /// the same thing and must never end supervision (MVP-PLAN.md §4).
+    public enum IdentityObservation: Hashable, Sendable {
+        case present(LiveProcess)
+        case absent
+        case unavailable
+    }
+
+    /// Observes `identity` against the live process table. A PID that now carries a different
+    /// start time, executable, or arguments belongs to another process, which proves the
+    /// recorded one exited; a PID that exists but cannot be read proves nothing.
+    public func observe(_ identity: ProcessIdentity) -> IdentityObservation {
+        switch enumerator.observe(pid: identity.pid) {
+        case .absent:
+            .absent
+        case .unavailable:
+            .unavailable
+        case .present(let live):
+            live.startTime == identity.startTime
+                && live.executablePath == identity.executablePath
+                && live.argumentsDigest == identity.argumentsDigest
+                ? .present(live) : .absent
+        }
+    }
+
     /// The live process that is exactly `identity` (same PID, start time, executable, and
     /// arguments), or `nil`: a PID that now belongs to another process is never a match.
+    /// A caller that must tell "gone" from "unreadable" uses `observe` instead.
     public func verify(_ identity: ProcessIdentity) -> LiveProcess? {
-        guard let live = enumerator.live(pid: identity.pid),
-              live.startTime == identity.startTime,
-              live.executablePath == identity.executablePath,
-              live.argumentsDigest == identity.argumentsDigest
-        else { return nil }
+        guard case .present(let live) = observe(identity) else { return nil }
         return live
     }
 

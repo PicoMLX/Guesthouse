@@ -11,12 +11,15 @@ actor FakeProcessRunner: ProcessRunning {
         var exit: ProcessExit = ProcessExit(reason: .status(0))
         /// The run stays alive until `finishHanging` or termination.
         var hangs = false
+        /// How long the command takes before it answers, so a test can act while it is in
+        /// flight without having to end it.
+        var delay: Duration = .zero
     }
 
     private(set) var invocations: [ProcessInvocation] = []
     private var fixed: Reply
     private var script: [String: Reply] = [:]
-    private var hanging: [ProcessRun] = []
+    private var hanging: [(command: String, run: ProcessRun)] = []
 
     init(stdout: [String] = [], stderr: [String] = [], exit: ProcessExit) {
         fixed = Reply(stdout: stdout, stderr: stderr, exit: exit)
@@ -33,16 +36,29 @@ actor FakeProcessRunner: ProcessRunning {
     /// a start time the supervisor can record); ending them terminates the process, and the
     /// run reports a `terminated` exit with SIGTERM.
     func finishHanging(with exit: ProcessExit = ProcessExit(reason: .status(0))) async {
-        for run in hanging {
-            run.terminate(gracePeriod: .milliseconds(200))
-            _ = await run.exit()
+        await finishHanging { _ in true }
+    }
+
+    /// Ends only the hanging runs of one command, so a test can end the VM's own process while
+    /// another query is still in flight.
+    func finishHanging(command: String) async {
+        await finishHanging { $0 == command }
+    }
+
+    private func finishHanging(_ matches: (String) -> Bool) async {
+        let ending = hanging.filter { matches($0.command) }
+        hanging.removeAll { matches($0.command) }
+        for entry in ending {
+            entry.run.terminate(gracePeriod: .milliseconds(200))
+            _ = await entry.run.exit()
         }
-        hanging.removeAll()
     }
 
     func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
         invocations.append(invocation)
-        let reply = invocation.arguments.first.flatMap { script[$0] } ?? fixed
+        let command = invocation.arguments.first ?? ""
+        let reply = script[command] ?? fixed
+        if reply.delay > .zero { try? await Task.sleep(for: reply.delay) }
         if reply.hangs {
             // A real process, so the supervisor can record a pid and a start time. When the
             // invocation's executable exists (a fixture bundle whose binary is a copy of
@@ -50,7 +66,7 @@ actor FakeProcessRunner: ProcessRunning {
             let executable = FileManager.default.isExecutableFile(atPath: invocation.executable.path) ? invocation.executable : URL(fileURLWithPath: "/bin/sleep")
             let arguments = executable == invocation.executable ? invocation.arguments : ["600"]
             let run = try await ProcessRunner().run(ProcessInvocation(executable: executable, arguments: arguments, timeout: min(invocation.timeout, .seconds(600)), terminationGracePeriod: .milliseconds(500), maximumOutputBytes: 64 << 10))
-            hanging.append(run)
+            hanging.append((command: command, run: run))
             return run
         }
         let (stream, continuation) = AsyncStream.makeStream(of: ProcessOutput.self, bufferingPolicy: .unbounded)

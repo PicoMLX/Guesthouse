@@ -61,6 +61,33 @@ import Testing
         #expect(await store.all.isEmpty)
     }
 
+    @Test func anUnreadableProcessIsNeverReportedAsExited() async throws {
+        let supervisor = OperationSupervisor(store: try ProcessIdentityStore(directory: root))
+        let environment = EnvironmentID()
+        let arguments = ["-e", "sleep 47", "run", environment.tartVMName]
+        let fixture = URL(fileURLWithPath: "/usr/bin/perl")
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: fixture, arguments: arguments, timeout: .seconds(20)))
+        let live = try #require(LiveProcessEnumerator().live(pid: run.processIdentifier))
+        let identity = ProcessIdentity(pid: live.pid, startTime: live.startTime, executablePath: live.executablePath, argumentsDigest: live.argumentsDigest, vmName: environment.tartVMName, environmentID: environment, recordedAt: Date())
+        #expect(supervisor.observe(identity) == .present(live))
+
+        // PID 1 is launchd: it exists, and this process cannot read its arguments, so the
+        // process table declines to describe it. Supervision must not read that as an exit.
+        guard case .unavailable = LiveProcessEnumerator().observe(pid: 1) else {
+            Issue.record("launchd is readable here, so it no longer stands in for an unobservable process")
+            return
+        }
+        let unreadable = ProcessIdentity(pid: 1, startTime: identity.startTime, executablePath: "/sbin/launchd", argumentsDigest: identity.argumentsDigest, vmName: identity.vmName, environmentID: environment, recordedAt: Date())
+        #expect(supervisor.observe(unreadable) == .unavailable)
+        #expect(supervisor.verify(unreadable) == nil, "unreadable is still not verified")
+
+        run.terminate(gracePeriod: .milliseconds(100))
+        _ = await run.exit()
+        #expect(supervisor.observe(identity) == .absent, "a process that ended is definitely gone")
+        let neverExisted = ProcessIdentity(pid: 2_000_000_000, startTime: identity.startTime, executablePath: identity.executablePath, argumentsDigest: identity.argumentsDigest, vmName: identity.vmName, environmentID: environment, recordedAt: Date())
+        #expect(supervisor.observe(neverExisted) == .absent)
+    }
+
     @Test func aReusedPIDIsNeverMistakenForTheRecordedProcess() async throws {
         let store = try ProcessIdentityStore(directory: root)
         let supervisor = OperationSupervisor(store: store)

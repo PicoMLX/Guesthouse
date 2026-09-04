@@ -111,10 +111,18 @@ import Testing
         let environment = EnvironmentID()
         let id = try await store.begin(.startEnvironment, for: environment)
         let record = JournalRecord(id: id, environmentID: environment, operation: .startEnvironment, timestamp: Date(), outcome: .completed)
+        let current = JournalRecord.currentFormat
         var json = String(decoding: try JSONEncoder().encode(record), as: UTF8.self)
-        #expect(json.contains("\"format\":1"))
-        json = json.replacingOccurrences(of: "\"format\":1", with: "\"format\":2")
+        #expect(json.contains("\"format\":\(current)"), "a record this build writes carries this build's format")
+        // A record from a later build is refused by name, so the journal is never reported as
+        // corrupt when the only problem is that it is newer.
+        json = json.replacingOccurrences(of: "\"format\":\(current)", with: "\"format\":\(current + 1)")
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(JournalRecord.self, from: Data(json.utf8)) }
+        // Every format this build claims to read still decodes.
+        for older in 1..<current {
+            let downgraded = json.replacingOccurrences(of: "\"format\":\(current + 1)", with: "\"format\":\(older)")
+            #expect(throws: Never.self) { try JSONDecoder().decode(JournalRecord.self, from: Data(downgraded.utf8)) }
+        }
     }
 
     @Test func migrationsMustAdvanceExactlyOneVersion() {

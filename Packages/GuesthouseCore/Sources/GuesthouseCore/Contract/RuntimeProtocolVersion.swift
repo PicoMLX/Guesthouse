@@ -12,8 +12,10 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
     /// History: 1 was the initial contract; 2 added `InvalidRequestReason.tooManyInFlight`;
     /// 3 made `TartRuntimeInfo.version` optional, added its `problem`, and added the storage
     /// error, so an older peer would fail to decode a reply instead of being told what
-    /// happened, and would read `verified` with the wrong meaning.
-    public static let current = RuntimeProtocolVersion(3)
+    /// happened, and would read `verified` with the wrong meaning; 4 added the
+    /// `listEnvironments` request, the `environments` event, `EnvironmentStatus.guestAddress`,
+    /// and the lifecycle's own error cases, none of which a version-3 peer can decode.
+    public static let current = RuntimeProtocolVersion(4)
 
     public static func < (lhs: RuntimeProtocolVersion, rhs: RuntimeProtocolVersion) -> Bool {
         lhs.rawValue < rhs.rawValue

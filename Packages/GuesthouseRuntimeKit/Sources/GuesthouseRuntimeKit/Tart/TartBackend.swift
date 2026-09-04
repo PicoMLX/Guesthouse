@@ -143,32 +143,36 @@ public struct TartBackend: Sendable {
         ))
         // A canceled operation ends the query process too, so a start canceled while waiting
         // for the address does not keep `tart ip` waiting for its own timeout.
-        let (stdout, stderr, exit) = await withTaskCancellationHandler {
+        let (stdout, stderr, exit, recordLimitReached) = await withTaskCancellationHandler {
             var stdout: [String] = []
             var stderr: [String] = []
+            var reachedLimit = false
             for await line in run.output {
                 // A command whose output is parsed is bounded by record count as well as by
                 // the runner's byte cap: empty records cost no bytes but still cost memory.
-                guard stdout.count + stderr.count < Self.maximumCapturedRecords else { break }
+                guard stdout.count + stderr.count < Self.maximumCapturedRecords else {
+                    reachedLimit = true
+                    break
+                }
                 switch line {
                 case .stdout(let text): stdout.append(text.text)
                 case .stderr(let text): stderr.append(text.text)
                 }
             }
-            return (stdout, stderr, await run.exit())
+            return (stdout, stderr, await run.exit(), reachedLimit)
         } onCancel: {
             run.terminate(gracePeriod: .seconds(1))
         }
         if Task.isCancelled { throw CancellationError() }
         if exit.timedOut { throw TartInvocationError.timedOut }
-        // A truncated capture is not a complete answer: a parser must see all of stdout
-        // before its result is trusted as the runtime's own.
         guard exit.succeeded else {
             throw TartInvocationError.failed(TartErrorClassifier.classify(stderr: stderr.joined(separator: "\n"), exitStatus: Self.exitStatus(exit)))
         }
-        // A truncated capture is not a complete answer: a parser must see all of stdout
-        // before its result is trusted as the runtime's own.
-        guard !exit.outputTruncated else { throw TartInvocationError.unparseableOutput }
+        // A truncated capture is not a complete answer: a parser must see all of stdout before
+        // its result is trusted as the runtime's own. The record cap counts as truncation even
+        // when the bytes stayed under the runner's limit, because a parseable prefix of an
+        // unread answer is exactly the case a byte count cannot notice.
+        guard !exit.outputTruncated, !recordLimitReached else { throw TartInvocationError.unparseableOutput }
         return Captured(stdout: stdout.joined(separator: "\n"), stderr: stderr.joined(separator: "\n"))
     }
 

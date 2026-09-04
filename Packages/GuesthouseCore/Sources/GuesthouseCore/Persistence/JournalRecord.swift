@@ -32,7 +32,12 @@ public enum JournalOperation: Codable, Hashable, Sendable, CaseIterable {
 /// whole journal.
 public struct JournalRecord: Codable, Hashable, Sendable {
     /// The record format this build writes and the newest it can read.
-    public static let currentFormat = 1
+    ///
+    /// History: 1 was the initial format; 2 added the `reconciled` outcome and the lifecycle's
+    /// error cases inside `failed`, neither of which a format-1 reader can decode. A record
+    /// this build writes is therefore refused by name as a newer format rather than making the
+    /// previous build report the whole journal corrupt.
+    public static let currentFormat = 2
 
     public enum Outcome: Codable, Hashable, Sendable {
         /// The operation was accepted. It is in flight until a later record says otherwise.

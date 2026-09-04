@@ -88,6 +88,10 @@ public enum OwnershipVerdict: Hashable, Sendable {
         /// The recorded process exists but could not be read from the process table (for
         /// example it now belongs to another user), so it cannot be matched or ruled out.
         case processUnobservable
+        /// The process ended but its durable record could not be removed. The stored PID
+        /// outlives the process it describes, so whatever reuses that PID would be reconciled
+        /// against it; the environment is not free until the record is gone.
+        case identityNotForgotten
     }
 }
 
