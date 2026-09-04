@@ -13,7 +13,49 @@ import Testing
         let file = try ResolvedPackagesFile.decode(Data(#"{"version":3,"pins":[{"identity":"mixed-repo.git","kind":"remoteSourceControl","location":"https://github.com/Org/Mixed-Repo.GIT","state":{"version":"1.0.0"}}]}"#.utf8))
         #expect(file.pins.first?.identity.rawValue == "mixed-repo.git")
         #expect(PackageIdentity(resolvedIdentity: "a/b") == nil)
-        #expect(PackageIdentity(resolvedIdentity: "Ｏrg") == nil)
+        #expect(PackageIdentity(resolvedIdentity: "\u{202E}kit") == nil, "an override could make the name read as another package")
+    }
+
+    @Test func anIdentityFromALocationMatchesTheOneDerivedFromItsRemote() {
+        // The SCP form without a path has only the colon between the host and the repository,
+        // so splitting on `/` alone would keep `git@example.com:` inside the identity.
+        #expect(PackageIdentity(location: "git@example.com:SharedUI.git")?.rawValue == "sharedui")
+        #expect(PackageIdentity(location: "git@github.com:PicoMLX/SharedUI.git")?.rawValue == "sharedui")
+        // SwiftPM strips only a lowercase `.git`, so both routes to an identity keep `.GIT`
+        // and a caller cannot derive two spellings for one dependency.
+        let remote = RemoteURL("https://github.com/Org/Mixed-Repo.GIT")!
+        #expect(PackageIdentity(location: "https://github.com/Org/Mixed-Repo.GIT") == PackageIdentity(remote: remote))
+        #expect(PackageIdentity(location: "git@github.com:Org/Mixed-Repo.GIT")?.rawValue == "mixed-repo.git")
+    }
+
+    @Test func aDecodedIdentityCarriesTheInvariantsADerivedOneHas() throws {
+        let derived = PackageIdentity(remote: RemoteURL("https://github.com/Org/SharedUI")!)
+        #expect(try JSONDecoder().decode(PackageIdentity.self, from: JSONEncoder().encode(derived)) == derived)
+        // A hand-written spelling would otherwise hash and compare differently from the
+        // identity derived for the same package, so a pin lookup would miss the dependency.
+        #expect(try JSONDecoder().decode(PackageIdentity.self, from: Data(#"{"rawValue":"SharedUI"}"#.utf8)) == derived)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(PackageIdentity.self, from: Data(#"{"rawValue":""}"#.utf8)) }
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(PackageIdentity.self, from: Data(#"{"rawValue":"a/b"}"#.utf8)) }
+    }
+
+    @Test func anUnusualLocalIdentityDoesNotRejectTheWholeResolvedFile() throws {
+        // SwiftPM derives a local dependency's identity from its checkout basename, so a
+        // lockfile can carry `cafékit` or `space kit`; re-resolving writes the same file back,
+        // so refusing it would leave the user the one advice that cannot work.
+        let json = #"""
+        {"version":3,"pins":[
+          {"identity":"cafékit","kind":"localSourceControl","location":"/Users/dev/Café Kit","state":{"revision":"0123456789abcdef0123456789abcdef01234567"}},
+          {"identity":"space kit","kind":"localSourceControl","location":"/Users/dev/Space Kit","state":{"revision":"0123456789abcdef0123456789abcdef01234567"}},
+          {"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"version":"1.0.0"}}
+        ]}
+        """#
+        let file = try ResolvedPackagesFile.decode(Data(json.utf8))
+        #expect(file.pins.map(\.identity.rawValue) == ["cafékit", "space kit", "sharedui"])
+        let remote = RemoteURL("https://github.com/Org/SharedUI")!
+        let package = WorkspaceRepository(role: .package, remote: remote, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        #expect(LocalOverrideMatcher.match(selected: [package], resolved: file, observedOrigins: [package.checkoutName: remote])
+            == [.matched(identity: PackageIdentity(remote: remote), location: "https://github.com/Org/SharedUI.git")],
+            "an unrelated local dependency no longer hides the selected package")
     }
 
     @Test func checkoutNamesAndOriginsMustCarryTheIdentity() {

@@ -4,17 +4,26 @@ import Foundation
 /// the last path component of the location, without a `.git` suffix, lowercased
 /// (`PackageIdentity.swift` in swift-package-manager). It is not the `Package(name:)` in the
 /// manifest, which may differ (MVP-PLAN.md §6).
-public struct PackageIdentity: Hashable, Sendable, Codable, CustomStringConvertible {
+public struct PackageIdentity: Hashable, Sendable, CustomStringConvertible {
     public let rawValue: String
 
     public init?(location: String) {
         var text = location.trimmingCharacters(in: .whitespacesAndNewlines)
         while text.hasSuffix("/") { text.removeLast() }
-        guard let last = text.split(separator: "/").last.map(String.init) ?? text.split(separator: ":").last.map(String.init), !last.isEmpty else {
-            return nil
+        // An SCP-form remote (`git@host:Name.git`) has no slash at all, so the colon that
+        // separates the host from the path is the only separator there is; splitting on `/`
+        // alone would keep `git@host:` inside the identity.
+        var name: String
+        if let slash = text.lastIndex(of: "/") {
+            name = String(text[text.index(after: slash)...])
+        } else if let colon = text.lastIndex(of: ":") {
+            name = String(text[text.index(after: colon)...])
+        } else {
+            name = text
         }
-        var name = last
-        if name.lowercased().hasSuffix(".git") { name = String(name.dropLast(4)) }
+        // SwiftPM strips only a lowercase `.git`, the way `RemoteURL` does, so `Mixed-Repo.GIT`
+        // stays the package `mixed-repo.git` that `Package.resolved` will name.
+        if name.hasSuffix(".git") { name = String(name.dropLast(4)) }
         guard !name.isEmpty, name != ".", name != ".." else { return nil }
         rawValue = name.lowercased()
     }
@@ -34,13 +43,33 @@ public struct PackageIdentity: Hashable, Sendable, Codable, CustomStringConverti
 
     /// An identity exactly as `Package.resolved` spells it. SwiftPM has already canonicalized
     /// it, so no location rules (such as dropping `.git`) are applied again.
+    ///
+    /// SwiftPM derives an identity from a checkout basename, which may legitimately hold
+    /// non-ASCII letters or spaces (`cafékit`, `space kit`), and re-resolving writes the same
+    /// file back; refusing those would reject the whole lockfile with advice that cannot
+    /// work. Only spellings that could not name a package at all are refused.
     public init?(resolvedIdentity: String) {
         let text = resolvedIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !text.contains("/"), text != ".", text != "..", text.unicodeScalars.allSatisfy({ $0.isASCII && $0.value > 0x20 && $0.value < 0x7F }) else { return nil }
+        guard !text.isEmpty, !text.contains("/"), text != ".", text != "..",
+              !WorkspaceManifest.containsControlCharacters(text)
+        else { return nil }
         rawValue = text.lowercased()
     }
 
     public var description: String { rawValue }
+}
+
+extension PackageIdentity: Codable {
+    /// Decoding is another way into the type, so it applies the same lowercasing and the same
+    /// refusals its initializers do; a hand-edited `SharedUI` or an empty name would otherwise
+    /// hash and compare differently from the identity derived for the same package.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.container(keyedBy: CodingKeys.self).decode(String.self, forKey: .rawValue)
+        guard let identity = PackageIdentity(resolvedIdentity: raw) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "not a package identity: \(raw)"))
+        }
+        self = identity
+    }
 }
 
 /// The parts of `Package.resolved` (versions 2 and 3) that matter for matching local overrides.
