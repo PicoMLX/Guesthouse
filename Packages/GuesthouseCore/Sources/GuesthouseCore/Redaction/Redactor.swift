@@ -185,15 +185,19 @@ public struct Redactor: Sendable {
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         let authorizationHeader = #/(?:\\?["'])?\bauthorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
-        /// Bearer credentials outside a header line, of any length.
-        let bearer = #/\bbearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()
+        /// Bearer credentials outside a header line, of any length. Every token rule below
+        /// starts at a character that cannot be part of the token rather than at `\b`: Swift's
+        /// word boundary is the Unicode one, where the dot in `<token>.partial` or in
+        /// `cache.<token>` is not a break, and a token beside one would survive.
+        let bearer = #/(^|[^A-Za-z0-9_])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
         /// Classic and fine-grained GitHub tokens.
-        let githubToken = #/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/#
+        let githubToken = #/(^|[^A-Za-z0-9_])((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/#
         /// OpenAI-style API keys.
-        let apiKey = #/\bsk-[A-Za-z0-9_-]{16,}\b/#
-        /// JSON Web Tokens, matched structurally: three Base64URL segments (the last may be
-        /// empty) whose first decodes to a JSON object, whitespace allowed.
-        let jwt = #/\b([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/#
+        let apiKey = #/(^|[^A-Za-z0-9_])(sk-[A-Za-z0-9_-]{16,})/#
+        /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
+        /// which one decodes to a JSON object, whitespace allowed. More than three segments are
+        /// taken because a JWT can follow a label, as in `session.<jwt>`.
+        let jwt = #/(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]*){2,})/#
         /// Credentials embedded in URLs: `https://user:secret@host`. The authority ends at the
         /// last `@` before a slash or whitespace, so a password containing `@` is fully covered.
         let urlUserInfo = #/(:\/\/)[^\s\/]+@/#
@@ -218,10 +222,11 @@ public struct Redactor: Sendable {
         let p = patterns
         var text = input
         text = text.replacing(p.authorizationHeader, with: "Authorization: \(marker("authorization"))")
-        text = text.replacing(p.bearer, with: "Bearer \(marker("bearer-token"))")
-        text = text.replacing(p.githubToken, with: marker("github-token"))
-        text = text.replacing(p.apiKey, with: marker("api-key"))
-        text = text.replacing(p.jwt) { match in isJOSEHeader(match.1) ? marker("jwt") : String(match.0) }
+        // Each token rule captures the character in front of the token, which is put back.
+        text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
+        text = text.replacing(p.githubToken) { match in "\(match.1)\(marker("github-token"))" }
+        text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
+        text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
         text = text.replacing(p.labeledSecret) { match in "\(match.1): \(marker("secret"))" }
         text = text.replacing(p.codeField) { match in "\(match.1): \(marker("device-code"))" }
@@ -245,6 +250,17 @@ public struct Redactor: Sendable {
 
     static func applyDeviceCodePattern(to input: String) -> String {
         input.replacing(patterns.deviceCode) { match in "\(match.1)\(marker("device-code"))" }
+    }
+
+    /// Replaces the three segments of a JWT inside a run of dot-separated segments. A dot is not
+    /// a word boundary, so the run can begin with a label such as `session.`; every segment that
+    /// has two behind it is tried as the JOSE header, and the segments around the token are kept.
+    static func redactedJWT(_ candidate: Substring) -> String {
+        let segments = candidate.split(separator: ".", omittingEmptySubsequences: false)
+        guard let header = segments.indices.dropLast(2).first(where: { isJOSEHeader(segments[$0]) }) else {
+            return String(candidate)
+        }
+        return (segments[..<header] + [Substring(marker("jwt"))] + segments[(header + 3)...]).joined(separator: ".")
     }
 
     /// Whether a Base64URL segment decodes to text that starts a JSON object.

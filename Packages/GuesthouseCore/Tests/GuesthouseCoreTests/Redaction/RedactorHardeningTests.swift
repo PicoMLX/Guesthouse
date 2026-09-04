@@ -159,6 +159,23 @@ import Testing
         #expect(redactor.redact("{'Authorization': 'Basic dXNlcjpwYXNz'}") == "{Authorization: [redacted:authorization]}")
     }
 
+    @Test func tokensNextToADotOrASlashAreRemoved() {
+        #expect(redactor.redact("\(token).partial") == "[redacted:github-token].partial")
+        #expect(redactor.redact("/var/folders/T/\(token)/id_rsa") == "/var/folders/T/[redacted:github-token]/id_rsa")
+        #expect(redactor.redact("wrote \(token)") == "wrote [redacted:github-token]")
+        #expect(redactor.redact("cache/\(token).partial.tmp") == "cache/[redacted:github-token].partial.tmp")
+        let key = "sk-proj-abcdefghijklmnopqrstuvwxyz"
+        #expect(redactor.redact("\(key).partial") == "[redacted:api-key].partial")
+        #expect(redactor.redact("/tmp/\(key)") == "/tmp/[redacted:api-key]")
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuv"
+        #expect(redactor.redact("session.\(jwt)") == "session.[redacted:jwt]")
+        #expect(redactor.redact("\(jwt).partial") == "[redacted:jwt].partial")
+        // The dot in an identifier still has to survive the stricter anchors.
+        for plain in ["com.apple.dt.Xcode", "docs.example.com", "Tart 2.36.0", "note.txt"] {
+            #expect(redactor.redact(plain) == plain)
+        }
+    }
+
     @Test func decodingRemovesBareDeviceCodes() throws {
         let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""AB12-CD34""#.utf8))
         #expect(line.text == "[redacted:device-code]")
