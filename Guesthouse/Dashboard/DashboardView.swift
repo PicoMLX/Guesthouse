@@ -125,18 +125,30 @@ struct EnvironmentCardView: View {
         .font(.callout)
     }
 
+    /// The actions wrap: at the adaptive grid's narrow column two cards leave roughly a third
+    /// of the window for each, which is not enough for these labels on one line.
     private var actionsRow: some View {
-        HStack(spacing: 8) {
-            AvailabilityButton("Start", availability: state.availability(of: .start)) { perform(.start) }
-                .buttonStyle(.borderedProminent)
-                .accessibilityLabel("Start")
-            ForEach(secondaryPrimaryActions) { action in
-                AvailabilityButton(action.title, availability: state.availability(of: action)) { perform(action) }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel(action.title)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                actionButtons
+                Spacer()
+                overflowMenu
             }
-            Spacer()
-            overflowMenu
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) { actionButtons }
+                HStack { Spacer(); overflowMenu }
+            }
+        }
+    }
+
+    @ViewBuilder private var actionButtons: some View {
+        AvailabilityButton("Start", availability: state.availability(of: .start)) { perform(.start) }
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel("Start")
+        ForEach(secondaryPrimaryActions) { action in
+            AvailabilityButton(action.title, availability: state.availability(of: action)) { perform(action) }
+                .buttonStyle(.bordered)
+                .accessibilityLabel(action.title)
         }
     }
 

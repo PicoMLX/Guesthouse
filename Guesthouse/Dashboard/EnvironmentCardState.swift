@@ -61,7 +61,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
     let details: [Detail]
     let availability: [Action: Availability]
 
-    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?, startBlockedElsewhere: String? = nil) {
+    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?, statusUnread: Bool = false, startBlockedElsewhere: String? = nil) {
         id = environment.id
         name = environment.name
         let attention: GuesthouseError? = {
@@ -70,10 +70,12 @@ struct EnvironmentCardState: Equatable, Identifiable {
         }()
         self.attention = attention
         phase = operation?.phase
-        isBusy = status == nil || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil
+        isBusy = statusUnread || status == nil || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil
         statusText = Self.statusText(for: status, operation: operation)
         details = Self.details(for: environment, status: status)
-        availability = Self.availability(for: status, operation: operation, attention: attention, blockedElsewhere: startBlockedElsewhere)
+        // A status nobody has read back yet is not a state to act on: Start stays disabled
+        // until the environment answers again.
+        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, blockedElsewhere: startBlockedElsewhere)
     }
 
     func availability(of action: Action) -> Availability {
@@ -86,16 +88,22 @@ struct EnvironmentCardState: Equatable, Identifiable {
         }
         guard let status else { return "Checking environment…" }
         if status.inFlightOperation != nil { return "Operation in progress…" }
+        let vm = describe(status.vm)
         switch status.readiness {
         case .checking: return "Checking environment…"
-        case .needsAttention: return "Needs attention"
-        case .ready:
-            switch status.vm {
-            case .running: return "Running"
-            case .stopped: return "Stopped"
-            case .notFound: return "Virtual machine missing"
-            case .uncertain: return "Ownership uncertain"
-            }
+        // Both states are reported: a running VM that is not reachable is still running, and
+        // the card must not hide that (MVP-PLAN.md §2).
+        case .needsAttention: return "\(vm), needs attention"
+        case .ready: return vm
+        }
+    }
+
+    static func describe(_ vm: EnvironmentStatus.VMState) -> String {
+        switch vm {
+        case .running: "Running"
+        case .stopped: "Stopped"
+        case .notFound: "Virtual machine missing"
+        case .uncertain: "Ownership uncertain"
         }
     }
 
@@ -140,6 +148,8 @@ struct EnvironmentCardState: Equatable, Identifiable {
     private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, blockedElsewhere: String?) -> Availability {
         guard let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
         if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
+        // A failure the runtime says is not retryable is not answered by pressing Start again.
+        if let attention, !attention.isRetryable { return .disabled(reason: attention.userMessage) }
         if let blockedElsewhere { return .disabled(reason: blockedElsewhere) }
         // A preserved slot is never startable, whatever the VM's state: the runtime refuses it
         // until the slot is repaired.

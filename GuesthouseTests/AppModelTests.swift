@@ -319,7 +319,7 @@ import Testing
         _ = model.handleQuitRequest()
         model.confirmStopAndQuit()
         try? await Task.sleep(for: .milliseconds(300))
-        #expect(model.quitFlow == .stopping(environment.id, nil), "a recovered operation keeps the quit waiting")
+        #expect(model.quitFlow == .waitingForOperations(environment.id), "a recovered operation keeps the quit waiting")
         #expect(decision.values.isEmpty)
         await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
         await waitUntil { model.quitFlow == .terminating }

@@ -27,6 +27,9 @@ final class AppModel {
         case confirming
         /// State is being reconciled before a stop is attempted, or after an unknown outcome.
         case checking
+        /// Waiting for an operation to finish before targets are chosen. Nothing has been
+        /// asked of the runtime yet, so cancelling here is immediate.
+        case waitingForOperations(EnvironmentID?)
         /// Environments are being stopped; the app has told AppKit to wait.
         case stopping(EnvironmentID?, ProgressPhase?)
         /// Graceful stop failed; the sheet offers the warned force-stop, or a check first.
@@ -52,6 +55,9 @@ final class AppModel {
     private(set) var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private(set) var operations: [EnvironmentID: OperationState] = [:]
     /// The last failure per environment, cleared when an operation completes.
+    /// Environments whose last status query failed, so a later success can clear that
+    /// error without erasing what a failed operation reported.
+    private var statusQueryFailures: Set<EnvironmentID> = []
     private(set) var lastErrors: [EnvironmentID: GuesthouseError] = [:]
     private(set) var quitFlow: QuitFlow = .idle
     /// The user canceled during a step that must run to its end; honored when it ends.
@@ -270,7 +276,7 @@ final class AppModel {
                 await self.reconcileForQuit(generation: generation)
             }
             return
-        case .checking, .stopping, .forceStopping, .terminating:
+        case .checking, .waitingForOperations, .stopping, .forceStopping, .terminating:
             // A stop stream reports its own loss; nothing to do here.
             return
         }
@@ -360,6 +366,11 @@ final class AppModel {
         if let running = runningEnvironments.first {
             return "\(running.name) is running. Guesthouse runs one development Mac at a time until resource validation allows two."
         }
+        // A VM the runtime cannot prove it owns is still a VM: the lifecycle refuses a second
+        // one while it is there, so the dashboard says so rather than offering a start.
+        if let uncertain = uncertainEnvironments.first {
+            return "\(uncertain.name) is running without proof that Guesthouse started it. Check it before starting another development Mac."
+        }
         return nil
     }
 
@@ -382,10 +393,15 @@ final class AppModel {
         do {
             for try await event in backend.send(.environmentStatus(id)) {
                 switch event {
-                case .status(let status): statuses[id] = status
+                case .status(let status):
+                    statuses[id] = status
+                    // The environment answered, so a failure of an earlier *query* is history.
+                    // A failed operation's error stays: it is what the card explains.
+                    if statusQueryFailures.remove(id) != nil { lastErrors[id] = nil }
                 case .failed(_, let error):
                     statuses[id] = nil
                     lastErrors[id] = error
+                    statusQueryFailures.insert(id)
                 default: break
                 }
             }
@@ -405,6 +421,7 @@ final class AppModel {
                 status: statuses[environment.id],
                 operation: operations[environment.id],
                 lastError: lastErrors[environment.id],
+                statusUnread: statuses[environment.id] == nil,
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil
             )
         }
@@ -568,6 +585,10 @@ final class AppModel {
             return
         case .stopping(_, let phase?) where !phase.cancelable:
             quitCancelRequested = true
+        case .waitingForOperations:
+            // Nothing has been asked of the runtime yet, so the quit is simply abandoned.
+            quitTask?.cancel()
+            finishCancel(reconcile: true)
         case .stopping(.some, nil):
             // A stop that has not described a phase yet: it may not even be accepted. Neither
             // can be abandoned here. Every phase a stop reports is one the runtime protects,
@@ -632,7 +653,7 @@ final class AppModel {
         }
         // A start accepted moments ago has not reported `running` yet; the decision waits
         // for every active operation and re-reads the statuses before choosing targets.
-        await waitForOperations()
+        guard await waitForOperations() else { return }
         guard generation == quitGeneration, !Task.isCancelled, !quitCancelRequested else { finishCancel(reconcile: true); return }
         // The mode still decides how they are stopped: only the environments whose graceful
         // stop already failed are force-stopped.
@@ -643,14 +664,26 @@ final class AppModel {
     /// Waits until neither this app nor the runtime reports an operation in flight: a start
     /// this app made moments ago, or one recovered after a relaunch that only the status
     /// names, must reach a terminal state before stop targets are chosen.
-    private func waitForOperations() async {
+    /// Waits until neither this app nor the runtime reports an operation in flight. A status
+    /// query that fails ends the wait: the quit stops rather than choosing targets from state
+    /// nobody could read. Returns false when the quit must not continue.
+    private func waitForOperations() async -> Bool {
         while !Task.isCancelled {
-            for environment in environments { await refreshStatus(of: environment.id) }
+            for environment in environments {
+                await refreshStatus(of: environment.id)
+                guard statuses[environment.id] != nil else {
+                    quitFlow = .stopFailed(lastErrors[environment.id] ?? .operationOutcomeUnknown(OperationID()))
+                    return false
+                }
+            }
             let busy = operations.keys.first ?? statuses.values.first(where: { $0.inFlightOperation != nil })?.environmentID
-            guard let busy else { return }
-            quitFlow = .stopping(busy, nil)
-            try? await Task.sleep(for: .milliseconds(200))
+            guard let busy else { return true }
+            quitFlow = .waitingForOperations(busy)
+            // The runtime runs a Tart command for every status query, so this waits in
+            // seconds rather than polling several times a second.
+            try? await Task.sleep(for: .seconds(2))
         }
+        return false
     }
 
     /// Stops every running environment. `mode` is `.force` only for the environments whose

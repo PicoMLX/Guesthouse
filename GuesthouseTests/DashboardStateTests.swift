@@ -11,6 +11,45 @@ import Testing
         for _ in 0..<600 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
     }
 
+    @Test func aFailedStatusQueryIsClearedByALaterSuccess() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        await model.refreshStatus(of: environment.id)
+        #expect(model.cardStates().first?.attention != nil)
+        #expect(model.cardStates().first?.availability(of: .start) != .enabled)
+        await backend.script("environmentStatus", .succeed())
+        await model.refreshStatus(of: environment.id)
+        #expect(model.cardStates().first?.attention == nil, "a successful check clears the query failure")
+    }
+
+    @Test func startIsRefusedWhileAnotherVMsOwnershipIsUncertain() async throws {
+        let backend = FakeRuntimeBackend()
+        let uncertain = DevelopmentEnvironment(name: "One", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let other = DevelopmentEnvironment(name: "Two", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([uncertain, other])
+        await backend.setStatus(EnvironmentStatus(environmentID: uncertain.id, vm: .uncertain(reason: "running without a recorded owner"), readiness: .needsAttention(.vmOwnershipUncertain(uncertain.id))))
+        await backend.setStatus(EnvironmentStatus(environmentID: other.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        let card = try #require(model.cardStates().first { $0.id == other.id })
+        guard case .disabled(let reason) = card.availability(of: .start) else { Issue.record("expected Start disabled"); return }
+        #expect(reason.contains("without proof"))
+    }
+
+    @Test func aNonRetryableFailureDoesNotOfferStartAgain() {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let status = EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready)
+        let error = GuesthouseError.runtimeStateUnavailable(reason: SanitizedText("the journal is unwritable"))
+        #expect(!error.isRetryable)
+        let card = EnvironmentCardState(environment: environment, status: status, operation: nil, lastError: error)
+        guard case .disabled = card.availability(of: .start) else { Issue.record("expected Start disabled"); return }
+    }
+
     @Test func aPreservedEnvironmentCannotBeStartedEvenWhenStopped() {
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
         let status = EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.environmentPreserved(environment.id)))
@@ -44,7 +83,7 @@ import Testing
         let card = try #require(model.cardStates().first)
         let error = GuesthouseError.hostKeyChanged(card.id)
         #expect(card.attention == error)
-        #expect(card.statusText == "Needs attention")
+        #expect(card.statusText == "Stopped, needs attention")
         #expect(card.availability(of: .start) == .disabled(reason: error.userMessage))
         #expect(error.recoveryActions.contains(.repair(.sshPairing)))
     }

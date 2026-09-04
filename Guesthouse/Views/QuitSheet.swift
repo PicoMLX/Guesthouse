@@ -22,6 +22,12 @@ struct QuitSheet: View {
                         .keyboardShortcut(.defaultAction)
                         .accessibilityLabel("Stop environments and quit")
                 }
+            case .waitingForOperations(let id):
+                Text("Finishing an operation…").font(.headline)
+                ProgressView().accessibilityLabel("Waiting for an operation to finish")
+                Text("Guesthouse waits for \(id.flatMap { id in model.environments.first { $0.id == id }?.name } ?? "the development Mac") to finish what it is doing before stopping anything.")
+                    .foregroundStyle(.secondary)
+                HStack { Spacer(); Button("Cancel") { model.cancelQuit() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel quitting") }
             case .checking:
                 Text("Checking environment…").font(.headline)
                 ProgressView().accessibilityLabel("Checking environment before quitting")
