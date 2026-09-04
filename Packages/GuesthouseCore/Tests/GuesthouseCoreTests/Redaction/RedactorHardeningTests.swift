@@ -176,6 +176,18 @@ import Testing
         }
     }
 
+    @Test func labelsNextToADotOrASlashAreRecognized() {
+        #expect(redactor.redact("payload.Authorization: Basic dXNlcjpwYXNz") == "payload.Authorization: [redacted:authorization]")
+        #expect(redactor.redact("req.password: hunter2") == "req.password: [redacted:secret]")
+        #expect(redactor.redact("wrote /tmp/cache/password: hunter2") == "wrote /tmp/cache/password: [redacted:secret]")
+        #expect(redactor.redact("Authorization: Basic dXNlcjpwYXNz") == "Authorization: [redacted:authorization]")
+        #expect(redactor.redact("cfg.device_code=a1b2c3d4e5") == "cfg.device_code: [redacted:device-code]")
+        #expect(redactor.redact("req.password:\ncorrect horse battery") == "req.password: [redacted:secret]\n[redacted:secret]")
+        // The anchor is still `\b` for word characters: a label has to begin a word.
+        #expect(redactor.redact("released 12 tokens: 42") == "released 12 tokens: 42")
+        #expect(redactor.redact("mypassword: hunter2") == "mypassword: hunter2")
+    }
+
     @Test func decodingRemovesBareDeviceCodes() throws {
         let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""AB12-CD34""#.utf8))
         #expect(line.text == "[redacted:device-code]")

@@ -176,7 +176,7 @@ public struct Redactor: Sendable {
         /// A folded header: the label alone on a line, value on the next.
         let authorizationLabelOnly = #/\s*(?:\\?["'])?authorization(?:\\?["'])?\s*:\s*/#.ignoresCase()
         /// Any authorization label, for lines whose value may continue on the next line.
-        let authorizationLabel = #/\bauthorization\b(?:\\?["'])?\s*[:=]/#.ignoresCase()
+        let authorizationLabel = #/(?:^|[^A-Za-z0-9_])authorization\b(?:\\?["'])?\s*[:=]/#.ignoresCase()
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
@@ -184,11 +184,12 @@ public struct Redactor: Sendable {
         /// The whole header value, quoted or to the end of the line, so multi-parameter schemes
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
-        let authorizationHeader = #/(?:\\?["'])?\bauthorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
-        /// Bearer credentials outside a header line, of any length. Every token rule below
-        /// starts at a character that cannot be part of the token rather than at `\b`: Swift's
-        /// word boundary is the Unicode one, where the dot in `<token>.partial` or in
-        /// `cache.<token>` is not a break, and a token beside one would survive.
+        let authorizationHeader = #/(^|[^A-Za-z0-9_])(?:\\?["'])?authorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        /// Bearer credentials outside a header line, of any length. Every token and label rule
+        /// here starts at a character that cannot be part of the word rather than at `\b`:
+        /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
+        /// `cache.<token>`, or in `payload.Authorization` is not a break, and a secret beside
+        /// one would survive. The character is captured so it can be put back.
         let bearer = #/(^|[^A-Za-z0-9_])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
         /// Classic and fine-grained GitHub tokens.
         let githubToken = #/(^|[^A-Za-z0-9_])((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/#
@@ -202,13 +203,13 @@ public struct Redactor: Sendable {
         /// last `@` before a slash or whitespace, so a password containing `@` is fully covered.
         let urlUserInfo = #/(:\/\/)[^\s\/]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`.
-        let labeledSecret = #/"?\b(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
+        let labeledSecret = #/(^|[^A-Za-z0-9_])"?(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
         /// the value on the next line.
-        let secretLabelOnly = #/"?\b(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*$/#.ignoresCase()
+        let secretLabelOnly = #/(^|[^A-Za-z0-9_])"?(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*$/#.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one.
-        let codeField = #/(?:\\?["'])?\b((?:user|device)[_-]code)\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9_])(?:\\?["'])?((?:user|device)[_-]code)\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D`, only on lines that mention a code (including the
         /// `user_code` and `device_code` field names of OAuth device flows), and never when the
         /// match is part of a longer hyphenated identifier such as a UUID.
@@ -221,19 +222,19 @@ public struct Redactor: Sendable {
     private static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
         let p = patterns
         var text = input
-        text = text.replacing(p.authorizationHeader, with: "Authorization: \(marker("authorization"))")
+        text = text.replacing(p.authorizationHeader) { match in "\(match.1)Authorization: \(marker("authorization"))" }
         // Each token rule captures the character in front of the token, which is put back.
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
         text = text.replacing(p.githubToken) { match in "\(match.1)\(marker("github-token"))" }
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
-        text = text.replacing(p.labeledSecret) { match in "\(match.1): \(marker("secret"))" }
-        text = text.replacing(p.codeField) { match in "\(match.1): \(marker("device-code"))" }
+        text = text.replacing(p.labeledSecret) { match in "\(match.1)\(match.2): \(marker("secret"))" }
+        text = text.replacing(p.codeField) { match in "\(match.1)\(match.2): \(marker("device-code"))" }
         var labelAwaitsValue = false
         text = text.replacing(p.secretLabelOnly) { match in
             labelAwaitsValue = true
-            return "\(match.1): \(marker("secret"))"
+            return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretValue = labelAwaitsValue
         let mentionsCode = text.contains(p.mentionsCode)
