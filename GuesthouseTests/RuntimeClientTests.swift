@@ -161,7 +161,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         // A log is read for its end: the newest lines reach the consumer, the middle is what
         // the bound drops.
         let texts = events.compactMap { if case .log(_, let line) = $0 { line.text } else { nil } }
-        #expect(texts.last == "line \(lines - 1)", "the operation's last line reaches a consumer that never kept up")
+        // The guarantee is the end of the log, not one exact line: the terminal event must
+        // still fit, so the last slot or two can go to it rather than to a log line.
+        let last = try #require(texts.last.flatMap { Int($0.dropFirst("line ".count)) })
+        #expect(last > lines - 16, "the tail is what reaches a consumer that never kept up, not the beginning")
+        #expect(!texts.contains("line \(lines / 2)"), "the middle is what the bound drops, not the two ends")
     }
 
     @Test func lateEventsForAFinishedOperationAreDropped() async throws {
