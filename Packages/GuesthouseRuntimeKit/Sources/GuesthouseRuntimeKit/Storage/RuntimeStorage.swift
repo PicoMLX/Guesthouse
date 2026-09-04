@@ -46,9 +46,15 @@ public struct RuntimeStorage: Sendable {
     public let root: URL
 
     /// The default root for the service's user: `~/Library/Application Support/Guesthouse`.
+    ///
+    /// The location is only resolved here, never created: `create: true` would make
+    /// Application Support before anything has looked at the directories above it, and
+    /// `init(root:)` would then refuse a hierarchy it had already added to — the opposite of
+    /// the preservation MVP-PLAN.md §3 asks for. `prepare` creates what is missing, `0700`,
+    /// after the ancestors it will live under have been verified.
     public static func defaultRoot() throws -> URL {
         do {
-            return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
                 .appending(path: "Guesthouse")
         } catch {
             throw RuntimeStorageError.unwritable(path: "~/Library/Application Support", reason: SanitizedText(error.localizedDescription, limit: 120))
@@ -98,6 +104,11 @@ public struct RuntimeStorage: Sendable {
                 throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
             }
             try refuseUnsafeExistingAncestor(of: url)
+            // Nothing is created inside a hierarchy that will then be refused. `verify` checks
+            // the ancestors below, but by then the refusal has already made the host change it
+            // was refusing to make: initialization would leave a new directory inside a tree it
+            // goes on to call untrusted, where MVP-PLAN.md §3 asks a refusal to preserve.
+            try verifyExistingAncestors(of: url)
             do {
                 try manager.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: [.posixPermissions: directoryPermissions])
             } catch let creationError {
@@ -217,6 +228,31 @@ public struct RuntimeStorage: Sendable {
         }
     }
 
+    /// The same checks, for a directory that does not exist yet: they run on the ancestors that
+    /// already do, before anything is created.
+    static func verifyExistingAncestors(of url: URL) throws {
+        guard let start = deepestExistingAncestor(of: url) else { return }
+        var verified: Set<String> = []
+        try verifyAncestorChain(from: start, verified: &verified)
+        let canonical = try canonicalPath(of: start)
+        if canonical != start {
+            try verifyAncestorChain(from: canonical, verified: &verified)
+        }
+    }
+
+    /// The deepest ancestor of `url` that is there to be checked. `nil` when none is, which
+    /// only happens for a path with no existing ancestor at all.
+    private static func deepestExistingAncestor(of url: URL) -> String? {
+        var candidate = (url.standardizedFileURL.path as NSString).deletingLastPathComponent
+        while !candidate.isEmpty {
+            var info = stat()
+            if lstat(candidate, &info) == 0 { return candidate }
+            if candidate == "/" { return nil }
+            candidate = (candidate as NSString).deletingLastPathComponent
+        }
+        return nil
+    }
+
     private static func verifyAncestorChain(from start: String, verified: inout Set<String>) throws {
         var candidate = start
         while !candidate.isEmpty {
@@ -237,6 +273,12 @@ public struct RuntimeStorage: Sendable {
             throw RuntimeStorageError.insecureDirectory(path: path, reason: "cannot be inspected")
         }
         if info.st_mode & S_IFMT == S_IFLNK {
+            // The link entry is checked before it is followed. Where it stands today may be a
+            // directory of ours, but in a shared sticky folder such as `/tmp` its owner is the
+            // one who may replace it, and replacing it redirects everything written afterwards.
+            guard mayHoldStorageEntry(owner: info.st_uid) else {
+                throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder is reached through a link another user can replace")
+            }
             guard stat(path, &info) == 0 else {
                 throw RuntimeStorageError.insecureDirectory(path: path, reason: "dangling symbolic link")
             }
@@ -244,7 +286,7 @@ public struct RuntimeStorage: Sendable {
         guard info.st_mode & S_IFMT == S_IFDIR else {
             throw RuntimeStorageError.insecureDirectory(path: path, reason: "not a directory")
         }
-        guard info.st_uid == getuid() || info.st_uid == 0 else {
+        guard mayHoldStorageEntry(owner: info.st_uid) else {
             throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder is owned by another user")
         }
         let sharedWrite = info.st_mode & (S_IWGRP | S_IWOTH)
@@ -253,6 +295,12 @@ public struct RuntimeStorage: Sendable {
             throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder can be changed by other users")
         }
         try verifyAncestorAccessControl(path)
+    }
+
+    /// Who may hold a directory entry on the way to storage: this user, or the system. Anyone
+    /// else owns a name they can replace, whatever it points at now.
+    static func mayHoldStorageEntry(owner: uid_t) -> Bool {
+        owner == getuid() || owner == 0
     }
 
     /// The fully resolved path, so a symbolic link anywhere in the chain is walked as the
@@ -289,17 +337,38 @@ public struct RuntimeStorage: Sendable {
         defer { acl_free(UnsafeMutableRawPointer(acl)) }
         var entry: acl_entry_t?
         var position = ACL_FIRST_ENTRY.rawValue
-        while acl_get_entry(acl, position, &entry) == 0 {
+        while true {
+            errno = 0
+            let status = acl_get_entry(acl, position, &entry)
+            guard status == 0 else {
+                // The enumeration ends by failing with the empty-or-exhausted code. Stopping on
+                // anything else would leave the rest of the list unread, and an unread entry may
+                // be the one that grants somebody else the right to replace this ancestor.
+                guard aclEnumerationFinished(errno) else {
+                    throw RuntimeStorageError.insecureDirectory(path: path, reason: "access control entries could not be inspected")
+                }
+                return
+            }
             position = ACL_NEXT_ENTRY.rawValue
-            guard let entry else { break }
+            guard let current = entry else {
+                throw RuntimeStorageError.insecureDirectory(path: path, reason: "access control entries could not be inspected")
+            }
             var tag = acl_tag_t(0)
-            guard acl_get_tag_type(entry, &tag) == 0 else {
+            guard acl_get_tag_type(current, &tag) == 0 else {
                 throw RuntimeStorageError.insecureDirectory(path: path, reason: "access control entries could not be inspected")
             }
             if tag == ACL_EXTENDED_DENY { continue }
-            guard try grantsReplacementRights(entry, path: path), !isCurrentUser(entry) else { continue }
+            guard try grantsReplacementRights(current, path: path), !isCurrentUser(current) else { continue }
             throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder grants another user the right to change it")
         }
+    }
+
+    /// Whether an entry enumeration that stopped had actually reached the end of the list.
+    /// Darwin reports an empty or exhausted list by failing the call with `EINVAL`; `ENOENT`
+    /// is the same answer for a path that carries no list at all. Every other code means
+    /// entries were left unread.
+    static func aclEnumerationFinished(_ code: Int32) -> Bool {
+        code == EINVAL || code == ENOENT
     }
 
     private static func grantsReplacementRights(_ entry: acl_entry_t, path: String) throws -> Bool {

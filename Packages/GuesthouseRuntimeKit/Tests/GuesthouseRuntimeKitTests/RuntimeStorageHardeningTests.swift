@@ -151,6 +151,52 @@ import Testing
         #expect(unwritable.recoveryActions == [.freeDiskSpace, .retry, .cancel])
     }
 
+    /// A refusal preserves; it does not first make the change it is refusing to make.
+    @Test func anUnsafeAncestorIsRefusedBeforeAnythingIsCreated() throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let open = root.appending(path: "open")
+        try FileManager.default.createDirectory(at: open, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o777])
+        let storage = open.appending(path: "storage")
+
+        #expect(throws: RuntimeStorageError.self) { _ = try RuntimeStorage(root: storage) }
+
+        #expect(!FileManager.default.fileExists(atPath: storage.path), "a refused initialization created a directory in the untrusted folder anyway")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: open.path).isEmpty)
+    }
+
+    /// The default root is only resolved, never created: making Application Support before
+    /// anything has looked at the folders above it is the change a refusal is there to
+    /// prevent. Whatever is missing is created by the preparation that verified those folders,
+    /// and it is created as private as the root itself.
+    @Test func missingIntermediatesAreCreatedByThePreparationThatCheckedThem() throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let support = root.appending(path: "Library/Application Support")
+        let storage = try RuntimeStorage(root: support.appending(path: "Guesthouse"))
+        for url in [support, support.deletingLastPathComponent(), storage.root] {
+            let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+            #expect(mode?.int16Value == 0o700, "\(url.lastPathComponent) is not as private as the storage it holds")
+        }
+    }
+
+    /// The rule the ancestor walk applies to a link it is about to follow: today's target says
+    /// nothing about who may put a different one there tomorrow.
+    @Test func onlyThisUserOrTheSystemMayHoldAnAncestorEntry() {
+        #expect(RuntimeStorage.mayHoldStorageEntry(owner: getuid()))
+        #expect(RuntimeStorage.mayHoldStorageEntry(owner: 0), "root-owned system links such as /tmp stay usable")
+        #expect(!RuntimeStorage.mayHoldStorageEntry(owner: getuid() &+ 1))
+        #expect(!RuntimeStorage.mayHoldStorageEntry(owner: 501 &+ 12_345))
+    }
+
+    /// Enumeration stops by failing; only the code that means "nothing further" may be taken
+    /// as a clean end, because an unread entry may be the grant that matters.
+    @Test func onlyAnExhaustedAccessControlListCountsAsFullyRead() {
+        #expect(RuntimeStorage.aclEnumerationFinished(EINVAL))
+        #expect(RuntimeStorage.aclEnumerationFinished(ENOENT))
+        for code in [EIO, EACCES, EBADF, EPERM, ENOMEM, 0] {
+            #expect(!RuntimeStorage.aclEnumerationFinished(code), "errno \(code) leaves entries unread")
+        }
+    }
+
     @Test func aNonDirectoryRootAncestorIsRefusedAndPreserved() throws {
         let blocker = root.appending(path: "not-a-directory")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
