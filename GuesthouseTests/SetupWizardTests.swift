@@ -13,14 +13,45 @@ struct StubHostProbe: HostProbe {
     var applications: [String: InstalledApplication] = ["com.openai.chat": InstalledApplication(url: URL(fileURLWithPath: "/Applications/ChatGPT.app"), version: "1.2.3", build: "456")]
 
     var freeThrows = false
+    /// A specific probe failure, so a test can exercise one undetermined outcome.
+    var freeError: HostProbeError?
 
     struct ProbeFailure: Error {}
 
     func freeBytes(at url: URL) throws -> UInt64 {
+        if let freeError { throw freeError }
         if freeThrows { throw ProbeFailure() }
         return free
     }
     func installedApplication(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
+}
+
+/// A probe that holds its first free-space answer until the test releases it, so two
+/// overlapping checks finish in a known order.
+final class GatedHostProbe: HostProbe, @unchecked Sendable {
+    let cpuArchitecture: CPUArchitecture = .appleSilicon
+    let operatingSystemVersion = SemanticVersion([26, 5, 2])
+    let operatingSystemBuild: String? = "25F84"
+    let physicalMemoryBytes: UInt64 = 32 * ResourcePreset.gibibyte
+    let powerSource: PowerSource = .externalPower
+
+    private let lock = NSLock()
+    private var calls = 0
+    private let gate = DispatchSemaphore(value: 0)
+
+    var callCount: Int { lock.withLock { calls } }
+    func releaseFirstAnswer() { gate.signal() }
+
+    /// The first call is held and then answers with plenty of space; every later call answers
+    /// at once with too little.
+    func freeBytes(at url: URL) throws -> UInt64 {
+        let call = lock.withLock { calls += 1; return calls }
+        guard call == 1 else { return 20 * ResourcePreset.gigabyte }
+        gate.wait()
+        return 500 * ResourcePreset.gigabyte
+    }
+
+    func installedApplication(bundleIdentifier: String) -> InstalledApplication? { nil }
 }
 
 @MainActor
@@ -121,5 +152,68 @@ struct StubHostProbe: HostProbe {
         #expect(SetupWizardModel(defaults: store, checkThisMac: model).current == .checkThisMac)
         #expect(SetupStage.allCases.count == 8)
         #expect(SetupStage.allCases.filter(\.isImplemented) == [.checkThisMac])
+    }
+
+    @Test func onlyTheNewestOverlappingCheckPublishesItsResult() async {
+        let probe = GatedHostProbe()
+        let model = CheckThisMacModel(probe: probe, storageRoot: URL(fileURLWithPath: "/Users/dev/Library/Application Support/Guesthouse"))
+        // A recovery action starts a check while the first one, held in the probe, still runs.
+        model.check()
+        await waitUntil { probe.callCount >= 1 }
+        model.check()
+        await waitUntil { model.report != nil && !model.isChecking }
+        #expect(model.report?.result(.freeDisk)?.isFailure == true, "the newest check answered")
+        probe.releaseFirstAnswer()
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(model.report?.result(.freeDisk)?.isFailure == true, "the superseded check never replaced it")
+        #expect(!model.canProceed, "and Next is never enabled from the older answer")
+    }
+
+    @Test func reopeningTheWizardResumesTheStageSetupActuallyReached() async {
+        let store = defaults()
+        let model = await checked(StubHostProbe())
+        let dashboard = SetupWizardModel(defaults: store, checkThisMac: model)
+        let window = SetupWizardModel(defaults: store, checkThisMac: model)
+        dashboard.next()
+        #expect(dashboard.current == .createDevelopmentMac)
+        #expect(window.current == .checkThisMac, "this model was made before the stage advanced")
+        window.presented()
+        #expect(window.current == .createDevelopmentMac, "reopening resumes where setup stopped, not where this model started")
+    }
+
+    @Test func reopeningTheWizardChecksThisMacAgain() async {
+        let model = await checked(StubHostProbe())
+        let wizard = SetupWizardModel(defaults: defaults(), checkThisMac: model)
+        #expect(wizard.canGoNext)
+        wizard.presented()
+        #expect(model.isChecking)
+        #expect(!wizard.canGoNext, "a report made before the sheet was closed no longer enables Next")
+        await waitUntil { !model.isChecking }
+        #expect(wizard.canGoNext)
+    }
+
+    @Test func theStorageSummaryNamesTheRuntimesRoot() async {
+        #expect(CheckThisMacModel.defaultStorageRoot == RuntimeStorageLocation.defaultRoot())
+        #expect(CheckThisMacModel.defaultStorageRoot.path.hasSuffix("/Library/Application Support/Guesthouse"))
+        let model = await checked(StubHostProbe())
+        #expect(model.storageSummary.contains { $0.contains("Everything lives under /Users/dev/Library/Application Support/Guesthouse") })
+    }
+
+    @Test func aCheckThatCouldNotBeMadeStillOffersAnActionTheAppCanPerform() async {
+        for error in [HostProbeError.volumeUnavailable(path: "/Volumes/Gone/Guesthouse"), .notADirectory(path: "/Users/dev/Guesthouse")] {
+            var probe = StubHostProbe()
+            probe.freeError = error
+            let model = await checked(probe)
+            guard let disk = model.rows.first(where: { $0.kind == .freeDisk }) else { Issue.record("no disk row"); return }
+            #expect(disk.verdict == .undetermined)
+            #expect(
+                disk.recovery.contains { $0.availability == .enabled && $0.action != .cancel },
+                "setup offers something other than closing when a check cannot be made"
+            )
+        }
+    }
+
+    func waitUntil(_ condition: @MainActor () -> Bool) async {
+        for _ in 0..<400 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
     }
 }

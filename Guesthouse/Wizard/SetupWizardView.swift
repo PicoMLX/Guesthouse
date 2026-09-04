@@ -31,6 +31,7 @@ struct SetupWizardView: View {
             .padding(20)
         }
         .frame(minWidth: 780, minHeight: 520)
+        .task { wizard.presented() }
     }
 
     private var stageList: some View {
@@ -92,6 +93,9 @@ struct CheckThisMacView: View {
                     ForEach(model.storageSummary, id: \.self) { line in Text(line).font(.callout) }
                 }
                 .padding(.top, 8)
+                // The storage line names where the VM will live; MVP-PLAN.md §"Essential
+                // screens" asks for selectable paths, so the user can copy it.
+                .textSelection(.enabled)
                 .accessibilityElement(children: .combine)
             }
             if let note {
@@ -102,7 +106,6 @@ struct CheckThisMacView: View {
                 .accessibilityLabel("Check this Mac again")
             Spacer()
         }
-        .task { if model.report == nil { model.check() } }
     }
 
     private func choose(_ option: RecoveryPresentation.Option) {

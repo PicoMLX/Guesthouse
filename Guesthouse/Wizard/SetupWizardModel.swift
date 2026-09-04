@@ -53,6 +53,9 @@ final class CheckThisMacModel {
     private let probe: any HostProbe
     private let storageRoot: URL
     private let policy: ResourcePolicy
+    /// Identifies one check. A recovery action can start a second check while the first is
+    /// still running, and only the newest may publish.
+    private var checkGeneration: UInt64 = 0
 
     init(probe: any HostProbe = SystemHostProbe(), storageRoot: URL = CheckThisMacModel.defaultStorageRoot, policy: ResourcePolicy = .standard) {
         self.probe = probe
@@ -60,16 +63,24 @@ final class CheckThisMacModel {
         self.policy = policy
     }
 
-    /// Where the runtime keeps its data. The sandboxed GUI cannot see it; the path is shown
-    /// so the user knows where the VM will live, and its volume is what the disk check reads.
-    static let defaultStorageRoot = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/Guesthouse")
+    /// Where the runtime keeps its data. The sandboxed GUI cannot read inside it; the path is
+    /// shown so the user knows where the VM will live, and its volume is what the disk check
+    /// measures. It is the runtime's canonical root, not this app's container, which is what
+    /// `FileManager`'s own home directory would name here (MVP-PLAN.md §3, "Local storage").
+    static let defaultStorageRoot = RuntimeStorageLocation.defaultRoot()
 
     func check() {
+        checkGeneration &+= 1
+        let generation = checkGeneration
         isChecking = true
         let probe = probe, storageRoot = storageRoot, policy = policy
         Task.detached {
             let report = PreflightCheck.run(probe: probe, policy: policy, storageRoot: storageRoot)
             await MainActor.run {
+                // A check that has been superseded publishes nothing: its answer is older than
+                // the one on screen, and clearing `isChecking` would enable Next over a result
+                // the newest check has not confirmed.
+                guard generation == self.checkGeneration else { return }
                 self.report = report
                 self.isChecking = false
             }
@@ -143,7 +154,20 @@ final class SetupWizardModel {
     init(defaults: UserDefaults = .standard, checkThisMac: CheckThisMacModel = CheckThisMacModel()) {
         self.defaults = defaults
         self.checkThisMac = checkThisMac
-        current = defaults.string(forKey: Self.stageKey).flatMap(SetupStage.init(rawValue:)) ?? .checkThisMac
+        current = Self.persistedStage(in: defaults)
+    }
+
+    /// The wizard is being shown. The position is read again, because setup may have advanced
+    /// since this model was made, and the host is checked again, because a report from an
+    /// earlier presentation cannot vouch for conditions that changed while the sheet was
+    /// closed (MVP-PLAN.md §2, "First launch").
+    func presented() {
+        current = Self.persistedStage(in: defaults)
+        checkThisMac.check()
+    }
+
+    private static func persistedStage(in defaults: UserDefaults) -> SetupStage {
+        defaults.string(forKey: stageKey).flatMap(SetupStage.init(rawValue:)) ?? .checkThisMac
     }
 
     var stages: [SetupStage] { SetupStage.allCases }
