@@ -6,14 +6,74 @@ import Testing
     let sha = CommitSHA("0123456789abcdef0123456789abcdef01234567")!
 
     func resolved(identity: String, location: String) -> ResolvedPackagesFile {
-        ResolvedPackagesFile(version: 3, pins: [.init(identity: PackageIdentity(resolvedIdentity: identity)!, kind: .remoteSourceControl, location: location, revision: nil, version: "1.0.0", branch: nil)])
+        ResolvedPackagesFile(version: 3, pins: [.init(identity: PackageIdentity(resolvedIdentity: identity)!, kind: .remoteSourceControl, location: location, revision: sha.rawValue, version: "1.0.0", branch: nil)])
     }
 
     @Test func resolvedIdentitiesAreKeptVerbatim() throws {
-        let file = try ResolvedPackagesFile.decode(Data(#"{"version":3,"pins":[{"identity":"mixed-repo.git","kind":"remoteSourceControl","location":"https://github.com/Org/Mixed-Repo.GIT","state":{"version":"1.0.0"}}]}"#.utf8))
+        let file = try ResolvedPackagesFile.decode(Data(#"{"version":3,"pins":[{"identity":"mixed-repo.git","kind":"remoteSourceControl","location":"https://github.com/Org/Mixed-Repo.GIT","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":"1.0.0"}}]}"#.utf8))
         #expect(file.pins.first?.identity.rawValue == "mixed-repo.git")
         #expect(PackageIdentity(resolvedIdentity: "a/b") == nil)
         #expect(PackageIdentity(resolvedIdentity: "\u{202E}kit") == nil, "an override could make the name read as another package")
+    }
+
+    @Test func aBoundarySpaceBelongsToTheIdentityThatCarriesIt() throws {
+        // SwiftPM takes a local dependency's identity from its checkout basename, so a
+        // directory named ` SharedUI ` is the package `" sharedui "`. Folding it onto
+        // `sharedui` would merge it with the app's real remote dependency and report a
+        // collision that no re-resolve could clear, because the file is what SwiftPM writes.
+        let json = #"""
+        {"version":3,"pins":[
+          {"identity":" sharedui ","kind":"localSourceControl","location":"/Users/dev/ SharedUI ","state":{"revision":"1111111111111111111111111111111111111111"}},
+          {"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":"1.0.0"}}
+        ]}
+        """#
+        let file = try ResolvedPackagesFile.decode(Data(json.utf8))
+        #expect(file.pins.map(\.identity.rawValue) == [" sharedui ", "sharedui"])
+        let remote = RemoteURL("https://github.com/Org/SharedUI")!
+        let package = WorkspaceRepository(role: .package, remote: remote, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        #expect(LocalOverrideMatcher.match(selected: [package], resolved: file, observedOrigins: [package.checkoutName: remote])
+            == [.matched(identity: PackageIdentity(remote: remote), location: "https://github.com/Org/SharedUI.git")],
+            "a neighbouring checkout whose name has boundary spaces is another package, not a collision")
+    }
+
+    @Test func aMirroredDependencyIsNotReportedAsAbsent() {
+        // A dependency mirror makes SwiftPM record the mirror's identity while mapping the
+        // location back to the original URL, so the app depends on the selected repository
+        // under a name no checkout directory can carry (MVP-PLAN.md §6).
+        let remote = RemoteURL("https://github.com/Org/SharedUI")!
+        let file = resolved(identity: "company-cache", location: "https://github.com/Org/SharedUI.git")
+        let package = WorkspaceRepository(role: .package, remote: remote, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        #expect(LocalOverrideMatcher.match(selected: [package], resolved: file, observedOrigins: [package.checkoutName: remote])
+            == [.identityMismatch(identity: PackageIdentity(remote: remote), pinned: PackageIdentity(resolvedIdentity: "company-cache")!, location: "https://github.com/Org/SharedUI.git")])
+        // A repository the lockfile names nowhere is still reported as no dependency at all.
+        let absent = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/Org/Unrelated")!, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        #expect(LocalOverrideMatcher.match(selected: [absent], resolved: file, observedOrigins: [:])
+            == [.notADependency(identity: PackageIdentity(location: "unrelated")!)])
+    }
+
+    @Test func aSourceControlPinWithoutARevisionIsRefused() throws {
+        func pin(_ state: String) -> Data {
+            Data(#"{"version":3,"pins":[{"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git"\#(state)}]}"#.utf8)
+        }
+        // A pin that names no commit pins nothing: seeding the generated workspace from it
+        // would resolve the dependency again instead of building the code the app ships.
+        #expect(throws: ResolvedPackagesError.malformed("state")) { try ResolvedPackagesFile.decode(pin("")) }
+        #expect(throws: ResolvedPackagesError.malformed("state")) { try ResolvedPackagesFile.decode(pin(#","state":"1.0.0""#)) }
+        #expect(throws: ResolvedPackagesError.malformed("state.revision")) { try ResolvedPackagesFile.decode(pin(#","state":{"version":"1.0.0"}"#)) }
+        #expect(throws: ResolvedPackagesError.malformed("state.version")) {
+            try ResolvedPackagesFile.decode(pin(#","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":1}"#))
+        }
+        // A registry pin carries a version and no commit, and still decodes.
+        let registry = try ResolvedPackagesFile.decode(Data(#"{"version":3,"pins":[{"identity":"registrykit","kind":"registry","location":"org.registrykit","state":{"version":"2.0.0"}}]}"#.utf8))
+        #expect(registry.pins.first?.version == "2.0.0")
+    }
+
+    @Test func thePublicMatchingTypesAreSendable() {
+        func requiringSendable<T: Sendable>(_ type: T.Type) {}
+        requiringSendable(LocalOverrideMatcher.self)
+        requiringSendable(LocalOverrideMatcher.MatchResult.self)
+        requiringSendable(ResolvedPackagesFile.self)
+        requiringSendable(PackageIdentity.self)
     }
 
     @Test func anIdentityFromALocationMatchesTheOneDerivedFromItsRemote() {
@@ -46,7 +106,7 @@ import Testing
         {"version":3,"pins":[
           {"identity":"cafékit","kind":"localSourceControl","location":"/Users/dev/Café Kit","state":{"revision":"0123456789abcdef0123456789abcdef01234567"}},
           {"identity":"space kit","kind":"localSourceControl","location":"/Users/dev/Space Kit","state":{"revision":"0123456789abcdef0123456789abcdef01234567"}},
-          {"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"version":"1.0.0"}}
+          {"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":"1.0.0"}}
         ]}
         """#
         let file = try ResolvedPackagesFile.decode(Data(json.utf8))

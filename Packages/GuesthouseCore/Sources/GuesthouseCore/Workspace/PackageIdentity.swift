@@ -48,12 +48,15 @@ public struct PackageIdentity: Hashable, Sendable, CustomStringConvertible {
     /// non-ASCII letters or spaces (`cafékit`, `space kit`), and re-resolving writes the same
     /// file back; refusing those would reject the whole lockfile with advice that cannot
     /// work. Only spellings that could not name a package at all are refused.
+    ///
+    /// A boundary space is part of the identity for the same reason: a checkout named ` Foo `
+    /// is the package `" foo "`, and folding it onto `foo` would merge two distinct pins into
+    /// one identity, report a collision, and block an override no re-resolve could unblock.
     public init?(resolvedIdentity: String) {
-        let text = resolvedIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !text.contains("/"), text != ".", text != "..",
-              !WorkspaceManifest.containsControlCharacters(text)
+        guard !resolvedIdentity.isEmpty, !resolvedIdentity.contains("/"), resolvedIdentity != ".", resolvedIdentity != "..",
+              !WorkspaceManifest.containsControlCharacters(resolvedIdentity)
         else { return nil }
-        rawValue = text.lowercased()
+        rawValue = resolvedIdentity.lowercased()
     }
 
     public var description: String { rawValue }
@@ -109,10 +112,36 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
             guard let kindRaw = raw["kind"] as? String else { throw .malformed("kind") }
             guard let kind = Pin.Kind(rawValue: kindRaw) else { throw .unknownKind(kindRaw) }
             guard let location = raw["location"] as? String else { throw .malformed("location") }
-            let state = raw["state"] as? [String: Any] ?? [:]
-            pins.append(Pin(identity: identity, kind: kind, location: location, revision: state["revision"] as? String, version: state["version"] as? String, branch: state["branch"] as? String))
+            let state = try decodeState(raw["state"], kind: kind)
+            pins.append(Pin(identity: identity, kind: kind, location: location, revision: state.revision, version: state.version, branch: state.branch))
         }
         return ResolvedPackagesFile(version: version, pins: pins)
+    }
+
+    /// SwiftPM records the commit it checked out for every source-control pin, so a pin whose
+    /// `state` is absent, is not an object, or names no revision is a corrupted lockfile.
+    /// Reading it as a pin with no metadata would let an override be approved against a pin
+    /// that identifies no code, and the failure would surface later, at the build.
+    private static func decodeState(_ raw: Any?, kind: Pin.Kind) throws(ResolvedPackagesError) -> (revision: String?, version: String?, branch: String?) {
+        let isSourceControl = kind == .remoteSourceControl || kind == .localSourceControl
+        guard let raw, !(raw is NSNull) else {
+            if isSourceControl { throw .malformed("state") }
+            return (nil, nil, nil)
+        }
+        guard let fields = raw as? [String: Any] else { throw .malformed("state") }
+        let revision = try string(fields["revision"], field: "state.revision")
+        let version = try string(fields["version"], field: "state.version")
+        let branch = try string(fields["branch"], field: "state.branch")
+        if isSourceControl, revision == nil { throw .malformed("state.revision") }
+        return (revision, version, branch)
+    }
+
+    /// A present-but-unreadable field is refused rather than dropped, so a lockfile that spells
+    /// a version or branch as something other than text is not silently read as having none.
+    private static func string(_ raw: Any?, field: String) throws(ResolvedPackagesError) -> String? {
+        guard let raw, !(raw is NSNull) else { return nil }
+        guard let text = raw as? String else { throw .malformed(field) }
+        return text
     }
 }
 
@@ -147,7 +176,7 @@ public enum ResolvedPackagesError: Error, Hashable, Sendable, LocalizedError {
 /// Decides, for each package repository the user selected, whether it can safely override one
 /// of the app's resolved dependencies (MVP-PLAN.md §6: match identity and canonical origin,
 /// never only the display name; reject ambiguous identities).
-public enum LocalOverrideMatcher {
+public enum LocalOverrideMatcher: Sendable {
     public enum MatchResult: Hashable, Sendable {
         /// The selected repository is exactly this remote-source-control dependency.
         case matched(identity: PackageIdentity, location: String)
@@ -156,6 +185,11 @@ public enum LocalOverrideMatcher {
         case collision(identity: PackageIdentity, locations: [String])
         /// The app does not depend on this package, directly or transitively.
         case notADependency(identity: PackageIdentity)
+        /// The app pins this repository, but under an identity SwiftPM did not derive from the
+        /// pinned location. A dependency mirror does exactly this: SwiftPM writes the mirror's
+        /// identity and maps the location back to the original URL. A local checkout can only
+        /// carry the location's identity, so the override would never take effect.
+        case identityMismatch(identity: PackageIdentity, pinned: PackageIdentity, location: String)
         /// The dependency exists but is not a Git URL dependency (registry or local path).
         case unsupportedKind(identity: PackageIdentity, kind: ResolvedPackagesFile.Pin.Kind)
         /// Same identity, different repository. Overriding would silently substitute code.
@@ -190,7 +224,15 @@ public enum LocalOverrideMatcher {
                 continue
             }
             guard let pins = pinsByIdentity[identity], !pins.isEmpty else {
-                results.append(.notADependency(identity: identity))
+                // A mirrored dependency is pinned at its original location under the mirror's
+                // identity, so the app does depend on the selected repository even though no
+                // pin carries its identity. Reporting that as an absent dependency would send
+                // the user to add a dependency the app already has.
+                if let mirrored = resolved.pins.first(where: { RemoteURL($0.location) == repository.remote }) {
+                    results.append(.identityMismatch(identity: identity, pinned: mirrored.identity, location: mirrored.location))
+                } else {
+                    results.append(.notADependency(identity: identity))
+                }
                 continue
             }
             if pins.count > 1 {
