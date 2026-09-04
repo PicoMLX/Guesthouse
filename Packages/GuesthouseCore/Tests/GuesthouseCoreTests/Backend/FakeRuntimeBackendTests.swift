@@ -21,7 +21,9 @@ import Testing
         #expect(events.map(\.caseName) == ["accepted", "progress", "progress", "status", "completed"])
         guard case .accepted(let id) = events[0] else { Issue.record("no accepted"); return }
         #expect(events[1] == .progress(id, phases[0]))
-        #expect(events[3] == .status(status))
+        var inFlight = status
+        inFlight.inFlightOperation = id
+        #expect(events[3] == .status(inFlight), "the emitted status names the operation that has not completed yet")
         #expect(events[4] == .completed(id))
         #expect(await backend.status(of: environment) == status)
         #expect(await backend.receivedRequests == [.startEnvironment(environment, StartOptions())])

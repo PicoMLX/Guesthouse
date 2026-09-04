@@ -47,7 +47,7 @@ public enum PreviewScenarios: Sendable {
     /// A stopped environment whose SSH identity changed; Start is refused until repaired.
     public static func environmentNeedingRepair() async -> PreviewScenario {
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: date)
-        let snapshot = try! snapshot(for: [environment], provisioning: [environment.id: ProvisioningState(stage: .sshPaired, status: .recoverableFailure(.hostKeyChanged(environment.id)))])
+        let snapshot = try! snapshot(for: [environment], provisioning: [environment.id: ProvisioningState(stage: .sshPaired, status: .recoverableFailure(.hostKeyChanged(environment.id), interrupted: nil))])
         let backend = FakeRuntimeBackend()
         await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(.hostKeyChanged(environment.id)), reconciledAt: date))
         await backend.script("startEnvironment", .fail(error: .hostKeyChanged(environment.id)))
@@ -60,7 +60,7 @@ public enum PreviewScenarios: Sendable {
         let preserved = DevelopmentEnvironment(name: "Old Dev Mac", createdAt: date.addingTimeInterval(-86_400 * 30))
         var snapshot = try! snapshot(for: [active, preserved], provisioning: [
             active.id: ProvisioningState(stage: .ready, status: .completed(Checkpoint(stage: .ready, reachedAt: date))),
-            preserved.id: ProvisioningState(stage: .guestSecured, status: .recoverableFailure(.guestNotReachable(preserved.id))),
+            preserved.id: ProvisioningState(stage: .guestSecured, status: .recoverableFailure(.guestNotReachable(preserved.id), interrupted: nil)),
         ])
         try! snapshot.slots.markPreserved(preserved.id)
         let backend = FakeRuntimeBackend()

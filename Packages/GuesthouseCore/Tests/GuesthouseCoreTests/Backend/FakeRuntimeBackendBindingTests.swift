@@ -212,6 +212,153 @@ import Testing
         #expect(cancels.count == 2, "a request that never took effect swallowed the consumer's own cancellation")
     }
 
+    /// The replay has to land where the cancellation happened. A reservation can be released
+    /// long after the consumer went away, and a coordinator test reading `receivedRequests`
+    /// would otherwise see the requests it sent in between ahead of a cancellation that
+    /// preceded them.
+    @Test func aSuppressedCancellationIsReplayedWhereItHappened() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = EnvironmentID()
+        let id = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready, inFlightOperation: id))
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .hang)
+        await backend.script("cancelOperation", .hang)
+        let stream = backend.send(.startEnvironment(environment, StartOptions()))
+        let consumer = Task { for try await _ in stream {} }
+        while await backend.receivedRequests.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
+        let cancelStream = backend.send(.cancelOperation(id))
+        let canceller = Task { for try await _ in cancelStream {} }
+        while await backend.receivedRequests.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        consumer.cancel()
+        for _ in 0..<400 where await backend.status(of: environment)?.inFlightOperation != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        // Sent after the consumer went away, so it must stay behind that cancellation.
+        for try await _ in backend.send(.environmentStatus(environment)) {}
+        canceller.cancel()
+        _ = try? await canceller.value
+        for _ in 0..<400 where await backend.receivedRequests.filter({ $0 == .cancelOperation(id) }).count < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let requests = await backend.receivedRequests
+        let replay = requests.lastIndex(of: .cancelOperation(id))
+        let query = requests.firstIndex(of: .environmentStatus(environment))
+        #expect(requests.filter { $0 == .cancelOperation(id) }.count == 2)
+        #expect(replay != nil && query != nil && replay! < query!, "\(requests)")
+    }
+
+    /// Two suppressed cancellations reserve two slots, so replaying them puts them back in the
+    /// order they happened whatever order their reservations are released in. Keying them on the
+    /// length of the log instead made the second replay land in front of the first.
+    @Test func twoSuppressedCancellationsKeepTheOrderTheyHappenedIn() async throws {
+        let backend = FakeRuntimeBackend()
+        let first = EnvironmentID()
+        let second = EnvironmentID()
+        let one = OperationID()
+        let two = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: first, vm: .running, readiness: .ready, inFlightOperation: one))
+        await backend.setStatus(EnvironmentStatus(environmentID: second, vm: .running, readiness: .ready, inFlightOperation: two))
+        await backend.script("startEnvironment", .hang)
+        await backend.script("cancelOperation", .hang)
+
+        await backend.useOperationID(one, forNext: "startEnvironment")
+        let firstStream = backend.send(.startEnvironment(first, StartOptions()))
+        let firstConsumer = Task { for try await _ in firstStream {} }
+        while await backend.receivedRequests.count < 1 { try await Task.sleep(for: .milliseconds(2)) }
+        await backend.useOperationID(two, forNext: "startEnvironment")
+        let secondStream = backend.send(.startEnvironment(second, StartOptions()))
+        let secondConsumer = Task { for try await _ in secondStream {} }
+        while await backend.receivedRequests.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        let firstCancel = backend.send(.cancelOperation(one))
+        let firstCanceller = Task { for try await _ in firstCancel {} }
+        while await backend.receivedRequests.count < 3 { try await Task.sleep(for: .milliseconds(2)) }
+        let secondCancel = backend.send(.cancelOperation(two))
+        let secondCanceller = Task { for try await _ in secondCancel {} }
+        while await backend.receivedRequests.count < 4 { try await Task.sleep(for: .milliseconds(2)) }
+
+        // The consumer of `one` goes away first, so its cancellation happened first.
+        firstConsumer.cancel()
+        for _ in 0..<400 where await backend.status(of: first)?.inFlightOperation != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        secondConsumer.cancel()
+        for _ in 0..<400 where await backend.status(of: second)?.inFlightOperation != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        // Released in the same order, which is the order that used to invert the replays.
+        firstCanceller.cancel()
+        _ = try? await firstCanceller.value
+        for _ in 0..<400 where await backend.receivedRequests.filter({ $0 == .cancelOperation(one) }).count < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        secondCanceller.cancel()
+        _ = try? await secondCanceller.value
+        for _ in 0..<400 where await backend.receivedRequests.filter({ $0 == .cancelOperation(two) }).count < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let requests = await backend.receivedRequests
+        #expect(requests.suffix(2) == [.cancelOperation(one), .cancelOperation(two)], "\(requests)")
+    }
+
+    @Test func theEmittedScriptedStatusNamesTheOperationStillInFlight() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = EnvironmentID()
+        let id = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready, inFlightOperation: id))
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .succeed(status: EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready)))
+        var emitted: EnvironmentStatus?
+        for try await event in backend.send(.startEnvironment(environment, StartOptions())) {
+            if case .status(let status) = event { emitted = status }
+        }
+        #expect(emitted?.inFlightOperation == id, "a consumer applying the status event must not see an idle environment while the operation runs")
+    }
+
+    @Test func aScriptedPostCancellationStatusDoesNotRestoreTheCanceledOperation() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = EnvironmentID()
+        let id = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready, inFlightOperation: id))
+        await backend.script("cancelOperation", .succeed(status: EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready, inFlightOperation: id)))
+        for try await _ in backend.send(.cancelOperation(id)) {}
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil, "a scripted status must not put the canceled operation back in flight")
+    }
+
+    @Test func releasingOneReservationLeavesAnOverlappingRequestSpeakingForTheConsumer() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = EnvironmentID()
+        let id = OperationID()
+        await backend.setStatus(EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready, inFlightOperation: id))
+        await backend.useOperationID(id, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .hang)
+        await backend.script("cancelOperation", .hang)
+        let consumer = Task { for try await _ in backend.send(.startEnvironment(environment, StartOptions())) {} }
+        while await backend.receivedRequests.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
+        // The first request reserves the id and then hangs, so its reservation still stands
+        // while the second one is sent, released, and the consumer goes away.
+        let pending = backend.send(.cancelOperation(id))
+        let canceller = Task { for try await _ in pending {} }
+        while await backend.receivedRequests.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        await backend.script("cancelOperation", .disconnect())
+        await #expect(throws: RuntimeConnectionInterrupted.self) {
+            for try await _ in backend.send(.cancelOperation(id)) {}
+        }
+        consumer.cancel()
+        for _ in 0..<400 where await backend.status(of: environment)?.inFlightOperation != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil, "the consumer's cancellation ended the operation")
+        // A later ticket cannot be served until every earlier one has been, so a synthetic
+        // cancellation taken before this query is recorded by the time it replies.
+        for try await _ in backend.send(.environmentStatus(environment)) {}
+        let cancels = await backend.receivedRequests.filter { $0 == .cancelOperation(id) }
+        #expect(cancels.count == 2, "the released request spoke for a reservation another request still holds")
+        canceller.cancel()
+        _ = try? await canceller.value
+    }
+
     @Test func explicitCancellationIsRecordedOnceEvenWhenTheConsumerAlsoStops() async throws {
         let backend = FakeRuntimeBackend()
         let id = OperationID()
