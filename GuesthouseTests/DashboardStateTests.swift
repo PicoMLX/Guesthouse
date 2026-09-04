@@ -344,9 +344,13 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        // The check that follows the failure has to answer first: the status the start began
-        // from is dropped, so Start is offered again only from what the runtime just reported.
-        await waitUntil { model.lastErrors[environment.id] != nil && model.operations.isEmpty && model.statuses[environment.id] != nil }
+        // Start is offered again only once the check that follows the failure has answered:
+        // the status the start began from is dropped, so what the runtime just reported is the
+        // only thing Start can be offered from.
+        await waitUntil {
+            model.lastErrors[environment.id] != nil && model.operations.isEmpty
+                && model.statuses[environment.id] != nil && !model.reconciling.contains(environment.id)
+        }
         let card = try #require(model.cardStates().first)
         #expect(card.attention == .guestNotReachable(environment.id))
         #expect(card.availability(of: .start) == .enabled, "a stopped, ready VM can be started again after a failed start")
