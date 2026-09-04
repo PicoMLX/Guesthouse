@@ -20,6 +20,21 @@ import Testing
         return url
     }
 
+    @Test func metadataThatSanitizesToNothingIsRefused() throws {
+        let app = try bundle(name: "Blank.app", version: "\u{200B}\u{200B}")
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: app) }
+    }
+
+    @Test func anUnreadableEntryMakesTheEstimateUnknown() throws {
+        let app = try bundle(name: "Unreadable.app")
+        let hidden = app.appending(path: "Contents/Resources")
+        try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: hidden.appending(path: "file"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: hidden.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hidden.path) }
+        #expect(XcodeImportValidator.estimateSize(of: app) == nil, "a partial sum is not an estimate")
+    }
+
     @Test func validBundleBecomesACandidate() throws {
         let url = try bundle()
         let candidate = try XcodeImportValidator.candidate(at: url, expectedBundleIdentifier: XcodeImportValidator.xcodeBundleIdentifier)
@@ -52,6 +67,9 @@ import Testing
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.notXcode)) { try XcodeImportValidator.candidate(at: expectedMismatch, expectedBundleIdentifier: "com.example.Else") }
         let noBuild = try bundle(name: "NoBuild.app", build: nil)
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: noBuild) }
+        let damaged = try bundle(name: "Damaged.app")
+        try Data("not a property list".utf8).write(to: damaged.appending(path: "Contents/Info.plist"))
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.metadataUnreadable)) { try XcodeImportValidator.candidate(at: damaged) }
         let file = root.appending(path: "file.app")
         try Data("x".utf8).write(to: file)
         #expect(throws: GuesthouseError.xcodeSelectionRejected(.notAnApplication)) { try XcodeImportValidator.candidate(at: file) }

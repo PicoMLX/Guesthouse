@@ -6,6 +6,10 @@ import Observation
 /// XPC arrangement can be checked outside tests (issue #19). Not part of the product UI.
 @Observable
 final class DebugRuntimeProbe {
+    /// Only the newest request may publish: a slower earlier probe never overwrites it.
+    private var generation: UInt64 = 0
+    private var probeTask: Task<Void, Never>?
+
     var result: String = "Not requested"
     private let backend: any RuntimeBackend
 
@@ -26,30 +30,38 @@ final class DebugRuntimeProbe {
         case .handoff(let made):
             handoff = made
         }
-        result = "Validating \(handoff.displayName)…"
-        Task {
+        result = "Validating \(GuesthouseError.sanitize(handoff.displayName, limit: 120))…"
+        generation &+= 1
+        let generation = self.generation
+        probeTask?.cancel()
+        probeTask = Task {
             do {
                 var text = "No reply"
                 for try await event in backend.send(.importXcode(EnvironmentID(), handoff)) {
                     switch event {
                     case .xcodeCandidate(let candidate):
-                        text = "Xcode \(candidate.version) (\(candidate.build)) at \(candidate.path), about \(candidate.sizeEstimateBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "unknown size")"
+                        text = "Xcode \(candidate.version) (\(candidate.build)) at \(GuesthouseError.sanitize(candidate.path, limit: 200)), about \(candidate.sizeEstimateBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "unknown size")"
                     case .failed(_, let error):
                         text = "Rejected: \(error.userMessage)"
                     default:
                         text = "Unexpected reply: \(event.caseName)"
                     }
                 }
+                guard generation == self.generation else { return }
                 result = text
             } catch {
-                result = "Connection interrupted: \(error)"
+                guard generation == self.generation else { return }
+                result = "Connection interrupted: \(GuesthouseError.sanitize(String(describing: error), limit: 120))"
             }
         }
     }
 
     func requestRuntimeVersion() {
         result = "Requesting…"
-        Task {
+        generation &+= 1
+        let generation = self.generation
+        probeTask?.cancel()
+        probeTask = Task {
             do {
                 var text = "No reply"
                 for try await event in backend.send(.runtimeVersion) {
@@ -59,9 +71,11 @@ final class DebugRuntimeProbe {
                         text = "Unexpected reply: \(event.caseName)"
                     }
                 }
+                guard generation == self.generation else { return }
                 result = text
             } catch {
-                result = "Connection interrupted: \(error)"
+                guard generation == self.generation else { return }
+                result = "Connection interrupted: \(GuesthouseError.sanitize(String(describing: error), limit: 120))"
             }
         }
     }
