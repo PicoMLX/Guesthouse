@@ -169,7 +169,9 @@ import Testing
         let environment = EnvironmentID()
         #expect(RuntimeRequest.startEnvironment(environment, StartOptions()).mutatesHost)
         #expect(RuntimeRequest.stopEnvironment(environment, .force).mutatesHost)
-        #expect(RuntimeRequest.importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")).mutatesHost)
+        // Validation resolves a handoff, reads metadata and measures a bundle. Nothing on the
+        // host changes, so an interrupted one leaves nothing to inspect and may be asked again.
+        #expect(!RuntimeRequest.importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")).mutatesHost)
         #expect(!RuntimeRequest.runtimeVersion.mutatesHost)
         #expect(!RuntimeRequest.environmentStatus(environment).mutatesHost)
         #expect(!RuntimeRequest.cancelOperation(OperationID()).mutatesHost)

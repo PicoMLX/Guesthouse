@@ -41,7 +41,7 @@ final class DebugRuntimeProbe {
                 for try await event in backend.send(.importXcode(EnvironmentID(), handoff)) {
                     switch event {
                     case .xcodeCandidate(let candidate):
-                        text = "Xcode \(candidate.version) (\(candidate.build)) at \(GuesthouseError.sanitize(candidate.path, limit: 200)), about \(candidate.sizeEstimateBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "unknown size")"
+                        text = Self.describe(candidate)
                     case .failed(_, let error):
                         text = "Rejected: \(error.userMessage)"
                     default:
@@ -55,6 +55,16 @@ final class DebugRuntimeProbe {
                 result = "Connection interrupted: \(GuesthouseError.sanitize(String(describing: error), limit: 120))"
             }
         }
+    }
+
+    /// How a validated candidate reads.
+    ///
+    /// The estimate is clamped rather than converted: the service may legitimately report any
+    /// `UInt64`, and `ByteCountFormatter` takes an `Int64`, so a bundle measured above
+    /// `Int64.max` would trap and take the app down instead of being shown.
+    static func describe(_ candidate: XcodeCandidate) -> String {
+        let size = candidate.sizeEstimateBytes.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "unknown size"
+        return "Xcode \(candidate.version) (\(candidate.build)) at \(GuesthouseError.sanitize(candidate.path, limit: 200)), about \(size)"
     }
 
     /// Retires the request in flight and returns the generation of the new one.

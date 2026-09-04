@@ -484,7 +484,7 @@ nonisolated extension RuntimeEvent {
     fileprivate var isDroppableTraffic: Bool {
         switch self {
         case .progress, .log, .status: true
-        case .runtimeVersion, .environments, .accepted, .completed, .failed: false
+        case .runtimeVersion, .environments, .xcodeCandidate, .accepted, .completed, .failed: false
         }
     }
 }

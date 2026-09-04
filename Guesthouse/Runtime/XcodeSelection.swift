@@ -39,7 +39,11 @@ enum XcodeSelection {
     }
 
     static func handoff(for url: URL) throws -> FileHandoff {
-        let bookmark = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+        // The panel grants read access only, which is all the app's
+        // `files.user-selected.read-only` entitlement allows. A plain security scope asks for
+        // read and write, exceeds that grant, and the bookmark is then refused for a selection
+        // that was perfectly valid.
+        let bookmark = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess], includingResourceValuesForKeys: nil, relativeTo: nil)
         return FileHandoff(kind: .securityScopedBookmark(bookmark), displayName: url.lastPathComponent, expectedBundleIdentifier: expectedBundleIdentifier)
     }
 }
