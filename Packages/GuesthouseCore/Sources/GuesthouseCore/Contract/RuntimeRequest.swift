@@ -23,6 +23,20 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
         case .cancelOperation: "cancelOperation"
         }
     }
+
+    /// Whether the service changes host state for this request.
+    ///
+    /// A request that is interrupted before it is accepted carries no operation id, but it may
+    /// still have reached the service and been journaled or started. A mutating one therefore
+    /// has an unknown outcome and is never offered a blind retry; a read-only query changed
+    /// nothing and may simply be asked again. Cancelling counts as read-only because asking
+    /// twice cannot leave the host anywhere asking once would not.
+    public var mutatesHost: Bool {
+        switch self {
+        case .runtimeVersion, .environmentStatus, .cancelOperation: false
+        case .startEnvironment, .stopEnvironment, .importXcode: true
+        }
+    }
 }
 
 /// Every message from the GUI carries the protocol version it speaks.
