@@ -69,10 +69,11 @@ public final class OperationSupervisor: Sendable {
         guard live.executablePath == executable.path, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
             throw SupervisionError.processMismatch(pid: pid)
         }
-        // The process must name the VM the caller says it launched: arguments for one VM
-        // recorded under another environment would make later reconciliation claim the wrong
-        // machine (MVP-PLAN.md §4).
-        guard live.claimedVMName == vmName else {
+        // The process must name the VM the caller says it launched, and that VM must be the
+        // one this environment owns: all three have to agree, or later reconciliation would
+        // claim the wrong machine, and a record that disagrees with itself would make the
+        // whole identity document unreadable on the next start (MVP-PLAN.md §4).
+        guard live.claimedVMName == vmName, vmName == environment.tartVMName else {
             throw SupervisionError.processMismatch(pid: pid)
         }
         // The start time is stored exactly as observed: the reconciler compares it for
@@ -142,6 +143,11 @@ public final class OperationSupervisor: Sendable {
                     let claimants = enumerator.claimants(ofVM: environment.tartVMName)
                     if !claimants.processes.isEmpty {
                         verdicts[environment] = .uncertain(.anotherProcessClaimsVM)
+                    } else if claimants.unreadable {
+                        // The scan found a matching VM argument but could not finish reading
+                        // the process. An environment whose claimant could not be observed is
+                        // not an environment that is free.
+                        verdicts[environment] = .uncertain(.processUnobservable)
                     }
                 }
             }

@@ -202,6 +202,23 @@ import Testing
         }
     }
 
+    @Test func aVMNameThatIsNotTheEnvironmentsIsRefused() async throws {
+        // Arguments and vmName agree on VM B while the environment is A: recording that would
+        // file a self-contradicting identity, which makes the whole document unreadable on
+        // the next start.
+        let store = try ProcessIdentityStore(directory: root)
+        let supervisor = OperationSupervisor(store: store)
+        let environment = EnvironmentID(), other = EnvironmentID()
+        let arguments = ["-e", "sleep 41", "run", other.tartVMName]
+        let fixture = URL(fileURLWithPath: "/usr/bin/perl")
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: fixture, arguments: arguments, timeout: .seconds(20)))
+        defer { run.terminate(gracePeriod: .milliseconds(100)) }
+        await #expect(throws: SupervisionError.processMismatch(pid: run.processIdentifier)) {
+            _ = try await supervisor.recordLaunch(pid: run.processIdentifier, executable: fixture, arguments: arguments, vmName: other.tartVMName, environment: environment)
+        }
+        #expect(await store.identity(for: environment) == nil, "nothing was recorded")
+    }
+
     @Test func aClaimantWithoutARecordOrLockIsUncertain() async throws {
         let store = try ProcessIdentityStore(directory: root)
         let environment = EnvironmentID()
