@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import GuesthouseCore
 import Testing
 @testable import GuesthouseRuntimeKit
@@ -41,9 +42,93 @@ struct DummyBundle {
         let runner = FakeProcessRunner(stdout: ["2.36.0"], exit: ProcessExit(reason: .status(0)))
         // A link is not a regular file, so it has no identity to bind to: the launch is
         // refused rather than trusted.
-        let backend = TartBackend(bundle: bundle, storage: storage, runner: runner, verifiedExecutable: TartBundle.ExecutableIdentity(device: 1, inode: 2, size: 3, modified: timespec()))
-        await #expect(throws: TartInvocationError.self) { _ = try await backend.version() }
+        let file = TartBundle.FileIdentity(device: 1, inode: 2, size: 3, modified: timespec(), changed: timespec())
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: runner, verifiedBundle: TartBundle.BundleIdentity(directoryDevice: 1, directoryInode: 2, infoPlist: file, executable: file))
+        await #expect(throws: TartInvocationError.runtimeReplaced) { _ = try await backend.version() }
         #expect(await runner.invocations.isEmpty, "nothing was launched")
+    }
+
+    /// Verification records the bundle that passed rather than leaving the caller to read it
+    /// again. The identity is a field of the result, so there is no absent one to hand on: a
+    /// caller that took "no identity" for "no check needed" would launch whatever replaced it.
+    @Test func verificationCarriesTheBundleItPassedOn() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Identity-\(UUID().uuidString)")
+        let dummy = try await DummyBundle(root: root, sign: false)
+        let bundle = TartBundle(url: dummy.url)
+        let identity = try #require(bundle.identity)
+        #expect(TartVerification(version: TartRelease.version, teamIdentifier: "T", signingIdentifier: "S", bundle: identity).bundle == identity)
+
+        // A link is not a regular file, so a second read of the same path yields nothing at
+        // all — which is exactly the value verification no longer lets a caller receive.
+        try FileManager.default.removeItem(at: bundle.executable)
+        try FileManager.default.createSymbolicLink(at: bundle.executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
+        #expect(bundle.executableIdentity == nil)
+        #expect(bundle.identity == nil, "a bundle whose executable cannot be identified has no identity of its own")
+    }
+
+    /// Modification time can be set back to whatever it was; the inode's change time cannot.
+    @Test func anInPlaceOverwriteChangesTheExecutableIdentity() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Overwrite-\(UUID().uuidString)")
+        let dummy = try await DummyBundle(root: root, sign: false)
+        let bundle = TartBundle(url: dummy.url)
+        let before = try #require(bundle.executableIdentity)
+        let original = try Data(contentsOf: bundle.executable)
+
+        // Same file, same size, and the modification time put back exactly as it was: only
+        // the change time records that the bytes were rewritten.
+        var replacement = original
+        replacement[replacement.count - 1] = replacement[replacement.count - 1] ^ 0x01
+        let handle = try FileHandle(forWritingTo: bundle.executable)
+        try handle.write(contentsOf: replacement)
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: TimeInterval(before.modified.tv_sec))], ofItemAtPath: bundle.executable.path)
+
+        let after = try #require(bundle.executableIdentity)
+        #expect(after.device == before.device && after.inode == before.inode && after.size == before.size)
+        #expect(after != before, "an in-place overwrite that restores the modification time is still a different file")
+    }
+
+    /// The verified state has to mean the whole bundle. A replacement can hard-link the
+    /// verified executable into a bundle of its own: that file's device, inode, size, and
+    /// times are then all still the ones that passed, while the `Info.plist`, the resources,
+    /// and the nested code around it passed nothing.
+    @Test func aBundleRebuiltAroundTheVerifiedExecutableIsNotTheVerifiedBundle() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Relinked-\(UUID().uuidString)")
+        let dummy = try await DummyBundle(root: root, sign: false)
+        let bundle = TartBundle(url: dummy.url)
+
+        // Another bundle with the executable hard-linked into it — the same inode, so every
+        // field of its identity is shared — prepared before verification records anything.
+        let elsewhere = root.appending(path: "elsewhere")
+        let substitute = try await DummyBundle(root: elsewhere, sign: false)
+        let planted = substitute.url.appending(path: "Contents/MacOS/\(TartRelease.executableName)")
+        try FileManager.default.removeItem(at: planted)
+        try FileManager.default.linkItem(at: bundle.executable, to: planted)
+
+        let verified = try #require(bundle.identity)
+
+        // The bundle that passed is renamed away and the other one takes its pathname. The
+        // executable at that path is still the very inode that was verified.
+        try FileManager.default.moveItem(at: bundle.url, to: root.appending(path: "verified-aside"))
+        try FileManager.default.moveItem(at: substitute.url, to: bundle.url)
+
+        #expect(bundle.executableIdentity == verified.executable, "the executable is the very file that was verified")
+        #expect(bundle.identity != verified, "a different bundle around it is a different bundle")
+
+        let storage = try RuntimeStorage(root: root.appending(path: "state"))
+        let runner = FakeProcessRunner(stdout: ["2.36.0"], exit: ProcessExit(reason: .status(0)))
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: runner, verifiedBundle: verified)
+        await #expect(throws: TartInvocationError.runtimeReplaced) { _ = try await backend.version() }
+        #expect(await runner.invocations.isEmpty, "nothing was launched")
+    }
+
+    /// The requirement string is compiled by `SecRequirementCreateWithString`; a form it
+    /// rejects would make every bundle, including the official one, fail verification.
+    @Test func theDeveloperIDRequirementCompiles() throws {
+        var requirement: SecRequirement?
+        let status = SecRequirementCreateWithString(TartRelease.codeRequirement as CFString, [], &requirement)
+        #expect(status == errSecSuccess, "the pinned requirement did not compile (OSStatus \(status))")
+        #expect(requirement != nil)
     }
 
     @Test func anExecutableReplacedAfterTheLaunchIsEndedNotSpokenTo() async throws {
@@ -62,9 +147,30 @@ struct DummyBundle {
         let storage = try RuntimeStorage(root: root.appending(path: "state"))
         let dummy = try await DummyBundle(root: root, sign: false)
         let bundle = TartBundle(url: dummy.url)
-        let identity = try #require(bundle.executableIdentity)
-        let backend = TartBackend(bundle: bundle, storage: storage, runner: SwappingRunner(executable: bundle.executable), verifiedExecutable: identity)
+        let identity = try #require(bundle.identity)
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: SwappingRunner(executable: bundle.executable), verifiedBundle: identity)
         await #expect(throws: TartInvocationError.self) { _ = try await backend.version() }
+    }
+
+    /// The runner refuses to launch a file that is gone or no longer executable, and that
+    /// failure arrives before the child exists, so the post-launch identity check never runs. A
+    /// bundle replaced in that window is a replaced runtime, not one that verified and then
+    /// would not start: reporting it as the latter would say the bundle on disk passed.
+    @Test func aLaunchRefusedBecauseTheExecutableChangedIsReportedAsAReplacement() async throws {
+        struct RemovingRunner: ProcessRunning {
+            let executable: URL
+            func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
+                try? FileManager.default.removeItem(at: executable)
+                throw ProcessLaunchError.executableNotFound(invocation.executable.lastPathComponent)
+            }
+        }
+        let root = FileManager.default.temporaryDirectory.appending(path: "Refused-\(UUID().uuidString)")
+        let storage = try RuntimeStorage(root: root.appending(path: "state"))
+        let dummy = try await DummyBundle(root: root, sign: false)
+        let bundle = TartBundle(url: dummy.url)
+        let identity = try #require(bundle.identity)
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: RemovingRunner(executable: bundle.executable), verifiedBundle: identity)
+        await #expect(throws: TartInvocationError.runtimeReplaced) { _ = try await backend.version() }
     }
 
     @Test func versionOutputIsBoundedByRecordCount() async throws {
@@ -86,6 +192,28 @@ struct DummyBundle {
         let bundle = TartBundle(url: root.appending(path: "tart.app"))
         #expect(bundle.claimedVersion == nil)
         #expect(throws: TartVerificationError.infoPlistUnreadable) { try bundle.verify() }
+    }
+
+    /// The metadata of an untrusted bundle is read through one descriptor, so what is measured
+    /// is what is parsed and a replacement cannot make the reader do something else.
+    @Test func theInfoPlistIsReadThroughOneDescriptor() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Plist-\(UUID().uuidString)")
+        let contents = root.appending(path: "tart.app/Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let plist = contents.appending(path: "Info.plist")
+
+        // A plist that is not a regular file at all: a reader that opens by path can block on
+        // one of these, so the descriptor's own kind is what decides.
+        #expect(mkfifo(plist.path, 0o600) == 0)
+        #expect(TartBundle.readInfoPlist(at: plist) == nil)
+        try FileManager.default.removeItem(at: plist)
+
+        // A link to a plist that would otherwise parse: the entry itself is refused.
+        let real = contents.appending(path: "Real.plist")
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "x"], format: .xml, options: 0).write(to: real)
+        try FileManager.default.createSymbolicLink(at: plist, withDestinationURL: real)
+        #expect(TartBundle.readInfoPlist(at: plist) == nil)
+        #expect(TartBundle.readInfoPlist(at: real)?.contents["CFBundleIdentifier"] as? String == "x")
     }
 
     @Test func recordedReleaseFactsAreConsistent() {
@@ -163,6 +291,10 @@ struct DummyBundle {
 
         let garbage = TartBackend(bundle: bundle, storage: storage, runner: FakeProcessRunner(stdout: ["2.36"], exit: ProcessExit(reason: .status(0))))
         await #expect(throws: TartInvocationError.unparseableOutput) { try await garbage.version() }
+        // Joining the records and splitting again would drop these blanks and read the drifted
+        // output as the pin; one line means one record.
+        let padded = TartBackend(bundle: bundle, storage: storage, runner: FakeProcessRunner(stdout: ["", "2.36.0", ""], exit: ProcessExit(reason: .status(0))))
+        await #expect(throws: TartInvocationError.unparseableOutput) { try await padded.version() }
         let failing = TartBackend(bundle: bundle, storage: storage, runner: FakeProcessRunner(stderr: ["the specified VM \"x\" does not exist"], exit: ProcessExit(reason: .status(2))))
         await #expect(throws: TartInvocationError.failed(.vmNotFound)) { try await failing.version() }
     }

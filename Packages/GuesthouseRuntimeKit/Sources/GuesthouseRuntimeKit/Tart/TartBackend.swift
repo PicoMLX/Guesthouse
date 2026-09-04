@@ -8,22 +8,24 @@ public struct TartBackend: Sendable {
     public let bundle: TartBundle
     public let storage: RuntimeStorage
     public let runner: any ProcessRunning
-    /// What the executable was when the service verified it. Every launch checks that the
-    /// file has not been replaced since, so an unsigned substitute cannot be run.
-    public let verifiedExecutable: TartBundle.ExecutableIdentity?
+    /// What the bundle was when the service verified it: the directory, its `Info.plist`, and
+    /// the executable. Every launch checks that none of them has been replaced since, so
+    /// neither an unsigned substitute nor another bundle built around the verified executable
+    /// can be run.
+    public let verifiedBundle: TartBundle.BundleIdentity?
 
-    public init(bundle: TartBundle, storage: RuntimeStorage, runner: any ProcessRunning, verifiedExecutable: TartBundle.ExecutableIdentity? = nil) {
+    public init(bundle: TartBundle, storage: RuntimeStorage, runner: any ProcessRunning, verifiedBundle: TartBundle.BundleIdentity? = nil) {
         self.bundle = bundle
         self.storage = storage
         self.runner = runner
-        self.verifiedExecutable = verifiedExecutable
+        self.verifiedBundle = verifiedBundle
     }
 
-    /// Refuses to launch when the executable is not the file that passed verification.
-    func requireVerifiedExecutable() throws {
-        guard let verifiedExecutable else { return }
-        guard bundle.executableIdentity == verifiedExecutable else {
-            throw TartInvocationError.failed(.unknown(RedactedLine(literal: "the runtime was replaced after it was verified")))
+    /// Refuses to launch when the bundle is not the one that passed verification.
+    func requireVerifiedBundle() throws {
+        guard let verifiedBundle else { return }
+        guard bundle.identity == verifiedBundle else {
+            throw TartInvocationError.runtimeReplaced
         }
     }
 
@@ -33,10 +35,19 @@ public struct TartBackend: Sendable {
     /// exists, and a process started from anything but the verified file is ended before it
     /// is spoken to, so a substitute never receives a request or reaches a VM.
     func launch(_ invocation: ProcessInvocation) async throws -> ProcessRun {
-        try requireVerifiedExecutable()
-        let run = try await runner.run(invocation)
+        try requireVerifiedBundle()
+        let run: ProcessRun
         do {
-            try requireVerifiedExecutable()
+            run = try await runner.run(invocation)
+        } catch {
+            // The launch itself can fail because the file was removed, replaced, or made
+            // unexecutable after the check above. That is an integrity failure, not a runtime
+            // that verified and then would not start, and the caller has to be told which.
+            try requireVerifiedBundle()
+            throw error
+        }
+        do {
+            try requireVerifiedBundle()
         } catch {
             run.terminate(gracePeriod: .seconds(1))
             _ = await run.exit()
@@ -79,7 +90,10 @@ public struct TartBackend: Sendable {
         // A truncated capture is not a complete answer: the parser must see all of stdout
         // before a version is accepted as the runtime's own.
         guard !exit.outputTruncated, !truncatedRecords else { throw TartInvocationError.unparseableOutput }
-        guard let version = TartVersion(parsing: stdout.joined(separator: "\n")) else {
+        // The parser's contract is one line, but it splits on newlines and `split` drops empty
+        // subsequences, so a leading or extra blank record would be parsed away and drifted
+        // output read as the pin. The capture itself has to be that one line.
+        guard stdout.count == 1, let version = TartVersion(parsing: stdout[0]) else {
             throw TartInvocationError.unparseableOutput
         }
         return version
@@ -96,4 +110,8 @@ public struct TartBackend: Sendable {
 public enum TartInvocationError: Error, Hashable, Sendable {
     case failed(TartFailure)
     case unparseableOutput
+    /// The executable is not the file that passed verification. Its own case, because an
+    /// integrity failure is not an unknown version: the caller must report the bundle as
+    /// unverified rather than as one that verified and then would not answer.
+    case runtimeReplaced
 }

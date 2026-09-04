@@ -195,6 +195,14 @@ import Testing
         #expect(manifest.tested.first?.tartVersion == "2.36.0")
     }
 
+    /// `Entry.matches` compares the protocol exactly, so a bundled entry left on an older
+    /// number could never match a tuple this build produces: once the placeholders are
+    /// replaced, every combination would be classified as untested.
+    @Test func theBundledEntryTracksTheProtocolThisBuildSpeaks() throws {
+        let manifest = try CompatibilityManifest.bundled()
+        #expect(manifest.tested.allSatisfy { $0.runtimeProtocolVersion == RuntimeProtocolVersion.current.rawValue })
+    }
+
     @Test func placeholdersNeverMatchAnObservation() throws {
         let manifest = try CompatibilityManifest.bundled()
         let observed = ObservedTuple(CompatibilityEvaluatorTests.tuple())

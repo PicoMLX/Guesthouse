@@ -12,6 +12,9 @@ import Testing
         .insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 50_000_000_000, volumePath: "/"),
         .downloadVerificationFailed(artifact: "Tart 2.36.0", check: .digest),
         .runtimeMissing,
+        .runtimeStateUnavailable(reason: "the operation journal could not be opened"),
+        .runtimeStorageUnavailable(reason: "the storage folder is full", problem: .unwritable),
+        .runtimeStorageUnavailable(reason: "a containing folder can be changed by other users", problem: .unsafeLocation),
         .runtimeVerificationFailed(check: .signature),
         .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
         .guestNotReachable(EnvironmentID()),
@@ -32,6 +35,7 @@ import Testing
 
     static let expectedCaseNames: Set<String> = [
         "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeMissing",
+        "runtimeStateUnavailable", "runtimeStorageUnavailable",
         "runtimeVerificationFailed", "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
