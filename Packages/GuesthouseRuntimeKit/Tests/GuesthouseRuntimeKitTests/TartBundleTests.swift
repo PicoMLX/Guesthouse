@@ -11,7 +11,7 @@ struct DummyBundle {
     init(root: URL, identifier: String = TartRelease.signingIdentifier, version: String = TartPin.releaseTag, executable: Bool = true, sign: Bool = true) async throws {
         url = root.appending(path: TartRelease.bundleName)
         let contents = url.appending(path: "Contents")
-        try FileManager.default.createDirectory(at: contents.appending(path: "MacOS"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: contents.appending(path: "MacOS"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let plist: [String: Any] = ["CFBundleIdentifier": identifier, "CFBundleShortVersionString": version, "CFBundleExecutable": TartRelease.executableName, "CFBundlePackageType": "APPL"]
         try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: contents.appending(path: "Info.plist"))
         if executable {
@@ -29,12 +29,12 @@ struct DummyBundle {
 @Suite(.serialized) struct TartBundleTests {
     let root = FileManager.default.temporaryDirectory.appending(path: "TartBundleTests-\(UUID().uuidString)")
 
-    init() { try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
+    init() { try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
 
     @Test func aRuntimeReplacedAfterVerificationIsNotRun() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Verified-\(UUID().uuidString)")
         let executable = root.appending(path: "tart.app/Contents/MacOS/tart")
-        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createSymbolicLink(at: executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
         let bundle = TartBundle(url: root.appending(path: "tart.app"))
         let storage = try RuntimeStorage(root: root.appending(path: "state"))
@@ -80,7 +80,7 @@ struct DummyBundle {
     @Test func anEnormousInfoPlistIsRefusedBeforeItIsParsed() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Bundle-\(UUID().uuidString)")
         let contents = root.appending(path: "tart.app/Contents")
-        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let plist = contents.appending(path: "Info.plist")
         try Data(repeating: 0x20, count: TartBundle.maximumInfoPlistBytes + 1).write(to: plist)
         let bundle = TartBundle(url: root.appending(path: "tart.app"))
@@ -100,7 +100,7 @@ struct DummyBundle {
         let storage = try RuntimeStorage(root: root.appending(path: "storage"))
         #expect(TartBundle.locate(in: storage) == nil)
         let expected = TartBundle.expectedLocation(in: storage)
-        try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         #expect(TartBundle.locate(in: storage)?.url == expected)
         #expect(expected.path.hasSuffix("/runtime/2.36.0/tart.app"))
     }
@@ -110,7 +110,7 @@ struct DummyBundle {
             try TartBundle(url: root.appending(path: "nope.app")).verify()
         }
         let empty = root.appending(path: "empty/tart.app")
-        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         #expect(throws: TartVerificationError.infoPlistUnreadable) { try TartBundle(url: empty).verify() }
     }
 
@@ -146,7 +146,7 @@ struct DummyBundle {
         try TartBundle.verifyArchiveDigest(of: file, expected: hasher.hex)
         #expect(throws: TartVerificationError.self) { try TartBundle.verifyArchiveDigest(of: root.appending(path: "missing.bin"), expected: hasher.hex) }
         let directory = root.appending(path: "dir.bin")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         #expect(throws: TartVerificationError.self) { try TartBundle.verifyArchiveDigest(of: directory, expected: hasher.hex) }
     }
 
