@@ -7,13 +7,16 @@ struct DashboardView: View {
     @Environment(AppModel.self) private var model
     @State private var showingWizard = false
     @State private var showingDiagnostics = false
+    /// Which environment the sheet is about, so Export writes the failing development Mac's
+    /// evidence rather than whichever environment was created first.
+    @State private var diagnosticsSubject: EnvironmentID?
 
     var body: some View {
         let cards = model.cardStates()
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if cards.isEmpty {
-                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { showingDiagnostics = true }) { showingWizard = true }
+                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { diagnosticsSubject = nil; showingDiagnostics = true }) { showingWizard = true }
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16)], alignment: .leading, spacing: 16) {
                         ForEach(cards) { card in
@@ -22,7 +25,7 @@ struct DashboardView: View {
                                 start: { model.start(card.id) },
                                 cancel: { model.cancel(card.id) },
                                 recover: { model.perform($0, for: card.id) },
-                                openDiagnostics: { showingDiagnostics = true }
+                                openDiagnostics: { diagnosticsSubject = card.id; showingDiagnostics = true }
                             )
                         }
                         SlotView(availability: model.createAvailability) { showingWizard = true }
@@ -32,7 +35,7 @@ struct DashboardView: View {
             .padding(20)
         }
         .sheet(isPresented: $showingWizard) { WizardPlaceholderView() }
-        .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model) }
+        .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model, subject: diagnosticsSubject) }
     }
 }
 

@@ -18,14 +18,34 @@ public struct DiagnosticsExport: Hashable, Sendable {
         /// The failure the user is reporting when the app could not reach its runtime. On a
         /// fresh launch there are no environments and no operation logs, so without this the
         /// bundle would describe nothing at all.
-        public var launchFailure: LaunchFailure?
+        public var launchFailure: ReportedFailure?
+        /// What the exported environment's last operation failed with. An operation that fails
+        /// before it produces output leaves nothing in the log, so the failure the user opened
+        /// Diagnostics about would otherwise be absent from the bundle.
+        public var operationFailure: ReportedFailure?
         public var excludedCategories: [String]
 
-        /// A launch failure as the export records it: what the user was told, in their words.
-        public struct LaunchFailure: Codable, Hashable, Sendable {
+        /// A failure as the export records it: what the user was told, in their words.
+        public struct ReportedFailure: Codable, Hashable, Sendable {
             public var message: String
             public var recovery: String?
             public var recoveryActions: [String]
+
+            /// Scrubbed on the way in, because a message quotes what failed: a path under the
+            /// user's home directory, or the address a guest did not answer on.
+            public init(message: String, recovery: String?, recoveryActions: [String]) {
+                self.message = DiagnosticsExportBuilder.scrub(message)
+                self.recovery = recovery.map { DiagnosticsExportBuilder.scrub($0) }
+                self.recoveryActions = recoveryActions
+            }
+
+            public init(_ error: GuesthouseError) {
+                self.init(
+                    message: error.userMessage,
+                    recovery: error.recoverySuggestion,
+                    recoveryActions: error.recoveryActions.map { String(describing: $0) }
+                )
+            }
         }
     }
 
@@ -68,7 +88,8 @@ public enum DiagnosticsExportBuilder {
         compatibility: ObservedTuple,
         environments: [DevelopmentEnvironment],
         logs: [RedactedLine],
-        launchError: GuesthouseError? = nil,
+        launchFailure: DiagnosticsExport.Manifest.ReportedFailure? = nil,
+        operationFailure: DiagnosticsExport.Manifest.ReportedFailure? = nil,
         exportedAt: Date = Date()
     ) -> DiagnosticsExport {
         let lines = scrubbedStream(logs)
@@ -80,13 +101,8 @@ public enum DiagnosticsExportBuilder {
             compatibility: scrubbed(compatibility),
             environmentIDs: environments.map(\.id),
             logLineCount: lines.count,
-            launchFailure: launchError.map { error in
-                DiagnosticsExport.Manifest.LaunchFailure(
-                    message: scrub(error.userMessage),
-                    recovery: error.recoverySuggestion.map { scrub($0) },
-                    recoveryActions: error.recoveryActions.map { String(describing: $0) }
-                )
-            },
+            launchFailure: launchFailure,
+            operationFailure: operationFailure,
             excludedCategories: excludedCategories
         )
         let excluded = "This export deliberately omits:\n" + excludedCategories.map { "- \($0)" }.joined(separator: "\n") + "\n"
@@ -107,37 +123,58 @@ public enum DiagnosticsExportBuilder {
         scrubIdentities(scrubAddresses(text))
     }
 
-    /// IPv4 and IPv6 literals become `[redacted:address]`. IPv6 candidates are validated with
-    /// `inet_pton`, so compressed (`::1`, `2001:db8::1`) and IPv4-mapped forms are caught and
-    /// clock times are not.
+    /// IPv4, IPv6, and MAC literals become `[redacted:address]`. IPv6 candidates are validated
+    /// with `inet_pton`, so compressed (`::1`, `2001:db8::1`) and IPv4-mapped forms are caught
+    /// and clock times are not.
     static func scrubAddresses(_ text: String) -> String {
-        // IPv6 first, so an IPv4-mapped address (`::ffff:192.0.2.1`) is taken whole. Trailing
+        // A MAC address is six hex pairs, which `inet_pton` rejects as an IPv6 candidate and
+        // the IPv4 pass never sees; it identifies the machine just as well as an IP does, so
+        // it is taken first, before the IPv6 pass can consume part of it. The boundaries are
+        // identifier-aware like the IPv4 and IPv6 ones: guest output writes the address inside
+        // a generated name (`nic_52:54:00:12:34:56_state`), and an underscore boundary let that
+        // form through both this pass and the IPv6 one. A colon is still not a boundary, so a
+        // longer colon run cannot be cut into six pairs.
+        let withoutMAC = text.replacing(#/(^|[^0-9A-Za-z:])([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})(?![0-9A-Za-z:])/#) { match in
+            String(match.output.1) + "[redacted:address]"
+        }
+        // IPv6 next, so an IPv4-mapped address (`::ffff:192.0.2.1`) is taken whole. Trailing
         // punctuation is trimmed before validation: a sentence's period is not part of the
         // address, and leaving it in would let the address through.
-        // The candidate must stand on its own: without these boundaries `foo::bar` offers
-        // `::ba`, which is a valid compressed address, and the identifier would be eaten.
-        let withoutIPv6 = text.replacing(#/(^|[^0-9A-Za-z_])([0-9A-Fa-f:.]{2,45})(?![0-9A-Za-z_])/#) { match in
+        // The candidate must not start or end inside a word: without a boundary `foo::bar`
+        // offers `::ba`, which is a valid compressed address, and the identifier would be
+        // eaten. An underscore is a boundary all the same, because machine-generated output
+        // writes an address inside an identifier (`peer_2001:db8::1_status`) the way it does
+        // with IPv4 — and `foo_::bar` still offers only `::ba` in front of a letter.
+        let withoutIPv6 = withoutMAC.replacing(#/(^|[^0-9A-Za-z])([0-9A-Fa-f:.]{2,45})(?![0-9A-Za-z])/#) { match in
             let before = String(match.output.1)
             let token = String(match.output.2)
             guard token.contains(":") else { return before + token }
-            // Only trailing punctuation is trimmed: a leading colon is part of a compressed
-            // address (`::1`), while a sentence's period at the end is not.
-            let trimmed = Self.trimmingTrailingPunctuation(token)
-            guard !trimmed.isEmpty, isIPv6(trimmed) else { return before + token }
-            return before + "[redacted:address]" + token.dropFirst(trimmed.count)
+            guard let address = Self.longestAddressPrefix(of: token) else { return before + token }
+            return before + "[redacted:address]" + token.dropFirst(address.count)
         }
         // Only a real IPv4 literal is an address: a four-part version such as `1.2.3.456` is
-        // exactly the information diagnostics exist to keep.
-        return withoutIPv6.replacing(#/\b(?:\d{1,3}\.){3}\d{1,3}\b/#) { match in
-            let token = String(withoutIPv6[match.range])
-            return isIPv4(token) ? "[redacted:address]" : token
+        // exactly the information diagnostics exist to keep. The boundaries are digit-aware
+        // rather than word-aware, because machine-generated output writes an address inside an
+        // identifier (`peer_192.168.64.7`, `192.168.64.7_status`) where `\b` does not fall.
+        return withoutIPv6.replacing(#/(^|[^0-9.])((?:\d{1,3}\.){3}\d{1,3})(?![0-9])(?!\.[0-9])/#) { match in
+            let before = String(match.output.1)
+            let token = String(match.output.2)
+            return isIPv4(token) ? before + "[redacted:address]" : before + token
         }
     }
 
-    static func trimmingTrailingPunctuation(_ token: String) -> String {
-        var trimmed = Substring(token)
-        while let last = trimmed.last, ".,;)]}".contains(last) { trimmed = trimmed.dropLast() }
-        return String(trimmed)
+    /// The longest leading part of `token` that is a valid IPv6 address, or nil. A delimiter
+    /// that follows an address is not part of it — `2001:db8::1: connection failed` ends the
+    /// address at the label's colon — while `2001:db8::` is itself a whole address, so the
+    /// candidate is tried at full length first and shortened one character at a time.
+    static func longestAddressPrefix(of token: String) -> String? {
+        var candidate = Substring(token)
+        while !candidate.isEmpty {
+            if isIPv6(String(candidate)) { return String(candidate) }
+            guard let last = candidate.last, ".,;)]}:".contains(last) else { return nil }
+            candidate = candidate.dropLast()
+        }
+        return nil
     }
 
     static func isIPv4(_ token: String) -> Bool {
@@ -153,14 +190,29 @@ public enum DiagnosticsExportBuilder {
     /// E-mail addresses and the identifier after "signed in as", "logged in as", "user",
     /// or "account" become `[redacted:account]`.
     static func scrubIdentities(_ text: String) -> String {
-        text.replacing(#/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/#, with: "[redacted:account]")
-            .replacing(#/(?i)\b((?:signed|logged) in (?:to \S+ )?as|account:?|user(?:name)?:?)\s+(?!\[redacted)(?![=:])(\S+)/#) { match in
+        // A local login is `user@host` with no dotted suffix (`alice@guesthouse`), and the
+        // host half of `alice@192.168.64.7` is already `[redacted:address]` by the time this
+        // runs. Both name the account `excluded.txt` promises the export omits. SSH syntax
+        // brackets an IPv6 host, and the address pass keeps those brackets around its marker,
+        // so `alice@[2001:db8::1]` reaches this as a doubled-bracket form; without it the
+        // account in front of an IPv6 host would stay in the export.
+        text.replacing(#/[A-Za-z0-9._%+-]+@(?:\[\[redacted:address\]\]|\[redacted:address\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)/#, with: "[redacted:account]")
+            // A display name has spaces in it: `Signed in as Alice Smith` left `Smith` behind
+            // when the value was a single token. A quoted value is taken whole; an unquoted one
+            // continues through further capitalized words, which is what the rest of a name
+            // looks like, and stops at anything else so `user: octocat (admin)` keeps its
+            // qualifier and a sentence after the name is not swallowed. The label group carries
+            // its own case-insensitivity, because the continuation must stay case-sensitive.
+            .replacing(#/\b((?i:(?:signed|logged) in (?:to \S+ )?as|account:?|user(?:name)?:?))\s+(?!\[redacted)(?![=:])("[^"]*"|'[^']*'|\S+(?: [A-Z][^\s]*){0,3})/#) { match in
                 "\(match.output.1) [redacted:account]"
             }
             // Structured output writes the same fact without a space: `user=octocat`,
-            // `"account":"alice"`. The label keeps its quoting so the line still parses.
-            .replacing(#/(?i)(["']?\b(?:account|owner|user(?:name)?)["']?\s*[:=]\s*)(["']?)(?!\[redacted)[A-Za-z0-9._%+@-]+(["']?)/#) { match in
-                "\(match.output.1)\(match.output.2)[redacted:account]\(match.output.3)"
+            // `"account":"alice"`. A quoted value runs to its closing quote, so a name with a
+            // space in it (`"user":"Alice Smith"`) goes whole rather than leaving its surname.
+            // The label keeps its quoting so the line still parses.
+            .replacing(#/(?i)(["']?\b(?:account|owner|user(?:name)?)["']?\s*[:=]\s*)(?:(")(?!\[redacted)[^"]*"|(')(?!\[redacted)[^']*'|(?!\[redacted)[A-Za-z0-9._%+@-]+)/#) { match in
+                let quote = match.output.2.map(String.init) ?? match.output.3.map(String.init) ?? ""
+                return "\(match.output.1)\(quote)[redacted:account]\(quote)"
             }
             // A home directory names its owner: `/Users/alice/…` is an account name in a path.
             .replacing(#/(/Users/)(?!\[redacted)[^/\s]+/#) { match in
@@ -189,22 +241,60 @@ public enum DiagnosticsExportBuilder {
     }
 
     /// The runtime's own report can name a path: a storage failure quotes where it tried to
-    /// write, which is often under the user's home directory. Its problem is replaced with a
-    /// scrubbed description so the manifest keeps the failure without the account name.
+    /// write, which is often under the user's home directory. Only the free text is replaced.
     static func scrubbed(_ runtime: RuntimeVersionInfo?) -> RuntimeVersionInfo? {
         guard var info = runtime, var tart = info.tart, let problem = tart.problem else { return runtime }
-        tart.problem = .runtimeStateUnavailable(reason: SanitizedText(scrub(problem.userMessage), limit: 300))
+        tart.problem = scrubbed(problem)
         info.tart = tart
         return info
     }
 
-    /// The observations that may appear in the manifest: paths carry the account name of
-    /// whoever owns them, so they are scrubbed like any other exported value.
+    /// Replaces an error's free text and keeps its case. The manifest's category, message,
+    /// and recovery actions are all derived from the case, so rewriting a missing runtime or
+    /// a failed verification as a saved-state failure would make the export say the wrong
+    /// thing about what went wrong and what to do about it.
+    static func scrubbed(_ error: GuesthouseError) -> GuesthouseError {
+        switch error {
+        case .runtimeStateUnavailable(let reason):
+            .runtimeStateUnavailable(reason: scrubbed(reason))
+        case .runtimeStorageUnavailable(let reason, let problem):
+            .runtimeStorageUnavailable(reason: scrubbed(reason), problem: problem)
+        case .runtimeIncompatible(let found, let required):
+            .runtimeIncompatible(found: found.map { scrubbed($0) }, required: required)
+        case .insufficientDisk(let required, let available, let volumePath):
+            .insufficientDisk(requiredBytes: required, availableBytes: available, volumePath: scrubbed(volumePath))
+        case .downloadVerificationFailed(let artifact, let check):
+            .downloadVerificationFailed(artifact: scrubbed(artifact), check: check)
+        case .toolMismatch(let tool, let found, let expected):
+            .toolMismatch(tool: scrubbed(tool), found: found.map { scrubbed($0) }, expected: expected)
+        default:
+            // Every remaining case carries identifiers, sizes, and enumerated reasons, never
+            // text that could name an address or an account.
+            error
+        }
+    }
+
+    static func scrubbed(_ text: SanitizedText) -> SanitizedText {
+        SanitizedText(scrub(text.value), limit: SanitizedText.maximumLimit)
+    }
+
+    /// The observations that may appear in the manifest. Wire sanitization removes credentials
+    /// but not identities, and a guest is free to answer any of these with an address or an
+    /// account name, so every string the tuple carries is scrubbed rather than only the paths.
     static func scrubbed(_ tuple: ObservedTuple) -> ObservedTuple {
         var copy = tuple
+        copy.hostMacOSBuild = tuple.hostMacOSBuild.map { scrub($0) }
+        copy.codexDesktopVersion = tuple.codexDesktopVersion.map { scrub($0) }
+        copy.codexDesktopBuild = tuple.codexDesktopBuild.map { scrub($0) }
         copy.codexDesktopPath = tuple.codexDesktopPath.map { scrub($0) }
+        copy.tartVersion = tuple.tartVersion.map { scrub($0) }
+        copy.guestMacOSBuild = tuple.guestMacOSBuild.map { scrub($0) }
+        copy.xcodeBuild = tuple.xcodeBuild.map { scrub($0) }
+        copy.codexCLIVersion = tuple.codexCLIVersion.map { scrub($0) }
         copy.codexCLIPath = tuple.codexCLIPath.map { scrub($0) }
         copy.codexCLICapabilities = tuple.codexCLICapabilities.map { $0.map { scrub($0) } }
+        copy.githubCLIVersion = tuple.githubCLIVersion.map { scrub($0) }
+        copy.provisioningScriptVersion = tuple.provisioningScriptVersion.map { scrub($0) }
         return copy
     }
 }

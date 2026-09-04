@@ -129,8 +129,12 @@ public struct TartBackend: Sendable {
     /// escalates to a force-stop, so it is set far beyond the deadline; when the deadline
     /// passes, the stop command is ended and `TartInvocationError.timedOut` is thrown with the
     /// guest still running. Force-stopping is a separate, warned path.
-    public func stop(vmName: String, deadline: Duration) async throws {
-        _ = try await capture(["stop", vmName, "--timeout", String(Self.neverForceSeconds)], timeout: deadline)
+    ///
+    /// `onOutput` receives each redacted line the stop command itself writes. A shutdown that
+    /// fails explains itself on that command's stderr, not on the VM's, so diagnostics would
+    /// otherwise be missing exactly the output the user is reporting (MVP-PLAN.md §2).
+    public func stop(vmName: String, deadline: Duration, onOutput: (@Sendable (RedactedLine) -> Void)? = nil) async throws {
+        _ = try await capture(["stop", vmName, "--timeout", String(Self.neverForceSeconds)], timeout: deadline, onOutput: onOutput)
     }
 
     static let neverForceSeconds = 86_400
@@ -148,7 +152,7 @@ public struct TartBackend: Sendable {
         let stderr: String
     }
 
-    private func capture(_ arguments: [String], timeout: Duration, terminationGracePeriod: Duration = .seconds(5)) async throws -> Captured {
+    private func capture(_ arguments: [String], timeout: Duration, terminationGracePeriod: Duration = .seconds(5), onOutput: (@Sendable (RedactedLine) -> Void)? = nil) async throws -> Captured {
         let run = try await launch(ProcessInvocation(
             executable: bundle.executable,
             arguments: arguments,
@@ -163,11 +167,18 @@ public struct TartBackend: Sendable {
             var stderr: [String] = []
             var reachedLimit = false
             for await line in run.output {
+                onOutput?(line.line)
                 // A command whose output is parsed is bounded by record count as well as by
                 // the runner's byte cap: empty records cost no bytes but still cost memory.
                 guard stdout.count + stderr.count < Self.maximumCapturedRecords else {
                     reachedLimit = true
-                    break
+                    // Storage is full, but a caller that is forwarding is reading a log rather
+                    // than parsing an answer, and the lines that explain a failed shutdown are
+                    // the last ones: ending the loop here would drop exactly them (§2). The
+                    // records are no longer kept, so the rest costs nothing to read. With
+                    // nobody forwarding there is nothing left to read for.
+                    if onOutput == nil { break }
+                    continue
                 }
                 switch line {
                 case .stdout(let text): stdout.append(text.text)
@@ -179,6 +190,11 @@ public struct TartBackend: Sendable {
             run.terminate(gracePeriod: .seconds(1))
         }
         if Task.isCancelled { throw CancellationError() }
+        // The runner's byte and record caps cut the output off before the stream ended, and
+        // this is the only place that sees the flag: `stop` discards the capture and a failure
+        // throws below. A forwarding caller is reading a log whose last lines are the ones a
+        // failed shutdown wrote, so the omission is stated rather than left to look complete.
+        if exit.outputTruncated { onOutput?(RedactedLine.runnerTruncatedOutput) }
         if exit.timedOut { throw TartInvocationError.timedOut }
         guard exit.succeeded else {
             throw TartInvocationError.failed(TartErrorClassifier.classify(stderr: stderr.joined(separator: "\n"), exitStatus: Self.exitStatus(exit)))

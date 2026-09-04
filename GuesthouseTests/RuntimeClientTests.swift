@@ -22,6 +22,11 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         }
         reply?(.success(.accepted(preparedID)))
     }
+    /// Set once an `.acceptThenStream` script has pushed everything it holds. A test that
+    /// measures what a full stream drops waits for this instead of sleeping: on a loaded
+    /// machine a fixed sleep ends mid-flood, and the consumer then reads a different log.
+    private var streamed = false
+    var hasStreamedEverything: Bool { lock.withLock { streamed } }
     let lock = NSLock()
     var behavior: Behavior
     var incoming: (@Sendable (RuntimeEvent) -> Void)?
@@ -77,6 +82,7 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
                 default: incoming?(event)
                 }
             }
+            lock.withLock { streamed = true }
         case .acceptThenDrop:
             reply(.success(.accepted(OperationID())))
             lock.withLock { self.interrupted }?()
@@ -153,6 +159,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<2000 where !transport.hasStreamedEverything { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.hasStreamedEverything, "the flood finished before the consumer began reading")
+        // Then long enough for the client to work through what it was handed: the bound is
+        // applied as the events are taken in, so a consumer that starts reading mid-flood
+        // measures the wrong thing.
         try await Task.sleep(for: .milliseconds(200))
         let events = try await collect(stream)
         #expect(events.first?.caseName == "accepted", "the operation id is learned before any traffic")
@@ -180,6 +191,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<2000 where !transport.hasStreamedEverything { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.hasStreamedEverything, "the flood finished before the consumer began reading")
+        // Then long enough for the client to work through what it was handed: the bound is
+        // applied as the events are taken in, so a consumer that starts reading mid-flood
+        // measures the wrong thing.
         try await Task.sleep(for: .milliseconds(200))
         let events = try await collect(stream)
         let numbers = events.compactMap { event -> Int? in
@@ -330,6 +346,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<2000 where !transport.hasStreamedEverything { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.hasStreamedEverything, "the flood finished before the consumer began reading")
+        // Then long enough for the client to work through what it was handed: the bound is
+        // applied as the events are taken in, so a consumer that starts reading mid-flood
+        // measures the wrong thing.
         try await Task.sleep(for: .milliseconds(200))
         let events = try await collect(stream)
         #expect(events.contains { if case .accepted = $0 { true } else { false } })

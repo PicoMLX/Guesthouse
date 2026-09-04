@@ -551,6 +551,7 @@ import Testing
         let statusQueries = await backend.receivedRequests.filter { if case .environmentStatus = $0 { return true }; return false }
         #expect(statusQueries.count == 1)
         #expect(model.canCheckEnvironment, "the check finished, so another one may be asked for")
+        #expect(model.launchState == .ready)
     }
 
     @Test func aLossDuringReconciliationLetsThatReconciliationSettle() async {
@@ -559,8 +560,6 @@ import Testing
         await backend.script("listEnvironments", .disconnect())
         let (model, _) = makeModel(backend)
         model.startRefresh()
-        // The listing is what "still reading" means: the reconciliation asks the runtime for
-        // its version first, so a bare request count no longer names that moment.
         // Any request means the check has started; which one goes out first is the
         // reconciliation's business, and it changes as the stack grows.
         await waitUntil({ await !backend.receivedRequests.isEmpty }, "the check to send its first request")

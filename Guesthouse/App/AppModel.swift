@@ -68,6 +68,12 @@ final class AppModel {
     /// check's own failure from a problem the environment reported.
     private var statusQueryFailures: [EnvironmentID: GuesthouseError] = [:]
     private(set) var lastErrors: [EnvironmentID: GuesthouseError] = [:]
+    /// How the last operation this app sent for an environment failed, kept apart from the
+    /// error a status query leaves on the card. The check that must follow a failed operation
+    /// is allowed to fail too, and its error replaces the operation's in `lastErrors`; without
+    /// this the bundle would name that check rather than the start or stop the user is
+    /// reporting, and would carry the check's recovery actions instead of the operation's.
+    private var operationFailures: [EnvironmentID: GuesthouseError] = [:]
     /// Operations whose connection dropped before a result arrived. Cleared only by a
     /// successful status query; Retry is never offered while an entry exists (MVP-PLAN.md §3).
     private(set) var unknownOutcomes: [EnvironmentID: OperationID] = [:]
@@ -133,10 +139,6 @@ final class AppModel {
     var quitWaitPollInterval: Duration = .seconds(2)
     /// How many of those polls are running. The model owns one at a time, so this is 0 or 1.
     private(set) var recoveredOperationPolls = 0
-    /// What the service reports about itself and the Tart bundle it verified. The per-status
-    /// observation carries no Tart version, so this is where the dashboard's tool-version row
-    /// comes from (MVP-PLAN.md §2).
-    private(set) var runtimeInfo: RuntimeVersionInfo?
     /// How many inspections of an environment are still outstanding. A card tells a check that
     /// is running from one that already ended in failure, so a query nobody is waiting for is
     /// never presented as one still in progress.
@@ -259,7 +261,11 @@ final class AppModel {
         // gone, and publishing it as Ready would leave that state on screen until the user
         // happened to ask again, so the loss settles the refresh instead (MVP-PLAN.md §2).
         var settled = outcome
-        if let loss = lossLeftToReconciliation, case .ready = outcome { settled = .interrupted(loss) }
+        if let loss = lossLeftToReconciliation, case .ready(_, _, let version) = outcome {
+            // The version this reconciliation did read is still what diagnostics should report:
+            // the loss is about the session, not about what the runtime said of itself.
+            settled = .interrupted(loss, version)
+        }
         lossLeftToReconciliation = nil
         switch settled {
         case .ready(let listed, let read, let version):
@@ -310,12 +316,20 @@ final class AppModel {
             reconciledGeneration = generation
             startRecoveredOperationPoll()
         case .unavailable(let error, let version):
-            if let version { runtimeInfo = version }
+            // Assigned whole, including a nil: a request rejected before it returned metadata
+            // has no current version to publish, and keeping the last verified one would have
+            // diagnostics report a runtime that is not the one that just failed.
+            runtimeInfo = version
             launchState = .unavailable(error)
             // An unavailable runtime is not something reconnecting fixes: the error carries
             // its own recovery, and the app stays on it until the user asks again.
             automaticReconciliationSuspended = true
-        case .interrupted(let interruption):
+        case .interrupted(let interruption, let version):
+            // Assigned whole, including a nil, for the same reason as above: the session that
+            // answered the last version is the one that just dropped, so keeping its answer
+            // would have diagnostics describe a runtime beside a connection failure this
+            // refresh never got past. What this refresh did read before the loss stands.
+            runtimeInfo = version
             launchState = .interrupted(interruption)
             // A reconciliation that was itself cut off would otherwise be restarted by the
             // loss it just suffered, relaunching a service that keeps crashing forever. The
@@ -338,17 +352,32 @@ final class AppModel {
         /// carried anyway: diagnostics must describe the runtime as it is now, not as the
         /// last successful check left it.
         case unavailable(GuesthouseError, RuntimeVersionInfo?)
-        case interrupted(RuntimeConnectionInterrupted)
+        /// The connection dropped mid-reconciliation. The version is carried for the same
+        /// reason: whatever this refresh read before the loss is the current metadata, and
+        /// what it never read is not.
+        case interrupted(RuntimeConnectionInterrupted, RuntimeVersionInfo?)
     }
 
     private func reconcile() async -> ReconcileOutcome {
+        // Declared outside the attempt so an interrupted reconciliation reports what it did
+        // read: the alternative is publishing the previous session's version beside the
+        // failure of this one.
+        var version: RuntimeVersionInfo?
         do {
             // Asked first, so a listing that fails afterwards still names the runtime the
-            // diagnostics bundle reports. Supplementary: a service that cannot describe
-            // itself leaves the version row unknown rather than making the app unavailable.
-            var version: RuntimeVersionInfo?
+            // diagnostics bundle reports. This request is supplementary: a service that cannot
+            // describe itself still works, and the tool-version row says Unknown rather than
+            // taking the whole app down. A protocol mismatch is the exception, because it is a
+            // fact about the session rather than about this request — nothing else this app
+            // sends will be understood — so it reports the runtime as unavailable with the
+            // recovery that error carries.
             for try await event in backend.send(.runtimeVersion) {
-                if case .runtimeVersion(let info) = event { version = info }
+                switch event {
+                case .runtimeVersion(let info): version = info
+                case .failed(_, let error):
+                    if case .protocolMismatch = error { return .unavailable(error, version) }
+                default: break
+                }
             }
             var listed: [DevelopmentEnvironment] = []
             for try await event in backend.send(.listEnvironments) {
@@ -370,9 +399,9 @@ final class AppModel {
             }
             return .ready(listed, fresh, version)
         } catch let error as RuntimeConnectionInterrupted {
-            return .interrupted(error)
+            return .interrupted(error, version)
         } catch {
-            return .interrupted(RuntimeConnectionInterrupted())
+            return .interrupted(RuntimeConnectionInterrupted(), version)
         }
     }
 
@@ -746,6 +775,7 @@ final class AppModel {
     /// the app was relaunched (AGENTS.md: every error carries a recovery action that works).
     func dismissError(_ id: EnvironmentID) {
         lastErrors[id] = nil
+        operationFailures[id] = nil
         statusQueryFailures[id] = nil
         Task { await refreshStatus(of: id) }
     }
@@ -801,8 +831,23 @@ final class AppModel {
         return Array((retained + live).suffix(OperationState.maximumLogLines))
     }
 
-    var diagnosticsLines: [RedactedLine] {
-        environments.flatMap { environment -> [RedactedLine] in
+    var diagnosticsLines: [RedactedLine] { diagnosticsLines(of: environments) }
+
+    /// The lines the diagnostics sheet shows: one environment's when it was opened from that
+    /// environment's card, every environment's when it was opened from the toolbar or from a
+    /// dashboard that has no cards.
+    func diagnosticsLines(subject: EnvironmentID?) -> [RedactedLine] { diagnosticsLines(of: subjects(subject)) }
+
+    /// The environments an export or the sheet describes. A subject that is no longer on the
+    /// dashboard names nothing, so the bundle falls back to what it can still describe rather
+    /// than to an empty report.
+    private func subjects(_ subject: EnvironmentID?) -> [DevelopmentEnvironment] {
+        guard let subject, let named = environments.first(where: { $0.id == subject }) else { return environments }
+        return [named]
+    }
+
+    private func diagnosticsLines(of subjects: [DevelopmentEnvironment]) -> [RedactedLine] {
+        subjects.flatMap { environment -> [RedactedLine] in
             // Scrubbed as a stream *before* the prefix goes on. A credential printed over two
             // lines is recognized by the line that ends in its label, and a UUID in front of
             // that label would hide it from the whole-line match.
@@ -812,12 +857,15 @@ final class AppModel {
         }
     }
 
-    /// The bundle "Export diagnostics" writes.
-    func diagnosticsExport() -> DiagnosticsExport {
+    /// The bundle "Export diagnostics" writes, describing the environment whose card opened
+    /// the sheet.
+    func diagnosticsExport(subject requested: EnvironmentID? = nil) -> DiagnosticsExport {
         let info = Bundle.main.infoDictionary ?? [:]
-        // The manifest describes one environment: the first in creation order, named in the
-        // export, rather than whichever status happened to be first in a dictionary.
-        let subject = environments.first
+        // The manifest describes one environment: the one the user opened Diagnostics from,
+        // and otherwise the first in creation order rather than whichever status happened to
+        // be first in a dictionary. Exporting the first environment for a second one's card
+        // would answer a report about the failing Mac with the healthy Mac's evidence.
+        let subject = subjects(requested).first
         let compatibility = subject.map { observations(of: $0.id) } ?? ObservedTuple()
         return DiagnosticsExportBuilder.build(
             appVersion: info["CFBundleShortVersionString"] as? String ?? "0",
@@ -825,10 +873,19 @@ final class AppModel {
             runtime: runtimeInfo,
             compatibility: compatibility,
             environments: subject.map { [$0] } ?? [],
-            logs: diagnosticsLines,
+            // Only the named environment's log. The manifest declares one environment ID and
+            // one compatibility tuple, so lines prefixed with a second, undeclared UUID would
+            // describe a development Mac the bundle says nothing else about.
+            logs: diagnosticsLines(of: subject.map { [$0] } ?? []),
             // On a launch failure there is nothing else in the bundle: no environments, no
             // operation output. The error the user is looking at is the report.
-            launchError: unavailableLaunchError
+            launchFailure: launchFailure,
+            // An operation that failed before it wrote anything leaves no log either, so the
+            // failure is carried in its own right. The operation's own failure comes first:
+            // the mandatory check after it may fail as well, and that error takes the card
+            // while the state stays unread, but it is not how the operation ended. A card with
+            // no failed operation behind it still reports what it is showing.
+            operationFailure: subject.flatMap { operationFailures[$0.id] ?? lastErrors[$0.id] }.map { .init($0) }
         )
     }
 
@@ -935,6 +992,9 @@ final class AppModel {
             // with nothing to press. The presentation disables the option for the same reason.
             guard let shown = lastErrors[id], shown != statusQueryFailures[id] else { return }
             lastErrors[id] = nil
+            // A dismissed failure is not what the bundle reports either: the user said they
+            // are done with it, and the next export describes what the card shows now.
+            operationFailures[id] = nil
         default:
             break
         }
@@ -971,6 +1031,7 @@ final class AppModel {
     /// operation's own failure prescribes.
     private func recordOperationError(_ error: GuesthouseError?, for id: EnvironmentID) {
         lastErrors[id] = error
+        operationFailures[id] = error
         statusQueryFailures[id] = nil
     }
 
@@ -1243,10 +1304,22 @@ final class AppModel {
         }
     }
 
-    /// The launch failure the user is looking at, if that is what they are looking at.
-    private var unavailableLaunchError: GuesthouseError? {
-        if case .unavailable(let error) = launchState { return error }
-        return nil
+    /// The launch failure the user is looking at, if that is what they are looking at. A lost
+    /// connection counts: the interrupted screen offers Diagnostics too, and on a fresh launch
+    /// the bundle it produces has no environments and no logs to explain itself with.
+    private var launchFailure: DiagnosticsExport.Manifest.ReportedFailure? {
+        switch launchState {
+        case .unavailable(let error):
+            return .init(error)
+        case .interrupted(let interruption):
+            return .init(
+                message: interruption.userMessage,
+                recovery: interruption.recoveryMessage,
+                recoveryActions: interruption.recoveryActions.map { String(describing: $0) }
+            )
+        case .checkingEnvironment, .ready:
+            return nil
+        }
     }
 
     private func launchStateError() -> GuesthouseError {

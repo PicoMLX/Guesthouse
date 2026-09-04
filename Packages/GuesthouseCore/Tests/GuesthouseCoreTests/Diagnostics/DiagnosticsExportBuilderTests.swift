@@ -96,11 +96,115 @@ import Testing
         let error = GuesthouseError.runtimeMissing
         let export = DiagnosticsExportBuilder.build(
             appVersion: "1", appBuild: "1", runtime: nil, compatibility: ObservedTuple(),
-            environments: [], logs: [], launchError: error
+            environments: [], logs: [], launchFailure: .init(error)
         )
         let failure = export.manifest.launchFailure
         #expect(failure?.message == error.userMessage)
         #expect(failure?.recoveryActions.isEmpty == false, "the export names what the user was offered")
         #expect(String(decoding: DiagnosticsExportBuilder.encode(export.manifest), as: UTF8.self).contains("launchFailure"))
+    }
+
+    @Test func theOperationFailureIsInTheManifestBesideTheLaunchFailure() {
+        let error = GuesthouseError.guestNotReachable(EnvironmentID())
+        let export = DiagnosticsExportBuilder.build(
+            appVersion: "1", appBuild: "1", runtime: nil, compatibility: ObservedTuple(),
+            environments: [], logs: [], operationFailure: .init(error)
+        )
+        #expect(export.manifest.operationFailure?.message == error.userMessage)
+        #expect(export.manifest.operationFailure?.recoveryActions.isEmpty == false)
+        #expect(export.manifest.launchFailure == nil)
+    }
+
+    @Test func macAddressesAreScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("guest nic 52:54:00:12:34:56 up") == "guest nic [redacted:address] up")
+        #expect(DiagnosticsExportBuilder.scrub("started at 12:30:45 sharp") == "started at 12:30:45 sharp", "a clock time is not an address")
+    }
+
+    @Test func aMACAddressInsideAMachineGeneratedIdentifierIsScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("nic_52:54:00:12:34:56_state up") == "nic_[redacted:address]_state up")
+        #expect(DiagnosticsExportBuilder.scrub("52:54:00:12:34:56_link=down") == "[redacted:address]_link=down")
+        #expect(
+            DiagnosticsExportBuilder.scrub("prefix 2001:0db8:0000:0000:0000:ff00:0042:8329 up") == "prefix [redacted:address] up",
+            "a longer colon run is still taken whole rather than cut into six pairs"
+        )
+    }
+
+    @Test func multiWordAccountNamesAreScrubbedWhole() {
+        #expect(DiagnosticsExportBuilder.scrub("Signed in as Alice Smith") == "Signed in as [redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("{\"user\":\"Alice Smith\"}") == "{\"user\":\"[redacted:account]\"}")
+        // A label followed by a space is prose, so the marker replaces the quotes with it;
+        // the quoting is only kept where a parser depends on it, in the structured form above.
+        #expect(DiagnosticsExportBuilder.scrub("account: 'Alice Smith'") == "account: [redacted:account]")
+        #expect(DiagnosticsExportBuilder.scrub("Signed in as \"Alice Smith\"") == "Signed in as [redacted:account]")
+        // The value still ends where it stops looking like a name, so the qualifier a CLI
+        // prints after the account survives for the reader of the bundle.
+        #expect(DiagnosticsExportBuilder.scrub("user: octocat (admin)") == "user: [redacted:account] (admin)")
+        #expect(DiagnosticsExportBuilder.scrub("Logged in to github.com as octocat with a keyring token") == "Logged in to github.com as [redacted:account] with a keyring token")
+    }
+
+    @Test func anIPv6AddressFollowedByALabelDelimiterIsScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("peer 2001:db8::1: connection failed") == "peer [redacted:address]: connection failed")
+        #expect(DiagnosticsExportBuilder.scrub("prefix 2001:db8:: assigned") == "prefix [redacted:address] assigned", "a prefix is itself an address")
+    }
+
+    @Test func addressesInsideMachineGeneratedIdentifiersAreScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("peer_192.168.64.7 timed out") == "peer_[redacted:address] timed out")
+        #expect(DiagnosticsExportBuilder.scrub("192.168.64.7_status=down") == "[redacted:address]_status=down")
+        #expect(DiagnosticsExportBuilder.scrub("build 1.2.3.4.5 shipped") == "build 1.2.3.4.5 shipped", "a five-part version is not an address")
+    }
+
+    @Test func localUserAtHostIdentifiersAreScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("ssh alice@guesthouse failed") == "ssh [redacted:account] failed")
+        #expect(DiagnosticsExportBuilder.scrub("ssh alice@192.168.64.7 failed") == "ssh [redacted:account] failed")
+    }
+
+    @Test func theAccountInFrontOfABracketedIPv6HostIsScrubbed() {
+        // SSH brackets an IPv6 host, and the address pass keeps those brackets around its
+        // marker, so the account is met as `alice@[[redacted:address]]`.
+        #expect(DiagnosticsExportBuilder.scrub("ssh alice@[2001:db8::1] failed") == "ssh [redacted:account] failed")
+        #expect(DiagnosticsExportBuilder.scrub("ssh alice@[192.168.64.7] failed") == "ssh [redacted:account] failed")
+    }
+
+    @Test func anIPv6AddressInsideAMachineGeneratedIdentifierIsScrubbed() {
+        #expect(DiagnosticsExportBuilder.scrub("peer_2001:db8::1_status down") == "peer_[redacted:address]_status down")
+        #expect(DiagnosticsExportBuilder.scrub("fe80::1_state=up") == "[redacted:address]_state=up")
+        #expect(DiagnosticsExportBuilder.scrub("foo_::bar failed to build") == "foo_::bar failed to build", "an underscore does not make a qualified name an address")
+    }
+
+    @Test func theRuntimeProblemKeepsItsOwnCase() throws {
+        let info = RuntimeVersionInfo(
+            serviceVersion: "1", serviceBuild: "1",
+            tart: .init(version: nil, verified: false, problem: .runtimeVerificationFailed(check: .signature))
+        )
+        let export = DiagnosticsExportBuilder.build(appVersion: "1", appBuild: "1", runtime: info, compatibility: ObservedTuple(), environments: [], logs: [])
+        #expect(export.manifest.runtime?.tart?.problem == .runtimeVerificationFailed(check: .signature))
+    }
+
+    @Test func theRuntimeProblemsFreeTextIsScrubbedInPlace() throws {
+        let info = RuntimeVersionInfo(
+            serviceVersion: "1", serviceBuild: "1",
+            tart: .init(version: nil, verified: false, problem: .runtimeStorageUnavailable(reason: SanitizedText("/Users/alice/Library/Application Support is full"), problem: .unwritable))
+        )
+        let export = DiagnosticsExportBuilder.build(appVersion: "1", appBuild: "1", runtime: info, compatibility: ObservedTuple(), environments: [], logs: [])
+        let problem = try #require(export.manifest.runtime?.tart?.problem)
+        guard case .runtimeStorageUnavailable(let reason, let kind) = problem else {
+            Issue.record("the storage problem lost its case")
+            return
+        }
+        #expect(!reason.value.contains("alice"))
+        #expect(kind == .unwritable)
+    }
+
+    @Test func everyCompatibilityStringIsScrubbed() {
+        let observed = ObservedTuple(
+            xcodeBuild: "reported by 192.168.64.7",
+            githubCLIVersion: "2.62.0 as alice@example.com",
+            provisioningScriptVersion: "run from /Users/alice/scripts"
+        )
+        let export = DiagnosticsExportBuilder.build(appVersion: "1", appBuild: "1", runtime: nil, compatibility: observed, environments: [], logs: [])
+        let manifest = String(decoding: DiagnosticsExportBuilder.encode(export.manifest), as: UTF8.self)
+        #expect(!manifest.contains("192.168.64.7"))
+        #expect(!manifest.contains("alice"))
+        #expect(export.manifest.compatibility.xcodeBuild == "reported by [redacted:address]")
     }
 }
