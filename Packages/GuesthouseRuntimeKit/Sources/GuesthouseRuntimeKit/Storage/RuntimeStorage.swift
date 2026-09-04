@@ -184,10 +184,10 @@ public struct RuntimeStorage: Sendable {
     static func verify(_ url: URL) throws {
         let info = try verifyStructure(url)
         guard info.st_mode & mode_t(0o7777) == mode_t(directoryPermissions) else {
-            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "permissions are not 0700")
+            throw RuntimeStorageError.protectionDrift(path: url.path, reason: "permissions are not 0700")
         }
         guard try !hasAccessControlEntries(url) else {
-            throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "carries access control entries")
+            throw RuntimeStorageError.protectionDrift(path: url.path, reason: "carries access control entries")
         }
     }
 
@@ -250,13 +250,16 @@ public struct RuntimeStorage: Sendable {
 /// Storage failures block every runtime operation, so each names what happened and what the
 /// user can do (AGENTS.md: every error carries a message and a recovery action).
 public enum RuntimeStorageError: Error, Hashable, Sendable, LocalizedError {
+    case protectionDrift(path: String, reason: String)
     case insecureDirectory(path: String, reason: String)
     case unwritable(path: String, reason: SanitizedText)
 
     public var userMessage: String {
         switch self {
+        case .protectionDrift(let path, let reason):
+            "Guesthouse stopped because its storage folder \(GuesthouseError.sanitize(path, limit: 200)) is no longer private (\(GuesthouseError.sanitize(reason, limit: 120))). Leave the folder and its contents in place—they may include unpublished work. Quit and reopen Guesthouse so it can restore the required protection, then try again."
         case .insecureDirectory(let path, let reason):
-            "Guesthouse cannot safely use the item at its storage path \(GuesthouseError.sanitize(path, limit: 200)) (\(reason)). Preserve the item and any linked destination exactly as they are; they may contain unpublished work. Cancel and inspect the path before changing anything."
+            "Guesthouse cannot safely use the item at its storage path \(GuesthouseError.sanitize(path, limit: 200)) (\(GuesthouseError.sanitize(reason, limit: 120))). Preserve the item and any linked destination exactly as they are; they may contain unpublished work. Cancel and inspect the path before changing anything."
         case .unwritable(let path, let reason):
             "Guesthouse cannot write to its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason.value)). Leave the folder and its contents in place because they may contain unpublished work. Free disk space or restore write access, then try again."
         }
@@ -265,7 +268,7 @@ public enum RuntimeStorageError: Error, Hashable, Sendable, LocalizedError {
     /// In preference order. Never empty.
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .insecureDirectory: [.cancel]
+        case .protectionDrift, .insecureDirectory: [.cancel]
         case .unwritable: [.freeDiskSpace, .retry, .cancel]
         }
     }

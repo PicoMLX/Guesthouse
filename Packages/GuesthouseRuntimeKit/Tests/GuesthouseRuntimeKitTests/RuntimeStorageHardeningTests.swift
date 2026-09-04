@@ -52,37 +52,44 @@ import Testing
 
     @Test func strictVerificationRejectsPermissionDriftAfterInitialization() throws {
         let storage = try RuntimeStorage(root: root.appending(path: "mode-drift"))
-        let target = storage.url(for: .runtime)
+        let target = storage.url(for: .vms)
+        let unpublishedWork = target.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
 
-        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "permissions are not 0700")) {
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "permissions are not 0700")) {
             try RuntimeStorage.verify(target)
         }
 
         _ = try RuntimeStorage(root: storage.root)
         try RuntimeStorage.verify(target)
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
     @Test func strictVerificationRejectsACLDriftAfterInitialization() throws {
         let storage = try RuntimeStorage(root: root.appending(path: "acl-drift"))
-        let target = storage.url(for: .runtime)
+        let target = storage.url(for: .vms)
+        let unpublishedWork = target.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
         try addEveryoneReadACL(to: target)
 
-        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "carries access control entries")) {
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "carries access control entries")) {
             try RuntimeStorage.verify(target)
         }
 
         _ = try RuntimeStorage(root: storage.root)
         try RuntimeStorage.verify(target)
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
     @Test func errorsAreActionable() {
+        let drift = RuntimeStorageError.protectionDrift(path: "/private/vms", reason: "permissions are not 0700")
         let insecure = RuntimeStorageError.insecureDirectory(path: "/x", reason: "symbolic link")
         let unwritable = RuntimeStorageError.unwritable(
             path: "/x",
             reason: SanitizedText("No space left on device")
         )
-        let errors = [insecure, unwritable]
+        let errors = [drift, insecure, unwritable]
         for error in errors {
             #expect(!error.userMessage.isEmpty)
             #expect(!error.recoveryActions.isEmpty)
@@ -90,10 +97,21 @@ import Testing
             #expect(!error.userMessage.contains("Settings"))
             #expect(error.userMessage.contains("unpublished work"))
         }
+        #expect(drift.recoveryActions == [.cancel])
+        #expect(drift.userMessage.contains("Leave the folder and its contents in place"))
+        #expect(drift.userMessage.contains("Quit and reopen Guesthouse"))
         #expect(insecure.recoveryActions == [.cancel])
         #expect(insecure.userMessage.contains("Preserve"))
-        #expect(!insecure.userMessage.contains("move or remove"))
-        #expect(!insecure.userMessage.contains("delete"))
+        for reason in ["symbolic link", "not a directory", "owned by another user"] {
+            let unsafe = RuntimeStorageError.insecureDirectory(path: "/private/vms", reason: reason)
+            #expect(unsafe.recoveryActions == [.cancel])
+            #expect(unsafe.userMessage.contains("Preserve"))
+            #expect(unsafe.userMessage.contains("unpublished work"))
+            #expect(!unsafe.userMessage.contains("move or remove"))
+            #expect(!unsafe.userMessage.contains("delete"))
+            #expect(!unsafe.userMessage.contains("replace"))
+            #expect(!unsafe.userMessage.contains("chown"))
+        }
         #expect(unwritable.recoveryActions == [.freeDiskSpace, .retry, .cancel])
     }
 
