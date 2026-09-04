@@ -20,8 +20,7 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
 
     static func isValid(_ name: String) -> Bool {
         guard !name.isEmpty, name != "@", name != "HEAD", !name.hasPrefix("-"), !name.hasPrefix("/"), !name.hasSuffix("/"),
-              !name.hasSuffix("."), !name.hasSuffix(".lock"), !name.contains(".."), !name.contains("@{"),
-              !name.contains("//")
+              !name.hasSuffix("."), !name.contains(".."), !name.contains("@{"), !name.contains("//")
         else { return false }
         for scalar in name.unicodeScalars {
             if scalar.value < 0x20 || scalar.value == 0x7F { return false }
@@ -33,13 +32,18 @@ public struct BranchName: Hashable, Sendable, CustomStringConvertible {
             }
         }
         guard name.utf8.count <= maximumTotalBytes else { return false }
+        // The `.lock` suffix is matched without regard to case: Git only documents the exact
+        // spelling, but on the guest's case-insensitive file system `main.LOCK` still aliases
+        // the `refs/heads/main.lock` file Git writes while updating `main`.
         return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
-            !$0.hasPrefix(".") && !$0.hasSuffix(".lock") && $0.utf8.count <= maximumComponentBytes
+            !$0.hasPrefix(".") && !$0.lowercased().hasSuffix(".lock") && $0.utf8.count <= maximumComponentBytes
         }
     }
 
-    /// Case-insensitive identity: the guest file system is, so `main` and `MAIN` collide.
-    public var identity: String { rawValue.lowercased() }
+    /// Identity for collision checks. Case is folded because the guest file system folds it, and
+    /// the composition of accented characters because the file system treats canonically
+    /// equivalent spellings as one loose-ref path.
+    public var identity: String { rawValue.precomposedStringWithCanonicalMapping.lowercased() }
 
     /// Whether one name is a slash-component prefix of the other, which Git cannot store as
     /// two refs (`release` and `release/feature`), or the two are the same name in another case.
@@ -116,10 +120,16 @@ extension DirectoryName: Codable {
 public struct CommitSHA: Hashable, Sendable, Codable, CustomStringConvertible {
     public let rawValue: String
 
+    static let nullObjectID = String(repeating: "0", count: 40)
+
     public init?(_ rawValue: String) {
         let lowered = rawValue.lowercased()
         // ASCII hexadecimal only: `Character.isHexDigit` also accepts full-width digits.
         guard lowered.count == 40, lowered.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        // Git reserves all zeroes as the null object ID, which names the absence of a commit.
+        // Recording it as a base would defer the failure to the publish flow, which cannot
+        // inspect it or compute a change range from it.
+        guard lowered != Self.nullObjectID else { return nil }
         self.rawValue = lowered
     }
 

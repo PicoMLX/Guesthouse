@@ -115,18 +115,117 @@ import Testing
         }
     }
 
+    @Test func ownersFollowGitHubAccountRules() {
+        for bad in ["https://github.com/_/Repo", "https://github.com/my.org/Repo", "https://github.com/-org/Repo", "https://github.com/org-/Repo", "https://github.com/\(String(repeating: "o", count: 40))/Repo"] {
+            #expect(RemoteURL(bad) == nil, Comment(rawValue: bad))
+        }
+        #expect(RemoteURL("https://github.com/Org-Name/repo_name.v2") != nil)
+        #expect(RemoteURL("https://github.com/\(String(repeating: "o", count: 39))/Repo") != nil)
+    }
+
+    @Test func remotePathsRejectEmptyComponents() {
+        for bad in ["git@github.com:/Org/Repo", "git@github.com:Org//Repo", "https://github.com/Org//Repo", "https://github.com//Org/Repo", "https://github.com/Org/Repo//"] {
+            #expect(RemoteURL(bad) == nil, Comment(rawValue: bad))
+        }
+        #expect(RemoteURL("https://github.com/Org/Repo/")?.canonical == "https://github.com/Org/Repo")
+        #expect(RemoteURL("git@github.com:Org/Repo/") == nil, "an SCP path has no documented trailing separator")
+    }
+
+    @Test func remotesRejectSurroundingWhitespace() {
+        for bad in ["https://github.com/Org/Repo ", " https://github.com/Org/Repo", "https://github.com/Org/Repo\n", "git@github.com:Org/Repo\t"] {
+            #expect(RemoteURL(bad) == nil, Comment(rawValue: bad.unicodeScalars.map(\.value).description))
+        }
+    }
+
+    @Test func theNullObjectIDIsNotACommit() {
+        #expect(CommitSHA(String(repeating: "0", count: 40)) == nil)
+        #expect(CommitSHA(String(repeating: "0", count: 39) + "1") != nil)
+    }
+
+    @Test func lockSuffixesAreRejectedWhateverTheirCase() {
+        for bad in ["main.LOCK", "main.Lock", "feature/x.lOcK"] {
+            #expect(BranchName(bad) == nil, Comment(rawValue: bad))
+        }
+        #expect(BranchName("main.locked") != nil)
+    }
+
+    @Test func branchIdentitiesFoldUnicodeComposition() throws {
+        let composed = try #require(BranchName("caf\u{E9}"))
+        let decomposed = try #require(BranchName("cafe\u{301}"))
+        #expect(composed.identity == decomposed.identity)
+        #expect(composed.collides(with: decomposed), "one loose-ref path cannot hold two branches")
+        #expect(throws: WorkspaceValidationError.taskBranchCollidesWithBaseBranch("App")) {
+            try manifest(repositories: [app(base: "caf\u{E9}", task: "cafe\u{301}", sha: sha)]).validate()
+        }
+    }
+
+    @Test func everyNoncharacterIsRejected() {
+        // Swift's own literals refuse most of these, so they are built from their scalar values.
+        for value: UInt32 in [0xFDD0, 0xFDEF, 0x1FFFE, 0x10FFFF] {
+            let bad = "Scheme" + String(Unicode.Scalar(value)!)
+            #expect(throws: WorkspaceValidationError.invalidScheme(bad), Comment(rawValue: String(value, radix: 16))) {
+                try manifest(repositories: [app(sha: sha)], scheme: bad).validate()
+            }
+        }
+    }
+
+    @Test func projectPathComponentsAreBounded() {
+        let overlong = String(repeating: "d", count: 256)
+        #expect(throws: WorkspaceValidationError.invalidAppProjectPath("\(overlong)/App.xcodeproj")) {
+            try manifest(repositories: [app(sha: sha)], project: "\(overlong)/App.xcodeproj").validate()
+        }
+        let deep = Array(repeating: String(repeating: "d", count: 60), count: 9).joined(separator: "/") + "/App.xcodeproj"
+        #expect(throws: WorkspaceValidationError.invalidAppProjectPath(deep)) {
+            try manifest(repositories: [app(sha: sha)], project: deep).validate()
+        }
+        #expect(throws: Never.self) {
+            try manifest(repositories: [app(sha: sha)], project: "\(String(repeating: "d", count: 255))/App.xcodeproj").validate()
+        }
+    }
+
+    @Test func twoPackagesOfOneNameAreAnIdentityConflictNotAFolderConflict() {
+        let a = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/OrgA/Common")!, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        let b = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/OrgB/Common")!, baseBranch: BranchName("main")!, baseSHA: sha, taskBranch: BranchName("t")!)
+        // Both checkouts must keep the repository's own name, so "rename one folder" is not a
+        // recovery the user can perform.
+        #expect(throws: WorkspaceValidationError.duplicatePackageIdentity("common")) {
+            try manifest(repositories: [app(sha: sha), a, b]).validate()
+        }
+    }
+
     @Test func aMalformedManifestIsAnActionableError() {
         let error = #expect(throws: WorkspaceValidationError.self) { try WorkspaceManifest.decode(Data("not json".utf8)) }
         guard case .malformed? = error else { Issue.record("expected malformed, got \(String(describing: error))"); return }
         #expect(error?.recoveryActions.first == .inspectState)
+        // Rebuilding the workspace file is not one of the targeted repairs, so offering tool
+        // repair would give the user a button that cannot do what the message promises.
+        #expect(error?.recoveryActions.contains(.repair(.tools)) == false)
+        #expect(error?.recoveryActions.contains(.openSettings) == true)
         #expect(error?.userMessage.isEmpty == false)
         let missingField = #expect(throws: WorkspaceValidationError.self) { try WorkspaceManifest.decode(Data("{}".utf8)) }
         guard case .malformed? = missingField else { Issue.record("expected malformed for a missing field"); return }
     }
 
     @Test func aMissingBaseSHAIsNeverRetriedBlindly() {
-        #expect(!WorkspaceValidationError.missingBaseSHA("Repo").recoveryActions.contains(.retry))
-        #expect(WorkspaceValidationError.missingBaseSHA("Repo").recoveryActions.first == .inspectState)
+        let error = WorkspaceValidationError.missingBaseSHA("Repo")
+        #expect(!error.recoveryActions.contains(.retry))
+        #expect(error.recoveryActions.first == .inspectState)
+        // The clone may have finished with only the manifest update lost, so the message must
+        // not reach the opposite conclusion before the development Mac has been inspected.
+        #expect(!error.userMessage.contains("not been cloned"))
+        #expect(error.userMessage.contains("unknown"))
+    }
+
+    @Test func aWorkspaceIsAnchoredToItsDirectoryAndEnvironment() throws {
+        let loaded = manifest(repositories: [app(sha: sha)])
+        let elsewhere = try #require(DirectoryName("other-workspace"))
+        #expect(throws: WorkspaceValidationError.nameDoesNotMatchDirectory(manifest: "ws", directory: "other-workspace")) {
+            _ = try WorkspaceLayout(loaded, loadedFrom: elsewhere)
+        }
+        let here = try #require(DirectoryName("ws"))
+        #expect(try WorkspaceLayout(loaded, loadedFrom: here).root == "Workspaces/ws")
+        #expect(throws: WorkspaceValidationError.environmentMismatch) { try loaded.validate(in: EnvironmentID()) }
+        #expect(throws: Never.self) { try loaded.validate(in: loaded.environmentID) }
     }
 
     @Test func validationErrorsAreActionable() {
@@ -134,6 +233,7 @@ import Testing
             .unsupportedSchemaVersion(2), .appRepositoryCount(0), .duplicateCheckoutName("a"), .duplicateRemote("r"), .unsupportedHost("h"),
             .taskBranchCollidesWithBaseBranch("a"), .missingBaseSHA("a"), .invalidPullRequestReference("a"), .invalidAppProjectPath("p"),
             .invalidScheme("s"), .invalidTestDestination("d"), .checkoutNameDoesNotMatchRepository(checkout: "a", repository: "b"), .duplicatePackageIdentity("i"),
+            .environmentMismatch, .nameDoesNotMatchDirectory(manifest: "a", directory: "b"),
         ]
         for error in errors {
             #expect(!error.userMessage.isEmpty)

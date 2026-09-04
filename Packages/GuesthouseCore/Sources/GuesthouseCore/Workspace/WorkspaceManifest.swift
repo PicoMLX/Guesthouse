@@ -49,8 +49,13 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     }
 
     /// Every rule a manifest must satisfy before it is shown as a supported workspace.
-    public func validate(stage: ValidationStage = .supported) throws(WorkspaceValidationError) {
+    ///
+    /// Pass `environment` when the file was read from a development Mac: `workspace.json` lives
+    /// in the guest, so its recorded environment is only trustworthy once it has been checked
+    /// against the environment it actually came from.
+    public func validate(stage: ValidationStage = .supported, in environment: EnvironmentID? = nil) throws(WorkspaceValidationError) {
         guard schemaVersion == SchemaVersion.current else { throw .unsupportedSchemaVersion(schemaVersion.rawValue) }
+        if let environment, environmentID != environment { throw .environmentMismatch }
         let apps = repositories.filter { $0.role == .app }
         guard apps.count == 1 else { throw .appRepositoryCount(apps.count) }
 
@@ -58,21 +63,10 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         var seenRemotes: Set<String> = []
         var seenIdentities: Set<String> = []
         for repository in repositories {
-            guard seenNames.insert(repository.checkoutName.identity).inserted else {
-                throw .duplicateCheckoutName(repository.checkoutName.rawValue)
-            }
-            guard seenRemotes.insert(repository.remote.identity).inserted else {
-                throw .duplicateRemote(repository.remote.canonical)
-            }
-            guard repository.remote.isSupportedHost else {
-                throw .unsupportedHost(repository.remote.host)
-            }
-            guard !repository.baseBranch.collides(with: repository.taskBranch) else {
-                throw .taskBranchCollidesWithBaseBranch(repository.checkoutName.rawValue)
-            }
-            if let pullRequest = repository.draftPullRequest {
-                guard pullRequest.isValid(for: repository.remote) else { throw .invalidPullRequestReference(repository.checkoutName.rawValue) }
-            }
+            // Package identity is settled before the checkout-name and remote checks, because
+            // two packages that share a repository name also share their required checkout
+            // name: reporting that as a duplicate folder would ask for a rename that the
+            // identity rule in this block refuses.
             if repository.role == .package {
                 // SwiftPM derives a local package's identity from its directory name and a Git
                 // dependency's identity from the repository name, so the two must agree or the
@@ -91,6 +85,21 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
                     throw .duplicatePackageIdentity(identity)
                 }
             }
+            guard seenNames.insert(repository.checkoutName.identity).inserted else {
+                throw .duplicateCheckoutName(repository.checkoutName.rawValue)
+            }
+            guard seenRemotes.insert(repository.remote.identity).inserted else {
+                throw .duplicateRemote(repository.remote.canonical)
+            }
+            guard repository.remote.isSupportedHost else {
+                throw .unsupportedHost(repository.remote.host)
+            }
+            guard !repository.baseBranch.collides(with: repository.taskBranch) else {
+                throw .taskBranchCollidesWithBaseBranch(repository.checkoutName.rawValue)
+            }
+            if let pullRequest = repository.draftPullRequest {
+                guard pullRequest.isValid(for: repository.remote) else { throw .invalidPullRequestReference(repository.checkoutName.rawValue) }
+            }
         }
 
         guard Self.isRelativeProjectPath(appProjectPath) else { throw .invalidAppProjectPath(appProjectPath) }
@@ -102,19 +111,31 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         }
     }
 
+    /// APFS and HFS+ both cap one directory entry at 255 bytes, so a longer component names a
+    /// directory the guest cannot create.
+    static let maximumPathComponentBytes = 255
+    /// The project path is only part of the path the guest builds from it (`Workspaces/<name>/
+    /// repos/<checkout>/…`), so it is bounded well inside macOS's 1024-byte pathname limit.
+    static let maximumProjectPathBytes = 512
+
     static func isRelativeProjectPath(_ path: String) -> Bool {
-        guard !path.isEmpty, !path.hasPrefix("/"), path.hasSuffix(".xcodeproj"), !containsControlCharacters(path) else { return false }
+        guard !path.isEmpty, !path.hasPrefix("/"), path.hasSuffix(".xcodeproj"), !containsControlCharacters(path),
+              path.utf8.count <= maximumProjectPathBytes
+        else { return false }
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+        // A component the guest cannot create makes the whole path unreachable, so it is
+        // refused here rather than at checkout or build.
+        return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= maximumPathComponentBytes }
     }
 
     /// Control, format, and separator characters cannot travel in an argument vector, and
-    /// separators would let one value render as several lines in the GUI.
+    /// separators would let one value render as several lines in the GUI. Noncharacters are
+    /// reserved against interchange and would reach the confirmation UI as replacement glyphs.
     static func containsControlCharacters(_ text: String) -> Bool {
         text.unicodeScalars.contains { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator: true
-            default: scalar.value == 0xFFFE || scalar.value == 0xFFFF
+            default: scalar.properties.isNoncharacterCodePoint
             }
         }
     }
@@ -214,6 +235,10 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case invalidTestDestination(String)
     case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
     case duplicatePackageIdentity(String)
+    /// The manifest names a development Mac other than the one it was read from.
+    case environmentMismatch
+    /// The manifest names a workspace other than the directory that contained it.
+    case nameDoesNotMatchDirectory(manifest: String, directory: String)
     /// The file could not be read as a workspace at all.
     case malformed(reason: SanitizedText)
 
@@ -232,7 +257,7 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
         case .taskBranchCollidesWithBaseBranch(let name):
             "The task branch for \(GuesthouseError.sanitize(name)) cannot exist alongside its base branch. Choose a branch name that is not the base branch, its case variant, or a prefix of it."
         case .missingBaseSHA(let name):
-            "The repository \(GuesthouseError.sanitize(name)) has not been cloned yet, so the workspace cannot be used until setup finishes."
+            "Guesthouse has no record of the commit \(GuesthouseError.sanitize(name)) was cloned at, so whether that clone finished is unknown until the development Mac is inspected."
         case .invalidPullRequestReference(let name):
             "The draft pull request recorded for \(GuesthouseError.sanitize(name)) does not belong to that repository, so it was ignored. Publishing will create a fresh draft."
         case .invalidAppProjectPath(let path):
@@ -246,7 +271,11 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
         case .checkoutNameDoesNotMatchRepository(let checkout, let repository):
             "The package repository \(GuesthouseError.sanitize(repository)) must be checked out as \(GuesthouseError.sanitize(repository)), not \(GuesthouseError.sanitize(checkout)), or Xcode will not use the local copy."
         case .duplicatePackageIdentity(let identity):
-            "Two package repositories share the identity \(GuesthouseError.sanitize(identity)); Xcode could not tell them apart."
+            "Two package repositories share the identity \(GuesthouseError.sanitize(identity)); Xcode could not tell them apart. Remove one of them from the workspace."
+        case .environmentMismatch:
+            "This workspace file belongs to another development Mac, so Guesthouse will not open it here."
+        case .nameDoesNotMatchDirectory(let manifest, let directory):
+            "The workspace in the folder \(GuesthouseError.sanitize(directory)) calls itself \(GuesthouseError.sanitize(manifest)), so Guesthouse cannot tell which workspace it is."
         }
     }
 
@@ -257,7 +286,10 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
         // The clone may have finished with only the manifest update lost, so the outcome is
         // not known: only inspection is offered, never a blind repeat.
         case .missingBaseSHA: [.inspectState, .cancel]
-        case .malformed: [.inspectState, .repair(.tools), .cancel]
+        // Rebuilding the workspace file is a workspace action, not one of §9's targeted
+        // repairs: none of those repair kinds writes `workspace.json`.
+        case .malformed: [.inspectState, .openSettings, .cancel]
+        case .environmentMismatch, .nameDoesNotMatchDirectory: [.inspectState, .openSettings, .cancel]
         default: [.openSettings, .cancel]
         }
     }
