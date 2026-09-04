@@ -31,6 +31,31 @@ struct DummyBundle {
 
     init() { try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
 
+    @Test func aRuntimeReplacedAfterVerificationIsNotRun() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Verified-\(UUID().uuidString)")
+        let executable = root.appending(path: "tart.app/Contents/MacOS/tart")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: executable, withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
+        let bundle = TartBundle(url: root.appending(path: "tart.app"))
+        let storage = try RuntimeStorage(root: root.appending(path: "state"))
+        let runner = FakeProcessRunner(stdout: ["2.36.0"], exit: ProcessExit(reason: .status(0)))
+        // A link is not a regular file, so it has no identity to bind to: the launch is
+        // refused rather than trusted.
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: runner, verifiedExecutable: TartBundle.ExecutableIdentity(device: 1, inode: 2, size: 3, modified: timespec()))
+        await #expect(throws: TartInvocationError.self) { _ = try await backend.version() }
+        #expect(await runner.invocations.isEmpty, "nothing was launched")
+    }
+
+    @Test func versionOutputIsBoundedByRecordCount() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Records-\(UUID().uuidString)")
+        let storage = try RuntimeStorage(root: root)
+        let bundle = TartBundle(url: root.appending(path: "tart.app"))
+        let flood = Array(repeating: "", count: TartBackend.maximumCapturedRecords + 10) + ["2.36.0"]
+        let runner = FakeProcessRunner(stdout: flood, exit: ProcessExit(reason: .status(0)))
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: runner)
+        await #expect(throws: TartInvocationError.unparseableOutput) { _ = try await backend.version() }
+    }
+
     @Test func anEnormousInfoPlistIsRefusedBeforeItIsParsed() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Bundle-\(UUID().uuidString)")
         let contents = root.appending(path: "tart.app/Contents")

@@ -1,3 +1,4 @@
+import Darwin
 import CryptoKit
 import Foundation
 import GuesthouseCore
@@ -63,6 +64,33 @@ public struct TartBundle: Hashable, Sendable {
               let data = try? Data(contentsOf: url, options: [.mappedIfSafe]), data.count <= maximumInfoPlistBytes
         else { return nil }
         return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+    }
+
+    /// What the executable was when it passed verification: the same file, unchanged. A
+    /// launch compares this against the file it is about to run, so a bundle replaced after
+    /// verification is never executed.
+    public struct ExecutableIdentity: Hashable, Sendable {
+        public let device: UInt64
+        public let inode: UInt64
+        public let size: Int64
+        public let modified: timespec
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.device == rhs.device && lhs.inode == rhs.inode && lhs.size == rhs.size
+                && lhs.modified.tv_sec == rhs.modified.tv_sec && lhs.modified.tv_nsec == rhs.modified.tv_nsec
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(device); hasher.combine(inode); hasher.combine(size)
+            hasher.combine(modified.tv_sec); hasher.combine(modified.tv_nsec)
+        }
+    }
+
+    /// The executable's identity now, without following links, or `nil` if it cannot be read.
+    public var executableIdentity: ExecutableIdentity? {
+        var info = stat()
+        guard lstat(executable.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return ExecutableIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino), size: Int64(info.st_size), modified: info.st_mtimespec)
     }
 
     /// Verifies the bundle against the pinned release: identifier and version from Info.plist,

@@ -165,7 +165,13 @@ final class RuntimeService: Sendable {
             // unwritable or unsafe storage directory, so the storage error is reported as it
             // is, with its own recovery actions.
             log.error("runtime storage unavailable: \(Self.describe(error), privacy: .public)")
-            let problem = (error as? RuntimeStorageError).map { GuesthouseError.runtimeStateUnavailable(reason: SanitizedText($0.userMessage, limit: 200)) } ?? .runtimeMissing
+            // The storage error keeps its own recovery: freeing space and retrying discovery
+            // are what help, and neither is what a missing runtime would offer.
+            let problem: GuesthouseError = switch error as? RuntimeStorageError {
+            case .unwritable(_, _)?: .runtimeStorageUnavailable(reason: SanitizedText((error as? RuntimeStorageError)?.userMessage ?? "", limit: 200), problem: .unwritable)
+            case .insecureDirectory(_, _)?: .runtimeStorageUnavailable(reason: SanitizedText((error as? RuntimeStorageError)?.userMessage ?? "", limit: 200), problem: .unsafeLocation)
+            case nil: .runtimeMissing
+            }
             tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: problem) }
             return
         }
@@ -190,7 +196,9 @@ final class RuntimeService: Sendable {
             tartInfo.withLock { $0 = .init(version: claimed, verified: false, problem: problem) }
             return
         }
-        let backend = TartBackend(bundle: bundle, storage: storage, runner: ProcessRunner())
+        // The bundle just passed verification: its executable's identity is captured so a
+        // replacement before launch is refused.
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: ProcessRunner(), verifiedExecutable: bundle.executableIdentity)
         let version: TartVersion
         do {
             version = try await backend.version()

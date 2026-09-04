@@ -15,6 +15,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// Guesthouse's own storage could not be used: the location is missing, unsafe, or not
     /// writable. Distinct from a missing runtime, which reinstalling Tart would fix.
     case runtimeStateUnavailable(reason: SanitizedText)
+    /// Guesthouse's storage location itself could not be used. Carries which kind of problem
+    /// it is, so the GUI offers what actually helps rather than a generic check.
+    case runtimeStorageUnavailable(reason: SanitizedText, problem: StorageProblem)
     case runtimeVerificationFailed(check: RuntimeVerificationCheck)
     case runtimeIncompatible(found: SanitizedText?, required: SanitizedText)
     case guestNotReachable(EnvironmentID)
@@ -49,6 +52,14 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     }
 
     /// Which check an installed runtime bundle failed.
+    /// Why the storage location cannot be used.
+    public enum StorageProblem: String, Codable, Hashable, Sendable {
+        /// The location exists but cannot be written to, usually for lack of space.
+        case unwritable
+        /// Something unsafe occupies the location; nothing is moved or deleted automatically.
+        case unsafeLocation
+    }
+
     public enum RuntimeVerificationCheck: String, Codable, Hashable, Sendable {
         /// Files or metadata are missing from the bundle.
         case layout
@@ -84,7 +95,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public var category: Category {
         switch self {
         case .unsupportedHost: .host
-        case .insufficientDisk, .runtimeStateUnavailable: .storage
+        case .insufficientDisk, .runtimeStateUnavailable, .runtimeStorageUnavailable: .storage
         case .downloadVerificationFailed, .runtimeMissing, .runtimeVerificationFailed, .runtimeIncompatible: .runtime
         case .guestNotReachable, .hostKeyChanged: .guest
         case .credentialsLocked, .loginExpired: .credentials
@@ -115,6 +126,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "The downloaded \(artifact.value) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
+        case .runtimeStorageUnavailable(let reason, _):
+            reason.value
         case .runtimeStateUnavailable(let reason):
             "Guesthouse's saved state could not be used (\(reason.value)). Guesthouse will inspect the actual virtual machines before offering anything; if this persists, check the storage location in Settings."
         case .runtimeVerificationFailed(let check):
@@ -160,6 +173,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .downloadVerificationFailed: [.retry, .cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
         case .runtimeStateUnavailable: [.inspectState, .openSettings, .cancel]
+        // The storage error's own actions, kept: freeing space and retrying are what help.
+        case .runtimeStorageUnavailable(_, .unwritable): [.freeDiskSpace, .retry, .cancel]
+        case .runtimeStorageUnavailable(_, .unsafeLocation): [.cancel]
         case .runtimeVerificationFailed: [.repair(.runtime), .cancel]
         case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
         case .guestNotReachable: [.inspectState, .retry, .openConsole, .cancel]
@@ -201,6 +217,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .downloadVerificationFailed: "downloadVerificationFailed"
         case .runtimeMissing: "runtimeMissing"
         case .runtimeStateUnavailable: "runtimeStateUnavailable"
+        case .runtimeStorageUnavailable: "runtimeStorageUnavailable"
         case .runtimeVerificationFailed: "runtimeVerificationFailed"
         case .runtimeIncompatible: "runtimeIncompatible"
         case .guestNotReachable: "guestNotReachable"
