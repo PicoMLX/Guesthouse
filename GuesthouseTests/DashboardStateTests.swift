@@ -136,11 +136,11 @@ import Testing
         await model.refresh()
         #expect(try #require(model.cardStates().first).availability(of: .start) == .enabled)
         model.start(environment.id)
-        // The status the operation returned still names the operation until the check that
-        // follows it answers; the card reads "Running" only once nothing is in flight on it.
+        // The card reads "Checking environment…" until the check that follows the operation
+        // has landed, and the status it returned names the operation until then.
         await waitUntil({
             model.statuses[environment.id]?.vm == .running && model.operations.isEmpty
-                && model.statuses[environment.id]?.inFlightOperation == nil
+                && model.reconciling.isEmpty && model.statuses[environment.id]?.inFlightOperation == nil
         }, "the check that follows the start")
         let card = try #require(model.cardStates().first)
         #expect(card.statusText == "Running")
