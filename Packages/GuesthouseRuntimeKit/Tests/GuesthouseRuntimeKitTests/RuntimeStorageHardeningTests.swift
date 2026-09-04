@@ -58,8 +58,12 @@ import Testing
             #expect(!error.recoveryActions.isEmpty)
             #expect(error.errorDescription == error.userMessage)
             #expect(!error.userMessage.contains("Settings"))
+            #expect(error.userMessage.contains("unpublished work"))
         }
-        #expect(insecure.recoveryActions == [.retry, .cancel])
+        #expect(insecure.recoveryActions == [.cancel])
+        #expect(insecure.userMessage.contains("Preserve"))
+        #expect(!insecure.userMessage.contains("move or remove"))
+        #expect(!insecure.userMessage.contains("delete"))
         #expect(unwritable.recoveryActions == [.freeDiskSpace, .retry, .cancel])
     }
 
