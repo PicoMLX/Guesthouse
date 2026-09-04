@@ -1,4 +1,7 @@
 import Darwin
+// Resolves an access control entry's qualifier to an account identifier. `membership` is an
+// explicit submodule, so importing `Darwin` alone does not bring `mbr_uuid_to_id` into scope.
+import Darwin.membership
 import Foundation
 import GuesthouseCore
 
@@ -196,35 +199,129 @@ public struct RuntimeStorage: Sendable {
 
     /// A `0700` directory is only as private as the directories above it: another local
     /// account that can write to an ancestor can rename this one away and put its own
-    /// directory in its place, and everything written afterwards would go there. Every
-    /// ancestor up to the root must therefore be owned by this user or by root, and must not
-    /// be writable by anyone else unless it is sticky (the rule that makes `/tmp` safe).
+    /// directory in its place, and everything written afterwards would go there.
+    ///
+    /// Two chains are walked. The lexical one is what the caller named. Following a symbolic
+    /// link in it validates the link's target but leaves the target's own parents unseen, and
+    /// whoever can write to those can rename the target away just the same; resolving the
+    /// deepest ancestor resolves every component above it, so the second walk covers the whole
+    /// real chain in one pass.
     static func verifyAncestors(of url: URL) throws {
-        var candidate = (url.standardizedFileURL.path as NSString).deletingLastPathComponent
+        let lexicalParent = (url.standardizedFileURL.path as NSString).deletingLastPathComponent
+        guard !lexicalParent.isEmpty else { return }
+        var verified: Set<String> = []
+        try verifyAncestorChain(from: lexicalParent, verified: &verified)
+        let canonicalParent = try canonicalPath(of: lexicalParent)
+        if canonicalParent != lexicalParent {
+            try verifyAncestorChain(from: canonicalParent, verified: &verified)
+        }
+    }
+
+    private static func verifyAncestorChain(from start: String, verified: inout Set<String>) throws {
+        var candidate = start
         while !candidate.isEmpty {
-            var info = stat()
-            guard lstat(candidate, &info) == 0 else {
-                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "cannot be inspected")
-            }
-            if info.st_mode & S_IFMT == S_IFLNK {
-                guard stat(candidate, &info) == 0 else {
-                    throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "dangling symbolic link")
-                }
-            }
-            guard info.st_mode & S_IFMT == S_IFDIR else {
-                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "not a directory")
-            }
-            guard info.st_uid == getuid() || info.st_uid == 0 else {
-                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "a containing folder is owned by another user")
-            }
-            let sharedWrite = info.st_mode & (S_IWGRP | S_IWOTH)
-            let sticky = info.st_mode & S_ISVTX
-            guard sharedWrite == 0 || sticky != 0 else {
-                throw RuntimeStorageError.insecureDirectory(path: candidate, reason: "a containing folder can be changed by other users")
+            if verified.insert(candidate).inserted {
+                try verifyAncestor(candidate)
             }
             if candidate == "/" { return }
             candidate = (candidate as NSString).deletingLastPathComponent
         }
+    }
+
+    /// Every ancestor must be owned by this user or by root, must not be writable by anyone
+    /// else unless it is sticky (the rule that makes `/tmp` safe), and must not hand the same
+    /// power to another principal through an access control entry.
+    private static func verifyAncestor(_ path: String) throws {
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "cannot be inspected")
+        }
+        if info.st_mode & S_IFMT == S_IFLNK {
+            guard stat(path, &info) == 0 else {
+                throw RuntimeStorageError.insecureDirectory(path: path, reason: "dangling symbolic link")
+            }
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR else {
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "not a directory")
+        }
+        guard info.st_uid == getuid() || info.st_uid == 0 else {
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder is owned by another user")
+        }
+        let sharedWrite = info.st_mode & (S_IWGRP | S_IWOTH)
+        let sticky = info.st_mode & S_ISVTX
+        guard sharedWrite == 0 || sticky != 0 else {
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder can be changed by other users")
+        }
+        try verifyAncestorAccessControl(path)
+    }
+
+    /// The fully resolved path, so a symbolic link anywhere in the chain is walked as the
+    /// directory it really is. An ancestor of an existing directory always resolves; a failure
+    /// means the tree changed underneath us or cannot be traversed, and is refused.
+    private static func canonicalPath(of path: String) throws -> String {
+        guard let resolved = realpath(path, nil) else {
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "cannot be inspected")
+        }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// The directory rights that let a principal replace an ancestor or take it over: adding,
+    /// renaming or removing entries in it, deleting it, or rewriting the metadata that decides
+    /// who may do those things.
+    private static let replacementRights: [acl_perm_t] = [
+        ACL_ADD_FILE, ACL_ADD_SUBDIRECTORY, ACL_DELETE_CHILD, ACL_DELETE,
+        ACL_WRITE_ATTRIBUTES, ACL_WRITE_EXTATTRIBUTES, ACL_WRITE_SECURITY, ACL_CHANGE_OWNER,
+    ]
+
+    /// The POSIX mode is not the whole story: an ancestor at `0755` whose access control list
+    /// grants another principal the right to add or delete entries is still replaceable.
+    /// Ordinary Macs carry harmless entries — a home folder's "everyone deny delete", for one —
+    /// so entries are inspected rather than refused wholesale: only a grant naming someone
+    /// other than this user is a refusal. Deny entries take nothing away from us and are kept.
+    private static func verifyAncestorAccessControl(_ path: String) throws {
+        // Ancestor symbolic links are already followed by `stat`, so follow them here too: the
+        // rights that matter are the ones on the directory the chain actually reaches.
+        guard let acl = acl_get_file(path, ACL_TYPE_EXTENDED) else {
+            if errno == ENOENT { return }
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "access control entries could not be inspected")
+        }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        var position = ACL_FIRST_ENTRY.rawValue
+        while acl_get_entry(acl, position, &entry) == 0 {
+            position = ACL_NEXT_ENTRY.rawValue
+            guard let entry else { break }
+            var tag = acl_tag_t(0)
+            guard acl_get_tag_type(entry, &tag) == 0 else {
+                throw RuntimeStorageError.insecureDirectory(path: path, reason: "access control entries could not be inspected")
+            }
+            if tag == ACL_EXTENDED_DENY { continue }
+            guard try grantsReplacementRights(entry, path: path), !isCurrentUser(entry) else { continue }
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "a containing folder grants another user the right to change it")
+        }
+    }
+
+    private static func grantsReplacementRights(_ entry: acl_entry_t, path: String) throws -> Bool {
+        var permissions: acl_permset_t?
+        guard acl_get_permset(entry, &permissions) == 0, let permissions else {
+            throw RuntimeStorageError.insecureDirectory(path: path, reason: "access control entries could not be inspected")
+        }
+        // `acl_get_perm_np` answers 1 for granted and -1 for an unreadable permission; both
+        // count as granted, so an entry we cannot fully read is never waved through.
+        return replacementRights.contains { acl_get_perm_np(permissions, $0) != 0 }
+    }
+
+    /// Whether the entry names this user's account. A qualifier that resolves to a group, or
+    /// that cannot be resolved to an account at all, is deliberately not this user: a group
+    /// grant reaches every other member of it.
+    private static func isCurrentUser(_ entry: acl_entry_t) -> Bool {
+        guard let qualifier = acl_get_qualifier(entry) else { return false }
+        defer { acl_free(qualifier) }
+        var identifier = uid_t(0)
+        var kind = Int32(0)
+        guard mbr_uuid_to_id(qualifier.assumingMemoryBound(to: UInt8.self), &identifier, &kind) == 0 else { return false }
+        return kind == ID_TYPE_UID && identifier == getuid()
     }
 
     /// POSIX mode `0700` does not remove access control entries an existing or inherited
