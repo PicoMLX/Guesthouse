@@ -188,6 +188,17 @@ import Testing
         #expect(redactor.redact("mypassword: hunter2") == "mypassword: hunter2")
     }
 
+    @Test func labelsAfterAnUnderscoreAreRecognized() {
+        #expect(redactor.redact("refresh_token=abc123") == "refresh_token: [redacted:secret]")
+        #expect(redactor.redact("access_token: abc123") == "access_token: [redacted:secret]")
+        #expect(!redactor.redact(#"{"refresh_token":"abc123"}"#).contains("abc123"))
+        #expect(redactor.redact("x_authorization: Basic dXNlcjpwYXNz") == "x_Authorization: [redacted:authorization]")
+        // An ordinary word that ends in a label is still not a label, and a name that only
+        // mentions one, with no value after it, is left for the token rules.
+        #expect(redactor.redact("mypassword: hunter2") == "mypassword: hunter2")
+        #expect(redactor.redact("OPENAI_API_KEY is sk-proj-abcdefghijklmnopqrstuvwxyz0123") == "OPENAI_API_KEY is [redacted:api-key]")
+    }
+
     @Test func decodingRemovesBareDeviceCodes() throws {
         let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""AB12-CD34""#.utf8))
         #expect(line.text == "[redacted:device-code]")

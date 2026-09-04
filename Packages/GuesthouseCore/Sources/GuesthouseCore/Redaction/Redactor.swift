@@ -176,7 +176,7 @@ public struct Redactor: Sendable {
         /// A folded header: the label alone on a line, value on the next.
         let authorizationLabelOnly = #/\s*(?:\\?["'])?authorization(?:\\?["'])?\s*:\s*/#.ignoresCase()
         /// Any authorization label, for lines whose value may continue on the next line.
-        let authorizationLabel = #/(?:^|[^A-Za-z0-9_])authorization\b(?:\\?["'])?\s*[:=]/#.ignoresCase()
+        let authorizationLabel = #/(?:^|[^A-Za-z0-9])authorization\b(?:\\?["'])?\s*[:=]/#.ignoresCase()
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
@@ -184,12 +184,13 @@ public struct Redactor: Sendable {
         /// The whole header value, quoted or to the end of the line, so multi-parameter schemes
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
-        let authorizationHeader = #/(^|[^A-Za-z0-9_])(?:\\?["'])?authorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?authorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
         /// `cache.<token>`, or in `payload.Authorization` is not a break, and a secret beside
-        /// one would survive. The character is captured so it can be put back.
+        /// one would survive. The character is captured so it can be put back. A label may also
+        /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
         let bearer = #/(^|[^A-Za-z0-9_])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
         /// Classic and fine-grained GitHub tokens.
         let githubToken = #/(^|[^A-Za-z0-9_])((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/#
@@ -203,13 +204,13 @@ public struct Redactor: Sendable {
         /// last `@` before a slash or whitespace, so a password containing `@` is fully covered.
         let urlUserInfo = #/(:\/\/)[^\s\/]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`.
-        let labeledSecret = #/(^|[^A-Za-z0-9_])"?(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
+        let labeledSecret = #/(^|[^A-Za-z0-9])"?(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
         /// the value on the next line.
-        let secretLabelOnly = #/(^|[^A-Za-z0-9_])"?(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*$/#.ignoresCase()
+        let secretLabelOnly = #/(^|[^A-Za-z0-9])"?(password|passphrase|passwd|secret|token|api[_-]?key)\b"?\s*[:=]\s*$/#.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one.
-        let codeField = #/(^|[^A-Za-z0-9_])(?:\\?["'])?((?:user|device)[_-]code)\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[_-]code)\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D`, only on lines that mention a code (including the
         /// `user_code` and `device_code` field names of OAuth device flows), and never when the
         /// match is part of a longer hyphenated identifier such as a UUID.
