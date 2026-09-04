@@ -31,7 +31,7 @@ struct ContentView: View {
             case .unavailable(let error):
                 Image(systemName: "exclamationmark.triangle").imageScale(.large)
                 Text(error.userMessage)
-                RecoveryActionRow(error: error) { model.startRefresh() }
+                RecoveryActionRow(actions: error.recoveryActions) { model.startRefresh() }
             }
             #if DEBUG
             Text(debugProbe.result)
@@ -48,22 +48,50 @@ struct ContentView: View {
 /// The error's own recovery actions, in its order. Checking the environment is the one the
 /// app can perform today; the others are named so the user knows what the fix will be.
 struct RecoveryActionRow: View {
-    let error: GuesthouseError
+    let actions: [RecoveryAction]
     let check: () -> Void
+    /// Clears the failure, where the caller has one to clear. An error whose only recovery is
+    /// `.cancel` is otherwise a message with no control at all.
+    var dismiss: (() -> Void)?
 
     var body: some View {
         HStack {
-            ForEach(Array(error.recoveryActions.enumerated()), id: \.offset) { _, action in
+            ForEach(Array(rendered.enumerated()), id: \.offset) { _, action in
                 switch action {
                 case .retry, .inspectState:
                     Button("Check Environment", action: check)
                 case .cancel:
-                    EmptyView()
+                    if let dismiss {
+                        Button("Dismiss", action: dismiss)
+                    } else {
+                        EmptyView()
+                    }
                 case .repair, .openConsole, .exportWork, .openSettings, .signInAgain, .freeDiskSpace, .deleteEnvironment, .reinstallApp:
                     Text("\(label(action)) is not available yet").font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
+    }
+
+    /// One control per distinct behavior. Re-reading the state is all this row can do about
+    /// either `retry` or `inspectState`, so an error that prescribes both — a start refused
+    /// with `guestNotReachable` — gets one Check Environment rather than two identical buttons
+    /// that would each claim to be a different recovery. Repeating the operation itself is the
+    /// card's own Start, which the check re-enables once the VM answers as stopped and ready.
+    private var rendered: [RecoveryAction] {
+        var result: [RecoveryAction] = []
+        var checkOffered = false
+        for action in actions {
+            switch action {
+            case .retry, .inspectState:
+                guard !checkOffered else { continue }
+                checkOffered = true
+                result.append(action)
+            default:
+                result.append(action)
+            }
+        }
+        return result
     }
 
     private func label(_ action: RecoveryAction) -> String {

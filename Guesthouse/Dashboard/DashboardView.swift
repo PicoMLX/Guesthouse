@@ -16,7 +16,12 @@ struct DashboardView: View {
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16)], alignment: .leading, spacing: 16) {
                         ForEach(cards) { card in
-                            EnvironmentCardView(state: card) { model.start(card.id) }
+                            EnvironmentCardView(
+                                state: card,
+                                start: { model.start(card.id) },
+                                check: { Task { await model.refreshStatus(of: card.id) } },
+                                dismiss: { model.dismissError(card.id) }
+                            )
                         }
                         SlotView(availability: model.createAvailability) { showingWizard = true }
                     }
@@ -73,6 +78,10 @@ struct SlotView: View {
 struct EnvironmentCardView: View {
     let state: EnvironmentCardState
     let start: () -> Void
+    /// Re-reads this environment's state; what the `inspectState` and `retry` recoveries do.
+    let check: () -> Void
+    /// Clears the failure the card is holding; what the `cancel` recovery does.
+    let dismiss: () -> Void
     @State private var note: String?
 
     var body: some View {
@@ -82,6 +91,10 @@ struct EnvironmentCardView: View {
                 Label(attention.userMessage, systemImage: "exclamationmark.triangle")
                     .font(.callout)
                     .accessibilityLabel("Needs attention: \(attention.userMessage)")
+                // The failure's own recovery, on the card that reports it: a card error is
+                // otherwise text with no way out once Start is disabled. A failure the status
+                // itself keeps reporting is not offered a dismissal, which would clear nothing.
+                RecoveryActionRow(actions: state.recoveryActions, check: check, dismiss: state.canDismiss ? dismiss : nil)
             }
             detailsGrid
             actionsRow

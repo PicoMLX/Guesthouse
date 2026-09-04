@@ -58,21 +58,37 @@ struct EnvironmentCardState: Equatable, Identifiable {
     let phase: ProgressPhase?
     /// The problem the runtime reported, if any, with its recovery actions.
     let attention: GuesthouseError?
+    /// What the user can do about `attention`, in the error's own order. The card renders
+    /// these, so an error whose recovery is an inspection or a repair is never shown as text
+    /// with no way out (AGENTS.md: every error carries at least one recovery action).
+    let recoveryActions: [RecoveryAction]
+    /// Whether clearing `attention` would change anything. A problem the status itself keeps
+    /// reporting comes straight back, so the card does not offer a control that does nothing.
+    let canDismiss: Bool
     let details: [Detail]
     let availability: [Action: Availability]
 
-    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?, statusUnread: Bool = false, startBlockedElsewhere: String? = nil) {
+    /// - Parameter statusCheckFailed: this environment's last status query ended in a failure
+    ///   and no other query is running. The status is unread, but nothing is being checked.
+    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?, statusUnread: Bool = false, statusCheckFailed: Bool = false, startBlockedElsewhere: String? = nil, runtimeVersion: RuntimeVersionInfo? = nil) {
         id = environment.id
         name = environment.name
-        let attention: GuesthouseError? = {
+        let statusAttention: GuesthouseError? = {
             if case .needsAttention(let error)? = status?.readiness { return error }
-            return lastError
+            return nil
         }()
+        let attention: GuesthouseError? = statusAttention ?? lastError
         self.attention = attention
+        recoveryActions = attention?.recoveryActions ?? []
+        canDismiss = statusAttention == nil && lastError != nil
         phase = operation?.phase
-        isBusy = statusUnread || status == nil || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil
-        statusText = Self.statusText(for: status, operation: operation)
-        details = Self.details(for: environment, status: status)
+        // A status the last query could not read is not a check in progress: that query ended,
+        // and the card names the failure it is already showing rather than turning an error
+        // with its own recovery into an indefinite spinner nobody can end.
+        let unread = statusUnread || status == nil
+        isBusy = (unread && !statusCheckFailed) || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil
+        statusText = Self.statusText(for: status, operation: operation, checkFailed: statusCheckFailed)
+        details = Self.details(for: environment, status: status, runtimeVersion: runtimeVersion)
         // A status nobody has read back yet is not a state to act on: Start stays disabled
         // until the environment answers again.
         availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, blockedElsewhere: startBlockedElsewhere)
@@ -82,11 +98,11 @@ struct EnvironmentCardState: Equatable, Identifiable {
         availability[action] ?? .disabled(reason: "Not available")
     }
 
-    private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?) -> String {
+    private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checkFailed: Bool) -> String {
         if let operation {
             return operation.phase.map { describe($0) } ?? "Starting…"
         }
-        guard let status else { return "Checking environment…" }
+        guard let status else { return checkFailed ? "Last check failed" : "Checking environment…" }
         if status.inFlightOperation != nil { return "Operation in progress…" }
         let vm = describe(status.vm)
         switch status.readiness {
@@ -121,16 +137,22 @@ struct EnvironmentCardState: Equatable, Identifiable {
         }
     }
 
-    private static func details(for environment: DevelopmentEnvironment, status: EnvironmentStatus?) -> [Detail] {
+    private static func details(for environment: DevelopmentEnvironment, status: EnvironmentStatus?, runtimeVersion: RuntimeVersionInfo?) -> [Detail] {
         let observed = status?.observed
-        // Disk is the guest's logical capacity, labeled as such: actual usage is not observed
-        // yet. Account status is not observed yet either, and the row says so instead of
-        // claiming a value.
+        // A status carries no Tart version: the service reports the bundle it verified once,
+        // for the whole host, so that is what the row shows when the environment has no
+        // observation of its own.
+        let tart = observed?.tartVersion ?? runtimeVersion?.tart?.version
+        // The guest's logical capacity is not its consumption (MVP-PLAN.md §4), and nothing
+        // observes the latter yet: the two are separate rows so a sparse 160 GB disk is never
+        // read as 160 GB of work. Account status is not observed yet either, and both rows say
+        // so instead of letting capacity stand in for a value nobody measured.
         return [
             Detail(label: "Disk capacity", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: environment.guestDiskBytes), countStyle: .file)),
+            Detail(label: "Disk usage", value: "Not observed yet"),
             Detail(label: "Xcode", value: observed?.xcodeBuild ?? "Unknown"),
             Detail(label: "Guest macOS", value: observed?.guestMacOSBuild ?? "Unknown"),
-            Detail(label: "Runtime", value: observed?.tartVersion.map { "Tart \($0)" } ?? "Unknown"),
+            Detail(label: "Runtime", value: tart.map { "Tart \($0)" } ?? "Unknown"),
             Detail(label: "Codex CLI", value: observed?.codexCLIVersion ?? "Unknown"),
             Detail(label: "Accounts", value: "Not observed yet"),
         ]

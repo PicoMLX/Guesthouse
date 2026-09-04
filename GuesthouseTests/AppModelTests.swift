@@ -499,6 +499,7 @@ import Testing
         // menu item unavailable is a check that is reading, and which request goes out first
         // is the reconciliation's business.
         await waitUntil({ !model.canCheckEnvironment }, "the check to start reading")
+        #expect(!model.canCheckEnvironment, "a check is already reading; the menu says so rather than appearing to do nothing")
         model.startRefresh()
         model.startRefresh()
         await waitUntil({ model.launchState == .ready && model.canCheckEnvironment }, "the check to finish")
@@ -515,7 +516,11 @@ import Testing
         await backend.script("listEnvironments", .disconnect())
         let (model, _) = makeModel(backend)
         model.startRefresh()
-        await waitUntil { await backend.receivedRequests.count == 1 }
+        // The listing is what "still reading" means: the reconciliation asks the runtime for
+        // its version first, so a bare request count no longer names that moment.
+        // Any request means the check has started; which one goes out first is the
+        // reconciliation's business, and it changes as the stack grows.
+        await waitUntil({ await !backend.receivedRequests.isEmpty }, "the check to send its first request")
         // The real client reports the loss to its observers before it throws into the stream
         // the same loss cut off.
         backend.dropConnection()
@@ -622,6 +627,42 @@ import Testing
         #expect(model.launchState == .ready)
         #expect(model.runningEnvironments.isEmpty)
         #expect(model.runningSummary == "1 development Mac Guesthouse cannot identify")
+    }
+
+    /// A card-level status query that failed leaves nothing known about that VM. The menu bar
+    /// and the sentence the Quit decision is made on must not report it as stopped: that is the
+    /// same unproven claim uncertainty is kept out of.
+    @Test func anEnvironmentThatDidNotAnswerIsNeverReportedAsNotRunning() async {
+        let backend = FakeRuntimeBackend()
+        let environment = await runningEnvironment(backend)
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        #expect(model.runningSummary == "1 running")
+        await backend.script("environmentStatus", .fail(error: .runtimeMissing))
+        await model.refreshStatus(of: environment.id)
+        #expect(model.statuses[environment.id] == nil, "the query failed, so nothing is known about this VM")
+        #expect(model.runningSummary == "1 development Mac Guesthouse could not check")
+        #expect(model.quitConfirmationMessage.contains("cannot tell whether it is running"))
+        #expect(!model.quitConfirmationMessage.contains("No development Mac is running"))
+    }
+
+    /// The runtime's status refresh after a start is a bounded courtesy that can time out, so a
+    /// completed start can arrive without describing the environment. What was cached before it
+    /// describes a VM that is now running, and releasing the reservation over that would offer
+    /// Start again for as long as the app's own inspection takes.
+    @Test func aStartThatCompletedWithoutAStatusLeavesNothingActionableBehind() async {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(200))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        // Accepted and completed, with no status of its own in between.
+        await backend.script("startEnvironment", .succeed())
+        model.start(environment.id)
+        await waitUntil { model.operations[environment.id] == nil }
+        #expect(model.statuses[environment.id] == nil, "what was cached before the start says nothing about the state after it")
+        #expect(model.globalStartBlock != nil, "nothing is started while this environment has not answered")
     }
 
     @Test func aStopRefusedBeforeAcceptanceIsNeverForcedPast() async {
