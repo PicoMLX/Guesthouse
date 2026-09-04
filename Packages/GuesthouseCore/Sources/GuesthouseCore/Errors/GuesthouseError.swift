@@ -10,8 +10,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case unsupportedHost(UnsupportedHostReason)
     case insufficientDisk(requiredBytes: UInt64, availableBytes: UInt64, volumePath: SanitizedText)
     case downloadVerificationFailed(artifact: SanitizedText, check: VerificationCheck)
+    case runtimeStorageUnavailable
     case runtimeMissing
     case runtimeIncompatible(found: SanitizedText?, required: String)
+    case runtimeProbeFailed
     case guestNotReachable(EnvironmentID)
     case hostKeyChanged(EnvironmentID)
     case credentialsLocked(CredentialStore)
@@ -62,8 +64,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public var category: Category {
         switch self {
         case .unsupportedHost: .host
-        case .insufficientDisk: .storage
-        case .downloadVerificationFailed, .runtimeMissing, .runtimeIncompatible: .runtime
+        case .insufficientDisk, .runtimeStorageUnavailable: .storage
+        case .downloadVerificationFailed, .runtimeMissing, .runtimeIncompatible, .runtimeProbeFailed: .runtime
         case .guestNotReachable, .hostKeyChanged: .guest
         case .credentialsLocked, .loginExpired: .credentials
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
@@ -91,10 +93,14 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             Self.insufficientDiskMessage(required: required, available: available, volume: volume.value)
         case .downloadVerificationFailed(let artifact, let check):
             "The downloaded \(artifact.value) failed its \(check.rawValue) check and was not installed. The download may be incomplete or tampered with."
+        case .runtimeStorageUnavailable:
+            "Guesthouse cannot safely access its private runtime storage. It may be unavailable, incorrectly owned, or linked to another location."
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible(let found, let required):
             "The installed virtual machine runtime (\(found?.value ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
+        case .runtimeProbeFailed:
+            "Guesthouse could not inspect the installed virtual machine runtime. It may be damaged or unresponsive."
         case .guestNotReachable(let id):
             "The development Mac \(id.tartVMName) is not answering over the network."
         case .hostKeyChanged(let id):
@@ -132,8 +138,11 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost: [.cancel]
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
+        // Phase 0 discovery runs once per service launch; do not promise an unwired retry.
+        case .runtimeStorageUnavailable: [.openSettings, .cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
         case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
+        case .runtimeProbeFailed: [.repair(.runtime), .cancel]
         case .guestNotReachable: [.inspectState, .retry, .openConsole, .cancel]
         case .hostKeyChanged: [.repair(.sshPairing), .openConsole, .exportWork, .cancel]
         case .credentialsLocked(.guestKeychain): [.openConsole, .repair(.credentials), .cancel]
@@ -171,8 +180,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost: "unsupportedHost"
         case .insufficientDisk: "insufficientDisk"
         case .downloadVerificationFailed: "downloadVerificationFailed"
+        case .runtimeStorageUnavailable: "runtimeStorageUnavailable"
         case .runtimeMissing: "runtimeMissing"
         case .runtimeIncompatible: "runtimeIncompatible"
+        case .runtimeProbeFailed: "runtimeProbeFailed"
         case .guestNotReachable: "guestNotReachable"
         case .hostKeyChanged: "hostKeyChanged"
         case .credentialsLocked: "credentialsLocked"

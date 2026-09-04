@@ -46,6 +46,10 @@ import Testing
         .failed(operation, .guestNotReachable(environment)),
     ]
 
+    @Test func protocolVersionCoversTheExpandedErrorContract() {
+        #expect(RuntimeProtocolVersion.current == RuntimeProtocolVersion(3))
+    }
+
     @Test(arguments: requests)
     func requestsRoundTrip(request: RuntimeRequest) throws {
         let envelope = RuntimeRequestEnvelope(request: request)

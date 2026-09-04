@@ -2,6 +2,7 @@ import Foundation
 import GuesthouseCore
 import GuesthouseRuntimeKit
 import OSLog
+import Synchronization
 import XPC
 
 /// Decodes envelopes, dispatches named operations, and replies with `RuntimeEvent`s.
@@ -18,6 +19,12 @@ final class RuntimeService: Sendable {
     static let peerRequirement = XPCPeerRequirement.isFromSameTeam(andMatchesSigningIdentifier: clientSigningIdentifier)
 
     private let log = Logger(subsystem: serviceName, category: "service")
+    // A present value with no version, capabilities, or problem means discovery is still in
+    // progress. Keeping that state explicit lets the listener remain responsive while an
+    // external executable is interrogated.
+    private let lumeInfo = Mutex<RuntimeVersionInfo.LumeRuntimeInfo?>(
+        LumeDiscoveryReport.checking
+    )
 
     /// Accepts a session and returns a per-session handler that tracks in-flight requests.
     func acceptSession(_ session: XPCSession) -> SessionHandler {
@@ -79,21 +86,61 @@ final class RuntimeService: Sendable {
     private func perform(_ request: RuntimeRequest) -> RuntimeEvent {
         switch request {
         case .runtimeVersion:
-            return .runtimeVersion(Self.versionInfo)
+            return .runtimeVersion(versionInfo)
         case .environmentStatus, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation:
             log.notice("operation not implemented yet: \(request.caseName, privacy: .public)")
             return .failed(OperationID(), .invalidRequest(.unsupportedOperation))
         }
     }
 
-    static var versionInfo: RuntimeVersionInfo {
+    var versionInfo: RuntimeVersionInfo {
         let info = Bundle.main.infoDictionary ?? [:]
         return RuntimeVersionInfo(
             serviceVersion: info["CFBundleShortVersionString"] as? String ?? "0",
             serviceBuild: info["CFBundleVersion"] as? String ?? "0",
             protocolVersion: .current,
-            tart: nil
+            tart: nil,
+            lume: lumeInfo.withLock { $0 }
         )
+    }
+
+    /// Runs in the background after the listener activates. Version replies report `checking`
+    /// until it finishes, and only a bundle that passes static verification is executed.
+    func discoverLume() async {
+        let storage: RuntimeStorage
+        do {
+            storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error("runtime storage unavailable: \(diagnostic.value, privacy: .public)")
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.storageUnavailable }
+            return
+        }
+        guard let bundle = LumeBundle.locate(in: storage) else {
+            log.notice("no Lume bundle at the pinned location")
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.missing }
+            return
+        }
+        let verifiedBundle: VerifiedLumeBundle
+        do {
+            verifiedBundle = try bundle.verify()
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error("Lume bundle failed verification: \(diagnostic.value, privacy: .public)")
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.rejectedBundle(error) }
+            return
+        }
+        do {
+            let result = try await LumeBackend(bundle: verifiedBundle, storage: storage, runner: ProcessRunner()).probe()
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.succeeded(result) }
+            log.notice("Lume candidate located, verified, and probed")
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error("verified Lume bundle probe failed: \(diagnostic.value, privacy: .public)")
+            lumeInfo.withLock {
+                $0 = LumeDiscoveryReport.failedProbe(error, claimedVersion: verifiedBundle.version)
+            }
+        }
     }
 
     /// Per-session state: the in-flight request count used for the concurrency cap.

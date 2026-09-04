@@ -72,8 +72,9 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
     }
 
     public struct LumeRuntimeInfo: Codable, Hashable, Sendable {
-        /// The bundle metadata version, or the version reported by the verified executable.
-        /// External CLI text is redacted and bounded before it reaches the GUI.
+        /// The bundle metadata version, or the version reported by the verified executable;
+        /// `nil` while checking or when no trustworthy version is available. External CLI text
+        /// is redacted and bounded before it reaches the GUI.
         public private(set) var version: String?
         /// Only the pinned identity, signature, executable, and entitlements are covered.
         public var verified: Bool

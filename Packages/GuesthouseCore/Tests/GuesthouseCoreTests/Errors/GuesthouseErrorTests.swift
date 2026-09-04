@@ -11,8 +11,10 @@ import Testing
         .unsupportedHost(.insufficientMemory(foundBytes: 8 << 30, minimumBytes: 16 << 30)),
         .insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 50_000_000_000, volumePath: "/"),
         .downloadVerificationFailed(artifact: "Tart 2.36.0", check: .digest),
+        .runtimeStorageUnavailable,
         .runtimeMissing,
         .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
+        .runtimeProbeFailed,
         .guestNotReachable(EnvironmentID()),
         .hostKeyChanged(EnvironmentID()),
         .credentialsLocked(.guestKeychain),
@@ -30,8 +32,8 @@ import Testing
     ]
 
     static let expectedCaseNames: Set<String> = [
-        "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeMissing",
-        "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
+        "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeStorageUnavailable", "runtimeMissing",
+        "runtimeIncompatible", "runtimeProbeFailed", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
         "canceled",
@@ -66,6 +68,8 @@ import Testing
     @Test func retryableErrorsOfferRetry() {
         #expect(GuesthouseError.guestNotReachable(EnvironmentID()).isRetryable)
         #expect(GuesthouseError.downloadVerificationFailed(artifact: "x", check: .signature).isRetryable)
+        #expect(!GuesthouseError.runtimeStorageUnavailable.isRetryable)
+        #expect(!GuesthouseError.runtimeProbeFailed.isRetryable)
         #expect(!GuesthouseError.hostKeyChanged(EnvironmentID()).isRetryable)
         #expect(!GuesthouseError.unauthorizedCaller.isRetryable)
     }
