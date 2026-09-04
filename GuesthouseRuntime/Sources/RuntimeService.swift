@@ -123,9 +123,25 @@ final class RuntimeService: Sendable {
             }
             return
         }
-        guard let bundle = LumeBundle.locate(in: storage) else {
-            log.notice("no Lume bundle at the pinned location")
-            lumeInfo.withLock { $0 = LumeDiscoveryReport.missing }
+        let bundle: LumeBundle
+        do {
+            guard let located = try LumeBundle.locate(in: storage) else {
+                log.notice("no Lume bundle at the pinned location")
+                lumeInfo.withLock { $0 = LumeDiscoveryReport.missing }
+                return
+            }
+            bundle = located
+        } catch let error as RuntimeStorageError {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error("unsafe Lume storage path rejected: \(diagnostic.value, privacy: .public)")
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.storageUnavailable(error) }
+            return
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error("Lume location discovery failed: \(diagnostic.value, privacy: .public)")
+            lumeInfo.withLock {
+                $0 = .init(version: nil, verified: false, problem: .runtimeProbeFailed)
+            }
             return
         }
         let verifiedBundle: VerifiedLumeBundle
