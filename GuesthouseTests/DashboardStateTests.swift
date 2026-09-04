@@ -505,7 +505,10 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.lastRequests[environment.id] != nil && model.operations.isEmpty && model.unknownOutcomes.isEmpty }
+        // The check that follows the loss settles it; the request it would have replayed is
+        // withdrawn by that same answer, so what this waits on is the outcome, not the request.
+        await waitUntil({ model.operations.isEmpty && model.unknownOutcomes.isEmpty && !model.reconciling.contains(environment.id) },
+                        "the interrupted start to be reconciled")
         let requests = await backend.receivedRequests
         #expect(requests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1, "never replayed")
         guard let start = requests.firstIndex(where: { if case .startEnvironment = $0 { true } else { false } }) else {
@@ -550,7 +553,9 @@ import Testing
         // until the inspection answers rather than offering an immediate blind retry.
         #expect(model.statuses[environment.id] == nil)
         #expect(model.cardStates().first?.availability(of: .start) == .disabled(reason: "Checking environment"))
-        await waitUntil { model.statuses[environment.id] != nil }
+        // The check that follows the failed start is what answers; the card stays out of
+        // action until it has, which is both a status to act on and the guard it ends.
+        await waitUntil { model.statuses[environment.id] != nil && !model.reconciling.contains(environment.id) }
         #expect(model.cardStates().first?.availability(of: .start) == .enabled, "and Start returns once the VM answers as stopped and ready")
     }
 
@@ -680,6 +685,103 @@ import Testing
         #expect(offersDismissal(held))
         let reported = EnvironmentCardState(environment: environment, status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(error)), operation: nil, lastError: nil)
         #expect(!offersDismissal(reported))
+    }
+
+    /// One running environment whose status the fake answers, already reconciled.
+    func runningModel(_ backend: FakeRuntimeBackend, readiness: EnvironmentStatus.Readiness = .ready) async -> (AppModel, DevelopmentEnvironment) {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: readiness))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        return (model, environment)
+    }
+
+    @Test func anInspectedUnknownOutcomeStopsBlockingTheCard() async throws {
+        let backend = FakeRuntimeBackend()
+        let (model, environment) = await runningModel(backend)
+        await backend.script("stopEnvironment", .fail(error: .operationOutcomeUnknown(OperationID())))
+        model.stop(environment.id)
+        await waitUntil({ model.operations.isEmpty && !model.reconciling.contains(environment.id) }, "the check after the failed stop")
+        #expect(model.statuses[environment.id]?.readiness == .ready, "the runtime resolved it and no longer reports it")
+        #expect(model.canMutate(environment.id), "the inspection the error asked for was made, so it stops refusing every mutation")
+        #expect(model.lastErrors[environment.id] == nil)
+    }
+
+    @Test func aStopFailureSurvivesAStatusQueryThatFailedAndWasThenAnswered() async throws {
+        let backend = FakeRuntimeBackend()
+        let (model, environment) = await runningModel(backend)
+        await backend.script("stopEnvironment", .fail(error: .gracefulStopTimedOut(environment.id)))
+        // The check that follows the stop cannot reach the runtime.
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        model.stop(environment.id)
+        // The check that follows the stop is what fails here; it leaves no status behind and,
+        // having established nothing, leaves the post-operation guard standing.
+        await waitUntil({ model.operations.isEmpty && model.statuses[environment.id] == nil }, "the failed check after the stop")
+        // The user asks for a check, and it succeeds: the VM is still running.
+        await backend.script("environmentStatus", .succeed())
+        await model.refreshStatus(of: environment.id)
+        #expect(model.statuses[environment.id]?.vm == .running)
+        #expect(model.canForceStop(environment.id), "the graceful stop still failed; answering a query does not undo that")
+    }
+
+    @Test func aStopRefusedBeforeAcceptanceDoesNotOfferAForceStop() async throws {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        // The runtime rejects the request before it returns an operation id, so no `accepted`
+        // event precedes the failure and Tart was never asked to stop anything.
+        let backend = ScriptedBackend(
+            events: [.failed(OperationID(), .runtimeStateUnavailable(reason: SanitizedText("the journal could not be written")))],
+            environments: [environment],
+            status: EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready)
+        )
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.stop(environment.id)
+        await waitUntil({ model.lastErrors[environment.id] != nil && model.operations.isEmpty && !model.reconciling.contains(environment.id) }, "the failed stop")
+        #expect(model.statuses[environment.id]?.vm == .running)
+        #expect(!model.canForceStop(environment.id), "the normal shutdown was never attempted, so there is nothing to escalate past")
+    }
+
+    @Test func dismissingAStopFailureWithdrawsTheStopFromTryAgain() async throws {
+        let backend = FakeRuntimeBackend()
+        let (model, environment) = await runningModel(backend)
+        await backend.script("stopEnvironment", .fail(error: .gracefulStopTimedOut(environment.id)))
+        model.stop(environment.id)
+        await waitUntil({ model.operations.isEmpty && !model.reconciling.contains(environment.id) }, "the check after the failed stop")
+        #expect(model.retryAvailable(for: environment.id))
+        model.perform(.cancel, for: environment.id)
+        #expect(model.lastRequests[environment.id] == nil)
+        #expect(!model.retryAvailable(for: environment.id), "a problem a later status reports on its own must not replay a dismissed stop")
+    }
+
+    @Test func quitRefusesToStopOverAnOutcomeTheStatusStillCallsUnresolved() async throws {
+        let backend = FakeRuntimeBackend()
+        let unresolved = OperationID()
+        let (model, environment) = await runningModel(backend, readiness: .needsAttention(.operationOutcomeUnknown(unresolved)))
+        _ = model.handleQuitRequest()
+        model.confirmStopAndQuit()
+        await waitUntil({ if case .stopFailed = model.quitFlow { true } else { false } }, "the quit to stop and ask for a check")
+        #expect(model.quitFlow == .stopFailed(.operationOutcomeUnknown(unresolved)))
+        let requests = await backend.receivedRequests
+        #expect(!requests.contains { if case .stopEnvironment = $0 { true } else { false } }, "no second stop is sent over an unresolved one")
+        _ = environment
+    }
+
+    @Test func aStopTheStatusReconnectedToStaysNoncancelable() async throws {
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let stop = RuntimeRequest.stopEnvironment(environment.id, .graceful(deadline: AppModel.gracefulStopDeadline))
+        #expect(OperationProgressPresentation(recoveredOperation: OperationID(), request: stop).cancelability != .immediate)
+        let backend = FakeRuntimeBackend()
+        let (model, _) = await runningModel(backend)
+        await backend.script("stopEnvironment", .disconnect())
+        // The status keeps naming the operation the lost stream was following.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready, inFlightOperation: OperationID()))
+        model.stop(model.environments[0].id)
+        await waitUntil({ model.operations.isEmpty }, "the stop stream to drop")
+        let card = try #require(model.cardStates().first)
+        if let progress = card.progress {
+            #expect(progress.cancelability != .immediate, "a stop is uninterruptible whether or not this window is still streaming it")
+        }
     }
 }
 

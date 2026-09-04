@@ -95,7 +95,8 @@ struct EnvironmentCardState: Equatable, Identifiable {
         startBlockedElsewhere: String? = nil,
         runtimeVersion: RuntimeVersionInfo? = nil,
         operationElsewhere: String? = nil,
-        forceStopAvailable: Bool = false
+        forceStopAvailable: Bool = false,
+        lastRequest: RuntimeRequest? = nil
     ) {
         id = environment.id
         name = environment.name
@@ -119,7 +120,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         progress = if let operation {
             OperationProgressPresentation(phase: operation.phase, request: operation.request, accepted: operation.acceptedID != nil)
         } else if let recovered = status?.inFlightOperation {
-            OperationProgressPresentation(recoveredOperation: recovered)
+            OperationProgressPresentation(recoveredOperation: recovered, request: lastRequest)
         } else {
             nil
         }
