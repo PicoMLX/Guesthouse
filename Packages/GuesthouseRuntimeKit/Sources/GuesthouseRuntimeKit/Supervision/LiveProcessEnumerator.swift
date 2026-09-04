@@ -7,7 +7,24 @@ import GuesthouseCore
 /// (MVP-PLAN.md §4: identify any surviving Tart process and its exact VM before recovering
 /// control). Pure observation; nothing here signals or kills.
 public struct LiveProcessEnumerator: Sendable {
-    public init() {}
+    /// The two kernel reads whose refusal changes a verdict: listing the process table, and
+    /// reading one process's argument vector. Nothing else can make the kernel decline on
+    /// demand, and a refusal that reads as "nothing is there" is the difference between an
+    /// environment that is free and one that must not be touched.
+    struct KernelReads: Sendable {
+        var pids: @Sendable () -> [Int32]?
+        var arguments: @Sendable (Int32) -> [String]?
+    }
+
+    let kernel: KernelReads
+
+    public init() {
+        self.init(kernel: KernelReads(pids: { Self.listAllPIDs() }, arguments: { Self.readArguments(pid: $0) }))
+    }
+
+    init(kernel: KernelReads) {
+        self.kernel = kernel
+    }
 
     /// Every process the current user can inspect whose executable is `executable`, plus the
     /// process with `pid` if it exists (whatever it runs), so a reused PID is still observed.
@@ -41,7 +58,10 @@ public struct LiveProcessEnumerator: Sendable {
             }
         }
         guard let executable else { return Candidates(processes: result, unreadable: unreadable) }
-        for candidate in allPIDs() where !seen.contains(candidate) {
+        // A process table the kernel refused to list is not an empty one. Reporting it as a
+        // complete scan with nothing in it would let a caller conclude an environment exited.
+        guard let candidates = kernel.pids() else { return Candidates(processes: result, unreadable: true) }
+        for candidate in candidates where !seen.contains(candidate) {
             guard let path = executablePath(pid: candidate), path == executable.path else { continue }
             switch observe(pid: candidate) {
             case .present(let process): result.append(process)
@@ -68,10 +88,15 @@ public struct LiveProcessEnumerator: Sendable {
         if kill(pid, 0) != 0, errno == ESRCH { return .absent }
         guard let first = startTime(pid: pid) else { return .unavailable(reason: "start time unreadable") }
         guard let path = executablePath(pid: pid) else { return .unavailable(reason: "executable path unreadable") }
-        guard let arguments = arguments(pid: pid) else { return .unavailable(reason: "arguments unreadable") }
+        guard let arguments = kernel.arguments(pid) else { return .unavailable(reason: "arguments unreadable") }
         // The fields came from separate calls; if the PID was reused in between, the start
         // time has changed and the observation describes two processes, so it is discarded.
-        guard startTime(pid: pid) == first else { return .unavailable(reason: "process replaced during observation") }
+        // `exec` keeps both the PID and the start time, so the path is read again as well: it
+        // is the field that tells the same process now running a different program, and without
+        // it this could accept the old executable beside the new image's arguments.
+        guard startTime(pid: pid) == first, executablePath(pid: pid) == path else {
+            return .unavailable(reason: "process replaced during observation")
+        }
         return .present(LiveProcess(pid: pid, startTime: first, executablePath: path, argumentsDigest: Self.digest(of: arguments), claimedVMName: Self.claimedVMName(in: arguments)))
     }
 
@@ -80,8 +105,22 @@ public struct LiveProcessEnumerator: Sendable {
     public func claimants(ofVM vmName: String) -> Candidates {
         var found: [LiveProcess] = []
         var unreadable = false
-        for candidate in allPIDs() {
-            guard let arguments = arguments(pid: candidate) else { continue }
+        guard let candidates = kernel.pids() else { return Candidates(processes: found, unreadable: true) }
+        for candidate in candidates {
+            guard let arguments = kernel.arguments(candidate) else {
+                // A running process of this user's whose arguments the kernel declined to
+                // describe could be the launch that has not taken the VM's lock yet. One that
+                // belongs to somebody else, or that has already exited, never could be: the
+                // service launches Tart as this user, and those failures are the ordinary
+                // answer for every other process on the Mac. An ownership lookup the kernel
+                // also refused says nothing either way, and reading that as somebody else's
+                // process would turn an interrupted start into a free environment.
+                switch ownership(of: candidate) {
+                case .own, .unavailable: unreadable = true
+                case .notOurs: break
+                }
+                continue
+            }
             guard Self.claimedVMName(in: arguments) == vmName else { continue }
             switch observe(pid: candidate) {
             case .present(let process): found.append(process)
@@ -116,14 +155,38 @@ public struct LiveProcessEnumerator: Sendable {
 
     // MARK: - Process table
 
-    func allPIDs() -> [Int32] {
+    /// Every PID the kernel reports, or `nil` when it would not list them. A negative answer
+    /// from `proc_listallpids` is a refusal, and a refusal is not an empty process table.
+    static func listAllPIDs() -> [Int32]? {
         let count = proc_listallpids(nil, 0)
-        guard count > 0 else { return [] }
+        guard count > 0 else { return count == 0 ? [] : nil }
         var pids = [Int32](repeating: 0, count: Int(count) * 2)
         let filled = pids.withUnsafeMutableBufferPointer { buffer in
             proc_listallpids(buffer.baseAddress, Int32(buffer.count) * Int32(MemoryLayout<Int32>.size))
         }
-        return Array(pids.prefix(Int(max(0, filled)))).filter { $0 > 0 }
+        guard filled >= 0 else { return nil }
+        return Array(pids.prefix(Int(filled))).filter { $0 > 0 }
+    }
+
+    /// Whose process a PID is, as three answers rather than two. A lookup the kernel refused is
+    /// not the same as another account's process or one that has already exited: collapsing it
+    /// into "not ours" would let an interrupted start of our own read as nothing at all.
+    enum Ownership: Hashable, Sendable {
+        /// A running process this user owns: the only kind the service could have launched.
+        case own
+        /// Another account's process, or one that has exited; a zombie holds no VM either.
+        case notOurs
+        /// The kernel would not say.
+        case unavailable
+    }
+
+    func ownership(of pid: Int32) -> Ownership {
+        guard let info = processInfo(pid: pid) else {
+            // A PID that is simply gone answers `ESRCH`; anything else is a refusal.
+            return kill(pid, 0) != 0 && errno == ESRCH ? .notOurs : .unavailable
+        }
+        let mine = info.kp_eproc.e_ucred.cr_uid == getuid() && info.kp_proc.p_stat != Int8(SZOMB)
+        return mine ? .own : .notOurs
     }
 
     func executablePath(pid: Int32) -> String? {
@@ -134,17 +197,22 @@ public struct LiveProcessEnumerator: Sendable {
         return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
-    func startTime(pid: Int32) -> Date? {
+    func processInfo(pid: Int32) -> kinfo_proc? {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         guard sysctl(&name, UInt32(name.count), &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid else { return nil }
+        return info
+    }
+
+    func startTime(pid: Int32) -> Date? {
+        guard let info = processInfo(pid: pid) else { return nil }
         let start = info.kp_proc.p_starttime
         return Date(timeIntervalSince1970: TimeInterval(start.tv_sec) + TimeInterval(start.tv_usec) / 1_000_000)
     }
 
     /// Arguments as the kernel recorded them at exec, without the executable path.
-    func arguments(pid: Int32) -> [String]? {
+    static func readArguments(pid: Int32) -> [String]? {
         var name: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&name, UInt32(name.count), nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }

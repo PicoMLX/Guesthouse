@@ -125,34 +125,60 @@ public final class OperationSupervisor: Sendable {
                     continue
                 }
                 let observed = scan.processes
+                let verdict: OwnershipVerdict
                 switch lock {
                 case .unknown:
                     // Without the inventory, "no process" cannot become "exited".
-                    let verdict = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: true)
-                    verdicts[environment] = verdict == .uncertain(.lockHeldWithoutProcess) ? .uncertain(.inventoryUnavailable) : verdict
+                    let unlocked = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: true)
+                    verdict = unlocked == .uncertain(.lockHeldWithoutProcess) ? .uncertain(.inventoryUnavailable) : unlocked
                 case .present, .absent:
-                    verdicts[environment] = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: lock == .present)
+                    verdict = ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: lock == .present)
+                }
+                // That verdict was decided from processes running the *recorded* binary. A Tart
+                // at another path — what a runtime upgrade leaves behind — can be starting the
+                // same VM right now and appears in no such scan, so the VM's own name is asked
+                // for before an exit or an ownership is declared. This holds whatever the
+                // inventory said: a missing inventory is a reason to check the process table
+                // harder, not to skip it (MVP-PLAN.md §4).
+                if verdict == .exited {
+                    verdicts[environment] = claimVerdict(forVM: recorded.vmName) ?? .exited
+                } else if case .ownedRunning = verdict, otherClaimantExists(ofVM: recorded.vmName, besides: recorded.pid) {
+                    // The same scan matters when the record does match: the lock cannot say
+                    // which of two processes naming this VM controls it, so an exact match on
+                    // its own is not ownership. Only a claimant actually read downgrades this
+                    // verdict; an incomplete scan does not, because the recorded process was
+                    // read and matched, which an empty scan cannot claim.
+                    verdicts[environment] = .uncertain(.anotherProcessClaimsVM)
+                } else {
+                    verdicts[environment] = verdict
                 }
             } else {
                 switch lock {
                 case .present: verdicts[environment] = .uncertain(.unrecordedLaunch)
                 case .unknown: verdicts[environment] = .uncertain(.inventoryUnavailable)
-                case .absent:
-                    // No record and no lock, but a live process may already be claiming this
-                    // VM between its launch and the lock: that is not a free environment.
-                    let claimants = enumerator.claimants(ofVM: environment.tartVMName)
-                    if !claimants.processes.isEmpty {
-                        verdicts[environment] = .uncertain(.anotherProcessClaimsVM)
-                    } else if claimants.unreadable {
-                        // The scan found a matching VM argument but could not finish reading
-                        // the process. An environment whose claimant could not be observed is
-                        // not an environment that is free.
-                        verdicts[environment] = .uncertain(.processUnobservable)
-                    }
+                // No record and no lock, but a live process may already be claiming this VM
+                // between its launch and the lock: that is not a free environment.
+                case .absent: verdicts[environment] = claimVerdict(forVM: environment.tartVMName)
                 }
             }
         }
         return verdicts
+    }
+
+    /// What a scan for processes naming `vmName` says about the VM being free: a claimant that
+    /// was read, a claimant the scan could not finish reading, or `nil` when the scan proved
+    /// neither. `nil` is the only answer that leaves an environment available.
+    private func claimVerdict(forVM vmName: String) -> OwnershipVerdict? {
+        let claimants = enumerator.claimants(ofVM: vmName)
+        if !claimants.processes.isEmpty { return .uncertain(.anotherProcessClaimsVM) }
+        return claimants.unreadable ? .uncertain(.processUnobservable) : nil
+    }
+
+    /// Whether a process other than `pid` names `vmName`. Used where the recorded process is
+    /// alive: a second claimant makes ownership uncertain, but a scan that could not be
+    /// finished does not, because the record itself was read and matched.
+    private func otherClaimantExists(ofVM vmName: String, besides pid: Int32) -> Bool {
+        enumerator.claimants(ofVM: vmName).processes.contains { $0.pid != pid }
     }
 
     /// Pure helper for tests and for callers that already enumerated: the verdict for one
