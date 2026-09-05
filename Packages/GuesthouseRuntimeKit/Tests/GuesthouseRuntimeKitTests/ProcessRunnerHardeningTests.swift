@@ -256,10 +256,16 @@ import Testing
     }
 
     @Test func theInvocationDeadlineShortensAnOpenEndedTermination() async throws {
-        let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"], timeout: .seconds(30), terminationGracePeriod: .milliseconds(200)))
-        // Stopping the child first keeps it from finishing its exit between the two requests,
-        // so the second one meets a termination that is genuinely still under way.
-        #expect(kill(run.processIdentifier, SIGSTOP) == 0)
+        let run = try await runner.run(ProcessInvocation(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "trap '' TERM; printf 'ready\\n'; exec /bin/sleep 60"],
+            timeout: .seconds(30),
+            terminationGracePeriod: .milliseconds(200)
+        ))
+        // Readiness proves TERM is ignored, so the first request leaves an escalation pending.
+        var output = run.output.makeAsyncIterator()
+        let ready = await output.next()
+        try #require(ready?.line.text == "ready")
         let began = run.stop(gracePeriod: .seconds(3600), becauseOfTimeout: false)
         let asked = run.escalationDeadline
         let second = run.stop(gracePeriod: .milliseconds(200), becauseOfTimeout: true)
@@ -491,11 +497,18 @@ import Testing
     @Test func anEscalationSupersededByAnEarlierDeadlineIsReleased() async throws {
         weak var released: ProcessRun?
         do {
-            let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"], timeout: .seconds(30), terminationGracePeriod: .milliseconds(200)))
+            let run = try await runner.run(ProcessInvocation(
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "trap '' TERM; printf 'ready\\n'; exec /bin/sleep 60"],
+                timeout: .seconds(30),
+                terminationGracePeriod: .milliseconds(200)
+            ))
             released = run
-            // Stopping the child keeps it from finishing between the two requests, so the
-            // second one meets a termination that is genuinely still under way.
-            #expect(kill(run.processIdentifier, SIGSTOP) == 0)
+            // A stopped child can still die on SIGTERM. Wait until this fixture has ignored
+            // TERM (preserved across exec) so the second request meets an active escalation.
+            var output = run.output.makeAsyncIterator()
+            let ready = await output.next()
+            try #require(ready?.line.text == "ready")
             _ = run.stop(gracePeriod: .seconds(3600), becauseOfTimeout: false)
             _ = run.stop(gracePeriod: .milliseconds(200), becauseOfTimeout: true)
             #expect(await run.exit().timedOut)
