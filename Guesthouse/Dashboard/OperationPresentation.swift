@@ -151,6 +151,10 @@ struct OperationProgressPresentation: Equatable {
         fraction = phase?.fraction
         if !accepted {
             cancelability = .unavailable(reason: "Waiting for the runtime to accept the operation.")
+        } else if case .stopEnvironment = request {
+            // Every phase the runtime reports for a stop is uninterruptible, so a Cancel here
+            // could only look like it would stop the shutdown; the sheet says so instead.
+            cancelability = .unavailable(reason: "A stop runs to its end: the development Mac is shutting down.")
         } else if let phase, !phase.cancelable {
             // `EnvironmentLifecycle.cancel` never interrupts a protected phase: it records the
             // request and honors it at the next step that can be interrupted, and an operation
@@ -167,16 +171,27 @@ struct OperationProgressPresentation: Equatable {
         }
     }
 
-    /// An operation the runtime reports but this window did not start: its phase is not
-    /// known, only that it runs, and it can be canceled by the reported id.
-    init(recoveredOperation: OperationID) {
+    /// An operation the runtime reports but this window is no longer streaming: its phase is
+    /// not known, only that it runs, and it can be canceled by the reported id.
+    ///
+    /// `request` is what this app asked for, when it knows: a stop whose stream dropped is
+    /// still the same stop after the status reconnects to it, and every phase of a stop is
+    /// uninterruptible, so offering Cancel here could only cancel it before its first phase
+    /// or record a request that is deferred to an end that never comes.
+    init(recoveredOperation: OperationID, request: RuntimeRequest? = nil) {
         title = "Operation in progress…"
         fraction = nil
-        // Which step it is on is exactly what a recovered operation does not carry, and
-        // `EnvironmentLifecycle.cancel` defers a cancellation during a protected phase and
-        // lets a stop finish normally. Promising an immediate stop would misdescribe what
-        // Cancel does, so the conservative case is presented (MVP-PLAN.md §2).
-        cancelability = .deferred(reason: "Guesthouse did not start this operation, so it cannot tell which step it is on. It will stop at the next step that can be interrupted; if there is none, the operation finishes on its own.")
+        if case .stopEnvironment? = request {
+            // Every phase the runtime reports for a stop is uninterruptible, so Cancel here
+            // could only look like it would stop a shutdown that is already under way.
+            cancelability = .unavailable(reason: "A stop runs to its end: the development Mac is shutting down.")
+        } else {
+            // Which step it is on is exactly what a recovered operation does not carry, and
+            // `EnvironmentLifecycle.cancel` defers a cancellation during a protected phase and
+            // lets the operation finish normally. Promising an immediate stop would misdescribe
+            // what Cancel does, so the conservative case is presented (MVP-PLAN.md §2).
+            cancelability = .deferred(reason: "Guesthouse did not start this operation, so it cannot tell which step it is on. It will stop at the next step that can be interrupted; if there is none, the operation finishes on its own.")
+        }
     }
 
     private static func describe(_ request: RuntimeRequest) -> String {

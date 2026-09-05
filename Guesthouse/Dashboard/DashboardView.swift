@@ -31,6 +31,9 @@ struct DashboardView: View {
                             EnvironmentCardView(
                                 state: card,
                                 start: { model.start(card.id) },
+                                check: { Task { await model.refreshStatus(of: card.id) } },
+                                stop: { model.stop(card.id) },
+                                forceStop: { model.forceStop(card.id) },
                                 cancel: { model.cancel(card.id) },
                                 recover: { model.perform($0, for: card.id) },
                                 openDiagnostics: { diagnosticsSubject = card.id; showingDiagnostics = true }
@@ -95,10 +98,15 @@ struct SlotView: View {
 struct EnvironmentCardView: View {
     let state: EnvironmentCardState
     let start: () -> Void
+    /// Re-reads this environment's state; what the `inspectState` and `retry` recoveries do.
+    let check: () -> Void
+    let stop: () -> Void
+    let forceStop: () -> Void
     let cancel: () -> Void
     let recover: (RecoveryAction) -> Void
     let openDiagnostics: () -> Void
     @State private var note: String?
+    @State private var confirmingForceStop = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -162,12 +170,26 @@ struct EnvironmentCardView: View {
             Spacer(minLength: 8)
             overflowMenu
         }
+        .confirmationDialog("Force-stop the development Mac?", isPresented: $confirmingForceStop, titleVisibility: .visible) {
+            Button("Force stop", role: .destructive) { forceStop() }
+            Button("Keep running", role: .cancel) {}
+        } message: {
+            Text("Force-stopping is like pulling the power: unsaved work inside the guest can be lost. Open the console first if something is still running there.")
+        }
     }
 
     @ViewBuilder private var actionButtons: some View {
         AvailabilityButton("Start", availability: state.availability(of: .start)) { perform(.start) }
             .buttonStyle(.borderedProminent)
             .accessibilityLabel("Start")
+        AvailabilityButton("Stop", availability: state.availability(of: .stop)) { perform(.stop) }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Stop")
+        if state.availability(of: .forceStop) == .enabled {
+            Button("Force stop…", role: .destructive) { confirmingForceStop = true }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Force stop")
+        }
         ForEach(secondaryPrimaryActions) { action in
             AvailabilityButton(action.title, availability: state.availability(of: action)) { perform(action) }
                 .buttonStyle(.bordered)
@@ -176,7 +198,7 @@ struct EnvironmentCardView: View {
     }
 
     private var secondaryPrimaryActions: [EnvironmentCardState.Action] {
-        EnvironmentCardState.Action.allCases.filter { $0.isPrimary && $0 != .start }
+        EnvironmentCardState.Action.allCases.filter { $0.isPrimary && $0 != .start && $0 != .stop && $0 != .forceStop }
     }
 
     private var overflowMenu: some View {
@@ -198,7 +220,12 @@ struct EnvironmentCardView: View {
         switch state.availability(of: action) {
         case .enabled:
             note = nil
-            if action == .start { start() }
+            switch action {
+            case .start: start()
+            case .stop: stop()
+            case .forceStop: confirmingForceStop = true
+            default: break
+            }
         case .disabled(let reason):
             note = reason
         case .notImplemented(let text):

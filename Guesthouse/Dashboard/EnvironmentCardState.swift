@@ -7,6 +7,8 @@ struct EnvironmentCardState: Equatable, Identifiable {
     enum Action: String, CaseIterable, Identifiable {
         case start, stop, openInCodex, openConsole, testWorkspace, publishDrafts
         case repair, exportWork, delete
+        /// Offered only after a graceful stop timed out; confirmed with a warning first.
+        case forceStop
 
         var id: String { rawValue }
 
@@ -21,6 +23,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
             case .repair: "Repair…"
             case .exportWork: "Export work…"
             case .delete: "Delete environment…"
+            case .forceStop: "Force stop…"
             }
         }
 
@@ -28,12 +31,12 @@ struct EnvironmentCardState: Equatable, Identifiable {
         /// Delete separated and destructive so it never looks like a routine fix.
         var isPrimary: Bool {
             switch self {
-            case .start, .stop, .openInCodex, .openConsole, .testWorkspace, .publishDrafts: true
+            case .start, .stop, .openInCodex, .openConsole, .testWorkspace, .publishDrafts, .forceStop: true
             case .repair, .exportWork, .delete: false
             }
         }
 
-        var isDestructive: Bool { self == .delete }
+        var isDestructive: Bool { self == .delete || self == .forceStop }
     }
 
     enum Availability: Equatable {
@@ -90,7 +93,10 @@ struct EnvironmentCardState: Equatable, Identifiable {
         retryAvailable: Bool = true,
         retryBlockedReason: String? = nil,
         startBlockedElsewhere: String? = nil,
-        runtimeVersion: RuntimeVersionInfo? = nil
+        runtimeVersion: RuntimeVersionInfo? = nil,
+        operationElsewhere: String? = nil,
+        forceStopAvailable: Bool = false,
+        lastRequest: RuntimeRequest? = nil
     ) {
         id = environment.id
         name = environment.name
@@ -114,7 +120,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         progress = if let operation {
             OperationProgressPresentation(phase: operation.phase, request: operation.request, accepted: operation.acceptedID != nil)
         } else if let recovered = status?.inFlightOperation {
-            OperationProgressPresentation(recoveredOperation: recovered)
+            OperationProgressPresentation(recoveredOperation: recovered, request: lastRequest)
         } else {
             nil
         }
@@ -156,7 +162,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         details = Self.details(for: environment, status: status, runtimeVersion: runtimeVersion)
         // A status nobody has read back yet is not a state to act on: Start stays disabled
         // until the environment answers again.
-        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, checking: checking, blockedElsewhere: startBlockedElsewhere)
+        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, checking: checking, blockedElsewhere: startBlockedElsewhere, operationElsewhere: operationElsewhere, forceStopAvailable: forceStopAvailable)
     }
 
     func availability(of action: Action) -> Availability {
@@ -179,7 +185,9 @@ struct EnvironmentCardState: Equatable, Identifiable {
 
     private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checkFailed: Bool = false) -> String {
         if let operation {
-            return operation.phase.map { describe($0) } ?? "Starting…"
+            // Before the first phase arrives the request says what is happening: a slow stop
+            // must never be announced as a start.
+            return operation.phase.map { describe($0) } ?? OperationProgressPresentation(phase: nil, request: operation.request).title
         }
         guard let status else { return checkFailed ? "Last check failed" : "Checking environment…" }
         if status.inFlightOperation != nil { return "Operation in progress…" }
@@ -237,13 +245,35 @@ struct EnvironmentCardState: Equatable, Identifiable {
         ]
     }
 
-    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?) -> [Action: Availability] {
+    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?, operationElsewhere: String?, forceStopAvailable: Bool) -> [Action: Availability] {
         var table: [Action: Availability] = [:]
-        for action in Action.allCases where action != .start {
+        for action in Action.allCases where action != .start && action != .stop && action != .forceStop {
             table[action] = .notImplemented(note: Self.notImplementedNote(for: action))
         }
         table[.start] = startAvailability(for: status, operation: operation, attention: attention, checking: checking, blockedElsewhere: blockedElsewhere)
+        table[.stop] = stopAvailability(for: status, operation: operation, checking: checking, blockedElsewhere: blockedElsewhere, operationElsewhere: operationElsewhere)
+        table[.forceStop] = forceStopAvailable ? .enabled : .disabled(reason: "Force-stopping is offered only after a normal stop did not finish in time.")
         return table
+    }
+
+    /// Stop is disabled with a reason rather than hidden, like every other action here, and is
+    /// enabled for a running VM. The stop and warned force-stop contract is MVP-PLAN.md §2
+    /// ("Returning developer").
+    private static func stopAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checking: Bool, blockedElsewhere: String?, operationElsewhere: String?) -> Availability {
+        guard !checking, let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
+        // An outcome the runtime reports as unresolved is inspected before anything is sent
+        // again, exactly as one this app observed being interrupted (MVP-PLAN.md §3).
+        if case .needsAttention(.operationOutcomeUnknown) = status.readiness { return .disabled(reason: "Checking environment") }
+        if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
+        // The runtime takes one lifecycle operation at a time and would refuse this one.
+        if let operationElsewhere { return .disabled(reason: operationElsewhere) }
+        if let blockedElsewhere, status.vm != .running { return .disabled(reason: blockedElsewhere) }
+        switch status.vm {
+        case .running: return .enabled
+        case .stopped: return .disabled(reason: "Not running")
+        case .notFound: return .disabled(reason: "The virtual machine is missing")
+        case .uncertain(let reason): return .disabled(reason: "Ownership is uncertain (\(reason)). Repair before stopping.")
+        }
     }
 
     /// - Parameter checking: the outcome of the last operation is unknown, or its status is
@@ -271,8 +301,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
 
     private static func notImplementedNote(for action: Action) -> String {
         switch action {
-        case .start: ""
-        case .stop: "Stopping from the dashboard arrives with the real runtime wiring (#32)."
+        case .start, .stop, .forceStop: ""
         case .openInCodex: "Handing off to Codex desktop arrives in Phase 2 (MVP-PLAN.md §10)."
         case .openConsole: "The Mac console arrives in Phase 2 (MVP-PLAN.md §10)."
         case .testWorkspace: "Workspace tests arrive in Phase 2 (MVP-PLAN.md §10)."

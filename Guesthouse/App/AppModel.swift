@@ -2,6 +2,7 @@ import Foundation
 import GuesthouseCore
 import Observation
 import Synchronization
+import os
 
 /// The app's top-level state: what the runtime reports, and the Quit contract.
 ///
@@ -56,6 +57,16 @@ final class AppModel {
         var logs: [RedactedLine] = []
     }
 
+    /// How an operation this app sent ended in failure.
+    struct OperationFailure: Equatable {
+        let error: GuesthouseError
+        /// Whether the runtime accepted the request before reporting the failure. A request
+        /// refused before acceptance never reached Tart: the graceful shutdown it asked for
+        /// was not attempted, so escalating past it would skip the normal attempt entirely
+        /// (MVP-PLAN.md §2).
+        let accepted: Bool
+    }
+
     static let gracefulStopDeadline: Duration = .seconds(60)
 
     private(set) var launchState: LaunchState = .checkingEnvironment
@@ -69,11 +80,17 @@ final class AppModel {
     private var statusQueryFailures: [EnvironmentID: GuesthouseError] = [:]
     private(set) var lastErrors: [EnvironmentID: GuesthouseError] = [:]
     /// How the last operation this app sent for an environment failed, kept apart from the
-    /// error a status query leaves on the card. The check that must follow a failed operation
-    /// is allowed to fail too, and its error replaces the operation's in `lastErrors`; without
-    /// this the bundle would name that check rather than the start or stop the user is
-    /// reporting, and would carry the check's recovery actions instead of the operation's.
-    private var operationFailures: [EnvironmentID: GuesthouseError] = [:]
+    /// errors a status query leaves behind. A successful inspection answers a query failure,
+    /// but it does not undo a shutdown that did not happen, and the warned force-stop is
+    /// offered against this rather than against whatever `lastErrors` currently holds.
+    private var operationFailures: [EnvironmentID: OperationFailure] = [:]
+    /// Environments whose graceful stop this app made was accepted by the runtime and then
+    /// failed. It is the evidence the warned force-stop is offered against, and it survives a
+    /// force-stop that is itself refused before acceptance: such a refusal never reached Tart,
+    /// so it says nothing about the shutdown that did not happen — and since `retryAvailable`
+    /// deliberately refuses to replay a force-stop, withdrawing the evidence left another
+    /// 60-second graceful attempt as the only way back to the warning (MVP-PLAN.md §2).
+    private var stopEscalations: Set<EnvironmentID> = []
     /// Operations whose connection dropped before a result arrived. Cleared only by a
     /// successful status query; Retry is never offered while an entry exists (MVP-PLAN.md §3).
     private(set) var unknownOutcomes: [EnvironmentID: OperationID] = [:]
@@ -100,6 +117,7 @@ final class AppModel {
     let quitWarning = "Stopping a development Mac interrupts any Codex task running in it. Guesthouse cannot see those tasks; finish them first."
 
     let backend: any RuntimeBackend
+    private static let log = Logger(subsystem: "com.starlingprotocol.Guesthouse", category: "runtime")
     private let terminationDecision: @MainActor (Bool) -> Void
     private var quitTask: Task<Void, Never>?
     /// Identifies one Quit attempt. Every asynchronous step checks it, so a cancelled check
@@ -181,8 +199,8 @@ final class AppModel {
         interruptionObservation.cancel()
     }
 
-    /// Picks the real client, or the fake when the app is hosting unit tests, so a test run
-    /// never launches the runtime service.
+    /// Picks the real client, or the fake when the app is hosting unit tests or Xcode is
+    /// rendering previews, so neither launches the runtime service (MVP-PLAN.md §3).
     ///
     /// `GUESTHOUSE_FAKE_RUNTIME=1` selects the fake too, but only in a development build. In a
     /// shipped app an environment variable must not be able to replace the runtime with an
@@ -190,7 +208,9 @@ final class AppModel {
     /// conclude there is nothing to stop and approve termination with a real VM still running
     /// (MVP-PLAN.md §2).
     static func makeBackend(environment: [String: String] = ProcessInfo.processInfo.environment) -> any RuntimeBackend {
-        if environment["XCTestConfigurationFilePath"] != nil { return FakeRuntimeBackend() }
+        if environment["XCTestConfigurationFilePath"] != nil || environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
+            return FakeRuntimeBackend()
+        }
         #if DEBUG
         if environment["GUESTHOUSE_FAKE_RUNTIME"] == "1" { return FakeRuntimeBackend() }
         #endif
@@ -302,8 +322,11 @@ final class AppModel {
             runtimeInfo = version
             // These environments answered, so a failure of an earlier *query* is history,
             // exactly as it is after a single successful status query. A failed operation's
-            // error stays: it is what the card explains.
-            for id in published.keys where statusQueryFailures.removeValue(forKey: id) != nil { lastErrors[id] = nil }
+            // error is put back rather than dropped, for the same reason `refreshStatus` puts
+            // it back: the query error had overwritten it, and it is what the card explains.
+            for id in published.keys where statusQueryFailures.removeValue(forKey: id) != nil {
+                lastErrors[id] = operationFailures[id]?.error
+            }
             launchState = .ready
             // A full reconciliation read every listed environment's status, so it settles
             // exactly what a per-card check settles: an unknown outcome, a reconciliation
@@ -606,6 +629,15 @@ final class AppModel {
         unknownOutcomes[id] ?? Self.reportedUnknownOutcome(of: statuses[id])
     }
 
+    /// The runtime's single lifecycle slot, seen from another card: an operation anywhere else
+    /// makes every mutation here fail, so the control says why instead of doing nothing.
+    func operationBlockedElsewhere(_ id: EnvironmentID) -> String? {
+        let busy = operations.keys.first { $0 != id }
+            ?? statuses.values.first { $0.inFlightOperation != nil && $0.environmentID != id }?.environmentID
+        guard let busy, let name = environments.first(where: { $0.id == busy })?.name else { return nil }
+        return "An operation is in progress on \(name)."
+    }
+
     /// Statuses that name an operation this app did not start (one recovered after a
     /// relaunch) are re-queried until they become terminal, so a card never stays busy for
     /// an operation nobody observes.
@@ -718,8 +750,16 @@ final class AppModel {
                     statuses[id] = status
                     received = true
                     // The environment answered, so a failure of an earlier *query* is history.
-                    // A failed operation's error stays: it is what the card explains.
-                    if statusQueryFailures.removeValue(forKey: id) != nil { lastErrors[id] = nil }
+                    // A failed operation's error is what the card explains, so it is put back
+                    // rather than dropped: the query error had overwritten it, and clearing
+                    // both would leave the warned force-stop offered with no failure on screen
+                    // to escalate from, and without the stop's own retry, console and dismiss
+                    // recoveries (MVP-PLAN.md §2).
+                    if statusQueryFailures.removeValue(forKey: id) != nil { lastErrors[id] = operationFailures[id]?.error }
+                    clearSettledCancellationFailure(of: id, against: status)
+                    // An unknown outcome asked for exactly this inspection, and `settle` below
+                    // is where every answer — this one and a full reconciliation's alike —
+                    // clears what that outcome left behind.
                     // A poll whose own inspection failed ended without anything to restart it,
                     // so this is where an operation only the runtime reports is picked up
                     // again: without it the card stays busy and blocks every start until the
@@ -797,12 +837,42 @@ final class AppModel {
         // a late answer — a poll's, or a check that crossed the listing — free a slot the
         // runtime never confirmed was free (MVP-PLAN.md §3).
         guard environments.contains(where: { $0.id == id }) else { return }
-        if case .operationOutcomeUnknown? = lastErrors[id], Self.reportedUnknownOutcome(of: status) == nil {
-            lastErrors[id] = nil
+        // What this answer settles is read before anything is cleared. A stream this app lost
+        // writes only `unknownOutcomes`, a terminal `.operationOutcomeUnknown` writes only the
+        // error, and a full refresh clears the error here before its own follow-up loop could
+        // test for it — so keying the cleanup off the displayed error alone missed the
+        // disconnected case entirely and ran after the fact in the reconciled one.
+        let wasUnresolved = unknownOutcomes[id] != nil || Self.heldUnknownOutcome(lastErrors[id])
+        if wasUnresolved, Self.reportedUnknownOutcome(of: status) == nil {
+            if Self.heldUnknownOutcome(lastErrors[id]) { lastErrors[id] = nil }
+            operationFailures[id] = nil
+            // The escalation is not withdrawn while the VM is still running: what qualified it
+            // is a graceful stop the runtime took on and could not finish, and settling the
+            // *outcome* of a later request says nothing about that shutdown. Withdrawing it
+            // here would leave another 60-second graceful attempt as the only way back to the
+            // warning (MVP-PLAN.md §2).
+            if status.vm != .running { stopEscalations.remove(id) }
+            // Nothing failed any more, so there is nothing to replay. A request left here
+            // becomes the recovery for whatever a later status reports on its own, and "Try
+            // again" over a newly discovered guest problem would shut the VM down instead —
+            // the rule a dismissal and a completed operation already apply (MVP-PLAN.md §2).
+            lastRequests[id] = nil
         }
         unknownOutcomes[id] = nil
         reconciling.remove(id)
         clearSettledCancellationFailure(of: id, against: status)
+    }
+
+    /// Forgets how an environment's last operation failed, and with it the escalation that
+    /// failure qualified for.
+    private func clearOperationFailure(of id: EnvironmentID) {
+        operationFailures[id] = nil
+        stopEscalations.remove(id)
+    }
+
+    /// Whether the error a card is holding is the unresolved-outcome one.
+    private static func heldUnknownOutcome(_ error: GuesthouseError?) -> Bool {
+        if case .operationOutcomeUnknown? = error { true } else { false }
     }
 
     /// Drops a refused cancellation once an inspection shows its operation is no longer in
@@ -885,7 +955,7 @@ final class AppModel {
             // the mandatory check after it may fail as well, and that error takes the card
             // while the state stays unread, but it is not how the operation ended. A card with
             // no failed operation behind it still reports what it is showing.
-            operationFailure: subject.flatMap { operationFailures[$0.id] ?? lastErrors[$0.id] }.map { .init($0) }
+            operationFailure: subject.flatMap { operationFailures[$0.id]?.error ?? lastErrors[$0.id] }.map { .init($0) }
         )
     }
 
@@ -900,18 +970,40 @@ final class AppModel {
                 status: statuses[environment.id],
                 operation: operations[environment.id],
                 lastError: lastErrors[environment.id],
-                statusUnread: statuses[environment.id] == nil,
+                // A status that has not been read back — never, or not since the operation
+                // that just ended — is not a state to offer actions over: `canMutate` refuses
+                // them, so the card must not render them as if they would do something.
+                statusUnread: statuses[environment.id] == nil || reconciling.contains(environment.id),
                 statusCheckFailed: statusQueryFailures[environment.id] != nil && statusQueriesInFlight[environment.id] == nil,
                 unknownOutcome: unknownOutcomes[environment.id],
                 statusQueryFailure: statusQueryFailures[environment.id],
                 reconciling: reconciling.contains(environment.id),
                 logs: logs(of: environment.id),
-                retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
+                // A failed status check is answered by another check, not by replaying a
+                // mutation: `perform(.retry)` routes it to `refreshStatus`, which is read-only
+                // and safe while the state is unread. Without this a check failure whose only
+                // recovery is Retry — `.runtimeStarting` while the service reconnects — had
+                // that Retry disabled by the reconciliation guard and its Dismiss disabled
+                // because the state is unread, so the card had nothing the user could press.
+                retryAvailable: retryWouldInspect(environment.id)
+                    || (retryAvailable(for: environment.id) && !reconciling.contains(environment.id)),
                 retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
-                runtimeVersion: runtimeInfo
+                runtimeVersion: runtimeInfo,
+                operationElsewhere: operationBlockedElsewhere(environment.id),
+                forceStopAvailable: canForceStop(environment.id),
+                // What this app asked for, so a stop the status reconnected to keeps a stop's
+                // own rules rather than reverting to a generic operation.
+                lastRequest: lastRequests[environment.id]
             )
         }
+    }
+
+    /// Whether Try again would inspect rather than replay: the failure the card shows is the
+    /// status check's own, and no check is running to answer it already.
+    private func retryWouldInspect(_ id: EnvironmentID) -> Bool {
+        guard let shown = lastErrors[id], shown == statusQueryFailures[id] else { return false }
+        return statusQueriesInFlight[id] == nil
     }
 
     /// Why replaying the last request would be refused, or nil. Retry re-sends whatever
@@ -976,7 +1068,10 @@ final class AppModel {
                 Task { await refreshStatus(of: id) }
                 return
             }
-            guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id), let request = lastRequests[id] else { return }
+            guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id) else { return }
+            // A force-stop is destructive: Try again never resends one, so it cannot skip the
+            // warning the user accepted the first time (MVP-PLAN.md §2).
+            guard retryAvailable(for: id), let request = lastRequests[id] else { return }
             // A replayed start is one more start: the runtime still runs one operation and one
             // VM at a time, and sending past that would replace the useful original error.
             if case .startEnvironment = request, globalStartBlock != nil { return }
@@ -992,9 +1087,12 @@ final class AppModel {
             // with nothing to press. The presentation disables the option for the same reason.
             guard let shown = lastErrors[id], shown != statusQueryFailures[id] else { return }
             lastErrors[id] = nil
-            // A dismissed failure is not what the bundle reports either: the user said they
-            // are done with it, and the next export describes what the card shows now.
-            operationFailures[id] = nil
+            clearOperationFailure(of: id)
+            // Dismissing the failure dismisses the offer to replay it. A request kept here
+            // would become the recovery for whatever problem a later status reports on its
+            // own, so "Try again" over a newly discovered guest problem would shut the VM
+            // down instead — a stop the user never chose (MVP-PLAN.md §2).
+            lastRequests[id] = nil
         default:
             break
         }
@@ -1010,14 +1108,21 @@ final class AppModel {
         return .enabled
     }
 
-    /// Starts an environment. The only dashboard action wired to the runtime so far.
+    /// Whether the app's whole picture has been re-established. `connectionInterrupted`
+    /// changes the launch state at once but leaves every status cached while its reconciliation
+    /// runs, so a Stop the view had already rendered — or one whose callback was queued a
+    /// moment before — would otherwise send a mutation over a pre-disconnection snapshot. Start
+    /// has required this from the beginning; a stop is no less a mutation (MVP-PLAN.md §2).
+    private var reconciled: Bool { launchState == .ready }
+
+    /// Starts an environment.
     func start(_ id: EnvironmentID) {
         // A reconciliation in progress, or one that lost its connection, leaves the previous
         // statuses cached, and the cached snapshot is what `globalStartBlock` reads: a Start
         // rendered a moment before the state changed could otherwise send a mutating request
         // over state nothing has re-established. Nothing is started until reconciliation has
         // (AGENTS.md: never retry a mutating operation blindly).
-        guard launchState == .ready else { return }
+        guard reconciled else { return }
         guard environments.contains(where: { $0.id == id }), operations[id] == nil,
               !reconciling.contains(id), globalStartBlock == nil else { return }
         // Reserved before the first suspension, so two rapid starts cannot both pass the guard.
@@ -1029,19 +1134,127 @@ final class AppModel {
     /// status-query failure: left standing, that marker would let the next successful query
     /// clear this error as if it were the stale one, and the card would lose the recovery the
     /// operation's own failure prescribes.
-    private func recordOperationError(_ error: GuesthouseError?, for id: EnvironmentID) {
+    private func recordOperationError(_ error: GuesthouseError?, for id: EnvironmentID, accepted: Bool? = nil) {
         lastErrors[id] = error
-        operationFailures[id] = error
+        // Whether the runtime accepted the request travels with the failure: the warned
+        // force-stop is offered against a shutdown that was actually attempted, and a refusal
+        // before acceptance never reached Tart.
+        if let error {
+            operationFailures[id] = OperationFailure(error: error, accepted: accepted ?? (operations[id]?.acceptedID != nil))
+        } else {
+            clearOperationFailure(of: id)
+        }
         statusQueryFailures[id] = nil
     }
 
+    /// Stops a running environment gracefully. The guest gets `gracefulStopDeadline` to shut
+    /// down; if it does not, the runtime reports `gracefulStopTimedOut` and the card offers
+    /// the warned force-stop.
+    func stop(_ id: EnvironmentID) {
+        guard reconciled else { return }
+        guard canMutate(id), statuses[id]?.vm == .running else { return }
+        send(.stopEnvironment(id, .graceful(deadline: Self.gracefulStopDeadline)), for: id)
+    }
+
+    /// Reserves the operation before the first suspension, so two rapid activations cannot
+    /// both pass the guard and share one `operations` entry: the one the runtime refuses
+    /// would otherwise remove the state belonging to the one it accepted.
+    private func send(_ request: RuntimeRequest, for id: EnvironmentID) {
+        operations[id] = OperationState(id: OperationID(), request: request)
+        Task { await run(request, for: id) }
+    }
+
+    /// Whether a mutating request may be sent for this environment: no operation of ours in
+    /// flight, none the runtime reports anywhere, no unsettled outcome, and no status check
+    /// still outstanding. A state that was never verified never licenses a second mutation
+    /// (MVP-PLAN.md §3).
+    func canMutate(_ id: EnvironmentID) -> Bool {
+        // The runtime runs one lifecycle operation at a time and refuses every request while
+        // its slot is occupied, so an operation on another environment blocks this one too,
+        // exactly as `globalStartBlock` already says for Start (MVP-PLAN.md §4).
+        guard operations.isEmpty, !statuses.values.contains(where: { $0.inFlightOperation != nil }) else { return false }
+        guard unknownOutcomes[id] == nil, !reconciling.contains(id), let status = statuses[id] else { return false }
+        // An outcome the runtime itself reports as unresolved blocks a second mutation just as
+        // a lost connection does: the actual state has not been established yet.
+        guard Self.unresolvedOutcome(of: status) == nil else { return false }
+        if case .operationOutcomeUnknown? = lastErrors[id] { return false }
+        return true
+    }
+
+    /// The operation a status still reports as unresolved, if any. The runtime clears this
+    /// once the actual state has been inspected, so it is what says whether an unknown
+    /// outcome is still open (MVP-PLAN.md §3).
+    static func unresolvedOutcome(of status: EnvironmentStatus) -> OperationID? {
+        if case .needsAttention(.operationOutcomeUnknown(let operation)) = status.readiness { return operation }
+        return nil
+    }
+
+    /// Whether the card may offer Retry: something to replay, and a state fresh enough to
+    /// replay it over. A force-stop is never replayed from here; it goes back through its
+    /// own warning.
+    func retryAvailable(for id: EnvironmentID) -> Bool {
+        guard let request = lastRequests[id], canMutate(id) else { return false }
+        switch request {
+        case .stopEnvironment(_, .force): return false
+        // A stop the VM completed on its own after the failure is not repeated: the reconciled
+        // status decides, not the error the timeout left behind (MVP-PLAN.md §3).
+        case .stopEnvironment: return statuses[id]?.vm == .running
+        default: return true
+        }
+    }
+
+    /// The explicitly warned force-stop, offered only after a graceful stop did not finish.
+    func forceStop(_ id: EnvironmentID) {
+        guard reconciled, canForceStop(id) else { return }
+        send(.stopEnvironment(id, .force), for: id)
+    }
+
+    /// A force-stop is offered after a graceful stop this app made failed and the following
+    /// status check proved the VM is still running — whatever the failure was, since
+    /// `EnvironmentLifecycle` reports a Tart stop that did not work as `guestNotReachable`
+    /// just as often as a timeout, and MVP-PLAN.md §2 promises the warned force-stop after a
+    /// failed graceful stop. An unresolved outcome is inspected instead, never forced past.
+    func canForceStop(_ id: EnvironmentID) -> Bool {
+        guard canMutate(id), statuses[id]?.vm == .running else { return false }
+        // The operation's own failure, not whatever error is on the card: a status query that
+        // failed and was then answered clears `lastErrors`, and that inspection says nothing
+        // about the shutdown that did not happen. Acceptance is required too, so a request the
+        // runtime refused before it reached Tart cannot stand in for a graceful attempt.
+        // Either the failure the card is showing is an accepted stop's own, or an earlier one
+        // was and is still standing. A force-stop refused before acceptance — `runtimeStarting`
+        // while the service reconnects, or a journal that would not open — never reached Tart:
+        // it neither qualifies on its own nor withdraws the graceful failure that already did.
+        guard operationFailures[id]?.accepted == true || stopEscalations.contains(id) else { return false }
+        // Either stop mode qualifies. A force-stop can only be reached through a graceful
+        // failure, so one that itself failed over a VM the check still finds running is the
+        // same situation the warning exists for. Requiring `.graceful` here closed the only
+        // route out: the generic Retry deliberately refuses to replay a force-stop, so the
+        // user would have to sit through another 60-second graceful attempt before the
+        // warning could be offered again. The confirmation is shown every time, so this
+        // reoffers a warned escalation, never a blind repeat (MVP-PLAN.md §2).
+        guard case .stopEnvironment? = lastRequests[id] else { return false }
+        return true
+    }
+
     private func run(_ request: RuntimeRequest, for id: EnvironmentID) async {
-        recordOperationError(nil, for: id)
+        // The card's error is cleared for the attempt about to run, but not the escalation an
+        // earlier graceful failure qualified for: that is withdrawn below, and only when this
+        // request is not itself the escalation.
+        lastErrors[id] = nil
+        statusQueryFailures[id] = nil
         // The reconciliation this stream started under. The client reports a dropped
         // connection to its observers before it throws into the streams that connection cut
         // off, so a reconciliation launched by that same loss can already have read the
         // actual state by the time this stream ends.
         let generation = refreshGeneration
+        // A force-stop is the escalation of a graceful failure, so the evidence that qualified
+        // it outlives the attempt: an escalation refused before acceptance never reached Tart,
+        // and withdrawing the qualification would put the user through another 60-second
+        // graceful stop before the warning could be offered again (MVP-PLAN.md §2). Every
+        // other request is a fresh attempt and supersedes what came before it.
+        let escalating = if case .stopEnvironment(_, .force) = request { true } else { false }
+        operationFailures[id] = nil
+        if !escalating { stopEscalations.remove(id) }
         lastRequests[id] = request
         if operations[id] == nil { operations[id] = OperationState(id: OperationID(), request: request) }
         var completed = false
@@ -1071,8 +1284,15 @@ final class AppModel {
                     // when it cannot persist the result. That is the same unknown state as a
                     // stream this app lost, and is remembered as one until a status answers.
                     if case .operationOutcomeUnknown(let unresolved) = error { unknownOutcomes[id] = unresolved }
+                    let accepted = operations[id]?.acceptedID != nil
+                    operationFailures[id] = OperationFailure(error: error, accepted: accepted)
+                    // A stop the runtime took on and could not finish is what the warned
+                    // escalation exists for, and it is remembered in its own right: the force
+                    // stop that follows replaces `operationFailures` with its own result.
+                    if accepted, case .stopEnvironment = request { stopEscalations.insert(id) }
                 case .completed:
                     recordOperationError(nil, for: id)
+                    clearOperationFailure(of: id)
                     completed = true
                     // The request succeeded, so it is no longer what Try again would replay: a
                     // problem a later status reports on its own must not re-send this one.
@@ -1085,6 +1305,7 @@ final class AppModel {
             // reconciliation that began after this stream did has looked at the actual state
             // since, so its result stands rather than being overwritten by this loss.
             if generation == refreshGeneration { launchState = .interrupted(RuntimeConnectionInterrupted()) }
+            logRuntimeEvent("runtime connection interrupted during \(request.caseName); outcome unknown until inspected")
             // …and when that reconciliation has also finished, this environment's actual state
             // has been read back: that is the inspection an interrupted operation calls for,
             // so recreating an unknown marker over it, dropping the status it published and
@@ -1130,6 +1351,18 @@ final class AppModel {
     /// stream knows, and it is what an unknown outcome is waiting for.
     private func reconciledSinceStreamBegan(_ generation: UInt64, of id: EnvironmentID) -> Bool {
         reconciledGeneration > generation && statuses[id] != nil
+    }
+
+    /// The one path from this model to the system log. Every line goes through the redaction
+    /// layer first, so a message that later interpolates something the runtime said cannot
+    /// reach the log unchecked (AGENTS.md: route every log line through redaction).
+    func redactedLogLine(_ message: String) -> RedactedLine {
+        var state = Redactor.StreamState()
+        return redactor.redact(line: message, state: &state)
+    }
+
+    private func logRuntimeEvent(_ message: String) {
+        Self.log.error("\(self.redactedLogLine(message).text, privacy: .public)")
     }
 
     /// A model over a preview scenario's environments and scripted backend, already refreshed.
@@ -1386,6 +1619,14 @@ final class AppModel {
             // its own — would let the quit terminate over a VM that may still be running (§2).
             if let unread = reconciling.first {
                 quitFlow = .stopFailed(lastErrors[unread] ?? .operationOutcomeUnknown(unresolvedOperation(of: unread) ?? OperationID()))
+                return false
+            }
+            // The runtime can report an unresolved outcome on the status itself: the stream
+            // failed rather than dropped, so nothing was recorded above. Sending another
+            // graceful stop over it is the blind retry §3 forbids, and Quit asks for the
+            // inspection first exactly as the dashboard's own guard does.
+            if let reported = environments.lazy.compactMap({ self.statuses[$0.id].flatMap(Self.unresolvedOutcome) }).first {
+                quitFlow = .stopFailed(.operationOutcomeUnknown(reported))
                 return false
             }
             let busy = operations.keys.first ?? statuses.values.first(where: { $0.inFlightOperation != nil })?.environmentID
