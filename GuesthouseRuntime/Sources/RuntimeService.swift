@@ -1,5 +1,6 @@
 import Foundation
 import GuesthouseCore
+import GuesthouseRuntimeKit
 import OSLog
 import Synchronization
 import XPC
