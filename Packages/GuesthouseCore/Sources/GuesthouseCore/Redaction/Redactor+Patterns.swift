@@ -41,7 +41,7 @@ extension Redactor {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -134,10 +134,12 @@ extension Redactor {
                 #/(?:\\?["'])?\s*[:=]\s*/#
             }
         }
+        // A quote only bounds the value at a real sibling/whitespace boundary. Adjacent
+        // fragments remain in the conservative unquoted-value alternative below.
         let labeledSecret = Regex {
             secretLabel
             Capture {
-                #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*/#
+                #/"(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\S[^\r\n]*/#
             }
         }.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
@@ -175,7 +177,7 @@ extension Redactor {
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -184,7 +186,7 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
@@ -219,7 +221,8 @@ extension Redactor {
         /// Encoded quotes span the remaining line; the value scanner preserves their suffix.
         /// A copula may end in a delimiter; without one, whitespace still bounds the word.
         /// Empty delimited declarations belong to `codePromptOnly` and keep their prompt text.
-        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\\+["'][^\r\n]*|[^\s,;]+)|\s*$)/#.ignoresCase()
+        /// Spaces can group an opaque code; a comma or semicolon bounds following prose.
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\\+["'][^\r\n]*|[^,;\r\n]+)|\s*$)/#.ignoresCase()
     }
 
     static let patterns = Patterns()

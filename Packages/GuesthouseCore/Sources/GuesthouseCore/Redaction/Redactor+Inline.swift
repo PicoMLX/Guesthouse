@@ -35,6 +35,11 @@ extension Redactor {
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
+        if text.wholeMatch(of: #/[ \t]*(?i:Basic)[ \t]*(?:\\[ \t]*)?/#) != nil {
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
+        }
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
         text = text.replacing(p.basicAuthorization) { match in
             guard isBasicCredential(match.3) else { return String(match.0) }

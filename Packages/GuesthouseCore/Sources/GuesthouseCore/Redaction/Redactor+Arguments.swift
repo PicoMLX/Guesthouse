@@ -155,6 +155,10 @@ extension Redactor {
             } else {
                 cursor = value.firstIndex(where: { $0 == "," || $0 == "]" }) ?? text.endIndex
             }
+            if cursor == text.endIndex, valueExplicitlyContinues(value) {
+                state.expectingSecretValue = true
+                state.secretValueExplicitlyContinues = true
+            }
             result += marker("secret")
         }
         return result + text[cursor...]
