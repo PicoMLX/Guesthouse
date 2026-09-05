@@ -115,6 +115,10 @@ extension VMSlotError: LocalizedError {
             "Export any unpublished work from a development Mac you no longer need, then delete it to make room. Exporting alone does not free a slot."
         case .unknownEnvironment:
             "Check the environment list; the record may have been removed by a repair or deletion."
+        case .corruptInventory(.unsupportedSchemaVersion):
+            // Rebuilding here would drop whatever the newer format records that this build
+            // does not know about, so the way forward is the newer Guesthouse, not a repair.
+            "Update Guesthouse and open it again. Do not repair the record with this version: rebuilding it here would discard what the newer format keeps."
         case .corruptInventory:
             "Guesthouse will inspect the virtual machines that actually exist and rebuild the record from them; nothing is started or deleted until it has."
         }
