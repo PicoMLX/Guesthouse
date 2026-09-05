@@ -45,13 +45,15 @@ public enum IntegrationWorkspaceWriter {
     /// volume and file the check saw are compared with the ones the descriptor names, which no
     /// later renaming of the path can change.
     ///
-    /// A root created here is examined the same way rather than trusted because it was just
-    /// made: the guest can replace it in the same window, and an identity nobody recorded is an
-    /// identity nothing below can compare.
+    /// A new root is opened under a temporary name before installation, and its identity is
+    /// read from that descriptor. The descriptor stays open through the final comparison;
+    /// replacing the installed pathname cannot change which inode creation recorded.
+    /// This pins the staging open, not the earlier mkdir: see `createDirectory` for the
+    /// remaining requirement that creation happen under a trusted staging parent.
     ///
-    /// The test seams run between the absence check and creation, and between the identity
-    /// check and open, so substitutions can be exercised without racing the scheduler.
-    static func openRoot(_ resolvedRoot: URL, beforeCreate: () throws -> Void = {}, afterCheck: () -> Void = {}) throws -> Int32 {
+    /// The test seams bracket creation, installation and the final identity check so
+    /// substitutions can be exercised without racing the scheduler.
+    static func openRoot(_ resolvedRoot: URL, beforeCreate: () throws -> Void = {}, beforeInstall: () -> Void = {}, afterCheck: () -> Void = {}) throws -> Int32 {
         let name = resolvedRoot.lastPathComponent
         let container = resolvedRoot.deletingLastPathComponent()
         var containerDescriptor = open(container.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -73,6 +75,8 @@ public enum IntegrationWorkspaceWriter {
                 : GeneratedFileError.unwritable(path: name, reason: reason(containerError))
         }
         defer { close(containerDescriptor) }
+        var createdDescriptor: Int32?
+        defer { if let createdDescriptor { close(createdDescriptor) } }
         var rootInfo = stat()
         if fstatat(containerDescriptor, name, &rootInfo, AT_SYMLINK_NOFOLLOW) != 0 {
             let checkError = errno
@@ -80,15 +84,9 @@ public enum IntegrationWorkspaceWriter {
                 throw GeneratedFileError.unwritable(path: name, reason: reason(checkError))
             }
             try beforeCreate()
-            guard mkdirat(containerDescriptor, name, 0o755) == 0 else {
-                let code = errno
-                // Absence was observed above. An entry that arrived before creation belongs
-                // to somebody else, even when it is a real directory with a stable identity.
-                throw code == EEXIST
-                    ? GeneratedFileError.pathOutsideWorkspace(name)
-                    : GeneratedFileError.unwritable(path: name, reason: reason(code))
-            }
-            guard fstatat(containerDescriptor, name, &rootInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
+            let created = try createDirectory(name, in: containerDescriptor, of: name, afterCreate: beforeInstall)
+            createdDescriptor = created
+            guard fstat(created, &rootInfo) == 0 else {
                 throw GeneratedFileError.unwritable(path: name, reason: reason(errno))
             }
         }
@@ -181,8 +179,10 @@ public enum IntegrationWorkspaceWriter {
         return descriptor
     }
 
-    /// Creates a directory the write needs and returns a descriptor bound to the inode this
-    /// call made, not to whatever the name resolves to afterwards.
+    /// Opens a staged directory and pins its inode through installation and later writes.
+    /// This protects substitutions after the staging open. If the guest can replace the
+    /// temporary entry between mkdirat and openat, an unpredictable name alone cannot prove
+    /// creation ownership; a trusted staging parent is still required to close that window.
     ///
     /// `mkdirat` hands back no descriptor, so creating under the final name and opening that
     /// name again leaves the guest a window to rename the new directory away and move a
@@ -211,7 +211,9 @@ public enum IntegrationWorkspaceWriter {
             throw GeneratedFileError.unwritable(path: relativePath, reason: reason(code))
         }
         afterCreate()
-        guard renameat(parent, temporary, parent, name) == 0 else {
+        // Refuse every arriving entry, including an empty directory that ordinary renameat
+        // would silently replace. The absence check never granted ownership of that entry.
+        guard renameatx_np(parent, temporary, parent, name, UInt32(RENAME_EXCL)) == 0 else {
             let code = errno
             close(descriptor)
             unlinkat(parent, temporary, AT_REMOVEDIR)

@@ -237,6 +237,54 @@ import Testing
         #expect(try Data(contentsOf: root.appending(path: "README.md")) == original)
     }
 
+    @Test(arguments: [false, true])
+    func aRootThatAppearsBeforeInstallationIsRefused(checkoutHasContents: Bool) throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "InstallRace-\(UUID().uuidString)")
+        let root = base.appending(path: "workspace")
+        let checkout = base.appending(path: "repos/MyApp")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let original = Data("guest checkout".utf8)
+        if checkoutHasContents { try original.write(to: checkout.appending(path: "README.md")) }
+
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
+            let descriptor = try IntegrationWorkspaceWriter.openRoot(root, beforeInstall: {
+                try? FileManager.default.moveItem(at: checkout, to: root)
+            })
+            defer { close(descriptor) }
+            try IntegrationWorkspaceWriter.writeFile(Data("generated".utf8), named: "AGENTS.md", in: descriptor, of: "AGENTS.md")
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == (checkoutHasContents ? ["README.md"] : []))
+        if checkoutHasContents { #expect(try Data(contentsOf: root.appending(path: "README.md")) == original) }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: base.path).sorted() == ["repos", "workspace"], "failed installation removes its temporary directory")
+    }
+
+    @Test func aCreatedRootIsSampledThroughItsDescriptor() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "CreatedIdentity-\(UUID().uuidString)")
+        let root = base.appending(path: "workspace")
+        let checkout = base.appending(path: "repos/MyApp")
+        let created = base.appending(path: "created")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let original = Data("guest checkout".utf8)
+        try original.write(to: checkout.appending(path: "README.md"))
+
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
+            let descriptor = try IntegrationWorkspaceWriter.openRoot(root, beforeInstall: {
+                // Replace the staged pathname after the writer has opened it. The rename
+                // will install the checkout, so a later identity sample by name would adopt
+                // it; sampling the already-open descriptor must still identify the original.
+                guard let staged = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
+                    .first(where: { $0.lastPathComponent.hasPrefix(".workspace.") }) else { return }
+                try? FileManager.default.moveItem(at: staged, to: created)
+                try? FileManager.default.moveItem(at: checkout, to: staged)
+            })
+            defer { close(descriptor) }
+            try IntegrationWorkspaceWriter.writeFile(Data("generated".utf8), named: "AGENTS.md", in: descriptor, of: "AGENTS.md")
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["README.md"])
+        #expect(try Data(contentsOf: root.appending(path: "README.md")) == original)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: created.path).isEmpty)
+    }
+
     /// A root the writer had to create is bound to its identity the same way: having just made
     /// it is no evidence that it is still the directory being opened.
     @Test func aCreatedRootReplacedBeforeItIsOpenedIsRefused() throws {
