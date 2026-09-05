@@ -215,9 +215,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         let limit = min(max(limit, 1), SanitizedText.maximumLimit)
         // Only the window plus one scalar is ever looked at, so the cost is independent of the
         // input's size.
-        let window = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead + 1)
-        let truncated = window.count > limit + Self.sanitizeLookahead
-        let bounded = String(String.UnicodeScalarView(window.prefix(limit + Self.sanitizeLookahead)))
+        let (bounded, truncated) = Self.inspectionWindow(value.unicodeScalars, maximum: limit + Self.sanitizeLookahead)
         // Complete escape sequences go first, so styling inside a token cannot leave a
         // fragment behind once the bare control scalars are dropped. A sequence that can only
         // have borrowed its terminator from the value goes further and takes its whole run
@@ -271,6 +269,15 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return redacted }
         return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
+    }
+
+    /// Materializes only the inspection budget plus one sentinel scalar. A sequence input
+    /// makes the read budget testable without wall-clock assumptions about the CI machine.
+    static func inspectionWindow<S: Sequence>(
+        _ scalars: S, maximum: Int
+    ) -> (value: String, truncated: Bool) where S.Element == Unicode.Scalar {
+        let window = Array(scalars.prefix(maximum + 1))
+        return (String(String.UnicodeScalarView(window.prefix(maximum))), window.count > maximum)
     }
 
     static func list(_ components: MissingComponents) -> String {

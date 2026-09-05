@@ -52,13 +52,21 @@ import Testing
     }
 
     @Test func sanitizingAHugeValueCostsOnlyTheWindow() {
-        let huge = String(repeating: "x", count: 20_000_000)
-        // The point is that the cost does not scale with the input: a linear pass over 20
-        // million scalars takes seconds, so a second is a generous ceiling that still fails
-        // if the window is ever abandoned, and it does not depend on how loaded the machine is.
-        let started = ContinuousClock.now
-        _ = GuesthouseError.sanitize(huge)
-        #expect(ContinuousClock.now - started < .seconds(1))
+        let maximum = 80 + GuesthouseError.sanitizeLookahead
+        var reads = 0
+        let huge = AnySequence<Unicode.Scalar> {
+            AnyIterator {
+                guard reads < 20_000_000 else { return nil }
+                reads += 1
+                return "x"
+            }
+        }
+        let window = GuesthouseError.inspectionWindow(huge, maximum: maximum)
+        #expect(reads == maximum + 1, "only the inspection budget and sentinel are consumed")
+        #expect(window.value == String(repeating: "x", count: maximum))
+        #expect(window.truncated)
+        #expect(GuesthouseError.sanitize(String(repeating: "x", count: maximum + 1))
+            == String(repeating: "x", count: 80) + "…")
     }
 
     @Test func unterminatedAuthorityAtTheBoundIsRedacted() {
