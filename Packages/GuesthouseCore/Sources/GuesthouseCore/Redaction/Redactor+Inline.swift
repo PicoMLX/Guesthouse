@@ -36,6 +36,9 @@ extension Redactor {
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text
+        // Retain original DSN coverage independently of replacements that can erase its
+        // transport suffix. Field parsing below still owns original continuation state.
+        let dsnText = redactingMySQLUserInfo(protected.text)
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -145,11 +148,10 @@ extension Redactor {
         if text.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
         }
-        // Establish field/prompt/quote continuation from original text before a DSN can
-        // conceal those openers. Existing userinfo markers are excluded by the DSN grammar.
-        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
-            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
-            text = String(prefix) + text[end...]
+        if dsnText != protected.text {
+            // Overlapping interpretations have incompatible replaced offsets. Conceal the
+            // containing line instead of allowing either replacement to hide the other's evidence.
+            text = text == protected.text ? dsnText : marker("userinfo")
         }
         text = protected.restoring(in: text, state: &state)
         if text.contains(p.mentionsCode) || codeExpected {
@@ -167,5 +169,12 @@ extension Redactor {
             }
             return "\(match.1)\(marker("device-code"))"
         }
+    }
+
+    private static func redactingMySQLUserInfo(_ input: String) -> String {
+        guard let end = input.matches(of: patterns.mysqlTransport).last?.range.upperBound else { return input }
+        let assigned = input[..<end].replacing(patterns.mysqlAssignedUserInfo) { "\($0.1)\(marker("userinfo"))\($0.2)" }
+        let remaining = assigned.replacing(patterns.mysqlUserInfo) { "\($0.1)\(marker("userinfo"))\($0.2)" }
+        return String(remaining) + input[end...]
     }
 }
