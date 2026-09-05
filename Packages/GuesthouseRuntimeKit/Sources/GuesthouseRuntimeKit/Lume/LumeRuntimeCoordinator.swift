@@ -23,11 +23,13 @@ private enum LumeRuntimeLeaseContext {
 /// replaced between verification and launch. Probes and every future install, update, repair,
 /// or removal operation therefore share this coordinator and hold it for their whole operation.
 /// Processes running independently as the signed-in host user are outside Guesthouse's
-/// containment boundary.
+/// containment boundary. These rules implement MVP-PLAN.md §3 ("Sandbox and XPC boundary"
+/// and "Local storage") and §4 ("Runtime delivery and console").
 ///
-/// Operations may use structured child tasks, which inherit the lease context, but must not
-/// await a `Task.detached` that re-enters this coordinator. Detached tasks cannot inherit Swift
-/// task-local ownership, so awaiting such a reacquisition while holding a lease would deadlock.
+/// Operations may use child tasks that inherit the active lease context, but must not await
+/// any task that re-enters this coordinator without that context. This includes `Task.detached`
+/// and an ordinary unstructured `Task` created before the operation acquired its lease. Such a
+/// task queues behind the current owner, so awaiting its reacquisition would deadlock.
 public actor LumeRuntimeCoordinator {
     public static let shared = LumeRuntimeCoordinator()
 
@@ -62,8 +64,8 @@ public actor LumeRuntimeCoordinator {
         }
         guard !hasActiveInheritedLease else {
             // Reject every active nested acquisition, not just same-root recursion: otherwise
-            // concurrent A→B and B→A operations can deadlock. Detached tasks do not inherit this
-            // context and must never be awaited while re-entering the coordinator.
+            // concurrent A→B and B→A operations can deadlock. Tasks without inherited active
+            // lease context must never be awaited while re-entering the coordinator.
             throw LumeRuntimeCoordinationError.nestedAcquisition
         }
         let token = try await acquire(key)
