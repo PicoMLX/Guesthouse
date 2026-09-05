@@ -40,8 +40,9 @@ extension Redactor {
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
-        /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        /// arms the next line even when a logger prefixes or quotes the field name. Cookie
+        /// headers share this state: opaque session identifiers convey authority (RFC 6265 §8.4).
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:set-)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -88,12 +89,13 @@ extension Redactor {
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
         let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*/#
-        let wrappedTokenAtLineEnd = #/((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-)[A-Za-z0-9_-]*$/#
+        /// At line end a boundary-delimited bare `sk-` conservatively arms wrapped-key redaction.
+        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
         let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
         /// remain intact.
-        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-[A-Za-z0-9_-]{16,})/#
+        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-(?:[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]*$))/#
         let distinctiveAPIKey = #/sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]*/#
         /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
         /// which one decodes to a JSON object, whitespace allowed. More than three segments are
@@ -114,23 +116,25 @@ extension Redactor {
         let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
-        /// `clientSecret`. Those need a name in front of the label word, and the names come from
-        /// a closed list so that an ordinary word ending in `token` or `secret` is still not a
-        /// label. The key is quoted the way JSON, a Python dictionary, or a JSON string embedded
-        /// in a log line quotes it. An unquoted value runs to the end of the line rather than to
-        /// the first space, because a passphrase is words: `password: correct horse battery`. It
-        /// still has to start with one non-space character, so a bare label falls to the rule
+        /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names
+        /// require an uppercase secret suffix. An ordinary lowercase word ending in `token`
+        /// or `secret` is not a label. The key is quoted the way JSON, a Python dictionary, or
+        /// a JSON string embedded in a log line quotes it. An unquoted value runs to the end of
+        /// the line rather than the first space, because a passphrase is words:
+        /// `password: correct horse battery`. It still has to start with one non-space
+        /// character, so a bare label falls to the rule
         /// below and arms the next line instead of matching an empty value here.
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
-                #/(^|[^A-Za-z0-9])(?:\\?["'])?/#
+                // Preserve the consumed predecessor; only uppercase suffixes add a boundary.
+                #/(^|[^A-Za-z0-9]|(?-i:[A-Za-z0-9](?=[A-Z])))(?:\\?["'])?/#
                 Capture { secretName }
-                #/\b(?:\\?["'])?\s*[:=]\s*/#
+                #/(?:\\?["'])?\s*[:=]\s*/#
             }
         }
         let labeledSecret = Regex {
@@ -174,7 +178,7 @@ extension Redactor {
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -183,7 +187,7 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
