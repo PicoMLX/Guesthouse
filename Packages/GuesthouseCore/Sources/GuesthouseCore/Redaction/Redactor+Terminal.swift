@@ -50,6 +50,7 @@ extension Redactor {
         spans += text.matches(of: patterns.digestCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.specializedCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2).map { ($0, "jwt", false) } }
+        spans += text.matches(of: patterns.urlUserInfo).map { ($0.1.endIndex..<$0.range.upperBound, "userinfo", false) }
         return spans
     }
 
@@ -158,13 +159,9 @@ extension Redactor {
         return clusters.compactMap { span in span.kind.map { (span.range, $0) } }
     }
 
-    /// The two readings of a line whose terminal escapes have been removed: `joined`, where the
-    /// text on either side of an escape closes up, and `spliced`, where an escape that stood
-    /// between two characters a token can contain leaves a boundary behind. Only the second one
-    /// shows where a token begins when styling was put in front of it; only the first one keeps
-    /// a label that styling interrupted spelled correctly. `spliced` is `joined` when no escape
-    /// stood in such a place, which is every ordinary line. The spliced reading also masks credential
-    /// spans recovered before a CSI final byte could destroy their recognizable header.
+    /// Joined text repairs interrupted labels; spliced text preserves control-supplied token
+    /// boundaries and conceals recovered token spans. Scan-only contexts retain restored field
+    /// evidence for the state-aware caller. Ordinary lines have identical visible readings.
     static func renderings(of text: String) -> (joined: String, spliced: String, contexts: [String]) {
         func isTokenCharacter(_ character: Character) -> Bool {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
@@ -244,7 +241,9 @@ extension Redactor {
                 guard suffix.prefixMatch(of: patterns.labeledSecret) != nil
                     || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
                     || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
-                    || suffix.prefixMatch(of: patterns.codeField) != nil else { continue }
+                    || suffix.prefixMatch(of: patterns.codeField) != nil
+                    || suffix.prefixMatch(of: patterns.secretOption) != nil
+                    || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil else { continue }
                 // The token may have swallowed a separate label. Keep that label available
                 // to the stream scanner, but conceal even a now-short token prefix.
                 recovered.append((mergedRanges[rangeIndex].lowerBound..<offset, "secret"))

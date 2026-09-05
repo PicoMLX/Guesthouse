@@ -18,6 +18,30 @@ import Testing
         #expect(result.joined == prefix + field)
     }
 
+    @Test(arguments: ["sk-synthetic", "Bearer syntheticFirst"], ["--password syntheticSecond", "--password"])
+    func swallowedSecretOptionsRetainTheirBoundary(prefix: String, option: String) {
+        #expect(Redactor.renderings(of: prefix + "\u{0}" + option).spliced
+            == "[redacted:secret]" + Redactor.splicedBoundary + option)
+    }
+
+    @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}[", "\u{9B}"])
+    func recoveredAtSignsConcealURLUserinfo(escape: String) {
+        let result = Redactor.renderings(of: "https://sample:syntheticPassword" + escape + "@example.com")
+        #expect(!result.spliced.contains("syntheticPassword"))
+        #expect(result.spliced.hasSuffix("example.com"))
+    }
+
+    @Test(arguments: ["\u{1B}]", "\u{1B}P", "\u{1B}_", "\u{1B}^", "\u{1B}X", "\u{9D}", "\u{90}", "\u{9F}", "\u{9E}", "\u{98}"], ["\u{18}", "\u{1A}"])
+    func cancelledControlStringsReleaseVisibleDiagnostics(opener: String, cancel: String) {
+        var open: Redactor.StreamState.ControlString?
+        #expect(Redactor.stripTerminalEscapes("before" + opener + "payload" + cancel + "after", openControlString: &open).joined == "beforeafter")
+        #expect(open == nil)
+        _ = Redactor.stripTerminalEscapes(opener + "payload", openControlString: &open)
+        #expect(Redactor.stripTerminalEscapes(cancel + "after", openControlString: &open).joined == "after")
+        #expect(open == nil)
+        #expect(Redactor.stripTerminalEscapes("Finished", openControlString: &open).joined == "Finished")
+    }
+
     @Test(arguments: ["\u{1B}[", "\u{009B}", "\u{1B}", "\u{1B}("], [Character("m"), "e", "1"])
     func escapeIntroducersCannotConsumeAJOSEHeaderCharacter(introducer: String, character: Character) throws {
         let header = "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hYmMifQ"
