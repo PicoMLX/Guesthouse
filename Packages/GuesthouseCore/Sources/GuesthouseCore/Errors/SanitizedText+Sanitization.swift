@@ -25,7 +25,9 @@ extension SanitizedText {
         let (window, truncated) = Self.inspectionWindow(value.unicodeScalars, maximum: limit + Self.sanitizeLookahead)
         // At the cut, a colon-bearing value may be a DSN whose transport is outside our budget;
         // a Basic fragment may no longer decode. Their unknown remainder cannot prove safety.
-        let ambiguousCut = truncated && (window.contains(":")
+        // A whole open URL authority already has the explicit userinfo cutoff repair below.
+        let openAuthority = window.wholeMatch(of: #/[A-Za-z][A-Za-z0-9+.-]*:(?:\\?\/){2}[^\s\/?#]*$/#) != nil
+        let ambiguousCut = truncated && ((window.contains(":") && !openAuthority)
             || window.contains(#/(?:^|[^A-Za-z0-9])(?i:Basic)[ \t]+[A-Za-z0-9+\/=]*$/#))
         let bounded = ambiguousCut ? Redactor.marker("truncated") : window
         // Complete escape sequences go first, so styling inside a token cannot leave a
