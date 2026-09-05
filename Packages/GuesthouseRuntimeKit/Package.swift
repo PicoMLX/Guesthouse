@@ -2,7 +2,7 @@
 
 import PackageDescription
 
-// Process execution and Tart adapters. Linked only by the GuesthouseRuntime XPC service; the
+// Process execution and VM runtime adapters. Linked only by the GuesthouseRuntime XPC service; the
 // app target must never import this package (MVP-PLAN.md §3: keep process-launch
 // implementations in the runtime rather than exposing a generic execution API to the UI).
 // Same concurrency posture as GuesthouseCore: nonisolated by default, Sendable types.
