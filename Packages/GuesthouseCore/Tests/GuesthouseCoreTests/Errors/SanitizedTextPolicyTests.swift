@@ -3,6 +3,18 @@ import Testing
 @testable import GuesthouseCore
 
 struct SanitizedTextPolicyTests {
+    @Test(arguments: ["\u{200B}", "\u{202E}", "\u{0301}"])
+    func removedScalarsStillSeparateCredentialLabels(separator: String) {
+        #expect(!SanitizedText("--password" + separator + "syntheticSecret").value.contains("syntheticSecret"))
+    }
+
+    @Test(arguments: 1...3)
+    func truncatedQuotedWrappersCannotReleaseCompleteEmbeddedOptions(layers: Int) throws {
+        var input = "--password syntheticPassword " + String(repeating: "x", count: 700)
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        #expect(!SanitizedText(input).value.contains("syntheticPassword"))
+    }
+
     @Test(arguments: 0...3)
     func truncatedBasicCredentialsDoNotDependOnBase64Alignment(padding: Int) {
         let credential = Data(("user:" + String(repeating: "syntheticPassword", count: 100)).utf8).base64EncodedString()

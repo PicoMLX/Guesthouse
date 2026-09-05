@@ -2,6 +2,27 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorDiagnosticFieldRepairTests {
+    @Test(arguments: ["token: rest", "password: rest", "Authorization: rest"])
+    func fieldReplacementCannotEraseOriginalDSNEvidence(field: String) {
+        let input = "alice:synthetic " + field + "@tcp(db:3306)/app"
+        #expect(!Redactor().redact(input).contains("synthetic"))
+    }
+
+    @Test(arguments: ["https", "smb", "ssh"], ["tcp(db:3306)", "9net(address)", "_net(address)", "用户(address)"])
+    func explicitlyAssignedDSNsOverrideURISchemeHeuristics(username: String, transport: String) {
+        #expect(!Redactor().redact("dsn=" + username + "://synthetic/part@" + transport + "/app").contains("synthetic"))
+    }
+
+    @Test(arguments: ["supports_cookies: true", "supports-cookies: true", "accepts_request_cookies: false"])
+    func unrecognizedCookiePropertyPrefixesStayIntact(input: String) {
+        #expect(Redactor().redact(input) == input)
+    }
+
+    @Test func aBareDSNWithSpacesIsIndistinguishableFromContactProse() {
+        // The same bytes can be a registered-transport DSN; privacy takes precedence.
+        #expect(Redactor().redact("contact: alice@example.com/profile") == "[redacted:userinfo]@example.com/profile")
+    }
+
     @Test(arguments: ["Cookie", "setCookie", "requestCookie", "set_cookie", "request-cookie", "cookies", "setCookies", "requestCookies"], ["", "\""])
     func serializedCookieAliasesConcealOpaqueSessionValues(name: String, quote: String) {
         let input = quote + name + quote + ": SID=syntheticSession"

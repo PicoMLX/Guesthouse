@@ -14,9 +14,10 @@ extension Redactor {
         redact(text, codesAlwaysRedacted: true)
     }
 
-    /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
+    /// Redacts a record from a stream. Retained or embedded CR/LF terminators are preserved,
+    /// with state advanced once per physical line. Pass the same `state` for the whole stream.
     public func redact(line: String, state: inout StreamState) -> RedactedLine {
-        redact(line: line, state: &state, isPhysicalLine: true)
+        RedactedLine(redact(line, codesAlwaysRedacted: false, state: &state))
     }
 
     private func redact(line: String, state: inout StreamState, isPhysicalLine: Bool,
@@ -32,16 +33,21 @@ extension Redactor {
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString,
-                                               codesAlwaysRedacted: codesAlwaysRedacted || state.expectingDeviceCode)
+            codesAlwaysRedacted: codesAlwaysRedacted || state.expectingDeviceCode, activeQuote: state.quotedValue)
         var recoveredContexts = StreamState()
-        for reading in stripped.contexts {
-            let contextText: String
+        for reading in stripped.contexts + stripped.stateReadings {
+            guard state.ppkPhase == .inactive else { continue }
+            var start = reading.startIndex
+            if let label = state.pemLabel {
+                guard let footer = reading.range(of: "-----END \(label)-----") else { continue }
+                start = footer.upperBound
+            }
             if let quoted = state.quotedValue {
                 guard let end = Self.closingQuoteEnd(in: reading[...], for: quoted) else { continue }
-                contextText = String(reading[end...])
-            } else { contextText = reading }
+                start = max(start, end)
+            }
             var scanned = StreamState()
-            _ = redact(line: contextText, state: &scanned, isPhysicalLine: false)
+            _ = redact(line: String(reading[start...]), state: &scanned, isPhysicalLine: false)
             Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
         }
         // Only the physical pass advances PPK framing. On its opening line, preserve any
@@ -78,7 +84,7 @@ extension Redactor {
             // Inspect the original normalized text: replacement markers no longer contain the
             // closing delimiter. A closing line is redacted whole, but its suffix can open a new
             // pending field. Blank/styling-only lines do not close the quoted value.
-            if let end = Self.closingQuoteEnd(in: text[...], for: quoted) {
+            if !stripped.quoteMayContinue, let end = Self.closingQuoteEnd(in: text[...], for: quoted) {
                 let tail = String(text[end...])
                 let explicitlyContinues = Self.valueExplicitlyContinues(tail[...])
                 // This suffix is still on the same physical line. Scan it independently so
@@ -256,7 +262,9 @@ extension Redactor {
             redacted.replaceSubrange(start..<redacted.endIndex, with: Self.marker("jwt"))
         }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
-        return output(redacted)
+        // A different rule may have replaced the JOSE header with its own token marker.
+        // Preserve all original incomplete-token evidence, without releasing a partial payload.
+        return output(incompleteJWT ? Self.marker("jwt") : redacted)
     }
 
     /// Quoted and ordinary lines share the same footer-to-next-opener transition. Clearing
@@ -305,6 +313,10 @@ extension Redactor {
 
     private func redact(_ text: String, codesAlwaysRedacted: Bool) -> String {
         var state = StreamState()
+        return redact(text, codesAlwaysRedacted: codesAlwaysRedacted, state: &state)
+    }
+
+    private func redact(_ text: String, codesAlwaysRedacted: Bool, state: inout StreamState) -> String {
         var result = ""
         var lineStart = text.startIndex
         func appendRedacted(_ line: Substring) {
@@ -320,7 +332,9 @@ extension Redactor {
             result += separator.0
             lineStart = separator.range.upperBound
         }
-        appendRedacted(text[lineStart...])
+        // A retained terminator ends its record; it does not create an additional empty
+        // physical record (which would advance counted private-key framing a second time).
+        if lineStart < text.endIndex || text.isEmpty { appendRedacted(text[lineStart...]) }
         return result
     }
 }
