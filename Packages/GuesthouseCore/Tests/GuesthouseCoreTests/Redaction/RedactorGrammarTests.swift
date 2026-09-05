@@ -5,6 +5,19 @@ import Testing
 /// Synthetic examples exercise recognition before a public sanitizer is introduced.
 @Suite struct RedactorGrammarTests {
     @Test(arguments: [
+        ("Enter the code: ABC123", "Enter the code:"),
+        ("Enter this code: abcdef", "Enter this code:"),
+        ("Paste a code= tiny", "Paste a code="),
+        ("Copy your code: \"synthetic value\"", "Copy your code:"),
+    ])
+    func delimitedImperativePromptsCaptureTheCompleteValue(input: String, prompt: String) throws {
+        let match = try #require(input.firstMatch(of: Redactor.patterns.codePrompt))
+        #expect(match.1 == prompt)
+        #expect(match.range.upperBound == input.endIndex)
+        #expect(prompt.contains(Redactor.patterns.codePromptOnly))
+    }
+
+    @Test(arguments: [
         ("payload.accessToken=grammarValue", "accessToken", "grammarValue"),
         (#"{"clientSecret":"grammar value"}"#, "clientSecret", #""grammar value""#),
         ("private_key: grammar value", "private_key", "grammar value"),
