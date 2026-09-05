@@ -158,6 +158,24 @@ import Testing
         #expect(RuntimeConnectionInterrupted(operationID: OperationID()).recoveryActions == [.inspectState, .cancel])
     }
 
+    @Test func aMutationInterruptedBeforeAcceptanceIsAnUnknownOutcome() {
+        let mutation = RuntimeConnectionInterrupted(mayHaveMutated: true)
+        #expect(mutation.operationID == nil, "it was never accepted, so it has no id")
+        #expect(mutation.recoveryActions == [.inspectState, .cancel], "the service may already have started it")
+        #expect(mutation.userMessage.contains("may or may not"))
+        #expect(RuntimeConnectionInterrupted().recoveryActions == [.retry])
+    }
+
+    @Test func onlyHostChangingRequestsCountAsMutations() {
+        let environment = EnvironmentID()
+        #expect(RuntimeRequest.startEnvironment(environment, StartOptions()).mutatesHost)
+        #expect(RuntimeRequest.stopEnvironment(environment, .force).mutatesHost)
+        #expect(RuntimeRequest.importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")).mutatesHost)
+        #expect(!RuntimeRequest.runtimeVersion.mutatesHost)
+        #expect(!RuntimeRequest.environmentStatus(environment).mutatesHost)
+        #expect(!RuntimeRequest.cancelOperation(OperationID()).mutatesHost)
+    }
+
     @Test func queriesReplyWithoutOperationIDs() async throws {
         let backend = FakeRuntimeBackend()
         let status = EnvironmentStatus(environmentID: environment, vm: .stopped, readiness: .ready)
