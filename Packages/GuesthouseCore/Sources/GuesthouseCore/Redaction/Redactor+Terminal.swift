@@ -53,13 +53,19 @@ extension Redactor {
             let literal = text[scanned..<escape.range.lowerBound]
             joined += literal
             joinedByteCount += literal.utf8.count
-            if let before = text[..<escape.range.lowerBound].last, isTokenCharacter(before),
-               let after = text[escape.range.upperBound...].first, isTokenCharacter(after) {
+            if boundaryOffsets.last != joinedByteCount {
                 boundaryOffsets.append(joinedByteCount)
             }
             scanned = escape.range.upperBound
         }
         joined += text[scanned...]
+        // Adjacent controls share one offset. Inspect surviving neighbors only after every
+        // escape is removed, so a neighboring control cannot hide a credential's boundary.
+        boundaryOffsets = boundaryOffsets.filter { offset in
+            let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
+            return joined[..<boundary].last.map(isTokenCharacter) == true
+                && joined[boundary...].first.map(isTokenCharacter) == true
+        }
         guard !boundaryOffsets.isEmpty else { return (joined, joined) }
 
         // A boundary inside a recognized token would let the first scan redact only a valid
