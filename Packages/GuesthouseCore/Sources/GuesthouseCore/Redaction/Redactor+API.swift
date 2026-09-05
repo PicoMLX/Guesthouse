@@ -258,11 +258,12 @@ extension Redactor {
         var redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
         if let start = Self.incompleteJWTStartAtLineEnd(in: redacted) {
             redacted.replaceSubrange(start..<redacted.endIndex, with: Self.marker("jwt"))
+        } else if incompleteJWT {
+            // Another rule may have replaced the JOSE header; its offsets are now ambiguous.
+            redacted = Self.marker("jwt")
         }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
-        // A different rule may have replaced the JOSE header with its own token marker.
-        // Preserve all original incomplete-token evidence, without releasing a partial payload.
-        return output(incompleteJWT ? Self.marker("jwt") : redacted)
+        return output(redacted)
     }
 
     /// Quoted and ordinary lines share the same footer-to-next-opener transition. Clearing
