@@ -3,6 +3,38 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalContextRepairTests {
+    @Test(arguments: ["\u{1B}[22D", "\u{9B}22D"])
+    func cursorOverwriteKeepsUntouchedTokenSuffixes(control: String) {
+        #expect(!Redactor().redact("ghx_abcdefghijklmnopqrst" + control + "p").contains("abcdefghijklmnopqrst"))
+    }
+
+    @Test(arguments: ["ghp\u{1B}[_", "ghp\u{1B}[31_", "sk\u{9B}-"])
+    func recoveredPrefixCharactersRetainNextRecordProtection(input: String) {
+        let output = Redactor().redact(lines: [input, "syntheticContinuation", "[status] Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticContinuation"))
+        #expect(output[2] == "[status] Finished")
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{9B}", "\u{1B}[31"])
+    func recoveredBackslashesCannotPrematurelyCloseActiveQuotes(control: String) {
+        let output = Redactor().redact(lines: ["password: \"first", control + "\\\"",
+            "syntheticContinuation\"", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticContinuation"))
+        #expect(output[3] == "Finished")
+    }
+
+    @Test func recoveredOpenersInsidePEMPayloadDoNotEscapeItsFooter() {
+        let output = Redactor().redact(lines: ["-----BEGIN PRIVATE KEY-----",
+            "pass\u{1B}[word: \" -----END PRIVATE KEY-----", "Finished"]).map(\.text)
+        #expect(output[2] == "Finished")
+    }
+
+    @Test func recoveredOpenersInsidePPKMetadataDoNotEscapeItsMAC() {
+        let output = Redactor().redact(lines: ["PuTTY-User-Key-File-3: ssh-rsa", "Comment: pass\u{1B}[word: \"",
+            "Private-Lines: 1", "AAAA", "Private-MAC: " + String(repeating: "a", count: 64), "Finished"]).map(\.text)
+        #expect(output[5] == "Finished")
+    }
+
     @Test func recoveredLabelsInsideAClosingQuoteDoNotOpenAnotherQuote() {
         let output = Redactor().redact(lines: ["password: \"begin", "pass\u{1B}[word:\"", "Finished"]).map(\.text)
         #expect(output[2] == "Finished")

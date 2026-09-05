@@ -42,7 +42,8 @@ extension Redactor {
                   predecessor == nil || predecessor?.isWhitespace == true
                     || predecessor.map({ "=:([{,".contains($0) }) == true else { continue }
             let hasPrefix = start > firstValueCharacter
-            let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: slashes, kind: kind,
+            let quoted = StreamState.QuotedValue(delimiter: delimiter,
+                escapeDepth: slashes.isMultiple(of: 2) ? 0 : slashes, kind: kind,
                 enclosingAuthorizationFold: hasPrefix && kind == "authorization",
                 enclosingSecretFold: hasPrefix && kind == "secret")
             guard let end = closingQuoteEnd(in: value[cursor...], for: quoted) else { return quoted }
