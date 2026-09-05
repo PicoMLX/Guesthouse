@@ -31,7 +31,8 @@ extension Redactor {
         // they removed leaks whichever the other would have found. The boundary rendering goes
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
-        let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString,
+                                               codesAlwaysRedacted: codesAlwaysRedacted || state.expectingDeviceCode)
         var recoveredContexts = StreamState()
         for reading in stripped.contexts {
             var scanned = StreamState()
