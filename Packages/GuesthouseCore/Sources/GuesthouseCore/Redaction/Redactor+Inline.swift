@@ -36,6 +36,9 @@ extension Redactor {
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text
+        // Retain original DSN coverage independently of replacements that can erase its
+        // transport suffix. Field parsing below still owns original continuation state.
+        let dsnText = redactingMySQLUserInfo(protected.text)
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -46,7 +49,8 @@ extension Redactor {
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
             state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || explicit
             let header = match.0[..<match.2.startIndex].lowercased()
-            let name = header.contains("set-cookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
+            let compactHeader = header.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }
+            let name = compactHeader.contains("setcookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
@@ -144,6 +148,11 @@ extension Redactor {
         if text.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
         }
+        if dsnText != protected.text {
+            // Overlapping interpretations have incompatible replaced offsets. Conceal the
+            // containing line instead of allowing either replacement to hide the other's evidence.
+            text = text == protected.text ? dsnText : marker("userinfo")
+        }
         text = protected.restoring(in: text, state: &state)
         if text.contains(p.mentionsCode) || codeExpected {
             text = applyDeviceCodePattern(to: text, preserveAlgorithms: !codeExpected)
@@ -160,5 +169,12 @@ extension Redactor {
             }
             return "\(match.1)\(marker("device-code"))"
         }
+    }
+
+    private static func redactingMySQLUserInfo(_ input: String) -> String {
+        guard let end = input.matches(of: patterns.mysqlTransport).last?.range.upperBound else { return input }
+        let assigned = input[..<end].replacing(patterns.mysqlAssignedUserInfo) { "\($0.1)\(marker("userinfo"))\($0.2)" }
+        let remaining = assigned.replacing(patterns.mysqlUserInfo) { "\($0.1)\(marker("userinfo"))\($0.2)" }
+        return String(remaining) + input[end...]
     }
 }
