@@ -19,7 +19,8 @@ extension Redactor {
         redact(line: line, state: &state, isPhysicalLine: true)
     }
 
-    private func redact(line: String, state: inout StreamState, isPhysicalLine: Bool) -> RedactedLine {
+    private func redact(line: String, state: inout StreamState, isPhysicalLine: Bool,
+                        codesAlwaysRedacted: Bool = false) -> RedactedLine {
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
@@ -33,16 +34,28 @@ extension Redactor {
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
         // Only the physical pass advances PPK framing. Alternate readings and suffix scans
         // must neither count a body twice nor change the contexts enclosing the private key.
-        if isPhysicalLine, Self.consumePPKLine(stripped.joined, phase: &state.ppkPhase) {
+        let ppkLine = state.ppkPhase == .inactive
+            ? stripped.contexts.first(where: { $0.contains(Self.patterns.ppkBegin) }) ?? stripped.joined : stripped.joined
+        if isPhysicalLine, Self.consumePPKLine(ppkLine, phase: &state.ppkPhase) {
             return RedactedLine(Self.marker("private-key"))
+        }
+        var recoveredContexts = StreamState()
+        for reading in stripped.contexts {
+            var scanned = StreamState()
+            _ = redact(line: reading, state: &scanned, isPhysicalLine: false)
+            Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
+        }
+        defer { Self.mergePendingContexts(from: recoveredContexts, into: &state) }
+        // A restored label can refer to an opaque value with no recognizable token shape.
+        // Conservatively hide this line while preserving both ordinary and recovered state.
+        func output(_ value: String) -> RedactedLine {
+            RedactedLine(stripped.contexts.isEmpty ? value : Self.marker("secret"))
         }
         var text = stripped.joined
         if let quoted = state.quotedValue {
             // This branch masks the whole physical line, but still has to advance the
             // independently active PEM context before returning for the enclosing quote.
-            if let label = state.pemLabel, text.contains("-----END \(label)-----") {
-                state.pemLabel = nil
-            }
+            _ = Self.redactPEMBlocks(text, label: &state.pemLabel)
             // Inspect the original normalized text: replacement markers no longer contain the
             // closing delimiter. A closing line is redacted whole, but its suffix can open a new
             // pending field. Blank/styling-only lines do not close the quoted value.
@@ -53,6 +66,12 @@ extension Redactor {
                 // it cannot consume a next-line value or terminate the enclosing fold.
                 var suffixState = StreamState()
                 _ = redact(line: tail, state: &suffixState, isPhysicalLine: false)
+                if stripped.spliced != stripped.joined,
+                   let alternateEnd = Self.closingQuoteEnd(in: stripped.spliced[...], for: quoted) {
+                    var alternateSuffix = StreamState()
+                    _ = redact(line: String(stripped.spliced[alternateEnd...]), state: &alternateSuffix, isPhysicalLine: false)
+                    Self.mergePendingContexts(from: alternateSuffix, into: &suffixState)
+                }
                 if quoted.enclosingAuthorizationFold { suffixState.quotedValue?.enclosingAuthorizationFold = true }
                 if quoted.enclosingSecretFold { suffixState.quotedValue?.enclosingSecretFold = true }
                 state.quotedValue = nil
@@ -65,7 +84,7 @@ extension Redactor {
                 state.expectingDeviceCode = explicitlyContinues && quoted.kind == "device-code"
                 Self.mergePendingContexts(from: suffixState, into: &state)
             }
-            return RedactedLine(text.isEmpty ? text : Self.marker(quoted.kind))
+            return output(text.isEmpty ? text : Self.marker(quoted.kind))
         }
         // What the boundary rendering armed, kept apart until this line's own pending contexts
         // have been consumed below and unioned in on the way out.
@@ -76,11 +95,13 @@ extension Redactor {
             // Joined text has no terminal controls, so this scan has no alternate-reading recursion.
             var joinedScan = StreamState()
             _ = redact(line: stripped.joined, state: &joinedScan, isPhysicalLine: false)
-            text = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
+            let boundaryText = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
+            text = (codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: boundaryText, preserveAlgorithms: true) : boundaryText)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
-        let tokenAtLineEnd = stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+        let tokenAtLineEnd = (stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+            ?? stripped.spliced.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd))
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
         if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
             state.wrappedTokenKind = nil
@@ -138,25 +159,10 @@ extension Redactor {
         if !blankLine {
             state.expectingSecretContinuation = secretContinuation
         }
-        if let label = state.pemLabel {
-            guard let footer = text.range(of: "-----END \(label)-----") else {
-                return RedactedLine(Self.marker("private-key"))
-            }
-            // The block ends here; whatever follows the footer is scanned like any other text,
-            // including another block that begins on the same line.
-            state.pemLabel = nil
-            text = Self.marker("private-key") + text[footer.upperBound...]
+        if let label = state.pemLabel, !text.contains("-----END \(label)-----") {
+            return output(Self.marker("private-key"))
         }
-        while let begin = text.firstMatch(of: Self.patterns.pemBegin) {
-            let label = String(begin.1)
-            if let end = text[begin.range.upperBound...].range(of: "-----END \(label)-----") {
-                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: Self.marker("private-key"))
-            } else {
-                state.pemLabel = label
-                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: Self.marker("private-key"))
-                break
-            }
-        }
+        text = Self.redactPEMBlocks(text, label: &state.pemLabel)
 
         // The continuation's own text is all credential, but a PEM block it opens keeps running
         // over the lines that follow, so the block is detected above before the marker returns.
@@ -175,7 +181,7 @@ extension Redactor {
             if wholeValueQuote == nil || authorizationFoldWasEstablished {
                 state.quotedValue?.enclosingAuthorizationFold = state.expectingAuthorizationValue
             }
-            return RedactedLine(Self.marker("authorization"))
+            return output(Self.marker("authorization"))
         }
         if secretContinuation {
             let wholeValueQuote = Self.unterminatedQuote(in: text[...], kind: "secret")
@@ -187,12 +193,12 @@ extension Redactor {
             if wholeValueQuote == nil || secretFoldWasEstablished {
                 state.quotedValue?.enclosingSecretFold = state.expectingSecretContinuation
             }
-            return RedactedLine(Self.marker("secret"))
+            return output(Self.marker("secret"))
         }
 
         // A blank line carries nothing and keeps the device-code context for the next one.
         if blankLine {
-            return RedactedLine(text)
+            return output(text)
         }
         let codeExpected = state.expectingDeviceCode
         state.expectingDeviceCode = false
@@ -220,11 +226,33 @@ extension Redactor {
             } else if valueContinues {
                 state.expectingDeviceCode = true
             }
-            return RedactedLine(Self.marker(kind))
+            return output(Self.marker(kind))
         }
         let redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
-        return RedactedLine(redacted)
+        return output(redacted)
+    }
+
+    /// Quoted and ordinary lines share the same footer-to-next-opener transition. Clearing
+    /// one block must not discard a second opener later on the same physical line.
+    private static func redactPEMBlocks(_ input: String, label: inout String?) -> String {
+        var text = input
+        if let active = label {
+            guard let footer = text.range(of: "-----END \(active)-----") else { return marker("private-key") }
+            label = nil
+            text = marker("private-key") + text[footer.upperBound...]
+        }
+        while let begin = text.firstMatch(of: patterns.pemBegin) {
+            let opened = String(begin.1)
+            if let end = text[begin.range.upperBound...].range(of: "-----END \(opened)-----") {
+                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: marker("private-key"))
+            } else {
+                label = opened
+                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: marker("private-key"))
+                break
+            }
+        }
+        return text
     }
 
     /// Redacts a single value that came from outside the app (a version string, a path, a
@@ -245,7 +273,8 @@ extension Redactor {
         var result = ""
         var lineStart = text.startIndex
         func appendRedacted(_ line: Substring) {
-            let redacted = redact(line: String(line), state: &state).text
+            let redacted = redact(line: String(line), state: &state, isPhysicalLine: true,
+                                  codesAlwaysRedacted: codesAlwaysRedacted).text
             result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted, preserveAlgorithms: true) : redacted
         }
         // `\r\n` is one `Character`, so splitting on the newline character would leave a CRLF

@@ -21,8 +21,8 @@ import Testing
 
     @Test(arguments: ["--password", "--token", "--api-key", "--github-token"])
     func terminalSplicesRemainOptionBoundaries(option: String) {
-        #expect(("filename\u{009F}" + option + " synthetic").contains(Redactor.patterns.secretOption))
-        #expect(("filename\u{009F}" + option).contains(Redactor.patterns.secretOptionOnly))
+        #expect(("filename\u{001F}" + option + " synthetic").contains(Redactor.patterns.secretOption))
+        #expect(("filename\u{001F}" + option).contains(Redactor.patterns.secretOptionOnly))
     }
 
     @Test(arguments: ["remote=//sample:synthetic@example.com", "remote = //sample:synthetic@example.com",

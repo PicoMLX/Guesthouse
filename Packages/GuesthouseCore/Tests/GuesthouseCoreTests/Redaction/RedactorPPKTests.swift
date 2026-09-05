@@ -137,11 +137,20 @@ import Testing
         #expect(redactor.redact(line: "after", state: &state).text == Self.marker)
     }
 
-    @Test func unsupportedVersionsAndHeaderlessFragmentsDoNotArmAStream() {
+    @Test func headerlessFragmentsDoNotArmAStream() {
         var phase = Redactor.StreamState.PPKPhase.inactive
-        for line in ["PuTTY-User-Key-File-1: ssh-rsa", "PuTTY-User-Key-File-20: ssh-rsa", "AAAA", "Private-Lines: 2"] {
+        for line in ["PuTTY key format supported", "AAAA", "Private-Lines: 2"] {
             #expect(!Redactor.consumePPKLine(line, phase: &phase))
         }
         #expect(phase == .inactive)
+    }
+
+    @Test(arguments: ["1", "20", "0"])
+    func unsupportedPrivateKeyVersionsRemainConservativelyClosed(version: String) {
+        var state = Redactor.StreamState()
+        for line in ["PuTTY-User-Key-File-\(version): ssh-rsa", "Private-Lines: 1", "syntheticKeyBody", "Private-Hash: " + String(repeating: "a", count: 40), "after"] {
+            #expect(Redactor().redact(line: line, state: &state).text == Self.marker)
+        }
+        #expect(state.ppkPhase == .invalid)
     }
 }
