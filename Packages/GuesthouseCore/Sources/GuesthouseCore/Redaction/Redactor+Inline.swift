@@ -14,9 +14,7 @@ extension Redactor {
 
     /// A completed quoted field owns only its value, so indented structured siblings cannot
     /// belong to its fold. Encoded diagnostic quotes follow the same closure rules as streams.
-    static func isClosedQuotedValue(_ value: Substring) -> Bool {
-        closedQuotedValueTail(value) != nil
-    }
+    static func isClosedQuotedValue(_ value: Substring) -> Bool { closedQuotedValueTail(value) != nil }
 
     static func closedQuotedValueTail(_ value: Substring) -> Substring? {
         let start = value.drop(while: { $0.isWhitespace })
