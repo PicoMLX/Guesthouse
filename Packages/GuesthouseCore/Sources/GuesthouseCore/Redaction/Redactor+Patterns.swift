@@ -40,8 +40,9 @@ extension Redactor {
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
-        /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        /// arms the next line even when a logger prefixes or quotes the field name. Cookie
+        /// headers share this state: opaque session identifiers convey authority (RFC 6265 §8.4).
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:set-)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -115,12 +116,13 @@ extension Redactor {
         let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
-        /// `clientSecret`. Those need a name in front of the label word, and the names come from
-        /// a closed list so that an ordinary word ending in `token` or `secret` is still not a
-        /// label. The key is quoted the way JSON, a Python dictionary, or a JSON string embedded
-        /// in a log line quotes it. An unquoted value runs to the end of the line rather than to
-        /// the first space, because a passphrase is words: `password: correct horse battery`. It
-        /// still has to start with one non-space character, so a bare label falls to the rule
+        /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names
+        /// require an uppercase secret suffix. An ordinary lowercase word ending in `token`
+        /// or `secret` is not a label. The key is quoted the way JSON, a Python dictionary, or
+        /// a JSON string embedded in a log line quotes it. An unquoted value runs to the end of
+        /// the line rather than the first space, because a passphrase is words:
+        /// `password: correct horse battery`. It still has to start with one non-space
+        /// character, so a bare label falls to the rule
         /// below and arms the next line instead of matching an empty value here.
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
@@ -129,7 +131,8 @@ extension Redactor {
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
-                #/(^|[^A-Za-z0-9])(?:\\?["'])?/#
+                // Preserve the consumed predecessor; only uppercase suffixes add a boundary.
+                #/(^|[^A-Za-z0-9]|(?-i:[A-Za-z0-9](?=[A-Z])))(?:\\?["'])?/#
                 Capture { secretName }
                 #/(?:\\?["'])?\s*[:=]\s*/#
             }
