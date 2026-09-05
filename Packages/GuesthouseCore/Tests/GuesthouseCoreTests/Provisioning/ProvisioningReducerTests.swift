@@ -161,6 +161,12 @@ import Testing
         var state = state(.macOSInstalled, .inProgress(op))
         let inspecting = try Reducer.reduce(state, .connectionInterrupted(op))
         let reconciled = try Reducer.reduce(inspecting.state, .operationReconciled(try token(of: inspecting.effects), op, .quiescent(.completed(checkpoint(.macOSInstalled)))))
+        #expect(reconciled.state.status == .persistingCheckpoint(checkpoint(.macOSInstalled), operation: nil, write: try token(of: reconciled.effects)))
+        for delayed in [op, other] {
+            #expect(throws: ProvisioningTransitionError.self) {
+                try Reducer.reduce(reconciled.state, .connectionInterrupted(delayed))
+            }
+        }
         state = try Reducer.reduce(reconciled.state, .checkpointPersisted(try token(of: reconciled.effects), checkpoint(.macOSInstalled))).state
         state = try Reducer.reduce(state, .startRequested(stage: .needsGuestSetup)).state
         state = try Reducer.reduce(state, .operationStarted(other, stage: .needsGuestSetup, request: #require(state.status.pendingEffect))).state
