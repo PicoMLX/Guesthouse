@@ -151,7 +151,7 @@ extension Redactor {
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
         let secretOption = Regex {
-            #/(^|\s)/#
+            #/(^|[\s\u{009F}])/#
             Capture {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
@@ -159,7 +159,7 @@ extension Redactor {
             #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|\s)--?[A-Za-z0-9_-]*/#
+            #/(^|[\s\u{009F}])--?[A-Za-z0-9_-]*/#
             secretName
             #/[ \t]*(?:=[ \t]*)?$/#
         }.ignoresCase()
