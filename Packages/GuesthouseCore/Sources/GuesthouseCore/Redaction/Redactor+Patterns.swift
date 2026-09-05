@@ -213,7 +213,8 @@ extension Redactor {
         let codePromptWithoutDelimiter = #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))\s+(?=[A-Za-z0-9._-]{4})(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])/#
         /// Present-tense declarations explicitly supply the code. Lowercase, short, and
         /// quoted values are opaque. Historical status prose keeps the conservative rule above.
-        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals))(?:\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)|\s*$)/#.ignoresCase()
+        /// Encoded quotes span the remaining line; the value scanner preserves their suffix.
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals))(?:\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\\+["'][^\r\n]*|[^\s,;]+)|\s*$)/#.ignoresCase()
     }
 
     static let patterns = Patterns()
