@@ -61,18 +61,42 @@ public struct PreflightResult: Codable, Hashable, Sendable {
 
 /// "What will be downloaded and where the VM will live" (MVP-PLAN.md §2, step 1).
 public struct StorageSummary: Codable, Hashable, Sendable {
-    public var storageRootPath: String
+    /// Display text only, never authority to access a storage location. Construction,
+    /// assignment, and decoding all enforce the same boundary as other report details.
+    public var storageRootPath: String {
+        didSet { storageRootPath = Self.sanitizedPath(storageRootPath) }
+    }
     public var runtimeDownloadEstimateBytes: UInt64
     public var restoreImageEstimateBytes: UInt64
     public var guestDiskBytes: UInt64
     public var firstSetupAllowanceBytes: UInt64
 
     public init(storageRootPath: String, runtimeDownloadEstimateBytes: UInt64, restoreImageEstimateBytes: UInt64, guestDiskBytes: UInt64, firstSetupAllowanceBytes: UInt64) {
-        self.storageRootPath = storageRootPath
+        self.storageRootPath = Self.sanitizedPath(storageRootPath)
         self.runtimeDownloadEstimateBytes = runtimeDownloadEstimateBytes
         self.restoreImageEstimateBytes = restoreImageEstimateBytes
         self.guestDiskBytes = guestDiskBytes
         self.firstSetupAllowanceBytes = firstSetupAllowanceBytes
+    }
+
+    private static func sanitizedPath(_ path: String) -> String {
+        GuesthouseError.sanitize(path, limit: 400)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case storageRootPath, runtimeDownloadEstimateBytes, restoreImageEstimateBytes
+        case guestDiskBytes, firstSetupAllowanceBytes
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            storageRootPath: try container.decode(String.self, forKey: .storageRootPath),
+            runtimeDownloadEstimateBytes: try container.decode(UInt64.self, forKey: .runtimeDownloadEstimateBytes),
+            restoreImageEstimateBytes: try container.decode(UInt64.self, forKey: .restoreImageEstimateBytes),
+            guestDiskBytes: try container.decode(UInt64.self, forKey: .guestDiskBytes),
+            firstSetupAllowanceBytes: try container.decode(UInt64.self, forKey: .firstSetupAllowanceBytes)
+        )
     }
 }
 
@@ -180,7 +204,7 @@ public enum PreflightCheck: Sendable {
         } ?? .warn(detail: PreflightResult.detail("Codex desktop is not installed. Guesthouse can prepare a development Mac without it, but you will need it to open a workspace in Codex."), recovery: [])))
 
         let storage = StorageSummary(
-            storageRootPath: GuesthouseError.sanitize(storageRoot.path, limit: 400),
+            storageRootPath: storageRoot.path,
             runtimeDownloadEstimateBytes: policy.runtimeDownloadEstimateBytes,
             restoreImageEstimateBytes: policy.restoreImageEstimateBytes,
             guestDiskBytes: preset.diskBytes,
