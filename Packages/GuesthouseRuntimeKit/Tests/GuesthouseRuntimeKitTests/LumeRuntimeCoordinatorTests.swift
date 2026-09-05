@@ -124,7 +124,16 @@ private actor TwoPartyBarrier {
             .appending(path: "LumeRuntimeCoordinatorAlias-\(UUID().uuidString)")
         let realParent = parent.appending(path: "real")
         let aliasParent = parent.appending(path: "alias")
-        try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.createDirectory(
+            at: realParent,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
         try FileManager.default.createSymbolicLink(at: aliasParent, withDestinationURL: realParent)
         let firstStorage = try RuntimeStorage(root: realParent.appending(path: "storage"))
         let secondStorage = try RuntimeStorage(root: aliasParent.appending(path: "storage"))
