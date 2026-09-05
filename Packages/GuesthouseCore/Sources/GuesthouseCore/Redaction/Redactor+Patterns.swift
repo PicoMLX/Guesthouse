@@ -43,7 +43,7 @@ extension Redactor {
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name. Cookie
         /// headers share this state: opaque session identifiers convey authority (RFC 6265 §8.4).
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:set-)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -115,6 +115,12 @@ extension Redactor {
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
         let urlUserInfo = #/((?::|^|[\s\u{001F}"'(<\[{]|(?:^|[\s\u{001F}"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        /// Go MySQL-style DSNs omit the URL scheme; passwords are not escaped and may include
+        /// spaces, slashes and at-signs. Bound the credential with its transport/database suffix,
+        /// not a first-word or URL-authority rule. The documented default transport may be empty.
+        /// https://github.com/go-sql-driver/mysql#dsn-data-source-name
+        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])[A-Za-z0-9_.-]*:[^\r\n]*(@(?:(?:tcp[46]?|unix)(?:\([^()\r\n]*\))?)?\/)/#
+        let mysqlTransport = #/@(?:(?:tcp[46]?|unix)(?:\([^()\r\n]*\))?)?\//#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names

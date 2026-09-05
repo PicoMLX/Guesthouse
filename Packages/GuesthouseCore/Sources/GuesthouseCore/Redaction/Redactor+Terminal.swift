@@ -52,6 +52,9 @@ extension Redactor {
         spans += text.matches(of: patterns.codePromptOnly).map(\.range)
         spans += text.matches(of: patterns.pemBegin).map(\.range)
         spans += text.matches(of: patterns.ppkBegin).map(\.range)
+        if let end = text.matches(of: patterns.mysqlTransport).last?.range.upperBound {
+            spans += text[..<end].matches(of: patterns.mysqlUserInfo).map(\.range)
+        }
         return spans.sorted { $0.lowerBound < $1.lowerBound }
     }
 
