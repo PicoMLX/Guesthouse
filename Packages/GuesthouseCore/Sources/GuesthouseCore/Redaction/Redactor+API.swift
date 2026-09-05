@@ -14,9 +14,10 @@ extension Redactor {
         redact(text, codesAlwaysRedacted: true)
     }
 
-    /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
+    /// Redacts a record from a stream. Retained or embedded CR/LF terminators are preserved,
+    /// with state advanced once per physical line. Pass the same `state` for the whole stream.
     public func redact(line: String, state: inout StreamState) -> RedactedLine {
-        redact(line: line, state: &state, isPhysicalLine: true)
+        RedactedLine(redact(line, codesAlwaysRedacted: false, state: &state))
     }
 
     private func redact(line: String, state: inout StreamState, isPhysicalLine: Bool,
@@ -305,6 +306,10 @@ extension Redactor {
 
     private func redact(_ text: String, codesAlwaysRedacted: Bool) -> String {
         var state = StreamState()
+        return redact(text, codesAlwaysRedacted: codesAlwaysRedacted, state: &state)
+    }
+
+    private func redact(_ text: String, codesAlwaysRedacted: Bool, state: inout StreamState) -> String {
         var result = ""
         var lineStart = text.startIndex
         func appendRedacted(_ line: Substring) {
@@ -320,7 +325,9 @@ extension Redactor {
             result += separator.0
             lineStart = separator.range.upperBound
         }
-        appendRedacted(text[lineStart...])
+        // A retained terminator ends its record; it does not create an additional empty
+        // physical record (which would advance counted private-key framing a second time).
+        if lineStart < text.endIndex || text.isEmpty { appendRedacted(text[lineStart...]) }
         return result
     }
 }
