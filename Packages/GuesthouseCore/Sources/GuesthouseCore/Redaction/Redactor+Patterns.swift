@@ -180,12 +180,13 @@ extension Redactor {
         /// word, such as `process exited with code 1`, is a diagnostic, not a prompt. The
         /// `user_code` and `device_code` fields keep their own rule above, which keeps the field
         /// name in the output, so they are deliberately absent here.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        /// Imperative prompts can also delimit their opaque value with a colon or equals.
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
         /// nothing else on it for the word to belong to.
-        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\?["'])?(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?|^\s*codes?)\s*[:=]\s*$/#.ignoresCase()
+        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|^\s*codes?)\s*[:=]\s*$/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D` and the `WDJB.MJHT` an RFC 8628 provider may print:
         /// runs of four to eight upper-case characters joined by single separators. Applied only
         /// on lines that mention a code (including the `user_code` and `device_code` field names
