@@ -2,8 +2,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
-    @Test(arguments: ["\u{1B}[", "\u{009B}"], [Character("m"), "e", "1"])
-    func aCSIIntroducerCannotConsumeAJOSEHeaderCharacter(introducer: String, character: Character) throws {
+    @Test(arguments: ["\u{1B}", "\u{1B}("], ["accessToken", "authorization", "user_code"])
+    func genericEscapeFinalsCannotHideCredentialLabels(escape: String, label: String) {
+        let input = label.prefix(1) + escape + label.dropFirst() + ": syntheticPassword"
+        let result = Redactor.renderings(of: String(input))
+        #expect(result.contexts.contains(label + ": syntheticPassword"))
+        #expect(result.joined == label.prefix(1) + label.dropFirst(2) + ": syntheticPassword")
+    }
+
+    @Test(arguments: ["ghp_syntheticFirst", "sk-synthetic", "Bearer syntheticFirst"],
+          ["password: syntheticSecond", "Authorization: syntheticSecond", "user_code: syntheticSecond", "password:"])
+    func adjacentLabelsKeepTheirBoundaryWithoutReleasingTheToken(prefix: String, field: String) {
+        let result = Redactor.renderings(of: prefix + "\u{0}" + field)
+        #expect(result.spliced == "[redacted:secret]" + Redactor.splicedBoundary + field)
+        #expect(result.joined == prefix + field)
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{009B}", "\u{1B}", "\u{1B}("], [Character("m"), "e", "1"])
+    func escapeIntroducersCannotConsumeAJOSEHeaderCharacter(introducer: String, character: Character) throws {
         let header = "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hYmMifQ"
         let position = try #require(header.firstIndex(of: character))
         let token = header[..<position] + introducer + header[position...] + ".syntheticPayload.syntheticSignature"
@@ -21,7 +37,8 @@ import Testing
         #expect(Redactor.renderings(of: result.spliced).spliced == result.spliced)
     }
 
-    @Test(arguments: [("\u{1B}]0;", "\u{07}"), ("\u{1B}P", "\u{1B}\\")])
+    @Test(arguments: [("\u{1B}]0;", "\u{07}"), ("\u{1B}P", "\u{1B}\\"),
+                      ("\u{1B}_", "\u{9C}"), ("\u{1B}^", "\u{9C}"), ("\u{1B}X", "\u{9C}")])
     func recoveryNeverResurrectsControlStringPayloads(opener: String, closer: String) {
         let token = "eyJhbGciOiJIUzI1NiJ9.payload.signature"
         let result = Redactor.renderings(of: "before" + opener + token + closer + "after")
