@@ -14,8 +14,8 @@ import Foundation
 /// - Every start request and effect carries a token, and only the callback naming the outstanding
 ///   token is accepted. Lost effects can be reissued without accepting their earlier replies.
 /// - A checkpoint counts only once the journal has it (§3: "Persist ... before updating the UI").
-enum ProvisioningReducer: Sendable {
-    static func reduce(
+public enum ProvisioningReducer: Sendable {
+    public static func reduce(
         _ state: ProvisioningState,
         _ event: ProvisioningEvent
     ) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
