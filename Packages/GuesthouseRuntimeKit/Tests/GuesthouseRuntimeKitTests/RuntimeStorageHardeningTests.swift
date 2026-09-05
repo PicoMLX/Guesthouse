@@ -89,7 +89,7 @@ import Testing
         #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
-    @Test(arguments: ["", "state", "state/lume-xdg", "staging"])
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
     func lumeEnvironmentRejectsPermissionDriftAfterInitialization(relativePath: String) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "lume-mode-drift"))
         let target = relativePath.isEmpty ? storage.root : storage.root.appending(path: relativePath)
@@ -105,7 +105,7 @@ import Testing
         #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
-    @Test(arguments: ["", "state", "state/lume-xdg", "staging"])
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
     func lumeEnvironmentRejectsACLDriftAfterInitialization(relativePath: String) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "lume-acl-drift"))
         let target = relativePath.isEmpty ? storage.root : storage.root.appending(path: relativePath)
@@ -117,7 +117,7 @@ import Testing
         #expect(try RuntimeStorage.hasAccessControlEntries(target))
     }
 
-    @Test(arguments: ["", "state", "state/lume-xdg", "staging"])
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
     func lumeEnvironmentRejectsReplacedPathsAfterInitialization(relativePath: String) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "lume-link-drift"))
         let target = relativePath.isEmpty ? storage.root : storage.root.appending(path: relativePath)
