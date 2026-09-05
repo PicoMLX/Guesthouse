@@ -15,7 +15,7 @@ extension Redactor {
         /// inside one of those is payload. Ending them at it would hand the rest of the payload
         /// to the secret rules as text, and the character in front of a token there defeats the
         /// token rules' word boundary.
-        let terminalEscape = #/(?:\u{1B}\]|\u{9D})[^\u{07}\u{18}\u{1A}\u{9C}\u{1B}]*(?:[\u{07}\u{18}\u{1A}\u{9C}]|\u{1B}\\)?|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{18}\u{1A}\u{9C}\u{1B}]*(?:[\u{18}\u{1A}\u{9C}]|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[ -\/]*[0-~]|[\u{00}-\u{08}\u{0B}\u{0C}\u{0E}-\u{1F}\u{7F}-\u{9F}]/#
+        let terminalEscape = #/(?:\u{1B}\]|\u{9D})[^\u{07}\u{18}\u{1A}\u{9C}\u{1B}]*(?:[\u{07}\u{18}\u{1A}\u{9C}]|\u{1B}\\)?|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{18}\u{1A}\u{9C}\u{1B}]*(?:[\u{18}\u{1A}\u{9C}]|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[\u{00}-\u{09}\u{0B}\u{0C}\u{0E}-\u{17}\u{19}\u{1C}-\u{1F}\u{7F}0-?]*[\u{00}-\u{09}\u{0B}\u{0C}\u{0E}-\u{17}\u{19}\u{1C}-\u{1F}\u{7F} -\/]*(?:[\u{18}\u{1A}@-~]|(?=\u{1B}))|\u{1B}[ -\/]*[0-~]|[\u{00}-\u{08}\u{0B}\u{0C}\u{0E}-\u{1F}\u{7F}-\u{9F}]/#
         /// A control string introducer whose payload reaches the end of the line unterminated.
         /// The first capture is present only for an OSC, whose payload a later BEL also ends.
         let unterminatedControlString = #/(?:(\u{1B}\]|\u{9D})[^\u{07}\u{18}\u{1A}\u{9C}\u{1B}]*|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{18}\u{1A}\u{9C}\u{1B}]*)$/#

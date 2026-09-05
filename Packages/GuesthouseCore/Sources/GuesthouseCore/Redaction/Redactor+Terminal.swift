@@ -81,10 +81,16 @@ extension Redactor {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
                 boundaries.insert(offsets.count - 1)
                 let prefix = escape.0.hasPrefix("\u{1B}[") ? 2 : (escape.0.hasPrefix("\u{009B}") ? 1 : 0)
+                // CAN/SUB or a fresh ESC abort the old CSI; its parameters are not evidence.
+                if prefix > 0, let final = escape.0.unicodeScalars.last, !(0x40...0x7E).contains(final.value) {
+                    cursor = escape.range.upperBound
+                    continue
+                }
                 // Generic ESC commands can consume a label character too. Never interpret
                 // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
                 let generic = escape.0.wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
-                let body = generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix)
+                let body = String(generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix))
+                    .replacing(#/[\u{00}-\u{1F}\u{7F}]/#, with: "")
                 if prefix > 0 || generic, !body.isEmpty, retainParameters || body.count == 1 {
                     let start = offsets.count - 1
                     alternate += body
