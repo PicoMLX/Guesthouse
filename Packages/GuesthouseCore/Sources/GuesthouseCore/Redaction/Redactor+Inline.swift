@@ -12,17 +12,6 @@ extension Redactor {
         mergePendingContexts(from: scanned, into: &state)
     }
 
-    static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
-        state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
-        state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
-        state.expectingSecretValue = state.expectingSecretValue || scanned.expectingSecretValue
-        state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
-        state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
-        state.quotedValue = state.quotedValue ?? scanned.quotedValue
-        state.pemLabel = state.pemLabel ?? scanned.pemLabel
-        state.wrappedTokenKind = state.wrappedTokenKind ?? scanned.wrappedTokenKind
-    }
-
     /// A completed quoted field owns only its value, so indented structured siblings cannot
     /// belong to its fold. Encoded diagnostic quotes follow the same closure rules as streams.
     static func isClosedQuotedValue(_ value: Substring) -> Bool {
