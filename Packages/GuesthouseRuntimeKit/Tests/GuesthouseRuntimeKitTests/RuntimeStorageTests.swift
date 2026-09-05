@@ -38,9 +38,9 @@ import Testing
 
     @Test func symlinkedSubdirectoryIsRefused() throws {
         let outside = base.appending(path: "outside")
-        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let root = base.appending(path: "root")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createSymbolicLink(at: root.appending(path: "vms"), withDestinationURL: outside)
         #expect(throws: RuntimeStorageError.insecureDirectory(path: root.appending(path: "vms").path, reason: "symbolic link")) {
             try RuntimeStorage(root: root)
@@ -49,7 +49,7 @@ import Testing
 
     @Test func danglingSymlinkedSubdirectoryIsRefusedAndPreserved() throws {
         let root = base.appending(path: "dangling-subdirectory-root")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let link = root.appending(path: "vms")
         let missingTarget = base.appending(path: "unpublished-vms")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: missingTarget)
@@ -65,7 +65,7 @@ import Testing
 
     @Test func symlinkedRootIsRefused() throws {
         let real = base.appending(path: "real")
-        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let link = base.appending(path: "link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
         #expect(throws: RuntimeStorageError.self) { try RuntimeStorage(root: link) }
@@ -74,7 +74,7 @@ import Testing
     @Test func danglingSymlinkedRootIsRefusedAndPreserved() throws {
         let missingTarget = base.appending(path: "missing-root")
         let link = base.appending(path: "dangling-root")
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: missingTarget)
         #expect(!FileManager.default.fileExists(atPath: link.path), "the regression requires a dangling link")
 
@@ -87,7 +87,7 @@ import Testing
     }
 
     @Test func rootBelowADanglingSymlinkIsRefusedAndPreserved() throws {
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let unpublishedWork = base.appending(path: "unpublished-work.txt")
         try Data("keep me".utf8).write(to: unpublishedWork)
         let missingTarget = base.appending(path: "missing-parent")
@@ -106,7 +106,7 @@ import Testing
 
     @Test func rootBelowAValidDirectorySymlinkIsAllowed() throws {
         let realParent = base.appending(path: "real-parent")
-        try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let alias = base.appending(path: "parent-alias")
         try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: realParent)
 
@@ -120,7 +120,7 @@ import Testing
 
     @Test func aFileWhereADirectoryBelongsIsRefused() throws {
         let root = base.appending(path: "root2")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try Data("x".utf8).write(to: root.appending(path: "state"))
         #expect(throws: RuntimeStorageError.insecureDirectory(path: root.appending(path: "state").path, reason: "not a directory")) {
             try RuntimeStorage(root: root)

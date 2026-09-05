@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 
 /// A file the generator wants written, relative to the workspace root.
@@ -14,6 +13,21 @@ public struct GeneratedFile: Hashable, Sendable {
     public init(relativePath: String, text: String) {
         self.init(relativePath: relativePath, contents: Data(text.utf8))
     }
+}
+
+/// How the app repository builds today, as the caller found it. MVP-PLAN.md §6 supports "a
+/// committed `.xcodeproj` and shared scheme" for the first release and requires complex
+/// existing workspace composition to be detected rather than silently rewritten, so the caller
+/// that can read the repository states what it saw instead of the generator assuming the
+/// simple shape.
+public enum AppProjectLayout: Hashable, Sendable {
+    /// The app builds from the committed `.xcodeproj` alone, so the wrapper workspace can
+    /// contain that project and stand in for it. The `project.xcworkspace` that lives inside
+    /// every `.xcodeproj` is part of the project, not a composition, and does not count.
+    case project
+    /// The app repository carries its own `.xcworkspace`, which may add further projects,
+    /// workspace-level schemes, or settings that the wrapper would not reproduce.
+    case existingWorkspace(name: String)
 }
 
 /// Produces the wrapper `.xcworkspace`, the seeded resolution file, the agent guide, and the
@@ -55,14 +69,21 @@ public enum GeneratedFileError: Error, Hashable, Sendable, LocalizedError {
 public enum IntegrationWorkspaceGenerator {
     public static let resolvedPackagesRelativePath = "\(WorkspaceLayout.integrationWorkspaceName)/xcshareddata/swiftpm/Package.resolved"
 
-    /// - Parameter appResolvedPackages: the app repository's committed `Package.resolved`, read by
-    ///   the caller, or `nil` when the project has none. It is copied unchanged so the wrapper
-    ///   resolves from the same pins the app does.
-    public static func generate(_ manifest: WorkspaceManifest, appResolvedPackages: Data? = nil) throws(WorkspaceValidationError) -> [GeneratedFile] {
+    /// - Parameters:
+    ///   - appProjectLayout: what the caller found in the app repository. There is no default:
+    ///     an app that builds through its own workspace is refused here rather than given a
+    ///     wrapper that silently leaves that composition out (MVP-PLAN.md §6).
+    ///   - appResolvedPackages: the app repository's committed `Package.resolved`, read by
+    ///     the caller, or `nil` when the project has none. It is copied unchanged so the wrapper
+    ///     resolves from the same pins the app does.
+    public static func generate(_ manifest: WorkspaceManifest, appProjectLayout: AppProjectLayout, appResolvedPackages: Data? = nil) throws(WorkspaceValidationError) -> [GeneratedFile] {
         // Generation happens while the workspace is being set up, before every clone has
         // recorded its base commit, so the structural rules apply and the base-SHA rule waits
         // for the supported-workspace check.
         try manifest.validate(stage: .setup)
+        if case .existingWorkspace(let name) = appProjectLayout {
+            throw .unsupportedAppWorkspace(name)
+        }
         let layout = WorkspaceLayout(manifest)
         var files: [GeneratedFile] = []
         files.append(GeneratedFile(relativePath: "\(WorkspaceLayout.integrationWorkspaceName)/contents.xcworkspacedata", text: workspaceData(manifest, layout: layout)))
@@ -70,18 +91,17 @@ public enum IntegrationWorkspaceGenerator {
             files.append(GeneratedFile(relativePath: resolvedPackagesRelativePath, contents: appResolvedPackages))
         }
         files.append(GeneratedFile(relativePath: WorkspaceLayout.agentsGuideFileName, text: agentsGuide(manifest, layout: layout)))
-        files.append(GeneratedFile(relativePath: WorkspaceLayout.manifestFileName, contents: encodedManifest(manifest)))
+        let encoded = encodedManifest(manifest)
+        // `decodeManifest` refuses a `workspace.json` beyond this size, so writing one would
+        // create a workspace that cannot be opened again. The selection is still the user's to
+        // change here, which it would not be once the directory existed.
+        guard encoded.count <= WorkspaceManifest.maximumEncodedSize else {
+            throw .manifestTooLarge(bytes: encoded.count)
+        }
+        files.append(GeneratedFile(relativePath: WorkspaceLayout.manifestFileName, contents: encoded))
         return files
     }
 
-    /// Writes the generated files under `root`, creating directories as needed, and removes
-    /// the generator-owned optional resolution file when this generation did not produce one,
-    /// so a stale lockfile cannot outlive the app's own.
-    ///
-    /// Every path is normalized first: it must be relative, contain no `.` or `..` components,
-    /// and its first component must not be `repos` in any letter case (the usual macOS file
-    /// system is case-insensitive); the resolved location must lie inside `root`. The
-    /// repositories belong to Git, not to the generator.
     // MARK: - contents.xcworkspacedata
 
     static func workspaceData(_ manifest: WorkspaceManifest, layout: WorkspaceLayout) -> String {
