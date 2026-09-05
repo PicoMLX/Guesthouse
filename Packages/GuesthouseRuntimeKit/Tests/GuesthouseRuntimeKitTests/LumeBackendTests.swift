@@ -61,6 +61,7 @@ private actor TimedOutLumeRunner: ProcessRunning {
         }
         run.retainWhileRunning()
         try process.run()
+        run.recordChildIdentity()
         run.timeOut(gracePeriod: .milliseconds(10))
         return run
     }
