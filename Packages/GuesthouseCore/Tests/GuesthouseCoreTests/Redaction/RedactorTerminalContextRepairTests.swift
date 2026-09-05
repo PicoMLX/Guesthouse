@@ -3,6 +3,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalContextRepairTests {
+    @Test func recoveredLabelsInsideAClosingQuoteDoNotOpenAnotherQuote() {
+        let output = Redactor().redact(lines: ["password: \"begin", "pass\u{1B}[word:\"", "Finished"]).map(\.text)
+        #expect(output[2] == "Finished")
+    }
+
+    @Test func unrelatedCursorEditingDoesNotCreateCredentialEvidence() {
+        let output = Redactor().redact("run --password syntheticValue --verbose buildX\u{8} completed")
+        #expect(output == "run --password [redacted:secret] --verbose buildX completed")
+    }
+
+    @Test(arguments: [("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"), ("password: \"begin", "end\"")])
+    func enclosingContextsCanCloseBeforeAPrivateKeyOpens(context: (String, String)) {
+        let output = Redactor().redact(lines: [context.0, context.1 + " PuTTY-User-Key-File-3: ssh-rsa",
+            "Private-Lines: 1", "c3ludGhldGlj", "Private-MAC: " + String(repeating: "a", count: 64), "Finished"]).map(\.text)
+        #expect(output[1..<5].allSatisfy { $0 == "[redacted:private-key]" })
+        #expect(output[5] == "Finished")
+    }
+
     @Test(arguments: ["\u{8}", "\u{1B}[D", "\u{1B}[1D", "\u{1B}[0D", "\u{9B}1D"])
     func cursorCorrectionsCannotHideCredentialLabels(control: String) {
         #expect(!Redactor().redact("passwordX" + control + ": syntheticPassword").contains("syntheticPassword"))
