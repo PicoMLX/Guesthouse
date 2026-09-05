@@ -8,7 +8,7 @@
       "codexDesktopVersion": "TBD",
       "codexDesktopBuild": "TBD",
       "codexDesktopPath": "TBD",
-      "runtimeProtocolVersion": 1,
+      "runtimeProtocolVersion": 2,
       "tartVersion": "2.36.0",
       "guestMacOSBuild": "25F84",
       "xcodeBuild": "17F113",

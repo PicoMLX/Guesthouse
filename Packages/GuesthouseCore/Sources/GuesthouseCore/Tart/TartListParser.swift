@@ -45,9 +45,29 @@ public enum TartParseError: Error, Hashable, Sendable {
     case unknownValue(field: String, value: String)
     case notAnIPAddress
     case notAVersion
+
+    /// The failure as the user sees it. Output these parsers cannot read means the installed
+    /// Tart no longer prints what the pinned adapters were written against, so every parse
+    /// failure is one incompatibility with a repair route (AGENTS.md: an error carries a
+    /// message and at least one recovery action). The single conversion is here so no caller
+    /// has to invent its own mapping.
+    public var guesthouseError: GuesthouseError {
+        .runtimeIncompatible(found: SanitizedText(unreadableOutput), required: SanitizedText(TartPin.releaseTag))
+    }
+
+    /// Names what did not fit, in the place the message reserves for the installed version.
+    private var unreadableOutput: String {
+        switch self {
+        case .notJSON: "unreadable list output"
+        case .unexpectedShape(let field): "list output without \(field)"
+        case .unknownValue(let field, let value): "list output with \(field) \(value)"
+        case .notAnIPAddress: "unreadable address output"
+        case .notAVersion: "unreadable version output"
+        }
+    }
 }
 
-public enum TartListParser {
+public enum TartListParser: Sendable {
     /// Tart's field names, decoded strictly: a JSON boolean never becomes a number and a
     /// number never becomes a boolean, so a changed schema fails instead of producing
     /// plausible but wrong inventory.
@@ -88,6 +108,10 @@ public enum TartListParser {
             guard let state = TartVMInfo.State(rawValue: entry.State) else { throw .unknownValue(field: "State", value: GuesthouseError.sanitize(entry.State)) }
             guard entry.Disk >= 0 else { throw .unknownValue(field: "Disk", value: String(entry.Disk)) }
             guard entry.Size >= 0 else { throw .unknownValue(field: "Size", value: String(entry.Size)) }
+            // Tart sets `Running` from the same state it prints. Output where the two disagree
+            // would let two callers reading different properties reach opposite lifecycle
+            // decisions, so it is a changed schema rather than an entry.
+            guard entry.Running == (state == .running) else { throw .unknownValue(field: "Running", value: String(entry.Running)) }
             // The key is part of the pinned shape and must be present; only its value may fail
             // to parse, which is reported as `nil`.
             let accessed = try? Date(entry.Accessed, strategy: .iso8601)
