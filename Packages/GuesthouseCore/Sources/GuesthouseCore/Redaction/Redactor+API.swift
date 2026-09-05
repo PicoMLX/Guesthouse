@@ -280,7 +280,7 @@ extension Redactor {
         var state = StreamState()
         return untrustedLines.map { line in
             let sanitized = redact(line: line, state: &state, isPhysicalLine: true, codesAlwaysRedacted: true).text
-            return RedactedLine(Self.applyDeviceCodePattern(to: sanitized, preserveAlgorithms: true))
+            return RedactedLine(Self.applyDeviceCodePattern(to: sanitized))
         }
     }
 
