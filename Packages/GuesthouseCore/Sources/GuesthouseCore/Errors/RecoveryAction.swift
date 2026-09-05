@@ -1,0 +1,42 @@
+/// What the user can do about an error. Every `GuesthouseError` offers at least one.
+///
+/// The GUI renders these as buttons (MVP-PLAN.md §10, Phase 1: "Never show 'something went
+/// wrong' as the only recovery information").
+///
+/// Stopping an environment is deliberately not a recovery action: the dashboard's stop
+/// control stays available in every state, including every compatibility state
+/// (MVP-PLAN.md §5), and an error's buttons are shown alongside it, never instead of it.
+public enum RecoveryAction: Codable, Hashable, Sendable {
+    /// Run the same operation again. Only offered when the outcome of the last attempt is known.
+    case retry
+    /// Re-read the actual VM, guest, and journal state before deciding anything.
+    case inspectState
+    /// Start a targeted repair flow (MVP-PLAN.md §9).
+    case repair(RepairKind)
+    /// Open the guest console for a step that needs the user at the guest's screen.
+    case openConsole
+    /// Export unpublished work before a disruptive action.
+    case exportWork
+    /// Open the relevant settings screen (host power, storage location, accounts).
+    case openSettings
+    /// Run the provider sign-in flow again.
+    case signInAgain
+    /// Free disk space, then continue.
+    case freeDiskSpace
+    /// Delete a development Mac the user no longer needs. Always offered after `exportWork`,
+    /// never as the first choice (MVP-PLAN.md §2: deletion must not look like a routine fix).
+    case deleteEnvironment
+    /// Reinstall Guesthouse itself, for example when the app and its embedded service disagree.
+    case reinstallApp
+    /// Abandon the operation.
+    case cancel
+}
+
+/// The targeted repairs MVP-PLAN.md §9 promises instead of "delete the VM and start again".
+public enum RepairKind: String, Codable, Hashable, Sendable, CaseIterable {
+    case sshPairing
+    case credentials
+    case runtime
+    case tools
+    case xcodeComponents
+}
