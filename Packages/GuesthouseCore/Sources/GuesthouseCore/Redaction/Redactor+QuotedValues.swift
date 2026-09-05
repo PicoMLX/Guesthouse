@@ -18,6 +18,16 @@ extension Redactor {
         return result
     }
 
+    /// A completely decoded string has its own argument boundary. Only remove a wrapper
+    /// whose first matching closing quote is the end, never a quote plus sibling suffix.
+    static func unwrappingCompleteDecodedString(_ value: String) -> String {
+        guard let quote = value.first, quote == "\"" || quote == "'",
+              closingQuoteEnd(in: value.dropFirst(),
+                  for: .init(delimiter: quote, escapeDepth: 0, kind: "secret")) == value.endIndex
+        else { return value }
+        return String(value.dropFirst().dropLast())
+    }
+
     struct ProtectedQuotedValues {
         var text: String
         var values: [String: String] = [:]
@@ -52,8 +62,20 @@ extension Redactor {
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
             // Closing delimiters from outer encodings can precede the structural boundary.
             // An arbitrary suffix (including another quoted word) is still ambiguous.
-            let structuralTail = tail.drop(while: { $0.isWhitespace || "\\\"'".contains($0) })
+            let structuralTail = tail.drop(while: { "\"'".contains($0) }).drop(while: { $0.isWhitespace })
             guard structuralTail.isEmpty || structuralTail.first.map({ ",;]}".contains($0) }) == true else { continue }
+            let content = input[opener.range.upperBound..<end].dropLast(opener.1.count + 1)
+            let previous = input[..<opener.range.lowerBound].last(where: { !$0.isWhitespace })
+            // Preserve argv adjacency in the parent scan: hiding an option name behind a
+            // placeholder would detach the following value. Canonicalize only known names
+            // at an array-element boundary, not arbitrary diagnostic strings.
+            if previous == "[" || previous == ",",
+               tail.first == ",", !content.contains("="),
+               content.wholeMatch(of: patterns.secretOptionOnly) != nil {
+                result.text += input[copied..<opener.range.lowerBound] + "\"" + content + "\""
+                copied = end
+                continue
+            }
             while reserved.contains(String(identifier)) { identifier += 1 }
             let key = String(identifier)
             identifier += 1

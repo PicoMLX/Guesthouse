@@ -21,17 +21,26 @@ extension Redactor {
             guard encodingDepth < 8 else { return (marker("secret"), StreamState()) }
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
-            let normalized = removingQuotedEncodingLayer(value)
+            let normalized = unwrappingCompleteDecodedString(removingQuotedEncodingLayer(value))
             var nestedState = StreamState()
             let nested = applyPatterns(to: normalized, codeExpected: false, state: &nestedState,
                                        encodingDepth: encodingDepth + 1)
-            mergePendingContexts(from: nestedState, into: &quotedState)
+            // The encoded value has already closed. Its decoded, possibly truncated contents
+            // cannot acquire a value from a later unrelated physical record.
             // Do not attempt to splice decoded offsets back into multiply escaped text.
             // Hide the containing value if the decoded reading adds credential evidence.
             if nested != normalized { return (marker("secret"), quotedState) }
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text
+        // Scan DSNs before introducing colon-bearing redaction markers. Scheme URLs use
+        // their dedicated authority rule below, not the schemeless DSN grammar.
+        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
+            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in
+                return "\(match.1)\(marker("userinfo"))\(match.2)"
+            }
+            text = String(prefix) + text[end...]
+        }
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -67,11 +76,6 @@ extension Redactor {
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
-        // Do not repeatedly search credential-field suffixes that cannot contain a DSN.
-        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
-            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
-            text = String(prefix) + text[end...]
-        }
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
