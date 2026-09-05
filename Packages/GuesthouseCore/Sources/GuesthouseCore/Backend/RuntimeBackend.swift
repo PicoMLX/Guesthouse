@@ -13,6 +13,21 @@ public protocol RuntimeBackend: Sendable {
     /// operation was accepted means its outcome is unknown; the caller must inspect actual
     /// state before retrying.
     func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error>
+
+    /// Connection losses noticed while nothing is in flight (the service crashed or was
+    /// unloaded). In-flight streams report their own loss by throwing; this stream is how an
+    /// idle app learns that its cached state is stale. It never ends on its own.
+    func connectionInterruptions() -> AsyncStream<RuntimeConnectionInterrupted>
+}
+
+public extension RuntimeBackend {
+    /// A backend that cannot observe idle losses yields nothing.
+    func connectionInterruptions() -> AsyncStream<RuntimeConnectionInterrupted> {
+        AsyncStream(unfolding: {
+            while !Task.isCancelled { try? await Task.sleep(for: .seconds(3600)) }
+            return nil
+        })
+    }
 }
 
 /// Thrown by a backend when the connection dropped before the request reported a result.
