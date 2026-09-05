@@ -25,6 +25,10 @@ public struct Redactor: Sendable {
             let escapeDepth: Int
             let kind: String
             var singleQuotesAreLiteral = false
+            /// A quoted parameter can end without ending the credential fold containing it.
+            /// Whole quoted values leave these false so structured siblings remain visible.
+            var enclosingAuthorizationFold = false
+            var enclosingSecretFold = false
         }
 
         /// The label of the PEM block being removed, until its matching footer.
@@ -34,8 +38,12 @@ public struct Redactor: Sendable {
         /// That label carried no value of its own, so the next line is the value whether it is
         /// indented or not. A header that did carry one folds only over indented lines.
         var authorizationValueIsOnTheNextLine = false
+        /// Unlike an empty header, an explicit backslash owns even a header-shaped next line.
+        var authorizationValueExplicitlyContinues = false
         /// The previous line was a bare `password:`-style label; the value follows on this line.
         var expectingSecretValue = false
+        /// An already-started secret explicitly continues, rather than awaiting its first value.
+        var secretValueExplicitlyContinues = false
         /// The previous line labeled a secret and gave a value that may fold onto this one.
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
@@ -57,10 +65,14 @@ public struct Redactor: Sendable {
     static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
         state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
         state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
+        state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || scanned.authorizationValueExplicitlyContinues
         state.expectingSecretValue = state.expectingSecretValue || scanned.expectingSecretValue
+        state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || scanned.secretValueExplicitlyContinues
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
+        if scanned.quotedValue?.enclosingAuthorizationFold == true { state.quotedValue?.enclosingAuthorizationFold = true }
+        if scanned.quotedValue?.enclosingSecretFold == true { state.quotedValue?.enclosingSecretFold = true }
         state.pemLabel = state.pemLabel ?? scanned.pemLabel
         state.wrappedTokenKind = state.wrappedTokenKind ?? scanned.wrappedTokenKind
     }
