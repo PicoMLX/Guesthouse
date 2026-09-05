@@ -1,9 +1,8 @@
-/// Identity of one effect the reducer asked the coordinator to run.
+/// Identity of one start request or effect reserved by the reducer.
 ///
-/// Every effect carries a token and every callback has to echo it, so a reply from an effect
-/// the reducer has since replaced — a re-issued inspection, a second checkpoint write, a
-/// cleanup whose connection dropped — names a token that is no longer outstanding and is
-/// rejected instead of being taken for the answer to the current one (MVP-PLAN.md §3).
+/// Every reservation carries a token and every callback has to echo it. A reply to an earlier
+/// inspection, checkpoint write, cleanup, or start request names a token that is no longer
+/// outstanding and is rejected instead of settling the current one (MVP-PLAN.md §3).
 public struct EffectToken: Hashable, Sendable, CustomStringConvertible {
     public let value: UInt64
 
@@ -32,8 +31,8 @@ public struct ProvisioningState: Hashable, Sendable {
     /// The checkpoint being worked toward, or the last one completed.
     public private(set) var stage: ProvisioningStage
     public private(set) var status: StageStatus
-    /// How many effects this state has issued. The next token is this plus one, and the count
-    /// is persisted, so a token is never reused after a relaunch either.
+    /// How many start requests and effects this state has issued. The next token is this plus
+    /// one, and the count is persisted, so a token is never reused after a relaunch either.
     public private(set) var issuedEffects: UInt64
 
     /// A status that carries a checkpoint must carry one for `stage`; constructing anything
@@ -218,7 +217,11 @@ public enum StageStatus: Codable, Hashable, Sendable {
     /// durable partial work the reservation was made from, when there was any: the artifact
     /// outlives a refused request, and forgetting it here would leave the next start with no
     /// staging path to continue from (MVP-PLAN.md §9).
-    case startRequested(resuming: ResumeEvidence?)
+    /// `request` is minted by the reducer and must be captured before asking the runtime;
+    /// every acceptance, rejection, and interruption echoes that same token. It is optional
+    /// only so older records without a token decode without losing their resume evidence.
+    /// Such a restored reservation accepts no callbacks and must be inspected before starting.
+    case startRequested(request: EffectToken?, resuming: ResumeEvidence?)
     /// An operation is running.
     case inProgress(OperationID)
     /// The checkpoint was reached but is not yet durable. Nothing may advance until it is.
@@ -254,10 +257,12 @@ public enum StageStatus: Codable, Hashable, Sendable {
     /// the stage can start again; `cleanup` identifies the cleanup that is running.
     case cleanupRequired(GuesthouseError, cleanup: EffectToken)
 
-    /// The effect this status is waiting on, when it is waiting on one. Only a callback naming
+    /// The start request or effect this status is waiting on. Only a callback naming
     /// this token can move the status along.
     public var pendingEffect: EffectToken? {
         switch self {
+        case .startRequested(let token, _):
+            token
         case .persistingCheckpoint(_, _, let token), .unknownOutcome(_, let token), .awaitingInspection(let token), .cleanupRequired(_, let token):
             token
         default:

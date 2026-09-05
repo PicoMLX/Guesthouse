@@ -4,14 +4,15 @@ import Foundation
 public enum ProvisioningEvent: Hashable, Sendable {
     /// The coordinator is about to ask the runtime to start `stage`. Reserves the stage before
     /// the asynchronous request so a reentrant start is rejected rather than double-run.
+    /// Capture the returned reservation's token before the request, and echo it in every reply.
     case startRequested(stage: ProvisioningStage)
     /// The runtime refused the request before doing anything; nothing durable happened.
-    case startRequestRejected(GuesthouseError)
+    case startRequestRejected(GuesthouseError, request: EffectToken)
     /// The connection dropped while the request was in flight; the runtime may or may not
     /// have accepted it, so actual state must be inspected.
-    case startRequestInterrupted
+    case startRequestInterrupted(request: EffectToken)
     /// The runtime accepted an operation for `stage`.
-    case operationStarted(OperationID, stage: ProvisioningStage)
+    case operationStarted(OperationID, stage: ProvisioningStage, request: EffectToken)
     /// The operation reached its checkpoint. It is not durable until `checkpointPersisted`.
     case checkpointReached(OperationID, Checkpoint)
     /// The journal write for the checkpoint succeeded.
@@ -124,6 +125,9 @@ public enum ProvisioningTransitionError: Error, Hashable, Sendable {
     case checkpointMismatch(expected: Checkpoint, actual: Checkpoint)
     /// The callback answers an effect that is no longer outstanding.
     case staleEffect(expected: EffectToken, actual: EffectToken)
+    /// The reply names an older start request while a different request is still live.
+    /// Waiting for the live request, rather than inspecting, keeps its reservation intact.
+    case staleStartRequest(expected: EffectToken, actual: EffectToken)
     /// Inspection was asked for while a start request is still in flight. Told apart from a
     /// plain illegal transition because `inspectState` is the one recovery that cannot work
     /// here: offering it would send the same refused event again.
@@ -141,7 +145,7 @@ extension ProvisioningTransitionError: LocalizedError {
             "Guesthouse received a status update that does not match what it was doing. The environment's state is uncertain until it is checked."
         case .stageMismatch:
             "Guesthouse tried to run a setup step out of order. The environment's state is uncertain until it is checked."
-        case .inspectionWhileStartRequestLive:
+        case .inspectionWhileStartRequestLive, .staleStartRequest:
             "Guesthouse is still waiting for its runtime to answer a request to start this setup step, so it cannot check the environment yet."
         case .alreadyReady:
             "This development Mac is already fully set up; there is no further setup step to run."
@@ -151,7 +155,7 @@ extension ProvisioningTransitionError: LocalizedError {
     public var recoveryMessage: String {
         switch self {
         case .alreadyReady: "No action is needed."
-        case .inspectionWhileStartRequestLive: "Wait for that request to finish. Guesthouse reports a request it lost contact with by itself, and checks the environment then."
+        case .inspectionWhileStartRequestLive, .staleStartRequest: "Wait for that request to finish. Guesthouse reports a request it lost contact with by itself, and checks the environment then."
         default: "Check the environment before starting anything else. If this repeats, export diagnostics and report it."
         }
     }
@@ -162,7 +166,7 @@ extension ProvisioningTransitionError: LocalizedError {
     /// The recovery actions the GUI should offer.
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .alreadyReady, .inspectionWhileStartRequestLive: [.cancel]
+        case .alreadyReady, .inspectionWhileStartRequestLive, .staleStartRequest: [.cancel]
         default: [.inspectState, .cancel]
         }
     }
@@ -179,8 +183,8 @@ extension ProvisioningTransitionError: LocalizedError {
 ///   anything re-runs, so a retry can never blindly repeat a step whose real outcome is unknown
 ///   (MVP-PLAN.md §3, §4, §9). Inspection can be requested again at any time except while a
 ///   start request is still live; each request replaces the outstanding one.
-/// - Every effect is issued with a token and only the callback naming the outstanding token is
-///   accepted, so a lost effect can be reissued and a late reply to a replaced one is rejected.
+/// - Every start request and effect carries a token, and only the callback naming the outstanding
+///   token is accepted. Lost effects can be reissued without accepting their earlier replies.
 /// - A checkpoint counts only once the journal has it (§3: "Persist ... before updating the UI").
 public enum ProvisioningReducer: Sendable {
     public static func reduce(
@@ -206,7 +210,14 @@ public enum ProvisioningReducer: Sendable {
         /// reservation was made from so a refusal cannot orphan it.
         func reserve(_ requested: ProvisioningStage, resuming: ResumeEvidence?) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
             guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
-            return at(.startRequested(resuming: resuming))
+            return at(.startRequested(request: mint(), resuming: resuming))
+        }
+        /// Check the request before interpreting its reply: even an acceptance for the wrong
+        /// stage must not abandon a newer reservation. Older records have no request identity,
+        /// so no callback can settle them; explicit inspection is their recovery path.
+        func requireRequest(_ expected: EffectToken?, _ actual: EffectToken) throws(ProvisioningTransitionError) {
+            guard let expected else { throw .illegalTransition(status: state.status.caseName, event: event.caseName) }
+            guard expected == actual else { throw .staleStartRequest(expected: expected, actual: actual) }
         }
         /// Applies what inspection found. `interrupted` is the operation the reducer was
         /// tracking when contact was lost, when it knows one; a reported identity has to be
@@ -254,18 +265,30 @@ public enum ProvisioningReducer: Sendable {
         case (.completed, .startRequested(let requested)):
             guard let next = stage.next else { throw .alreadyReady }
             guard requested == next else { throw .stageMismatch(expected: next, actual: requested) }
-            return (ProvisioningState(stage: next, status: .startRequested(resuming: nil), issuedEffects: issued), [])
+            let request = mint()
+            return (ProvisioningState(stage: next, status: .startRequested(request: request, resuming: nil), issuedEffects: issued), [])
 
-        case (.startRequested, .operationStarted(let id, let requested)):
-            guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
+        case (.startRequested(let request, _), .operationStarted(let id, let requested, let token)):
+            try requireRequest(request, token)
+            // This request has answered, so its reservation is no longer live. An acceptance
+            // at the wrong stage may already be mutating; keep its operation identified and
+            // inspect the reserved stage instead of leaving an unresolvable live reservation.
+            guard requested == stage else { return inspect { .unknownOutcome(id, inspection: $0) } }
             return at(.inProgress(id))
 
-        case (.startRequested(let resuming), .startRequestRejected(let error)):
+        case (.startRequested(let request, let resuming), .startRequestRejected(let error, let token)):
+            try requireRequest(request, token)
             // The refusal did nothing, so whatever durable partial work the reservation was made
             // from is still there and still has to be resumed from once the refusal is dealt with.
             return at(.startRejected(error, resuming: resuming))
 
-        case (.startRequested, .startRequestInterrupted):
+        case (.startRequested(let request, _), .startRequestInterrupted(let token)):
+            try requireRequest(request, token)
+            return inspect(StageStatus.awaitingInspection)
+
+        case (.startRequested(nil, _), .inspectionRequested):
+            // Only a legacy saved reservation lacks a token. Its old request cannot still be
+            // live in this coordinator, and no uncorrelated callback is accepted in its place.
             return inspect(StageStatus.awaitingInspection)
 
         case (.startRequested, .inspectionRequested):

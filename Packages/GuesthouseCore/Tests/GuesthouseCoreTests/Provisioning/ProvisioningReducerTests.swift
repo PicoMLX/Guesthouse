@@ -49,11 +49,11 @@ import Testing
     var legalTransitions: [LegalTransition] {
         [
             .init(name: "request first stage", from: .initial, event: .startRequested(stage: .preflight), expectedStatus: "startRequested", expectedEffects: []),
-            .init(name: "runtime accepts the requested start", from: state(.preflight, .startRequested(resuming: nil)), event: .operationStarted(op, stage: .preflight), expectedStatus: "inProgress", expectedEffects: []),
-            .init(name: "runtime rejects the request: error kept, nothing ran", from: state(.preflight, .startRequested(resuming: nil)), event: .startRequestRejected(failure), expectedStatus: "startRejected", expectedEffects: []),
+            .init(name: "runtime accepts the requested start", from: state(.preflight, .startRequested(request: pending, resuming: nil)), event: .operationStarted(op, stage: .preflight, request: pending), expectedStatus: "inProgress", expectedEffects: []),
+            .init(name: "runtime rejects the request: error kept, nothing ran", from: state(.preflight, .startRequested(request: pending, resuming: nil)), event: .startRequestRejected(failure, request: pending), expectedStatus: "startRejected", expectedEffects: []),
             .init(name: "a new request after a rejection needs no inspection", from: state(.preflight, .startRejected(failure, resuming: nil)), event: .startRequested(stage: .preflight), expectedStatus: "startRequested", expectedEffects: []),
             .init(name: "user cancels while a console step is pending", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .operationCanceled(op), expectedStatus: "canceled", expectedEffects: []),
-            .init(name: "request interrupted: inspect", from: state(.preflight, .startRequested(resuming: nil)), event: .startRequestInterrupted, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight, pending)]),
+            .init(name: "request interrupted: inspect", from: state(.preflight, .startRequested(request: pending, resuming: nil)), event: .startRequestInterrupted(request: pending), expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight, next)]),
             .init(name: "checkpoint reached waits for persistence", from: state(.preflight, .inProgress(op)), event: .checkpointReached(op, checkpoint(.preflight)), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.preflight), pending)]),
             .init(name: "persisted checkpoint completes the stage", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight), operation: op, write: pending)), event: .checkpointPersisted(pending, checkpoint(.preflight)), expectedStatus: "completed", expectedEffects: []),
             .init(name: "persistence failure is shown with its recovery", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight), operation: op, write: pending)), event: .checkpointPersistenceFailed(pending, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
@@ -110,14 +110,14 @@ import Testing
     }
 
     @Test func startingFromAFailureUnknownOrInspectionIsIllegal() {
-        for status in [StageStatus.recoverableFailure(failure, interrupted: nil), .unknownOutcome(op, inspection: pending), .awaitingInspection(pending), .cleanupRequired(failure, cleanup: pending), .needsUserAction(op, consoleNeeded), .startRequested(resuming: nil), .inProgress(op)] {
+        for status in [StageStatus.recoverableFailure(failure, interrupted: nil), .unknownOutcome(op, inspection: pending), .awaitingInspection(pending), .cleanupRequired(failure, cleanup: pending), .needsUserAction(op, consoleNeeded), .startRequested(request: pending, resuming: nil), .inProgress(op)] {
             #expect(throws: ProvisioningTransitionError.self, Comment(rawValue: status.caseName)) {
                 try Reducer.reduce(state(.sshPaired, status), .startRequested(stage: .sshPaired))
             }
         }
         for status in [StageStatus.notStarted, .resumable(evidence), .completed(checkpoint(.sshPaired))] {
             #expect(throws: ProvisioningTransitionError.self, Comment(rawValue: status.caseName)) {
-                try Reducer.reduce(state(.sshPaired, status), .operationStarted(other, stage: .sshPaired))
+                try Reducer.reduce(state(.sshPaired, status), .operationStarted(other, stage: .sshPaired, request: pending))
             }
         }
     }
@@ -127,8 +127,9 @@ import Testing
         #expect(throws: ProvisioningTransitionError.illegalTransition(status: "startRequested", event: "startRequested")) {
             try Reducer.reduce(reserved, .startRequested(stage: .preflight))
         }
-        let running = try Reducer.reduce(reserved, .operationStarted(op, stage: .preflight)).state
-        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(running, .operationStarted(other, stage: .preflight)) }
+        let request = try #require(reserved.status.pendingEffect)
+        let running = try Reducer.reduce(reserved, .operationStarted(op, stage: .preflight, request: request)).state
+        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(running, .operationStarted(other, stage: .preflight, request: request)) }
     }
 
     @Test func confirmedFailureWithLeftoversReachesASafeStart() throws {
@@ -141,7 +142,7 @@ import Testing
         let clean = try Reducer.reduce(afterInspection, .cleanupFinished(try token(of: effects))).state
         #expect(clean.status == .notStarted)
         let reserved = try Reducer.reduce(clean, .startRequested(stage: .runtimeReady)).state
-        let started = try Reducer.reduce(reserved, .operationStarted(other, stage: .runtimeReady)).state
+        let started = try Reducer.reduce(reserved, .operationStarted(other, stage: .runtimeReady, request: #require(reserved.status.pendingEffect))).state
         #expect(started.status == .inProgress(other))
     }
 
@@ -157,9 +158,6 @@ import Testing
     @Test func stagesMustBeSequential() {
         #expect(throws: ProvisioningTransitionError.stageMismatch(expected: .runtimeReady, actual: .sshPaired)) {
             try Reducer.reduce(state(.preflight, .completed(checkpoint(.preflight))), .startRequested(stage: .sshPaired))
-        }
-        #expect(throws: ProvisioningTransitionError.stageMismatch(expected: .preflight, actual: .ready)) {
-            try Reducer.reduce(state(.preflight, .startRequested(resuming: nil)), .operationStarted(op, stage: .ready))
         }
         #expect(throws: ProvisioningTransitionError.stageMismatch(expected: .preflight, actual: .ready)) {
             try Reducer.reduce(state(.preflight, .inProgress(op)), .checkpointReached(op, checkpoint(.ready)))
@@ -181,7 +179,7 @@ import Testing
         for stage in ProvisioningStage.allCases {
             let id = OperationID()
             state = try Reducer.reduce(state, .startRequested(stage: stage)).state
-            state = try Reducer.reduce(state, .operationStarted(id, stage: stage)).state
+            state = try Reducer.reduce(state, .operationStarted(id, stage: stage, request: #require(state.status.pendingEffect))).state
             let reached = try Reducer.reduce(state, .checkpointReached(id, checkpoint(stage)))
             state = reached.state
             #expect(!state.isReady)
@@ -204,7 +202,7 @@ import Testing
         let reconciled = try Reducer.reduce(inspecting.state, .reconciled(try token(of: inspecting.effects), .completed(checkpoint(.macOSInstalled))))
         state = try Reducer.reduce(reconciled.state, .checkpointPersisted(try token(of: reconciled.effects), checkpoint(.macOSInstalled))).state
         state = try Reducer.reduce(state, .startRequested(stage: .needsGuestSetup)).state
-        state = try Reducer.reduce(state, .operationStarted(other, stage: .needsGuestSetup)).state
+        state = try Reducer.reduce(state, .operationStarted(other, stage: .needsGuestSetup, request: #require(state.status.pendingEffect))).state
         #expect(state.stage == .needsGuestSetup)
         #expect(state.status == .inProgress(other))
     }
@@ -221,13 +219,14 @@ import Testing
     }
 
     @Test func transitionErrorsCarryUserFacingText() {
-        for error in [ProvisioningTransitionError.illegalTransition(status: "a", event: "b"), .operationMismatch(expected: op, actual: other), .stageMismatch(expected: .preflight, actual: .ready), .checkpointMismatch(expected: checkpoint(.preflight), actual: checkpoint(.ready)), .staleEffect(expected: pending, actual: next), .inspectionWhileStartRequestLive, .alreadyReady] {
+        for error in [ProvisioningTransitionError.illegalTransition(status: "a", event: "b"), .operationMismatch(expected: op, actual: other), .stageMismatch(expected: .preflight, actual: .ready), .checkpointMismatch(expected: checkpoint(.preflight), actual: checkpoint(.ready)), .staleEffect(expected: pending, actual: next), .staleStartRequest(expected: pending, actual: next), .inspectionWhileStartRequestLive, .alreadyReady] {
             #expect(error.errorDescription?.isEmpty == false)
             #expect(error.recoverySuggestion?.isEmpty == false)
             #expect(!error.recoveryActions.isEmpty)
         }
         #expect(ProvisioningTransitionError.illegalTransition(status: "a", event: "b").recoveryActions.first == .inspectState)
         #expect(ProvisioningTransitionError.staleEffect(expected: pending, actual: next).recoveryActions.first == .inspectState)
+        #expect(!ProvisioningTransitionError.staleStartRequest(expected: pending, actual: next).recoveryActions.contains(.inspectState))
     }
 
     @Test func stateRoundTripsThroughJSONAndRejectsInconsistentCheckpoints() throws {

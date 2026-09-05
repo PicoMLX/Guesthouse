@@ -103,13 +103,13 @@ import Testing
     /// very event that was just refused — a button that can only produce the same error again.
     @Test func inspectionIsRefusedWhileAStartRequestIsLiveAndSaysWhatWorksInstead() throws {
         #expect(throws: ProvisioningTransitionError.inspectionWhileStartRequestLive) {
-            try ProvisioningReducer.reduce(state(.startRequested(resuming: nil)), .inspectionRequested)
+            try ProvisioningReducer.reduce(state(.startRequested(request: outstanding, resuming: nil)), .inspectionRequested)
         }
         #expect(!ProvisioningTransitionError.inspectionWhileStartRequestLive.recoveryActions.contains(.inspectState))
         #expect(!ProvisioningTransitionError.inspectionWhileStartRequestLive.recoveryActions.isEmpty)
         // A request no longer in flight — the connection dropped, or the app was relaunched over
         // a saved reservation — is reported as interrupted, and that does inspect.
-        let interrupted = try ProvisioningReducer.reduce(state(.startRequested(resuming: nil)), .startRequestInterrupted)
+        let interrupted = try ProvisioningReducer.reduce(state(.startRequested(request: outstanding, resuming: nil)), .startRequestInterrupted(request: outstanding))
         #expect(interrupted.state.status.caseName == "awaitingInspection")
     }
 
@@ -232,16 +232,143 @@ import Testing
     @Test func resumeEvidenceSurvivesARejectedStart() throws {
         let evidence = ResumeEvidence(summary: "62% downloaded", stagingPath: "downloads/restore.ipsw.partial")
         let reserved = try ProvisioningReducer.reduce(state(.resumable(evidence)), .startRequested(stage: .first))
-        #expect(reserved.state.status == .startRequested(resuming: evidence))
-        let rejected = try ProvisioningReducer.reduce(reserved.state, .startRequestRejected(.canceled))
+        let request = try #require(reserved.state.status.pendingEffect)
+        #expect(reserved.state.status == .startRequested(request: request, resuming: evidence))
+        let rejected = try ProvisioningReducer.reduce(reserved.state, .startRequestRejected(.canceled, request: request))
         #expect(rejected.state.status == .startRejected(.canceled, resuming: evidence))
         let again = try ProvisioningReducer.reduce(rejected.state, .startRequested(stage: .first))
-        #expect(again.state.status == .startRequested(resuming: evidence))
+        let nextRequest = try #require(again.state.status.pendingEffect)
+        #expect(nextRequest != request)
+        #expect(again.state.status == .startRequested(request: nextRequest, resuming: evidence))
         // The evidence survives a relaunch between the refusal and the next attempt.
         let relaunched = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(rejected.state))
         #expect(relaunched.status == .startRejected(.canceled, resuming: evidence))
         // A start that never had evidence still carries none.
-        #expect(try ProvisioningReducer.reduce(state(.notStarted), .startRequested(stage: .first)).state.status == .startRequested(resuming: nil))
+        #expect(try ProvisioningReducer.reduce(state(.notStarted), .startRequested(stage: .first)).state.status == .startRequested(request: outstanding, resuming: nil))
+    }
+
+    /// A can answer after inspection has settled its interruption and B has been reserved.
+    /// Even A's wrong-stage acceptance must check its request identity before releasing B.
+    @Test(arguments: [
+        ProvisioningEvent.operationStarted(OperationID(), stage: .first, request: EffectToken(1)),
+        .operationStarted(OperationID(), stage: .ready, request: EffectToken(1)),
+        .startRequestRejected(.canceled, request: EffectToken(1)),
+        .startRequestInterrupted(request: EffectToken(1)),
+    ])
+    func aStaleStartReplyCannotSettleANewerReservation(reply: ProvisioningEvent) throws {
+        let first = try ProvisioningReducer.reduce(.initial, .startRequested(stage: .first)).state
+        let interrupted = try ProvisioningReducer.reduce(first, .startRequestInterrupted(request: outstanding))
+        let inspected = try ProvisioningReducer.reduce(interrupted.state, .reconciled(try token(of: interrupted.effects), .notStarted)).state
+        let second = try ProvisioningReducer.reduce(inspected, .startRequested(stage: .first)).state
+        let live = try #require(second.status.pendingEffect)
+        #expect(live == EffectToken(3))
+        #expect(throws: ProvisioningTransitionError.staleStartRequest(expected: live, actual: outstanding)) {
+            try ProvisioningReducer.reduce(second, reply)
+        }
+        #expect(throws: ProvisioningTransitionError.inspectionWhileStartRequestLive) {
+            try ProvisioningReducer.reduce(second, .inspectionRequested)
+        }
+        #expect(try ProvisioningReducer.reduce(second, .operationStarted(operation, stage: .first, request: live)).state.status == .inProgress(operation))
+    }
+
+    @Test func startRequestIdentityAndResumeEvidenceSurviveRelaunch() throws {
+        let evidence = ResumeEvidence(summary: "62% downloaded", stagingPath: "downloads/restore.ipsw.partial")
+        let first = try ProvisioningReducer.reduce(state(.resumable(evidence)), .startRequested(stage: .first)).state
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(first))
+        #expect(restored == first)
+        let firstRequest = try #require(restored.status.pendingEffect)
+        let refused = try ProvisioningReducer.reduce(restored, .startRequestRejected(.canceled, request: firstRequest)).state
+        let second = try ProvisioningReducer.reduce(refused, .startRequested(stage: .first)).state
+        let restoredAgain = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(second))
+        let secondRequest = try #require(restoredAgain.status.pendingEffect)
+        #expect(secondRequest == EffectToken(firstRequest.value + 1))
+        #expect(restoredAgain.status == .startRequested(request: secondRequest, resuming: evidence))
+        #expect(throws: ProvisioningTransitionError.staleStartRequest(expected: secondRequest, actual: firstRequest)) {
+            try ProvisioningReducer.reduce(restoredAgain, .startRequestRejected(.canceled, request: firstRequest))
+        }
+        let interrupted = try ProvisioningReducer.reduce(restoredAgain, .startRequestInterrupted(request: secondRequest))
+        #expect(try token(of: interrupted.effects) == EffectToken(secondRequest.value + 1))
+    }
+
+    @Test(arguments: [ProvisioningStage.runtimeReady, .ready])
+    func wrongStageAcceptanceInspectsAndKeepsItsOperationThroughRecovery(reportedStage: ProvisioningStage) throws {
+        let reserved = try ProvisioningReducer.reduce(.initial, .startRequested(stage: .first)).state
+        let request = try #require(reserved.status.pendingEffect)
+        let accepted = try ProvisioningReducer.reduce(reserved, .operationStarted(operation, stage: reportedStage, request: request))
+        let inspection = try token(of: accepted.effects)
+        #expect(accepted.state.stage == .first)
+        #expect(accepted.state.status == .unknownOutcome(operation, inspection: inspection))
+        #expect(accepted.effects == [.inspectActualState(.first, inspection)])
+        #expect(inspection.value > request.value)
+        #expect(throws: ProvisioningTransitionError.self) {
+            try ProvisioningReducer.reduce(accepted.state, .startRequested(stage: .first))
+        }
+        #expect(try ProvisioningReducer.reduce(accepted.state, .reconciled(inspection, .stillRunning(operation))).state.status == .inProgress(operation))
+        let failed = try ProvisioningReducer.reduce(accepted.state, .inspectionFailed(inspection, .runtimeMissing)).state
+        #expect(failed.status == .recoverableFailure(.runtimeMissing, interrupted: operation))
+        for event in [ProvisioningEvent.inspectionRequested, .userRetried] {
+            // Both direct recovery and recovery after a failed inspection must stay scoped.
+            for recoverable in [accepted.state, failed] {
+                let retried = try ProvisioningReducer.reduce(recoverable, event)
+                let retry = try token(of: retried.effects)
+                #expect(retried.state.status == .unknownOutcome(operation, inspection: retry))
+                #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
+                    try ProvisioningReducer.reduce(retried.state, .reconciled(retry, .stillRunning(stranger)))
+                }
+                #expect(try ProvisioningReducer.reduce(retried.state, .reconciled(retry, .stillRunning(operation))).state.status == .inProgress(operation))
+            }
+        }
+    }
+
+    /// These are the schema-1 shapes written before start requests carried a token: nil
+    /// associated values were omitted, and a resumable reservation carried only `resuming`.
+    @Test(arguments: [
+        #"{"schemaVersion":1,"stage":"preflight","issuedEffects":9,"status":{"startRequested":{}}}"#,
+        #"{"schemaVersion":1,"stage":"preflight","issuedEffects":9,"status":{"startRequested":{"resuming":{"summary":"62% downloaded","stagingPath":"downloads/restore.ipsw.partial"}}}}"#,
+    ])
+    func legacyStartReservationsCanOnlyRecoverThroughInspection(record: String) throws {
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: Data(record.utf8))
+        guard case .startRequested(let request, let evidence) = restored.status else { Issue.record("expected saved reservation"); return }
+        #expect(request == nil)
+        #expect(restored.issuedEffects == 9)
+        if record.contains("resuming") {
+            #expect(evidence == ResumeEvidence(summary: "62% downloaded", stagingPath: "downloads/restore.ipsw.partial"))
+        } else {
+            #expect(evidence == nil)
+        }
+        for reply in [
+            ProvisioningEvent.operationStarted(operation, stage: .first, request: outstanding),
+            .operationStarted(operation, stage: .ready, request: outstanding),
+            .startRequestRejected(.canceled, request: outstanding),
+            .startRequestInterrupted(request: outstanding),
+        ] {
+            #expect(throws: ProvisioningTransitionError.illegalTransition(status: "startRequested", event: reply.caseName)) {
+                try ProvisioningReducer.reduce(restored, reply)
+            }
+        }
+        #expect(throws: ProvisioningTransitionError.self) {
+            try ProvisioningReducer.reduce(restored, .startRequested(stage: .first))
+        }
+        let inspecting = try ProvisioningReducer.reduce(restored, .inspectionRequested)
+        #expect(inspecting.state.status == .awaitingInspection(EffectToken(10)))
+        #expect(inspecting.effects == [.inspectActualState(.first, EffectToken(10))])
+        let inspected = try ProvisioningReducer.reduce(inspecting.state, .reconciled(EffectToken(10), .notStarted)).state
+        #expect(try ProvisioningReducer.reduce(inspected, .startRequested(stage: .first)).state.status == .startRequested(request: EffectToken(11), resuming: nil))
+    }
+
+    @Test(arguments: ["-1", "true", #""1""#, "1.5", "18446744073709551615", "9223372036854775808"])
+    func malformedStartRequestTokensAreRejectedWhenDecoded(request: String) {
+        let record = Data("{\"schemaVersion\":1,\"stage\":\"preflight\",\"issuedEffects\":0,\"status\":{\"startRequested\":{\"request\":\(request)}}}".utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: record) }
+    }
+
+    @Test func startRequestTokensAdvanceThePersistedCounter() throws {
+        let record = Data(#"{"schemaVersion":1,"stage":"preflight","issuedEffects":0,"status":{"startRequested":{"request":9}}}"#.utf8)
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: record)
+        #expect(restored.issuedEffects == 9)
+        #expect(restored.status.pendingEffect == EffectToken(9))
+        let interrupted = try ProvisioningReducer.reduce(restored, .startRequestInterrupted(request: EffectToken(9)))
+        #expect(try token(of: interrupted.effects) == EffectToken(10))
     }
 
     /// A record naming a counter at the end of the range would make the next token mint overflow
