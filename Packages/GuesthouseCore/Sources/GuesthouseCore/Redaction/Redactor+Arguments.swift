@@ -23,12 +23,32 @@ extension Redactor {
     }
 
     static func unterminatedQuote(in value: Substring, kind: String) -> StreamState.QuotedValue? {
-        let value = value.drop(while: { $0.isWhitespace })
-        let slashes = value.prefix(while: { $0 == "\\" }).count
-        let afterSlashes = value.dropFirst(slashes)
-        guard let delimiter = afterSlashes.first, delimiter == "\"" || delimiter == "'" else { return nil }
-        let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: slashes, kind: kind)
-        return closingQuoteEnd(in: afterSlashes.dropFirst(), for: quoted) == nil ? quoted : nil
+        let firstValueCharacter = value.firstIndex(where: { !$0.isWhitespace }) ?? value.endIndex
+        var cursor = value.startIndex
+        while cursor < value.endIndex {
+            let start = cursor
+            var slashes = 0
+            while cursor < value.endIndex, value[cursor] == "\\" {
+                slashes += 1
+                value.formIndex(after: &cursor)
+            }
+            guard cursor < value.endIndex else { break }
+            let delimiter = value[cursor]
+            let predecessor = start == value.startIndex ? nil : value[value.index(before: start)]
+            value.formIndex(after: &cursor)
+            // Parameters can open quotes after an unquoted scheme or prefix. Apostrophes
+            // inside an ordinary word are not delimiters (for example a passphrase's "don't").
+            guard delimiter == "\"" || delimiter == "'",
+                  predecessor == nil || predecessor?.isWhitespace == true
+                    || predecessor.map({ "=:([{,".contains($0) }) == true else { continue }
+            let hasPrefix = start > firstValueCharacter
+            let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: slashes, kind: kind,
+                enclosingAuthorizationFold: hasPrefix && kind == "authorization",
+                enclosingSecretFold: hasPrefix && kind == "secret")
+            guard let end = closingQuoteEnd(in: value[cursor...], for: quoted) else { return quoted }
+            cursor = end
+        }
+        return nil
     }
 
     static func closingQuoteEnd(in value: Substring, for quoted: StreamState.QuotedValue) -> String.Index? {
@@ -59,16 +79,20 @@ extension Redactor {
     static func redactSecretOptions(_ text: String, state: inout StreamState) -> String {
         var result = ""
         var cursor = text.startIndex
+        var concealOptionName = false
         while let match = text[cursor...].firstMatch(of: patterns.secretOption) {
             result += text[cursor..<match.range.lowerBound]
-            // A missing value must not consume a later option's name and leave that option's
-            // value unlabelled. Only a recognized secret option is left for another scan:
-            // an opaque password beginning with a dash must still be removed.
+            // A following secret option could also be this option's opaque value. Conceal
+            // its name but retain the original input for scanning its possible value too.
+            let optionName = concealOptionName ? marker("secret") : String(match.2)
+            concealOptionName = false
             let remainder = text[match.range.upperBound...]
             let bareOption = remainder.prefixMatch(of: patterns.secretOptionOnly) != nil
             if match.3 != "=", bareOption || remainder.prefixMatch(of: patterns.secretOption) != nil {
-                result += match.0
-                cursor = match.range.upperBound
+                result += "\(match.1)\(optionName)\(match.3)"
+                if bareOption { result += marker("secret") }
+                cursor = bareOption ? text.endIndex : match.range.upperBound
+                concealOptionName = true
                 state.expectingSecretValue = state.expectingSecretValue || bareOption
                 continue
             }
@@ -79,7 +103,7 @@ extension Redactor {
             // Canonicalize equals to a space so the generic field rule cannot treat the
             // replacement and later arguments as a single unquoted passphrase.
             let separator = match.3 == "=" ? " " : String(match.3)
-            result += "\(match.1)\(match.2)\(separator)\(marker("secret"))"
+            result += "\(match.1)\(optionName)\(separator)\(marker("secret"))"
             cursor = argument.end
         }
         return result + text[cursor...]
@@ -130,11 +154,17 @@ extension Redactor {
     static func redactSerializedOptions(_ text: String, state: inout StreamState) -> String {
         var result = ""
         var cursor = text.startIndex
+        var concealOptionName = false
         while let match = text[cursor...].firstMatch(of: patterns.serializedSecretOption) {
-            result += text[cursor..<match.range.upperBound]
+            result += text[cursor..<match.range.lowerBound]
+            if concealOptionName, let comma = match.0.lastIndex(of: ",") {
+                result += marker("secret") + match.0[comma...]
+            } else { result += match.0 }
+            concealOptionName = false
             let value = text[match.range.upperBound...]
-            // Do not consume a second secret option as a missing first option's value.
+            // Preserve both interpretations of an option-shaped opaque credential.
             if value.prefixMatch(of: patterns.serializedSecretOption) != nil {
+                concealOptionName = true
                 cursor = value.startIndex
                 continue
             }

@@ -42,7 +42,8 @@ import Testing
     func aBareFollowingOptionKeepsItsPendingValue(option: String) {
         var state = Redactor.StreamState()
         let input = "run --password " + option
-        #expect(Redactor.redactSecretOptions(input, state: &state) == input)
+        // The second option is also a possible opaque password, while its value stays pending.
+        #expect(Redactor.redactSecretOptions(input, state: &state) == "run --password [redacted:secret]")
         #expect(state.expectingSecretValue)
     }
 
