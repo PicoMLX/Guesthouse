@@ -78,34 +78,75 @@ private struct DummyLumeBundle {
 
     @Test func locateUsesOnlyThePrivatePinnedDirectory() throws {
         let storage = try RuntimeStorage(root: root.appending(path: "storage"))
-        #expect(LumeBundle.locate(in: storage) == nil)
+        #expect(try LumeBundle.locate(in: storage) == nil)
         let expected = LumeBundle.expectedLocation(in: storage)
+        try FileManager.default.createDirectory(at: expected.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #expect(try LumeBundle.locate(in: storage) == nil)
         try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: true)
-        #expect(LumeBundle.locate(in: storage)?.url == expected)
+        #expect(try LumeBundle.locate(in: storage)?.url == expected)
         #expect(expected.path.hasSuffix("/runtime/lume-v0.5.3/lume.app"))
     }
 
-    @Test func locateRejectsSymlinkedManagedComponents() throws {
+    @Test(arguments: [false, true])
+    func locateRejectsSymlinkedManagedComponents(atApp: Bool) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "symlink-storage"))
         let outside = root.appending(path: "outside")
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
-        let release = storage.url(for: .runtime).appending(path: LumePin.releaseTag)
-        try FileManager.default.createSymbolicLink(at: release, withDestinationURL: outside)
-        try FileManager.default.createDirectory(at: outside.appending(path: LumePin.bundleName), withIntermediateDirectories: true)
-        #expect(LumeBundle.locate(in: storage) == nil)
+        let app = LumeBundle.expectedLocation(in: storage)
+        let target = atApp ? app : app.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: outside)
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "symbolic link")) {
+            try LumeBundle.locate(in: storage)
+        }
     }
 
-    @Test func locateRechecksTheRuntimeRootAfterStorageInitialization() throws {
+    @Test(arguments: [false, true])
+    func locateRejectsManagedFilesWithoutChangingThem(atApp: Bool) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "file-layout"))
+        let app = LumeBundle.expectedLocation(in: storage)
+        let target = atApp ? app : app.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("preserve me".utf8).write(to: target)
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "not a directory")) {
+            try LumeBundle.locate(in: storage)
+        }
+        #expect(try String(contentsOf: target, encoding: .utf8) == "preserve me")
+    }
+
+    @Test(arguments: [false, true])
+    func locateRechecksTheRuntimeRootAfterStorageInitialization(atRoot: Bool) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "replaced-runtime-storage"))
-        let runtime = storage.url(for: .runtime)
+        let target = atRoot ? storage.root : storage.url(for: .runtime)
         let moved = root.appending(path: "moved-runtime")
-        try FileManager.default.moveItem(at: runtime, to: moved)
-        try FileManager.default.createSymbolicLink(at: runtime, withDestinationURL: moved)
-        try FileManager.default.createDirectory(
-            at: moved.appending(path: "\(LumePin.releaseTag)/\(LumePin.bundleName)"),
-            withIntermediateDirectories: true
-        )
-        #expect(LumeBundle.locate(in: storage) == nil)
+        try FileManager.default.moveItem(at: target, to: moved)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: moved)
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "symbolic link")) {
+            try LumeBundle.locate(in: storage)
+        }
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: target.path) == moved.path)
+    }
+
+    @Test(arguments: [false, true])
+    func locatePreservesStoragePermissionFailures(atRoot: Bool) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "mode-drift"))
+        let target = atRoot ? storage.root : storage.url(for: .runtime)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "permissions are not 0700")) {
+            try LumeBundle.locate(in: storage)
+        }
+        #expect(try FileManager.default.attributesOfItem(atPath: target.path)[.posixPermissions] as? Int == 0o755)
+    }
+
+    @Test(arguments: [false, true])
+    func locatePreservesStorageACLFailures(atRoot: Bool) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "acl-drift"))
+        let target = atRoot ? storage.root : storage.url(for: .runtime)
+        try #require(try RuntimeStorageHardeningTests().addAccessControlEntry("everyone allow read,list", to: target))
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "carries access control entries")) {
+            try LumeBundle.locate(in: storage)
+        }
+        #expect(try RuntimeStorage.hasAccessControlEntries(target))
     }
 
     @Test func missingMetadataAndExecutableAreRejectedBeforeExecution() async throws {
