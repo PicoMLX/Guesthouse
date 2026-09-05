@@ -35,4 +35,22 @@ import Testing
     @Test func aTerminalConsumedProtocolCharacterDoesNotHideADSNCredential() {
         #expect(!Redactor().redact("alice:syntheticPassword@\u{1B}[tcp(db:3306)/app").contains("syntheticPassword"))
     }
+
+    @Test(arguments: ["https://alice:syntheticPassword@example.com/app", "//alice:syntheticPassword@example.com/app",
+                      "alice:syntheticPassword@cloudsql(instance)/app", "https:\\/\\/alice:syntheticPassword@example.com/app"])
+    func sanitizedUserinfoSurvivesASecondRedactionPass(input: String) {
+        let first = Redactor().redact(input)
+        #expect(!first.contains("syntheticPassword"))
+        #expect(Redactor().redact(first) == first)
+    }
+
+    @Test func anEncodedURLRetainsItsSchemeAndEscapedDelimiters() {
+        let input = #"https:\/\/alice:syntheticPassword@example.com/app"#
+        #expect(Redactor().redact(input) == #"https:\/\/[redacted:userinfo]@example.com/app"#)
+    }
+
+    @Test func aPreviousMarkerCannotHideALaterDSN() {
+        let input = "[redacted:userinfo]@tcp(host)/app alice:syntheticPassword@cloudsql(instance)/app"
+        #expect(!Redactor().redact(input).contains("syntheticPassword"))
+    }
 }
