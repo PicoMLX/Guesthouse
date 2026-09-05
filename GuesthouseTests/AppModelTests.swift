@@ -278,19 +278,54 @@ import Testing
         #expect(!model.canForceStop, "the error asks for inspection, so forcing past it is not offered")
     }
 
-    @Test func aQuitConfirmationWaitsForAnOperationTheRuntimeReports() async {
+    @Test func twoRapidStartsSendOneRequest() async {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(20))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        model.start(environment.id)
+        model.start(environment.id)
+        #expect(model.operations[environment.id] != nil, "the reservation is visible before the task runs")
+        await waitUntil { model.operations[environment.id] == nil }
+        let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { return true }; return false }
+        #expect(starts.count == 1)
+    }
+
+    @Test func aFailedStatusReplyLeavesNoCachedState() async {
+        let backend = FakeRuntimeBackend()
+        let environment = await runningEnvironment(backend)
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        await model.refreshStatus(of: environment.id)
+        #expect(model.statuses[environment.id] == nil, "a stale status is never kept over a failed query")
+        #expect(model.lastErrors[environment.id] == .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable")))
+        let card = model.cardStates().first { $0.id == environment.id }
+        #expect(card?.availability(of: .start) == .disabled(reason: "Checking environment"))
+        #expect(card?.attention == .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable")))
+    }
+
+    @Test func quitWaitsForAnOperationOnlyTheStatusReports() async {
         let backend = FakeRuntimeBackend()
         let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
         let recovered = OperationID()
         await backend.setEnvironments([environment])
         await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: recovered))
+        await backend.script("stopEnvironment", .succeed(status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready)))
         let (model, decision) = makeModel(backend)
         await model.refresh()
         _ = model.handleQuitRequest()
         model.confirmStopAndQuit()
-        await waitUntil { if case .stopFailed = model.quitFlow { return true }; return false }
-        #expect(model.quitFlow == .stopFailed(.operationOutcomeUnknown(recovered)))
-        #expect(decision.values.isEmpty, "a quit never terminates over an operation the runtime still reports")
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(model.quitFlow == .waitingForOperations(environment.id), "a recovered operation keeps the quit waiting")
+        #expect(decision.values.isEmpty)
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        await waitUntil { model.quitFlow == .terminating }
+        #expect(decision.values == [true])
+        let stops = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { return true }; return false }
+        #expect(stops.count == 1, "the VM the recovered start produced is stopped before quitting")
     }
 
     @Test func anInterruptionWhileTheSheetIsOpenReconcilesBeforeOfferingAgain() async {
@@ -320,6 +355,18 @@ import Testing
         model.startRefresh()
         await waitUntil { await backend.receivedRequests.count > before }
         #expect(await backend.receivedRequests.count > before, "an explicit check still reconnects")
+    }
+
+    @Test func theInFlightPreviewShowsItsScriptedPhases() async {
+        let model = await AppModel.preview(PreviewScenarios.operationInProgress())
+        let backend = model.backend as? FakeRuntimeBackend
+        var requests: [RuntimeRequest] = []
+        for _ in 0..<400 {
+            requests = await backend?.receivedRequests ?? []
+            if requests.contains(where: { if case .startEnvironment = $0 { return true }; return false }) { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(requests.contains { if case .startEnvironment = $0 { return true }; return false }, "the scripted start is sent despite the seeded in-flight status")
     }
 
     @Test func anUnavailableRecoverySurvivesTheSessionClosingBehindIt() async {
@@ -452,6 +499,7 @@ import Testing
         // menu item unavailable is a check that is reading, and which request goes out first
         // is the reconciliation's business.
         await waitUntil({ !model.canCheckEnvironment }, "the check to start reading")
+        #expect(!model.canCheckEnvironment, "a check is already reading; the menu says so rather than appearing to do nothing")
         model.startRefresh()
         model.startRefresh()
         await waitUntil({ model.launchState == .ready && model.canCheckEnvironment }, "the check to finish")
@@ -468,7 +516,11 @@ import Testing
         await backend.script("listEnvironments", .disconnect())
         let (model, _) = makeModel(backend)
         model.startRefresh()
-        await waitUntil { await backend.receivedRequests.count == 1 }
+        // The listing is what "still reading" means: the reconciliation asks the runtime for
+        // its version first, so a bare request count no longer names that moment.
+        // Any request means the check has started; which one goes out first is the
+        // reconciliation's business, and it changes as the stack grows.
+        await waitUntil({ await !backend.receivedRequests.isEmpty }, "the check to send its first request")
         // The real client reports the loss to its observers before it throws into the stream
         // the same loss cut off.
         backend.dropConnection()
@@ -575,6 +627,42 @@ import Testing
         #expect(model.launchState == .ready)
         #expect(model.runningEnvironments.isEmpty)
         #expect(model.runningSummary == "1 development Mac Guesthouse cannot identify")
+    }
+
+    /// A card-level status query that failed leaves nothing known about that VM. The menu bar
+    /// and the sentence the Quit decision is made on must not report it as stopped: that is the
+    /// same unproven claim uncertainty is kept out of.
+    @Test func anEnvironmentThatDidNotAnswerIsNeverReportedAsNotRunning() async {
+        let backend = FakeRuntimeBackend()
+        let environment = await runningEnvironment(backend)
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        #expect(model.runningSummary == "1 running")
+        await backend.script("environmentStatus", .fail(error: .runtimeMissing))
+        await model.refreshStatus(of: environment.id)
+        #expect(model.statuses[environment.id] == nil, "the query failed, so nothing is known about this VM")
+        #expect(model.runningSummary == "1 development Mac Guesthouse could not check")
+        #expect(model.quitConfirmationMessage.contains("cannot tell whether it is running"))
+        #expect(!model.quitConfirmationMessage.contains("No development Mac is running"))
+    }
+
+    /// The runtime's status refresh after a start is a bounded courtesy that can time out, so a
+    /// completed start can arrive without describing the environment. What was cached before it
+    /// describes a VM that is now running, and releasing the reservation over that would offer
+    /// Start again for as long as the app's own inspection takes.
+    @Test func aStartThatCompletedWithoutAStatusLeavesNothingActionableBehind() async {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(200))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let (model, _) = makeModel(backend)
+        await model.refresh()
+        // Accepted and completed, with no status of its own in between.
+        await backend.script("startEnvironment", .succeed())
+        model.start(environment.id)
+        await waitUntil { model.operations[environment.id] == nil }
+        #expect(model.statuses[environment.id] == nil, "what was cached before the start says nothing about the state after it")
+        #expect(model.globalStartBlock != nil, "nothing is started while this environment has not answered")
     }
 
     @Test func aStopRefusedBeforeAcceptanceIsNeverForcedPast() async {
