@@ -54,7 +54,7 @@ public struct LumeBackend: Sendable {
         guard Self.bundlePath(bundle, belongsTo: storage) else {
             throw LumeInvocationError.storageMismatch
         }
-        guard let current = LumeBundle.locate(in: storage),
+        guard let current = try LumeBundle.locate(in: storage),
               bundle.matchesVerifiedFiles(in: current)
         else {
             throw LumeInvocationError.bundleChanged
@@ -91,7 +91,7 @@ public struct LumeBackend: Sendable {
     /// Separated from signature verification so the managed-path recheck has focused regression
     /// coverage without weakening or substituting the production signature gate.
     static func relocateForLaunch(_ bundle: VerifiedLumeBundle, in storage: RuntimeStorage) throws -> LumeBundle {
-        guard let current = LumeBundle.locate(in: storage),
+        guard let current = try LumeBundle.locate(in: storage),
               bundle.matchesVerifiedFiles(in: current)
         else { throw LumeInvocationError.bundleChanged }
         return current
@@ -153,6 +153,7 @@ public struct LumeBackend: Sendable {
         // while atomically placing the new bundle in this private directory.
         let executable: URL
         do { executable = try verifyBeforeLaunch() }
+        catch let error as RuntimeStorageError { throw error }
         catch { throw LumeInvocationError.bundleChanged }
         try Task.checkCancellation()
         let run: ProcessRun
@@ -171,6 +172,7 @@ public struct LumeBackend: Sendable {
             // A path swap can surface as a launch error in the narrow interval after the first
             // check. Reverify before preserving the earlier `verified` verdict.
             do { _ = try verifyBeforeLaunch() }
+            catch let error as RuntimeStorageError { throw error }
             catch { throw LumeInvocationError.bundleChanged }
             throw error
         }

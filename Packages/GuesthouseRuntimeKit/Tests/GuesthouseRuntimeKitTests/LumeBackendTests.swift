@@ -267,10 +267,12 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
         try FileManager.default.moveItem(at: runtime, to: movedRuntime)
         try FileManager.default.createSymbolicLink(at: runtime, withDestinationURL: movedRuntime)
 
-        #expect(throws: LumeInvocationError.bundleChanged) {
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: runtime.path, reason: "symbolic link")) {
             try LumeBackend.relocateForLaunch(verified, in: storage)
         }
-        await #expect(throws: LumeInvocationError.bundleChanged) { try await backend.probe() }
+        await #expect(throws: RuntimeStorageError.insecureDirectory(path: runtime.path, reason: "symbolic link")) {
+            try await backend.probe()
+        }
         #expect(await runner.invocations.isEmpty, "an ancestor swap is rejected before launch")
     }
 
