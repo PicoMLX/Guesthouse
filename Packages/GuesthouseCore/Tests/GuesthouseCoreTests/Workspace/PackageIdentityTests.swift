@@ -15,7 +15,8 @@ import Testing
     @Test func identityFollowsSwiftPMRules() {
         #expect(PackageIdentity(location: "https://github.com/PicoMLX/SharedUI.git")?.rawValue == "sharedui")
         #expect(PackageIdentity(location: "https://github.com/PicoMLX/SharedUI")?.rawValue == "sharedui")
-        #expect(PackageIdentity(location: "git@github.com:PicoMLX/Shared-UI.GIT")?.rawValue == "shared-ui")
+        // `.GIT` is not the lowercase suffix SwiftPM strips, so it stays part of the identity.
+        #expect(PackageIdentity(location: "git@github.com:PicoMLX/Shared-UI.GIT")?.rawValue == "shared-ui.git")
         #expect(PackageIdentity(location: "https://github.com/PicoMLX/SharedUI/")?.rawValue == "sharedui")
         #expect(PackageIdentity(location: "sharedui")?.rawValue == "sharedui")
         #expect(PackageIdentity(location: "") == nil)

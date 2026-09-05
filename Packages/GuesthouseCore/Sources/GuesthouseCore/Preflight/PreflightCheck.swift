@@ -9,15 +9,32 @@ public enum PreflightCheckKind: String, Codable, Hashable, Sendable, CaseIterabl
 }
 
 public struct PreflightResult: Codable, Hashable, Sendable {
+    /// A check's own words about the host: what was found, what is recommended, why an answer
+    /// could not be had.
+    ///
+    /// `SanitizedText` rather than `String`, like every other value that can come from outside
+    /// the app: a detail names the operating system build, the storage path, and the Codex
+    /// bundle path, and `run` is not the only way a result comes into being. A report decoded
+    /// from a diagnostics file or received over the wire would otherwise carry whatever control
+    /// characters, unbounded text, or credential-shaped values the sender put there, straight
+    /// into the GUI and back out through `encode(to:)`.
     public enum Outcome: Codable, Hashable, Sendable {
-        case pass(detail: String)
+        case pass(detail: SanitizedText)
         /// Setup may continue; the detail says what the user should know.
-        case warn(detail: String, recovery: [RecoveryAction])
+        case warn(detail: SanitizedText, recovery: [RecoveryAction])
         /// The check could not be made at all. Setup does not continue on a guess: an
         /// unanswerable question is not the same as a satisfied requirement.
-        case undetermined(detail: String, recovery: [RecoveryAction])
+        case undetermined(detail: SanitizedText, recovery: [RecoveryAction])
         /// Setup cannot continue. The error carries the message and recovery actions.
         case fail(GuesthouseError)
+    }
+
+    /// A detail bounded at the sanitizer's maximum rather than its 80-scalar default: these are
+    /// sentences, not identifiers, and the memory and storage advice runs well past 80 scalars.
+    /// `SanitizedText`'s decoder bounds at the same maximum, so a result survives a round trip
+    /// unchanged. A string literal still builds one directly, which is what the tests use.
+    public static func detail(_ text: String) -> SanitizedText {
+        SanitizedText(text, limit: SanitizedText.maximumLimit)
     }
 
     public let kind: PreflightCheckKind
@@ -101,31 +118,37 @@ public enum PreflightCheck: Sendable {
         // what was found and what is required, so a non-default policy still reads correctly.
         let architectureOutcome: PreflightResult.Outcome = switch architecture {
         case .unknown: .fail(.unsupportedHost(.architectureUnknown))
-        case policy.requiredArchitecture: .pass(detail: Self.name(of: architecture))
-        default: .fail(.unsupportedHost(.wrongArchitecture(found: SanitizedText(Self.name(of: architecture)), required: Self.name(of: policy.requiredArchitecture))))
+        case policy.requiredArchitecture: .pass(detail: PreflightResult.detail(Self.name(of: architecture)))
+        default: .fail(.unsupportedHost(.wrongArchitecture(found: SanitizedText(Self.name(of: architecture)), required: SanitizedText(Self.name(of: policy.requiredArchitecture)))))
         }
         results.append(PreflightResult(kind: .architecture, outcome: architectureOutcome))
 
         let version = probe.operatingSystemVersion
-        let build = probe.operatingSystemBuild.map { " (\($0))" } ?? ""
+        // The build string comes from the host through the probe protocol, like application
+        // metadata and storage paths: bounded and normalized before it becomes result text.
+        let build = probe.operatingSystemBuild.map { " (\(GuesthouseError.sanitize($0, limit: 40)))" } ?? ""
         results.append(PreflightResult(kind: .macOSVersion, outcome: version >= policy.minimumMacOS
-            ? .pass(detail: "macOS \(version)\(build)")
-            : .fail(.unsupportedHost(.macOSTooOld(found: SanitizedText(version.description), minimum: policy.minimumMacOS.description)))))
+            ? .pass(detail: PreflightResult.detail("macOS \(version)\(build)"))
+            : .fail(.unsupportedHost(.macOSTooOld(found: SanitizedText(version.description), minimum: SanitizedText(policy.minimumMacOS.description))))))
 
         let memory = probe.physicalMemoryBytes
         let memoryOutcome: PreflightResult.Outcome
         // The guest's allocation plus the host's headroom is the real floor; the policy minimum
         // applies on top of it.
-        // A guest allocation plus headroom that cannot be represented cannot be satisfied.
+        // A guest allocation plus headroom that cannot be represented cannot be satisfied, and
+        // that is decided on the overflow itself rather than on a `UInt64.max` floor no Mac was
+        // expected to reach: a probe that answers `UInt64.max` compares equal to that floor, not
+        // below it, and the report would then allow setup for an allocation that cannot exist
+        // (MVP-PLAN.md §4, host headroom).
         let (required, requiredOverflows) = preset.memoryBytes.addingReportingOverflow(policy.hostMemoryHeadroomBytes)
         let floor = requiredOverflows ? UInt64.max : max(policy.minimumMemoryBytes, required)
-        if memory < floor {
+        if requiredOverflows || memory < floor {
             memoryOutcome = .fail(.unsupportedHost(.insufficientMemory(foundBytes: memory, minimumBytes: floor)))
         } else if memory >= policy.recommendedMemoryBytes {
-            memoryOutcome = .pass(detail: "\(format(memory, memory: true)) of memory")
+            memoryOutcome = .pass(detail: PreflightResult.detail("\(format(memory, memory: true)) of memory"))
         } else {
             memoryOutcome = .warn(
-                detail: "\(format(memory, memory: true)) of memory. \(format(policy.recommendedMemoryBytes, memory: true)) is recommended; with less, run one development Mac at a time and expect memory pressure during large builds.",
+                detail: PreflightResult.detail("\(format(memory, memory: true)) of memory. \(format(policy.recommendedMemoryBytes, memory: true)) is recommended; with less, run one development Mac at a time and expect memory pressure during large builds."),
                 recovery: []
             )
         }
@@ -135,16 +158,16 @@ public enum PreflightCheck: Sendable {
         do {
             let free = try probe.freeBytes(at: storageRoot)
             if free >= policy.firstSetupAllowanceBytes {
-                diskOutcome = .pass(detail: "\(format(free)) free on the volume that will hold the development Mac")
+                diskOutcome = .pass(detail: PreflightResult.detail("\(format(free)) free on the volume that will hold the development Mac"))
             } else {
                 diskOutcome = .fail(.insufficientDisk(requiredBytes: policy.firstSetupAllowanceBytes, availableBytes: free, volumePath: SanitizedText(storageRoot.path)))
             }
         } catch let error as HostProbeError {
             // The destination is unusable or its volume is not there: not a transient lookup
             // failure, and never a warning, since there is no disk to check.
-            diskOutcome = .undetermined(detail: error.userMessage, recovery: error.recoveryActions)
+            diskOutcome = .undetermined(detail: PreflightResult.detail(error.userMessage), recovery: error.recoveryActions)
         } catch {
-            diskOutcome = .undetermined(detail: "Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined, so Guesthouse cannot tell whether the download will fit. Check again, or choose a storage location Guesthouse can read.", recovery: [.retry, .openSettings])
+            diskOutcome = .undetermined(detail: PreflightResult.detail("Free space on \(GuesthouseError.sanitize(storageRoot.path, limit: 200)) could not be determined, so Guesthouse cannot tell whether the download will fit. Check again, or choose a storage location Guesthouse can read."), recovery: [.retry, .openSettings])
         }
         results.append(PreflightResult(kind: .freeDisk, outcome: diskOutcome))
 
@@ -153,8 +176,8 @@ public enum PreflightCheck: Sendable {
             // Bundle metadata and paths come from another app on disk: normalize and bound them
             // before they become UI text, as every externally sourced value is.
             let version = [app.version.map { GuesthouseError.sanitize($0) }, app.build.map { "(\(GuesthouseError.sanitize($0)))" }].compactMap { $0 }.joined(separator: " ")
-            return .pass(detail: "Codex desktop \(version.isEmpty ? "found" : version) at \(GuesthouseError.sanitize(app.url.path, limit: 200))")
-        } ?? .warn(detail: "Codex desktop is not installed. Guesthouse can prepare a development Mac without it, but you will need it to open a workspace in Codex.", recovery: [])))
+            return .pass(detail: PreflightResult.detail("Codex desktop \(version.isEmpty ? "found" : version) at \(GuesthouseError.sanitize(app.url.path, limit: 200))"))
+        } ?? .warn(detail: PreflightResult.detail("Codex desktop is not installed. Guesthouse can prepare a development Mac without it, but you will need it to open a workspace in Codex."), recovery: [])))
 
         let storage = StorageSummary(
             storageRootPath: GuesthouseError.sanitize(storageRoot.path, limit: 400),

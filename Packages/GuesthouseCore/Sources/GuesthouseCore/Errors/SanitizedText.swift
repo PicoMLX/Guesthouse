@@ -54,11 +54,36 @@ public struct MissingComponents: Hashable, Sendable, Codable, ExpressibleByArray
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let names = try c.decode([SanitizedText].self, forKey: .listed)
+        var names = try c.nestedUnkeyedContainer(forKey: .listed)
+        var kept: [SanitizedText] = []
+        var dropped = 0
+        while !names.isAtEnd {
+            guard kept.count < Self.maximumListed else {
+                // Past the cap only the number matters, so the element is stepped over
+                // instead of being sanitized and retained: a list from a hostile sender
+                // costs no more than counting it.
+                _ = try names.decode(SkippedName.self)
+                dropped += 1
+                continue
+            }
+            kept.append(try names.decode(SanitizedText.self))
+        }
+        listed = kept
         let declaredOmitted = try c.decodeIfPresent(Int.self, forKey: .omitted) ?? 0
-        listed = Array(names.prefix(Self.maximumListed))
-        omitted = max(0, declaredOmitted) + max(0, names.count - Self.maximumListed)
+        // A sender can declare `Int.max` omitted names; the total saturates so a malformed
+        // payload cannot trap in its receiver.
+        omitted = Self.saturatingSum(max(0, declaredOmitted), dropped)
     }
 
-    public var count: Int { listed.count + omitted }
+    /// Consumes one element of the encoded list without materializing it.
+    private struct SkippedName: Decodable {
+        init(from decoder: any Decoder) throws {}
+    }
+
+    private static func saturatingSum(_ a: Int, _ b: Int) -> Int {
+        let (sum, overflowed) = a.addingReportingOverflow(b)
+        return overflowed ? .max : sum
+    }
+
+    public var count: Int { Self.saturatingSum(listed.count, omitted) }
 }

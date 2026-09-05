@@ -2,14 +2,25 @@ import Foundation
 
 /// The closed set of operations the journal can record. A misspelled or unsupported kind is a
 /// compile error, so replay always knows which state inspection an in-flight record needs.
-public enum JournalOperation: String, Codable, Hashable, Sendable, CaseIterable {
+///
+/// Two of them are recorded with the detail that inspection needs: the stage a provisioning
+/// attempt was working toward, and which of the five targeted repairs was running. Without
+/// them an operation interrupted before its first checkpoint would only say "provision" or
+/// "repair", and the snapshot's last completed stage is not proof of what had started.
+public enum JournalOperation: Codable, Hashable, Sendable, CaseIterable {
     case startEnvironment
     case stopEnvironment
-    case provision
+    case provision(stage: ProvisioningStage)
     case importXcode
     case deleteEnvironment
     case exportWork
-    case repair
+    case repair(kind: RepairKind)
+
+    public static var allCases: [JournalOperation] {
+        [.startEnvironment, .stopEnvironment, .importXcode, .deleteEnvironment, .exportWork]
+            + ProvisioningStage.allCases.map { .provision(stage: $0) }
+            + RepairKind.allCases.map { .repair(kind: $0) }
+    }
 }
 
 /// One line of the append-only operation journal.
@@ -32,7 +43,15 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         case failed(GuesthouseError)
         /// Contact was lost; the true outcome must be reconciled before anything is retried.
         case unknown
+        /// Inspection established that the mutation did not take effect. Terminal, and the only
+        /// truthful way to settle an operation whose outcome was unknown and turned out to be
+        /// nothing: `completed` would claim it succeeded, and every "unknown" outcome leaves the
+        /// environment blocked against the new operation recovery is there to allow.
+        case notApplied
     }
+
+    /// Whether this build can read a record written in `format`.
+    public static func canRead(_ format: Int) -> Bool { (1...currentFormat).contains(format) }
 
     public let format: Int
     public let id: OperationID
@@ -53,7 +72,7 @@ public struct JournalRecord: Codable, Hashable, Sendable {
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let format = try c.decode(Int.self, forKey: .format)
-        guard (1...Self.currentFormat).contains(format) else {
+        guard Self.canRead(format) else {
             throw DecodingError.dataCorruptedError(forKey: .format, in: c, debugDescription: "journal record format \(format) is not readable by this build")
         }
         self.format = format
@@ -66,11 +85,35 @@ public struct JournalRecord: Codable, Hashable, Sendable {
 
     /// Whether this record leaves the operation in flight. A failure whose error says the
     /// outcome is unknown is not terminal: the mutation's result is still unestablished.
+    ///
+    /// A cancellation is one of those. It can reach the runtime after the host mutation has
+    /// partly or fully happened, which is why `GuesthouseError.canceled` offers inspection as
+    /// its first recovery action; the operation stays unresolved until that inspection has
+    /// settled it (AGENTS.md: never retry a mutating operation blindly).
     public var leavesInFlight: Bool {
         switch outcome {
         case .started, .checkpoint, .unknown: true
-        case .failed(.operationOutcomeUnknown): true
-        case .completed, .failed: false
+        case .failed(.operationOutcomeUnknown), .failed(.canceled): true
+        case .completed, .notApplied, .failed: false
+        }
+    }
+
+    /// Whether the record agrees with itself. A journal can also be written by a restore or a
+    /// repair tool, so the identities and stages a record carries are checked against the ones
+    /// it belongs to when it is appended and again when it is replayed: a record naming two
+    /// operations, two environments, or two stages leaves recovery unable to say which mutation
+    /// to inspect (AGENTS.md: an interrupted operation has an unknown outcome until the actual
+    /// state is inspected).
+    public var isSelfConsistent: Bool {
+        switch outcome {
+        case .failed(.operationOutcomeUnknown(let reported)):
+            reported == id
+        case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)):
+            reported == environmentID
+        case .checkpoint(let reached):
+            operation == .provision(stage: reached)
+        default:
+            true
         }
     }
 }

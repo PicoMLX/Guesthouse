@@ -56,9 +56,25 @@ public enum RequestValidator: Sendable {
                   case .control, .format, .lineSeparator, .paragraphSeparator: true
                   default: false
                   }
-              })
+              }),
+              // The name is kept for progress and errors, where it is shown as it arrived, and
+              // nothing downstream redacts a display value again. Refusing rather than
+              // rewriting keeps the user's own file name honest: showing something other than
+              // what they picked would be worse than declining the selection.
+              !carriesCredential(handoff.displayName)
         else {
             throw .invalidDisplayName
+        }
+    }
+
+    /// Whether the redactor recognizes a credential in a file name, examined whole and by
+    /// dot-separated part. A name is a single Unicode word across its dots, so a token that
+    /// ends where an extension begins (`ghp_….app`) reaches no word boundary the patterns can
+    /// anchor on; the whole name is examined as well, so a credential that needs its dots,
+    /// such as a JWT, is still recognized.
+    static func carriesCredential(_ name: String) -> Bool {
+        ([name] + name.split(separator: ".").map(String.init)).contains {
+            GuesthouseError.sanitizeReporting($0, limit: maximumDisplayNameLength).redacted
         }
     }
 
