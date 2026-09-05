@@ -81,8 +81,11 @@ extension Redactor {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
                 boundaries.insert(offsets.count - 1)
                 let prefix = escape.0.hasPrefix("\u{1B}[") ? 2 : (escape.0.hasPrefix("\u{009B}") ? 1 : 0)
-                let body = escape.0.dropFirst(prefix)
-                if prefix > 0, !body.isEmpty, retainParameters || body.count == 1 {
+                // Generic ESC commands can consume a label character too. Never interpret
+                // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
+                let generic = escape.0.wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
+                let body = generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix)
+                if prefix > 0 || generic, !body.isEmpty, retainParameters || body.count == 1 {
                     let start = offsets.count - 1
                     alternate += body
                     offsets.append(contentsOf: repeatElement(joinedCount, count: body.utf8.count))
@@ -92,6 +95,18 @@ extension Redactor {
             }
             guard !retained.isEmpty else { continue }
             appendLiteral(text[cursor...])
+            // A restored label can identify an opaque value with no recognizable token shape.
+            let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
+                + alternate.matches(of: patterns.authorizationHeader).map { ($0.range, $0.2.startIndex) }
+                + alternate.matches(of: patterns.codeField).map { ($0.range, $0.3.startIndex) }
+            for (range, valueStart) in fields {
+                let lower = alternate.utf8.distance(from: alternate.startIndex, to: range.lowerBound)
+                let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: valueStart)
+                if retained.contains(where: { $0.overlaps(lower..<labelEnd) }) {
+                    let upper = alternate.utf8.distance(from: alternate.startIndex, to: range.upperBound)
+                    recovered.append((offsets[lower]..<offsets[upper], "secret"))
+                }
+            }
             let recognizedStarts = Set(
                 alternate.matches(of: patterns.apiKey).map { $0.2.startIndex }
                 + alternate.matches(of: patterns.bearer).map { $0.2.startIndex }
@@ -224,7 +239,15 @@ extension Redactor {
                 rangeIndex += 1
             }
             if rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].lowerBound < offset {
-                continue
+                let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
+                let suffix = joined[boundary...]
+                guard suffix.prefixMatch(of: patterns.labeledSecret) != nil
+                    || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
+                    || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
+                    || suffix.prefixMatch(of: patterns.codeField) != nil else { continue }
+                // The token may have swallowed a separate label. Keep that label available
+                // to the stream scanner, but conceal even a now-short token prefix.
+                recovered.append((mergedRanges[rangeIndex].lowerBound..<offset, "secret"))
             }
             let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
             spliced += joined[scanned..<boundary]
@@ -235,7 +258,7 @@ extension Redactor {
         spliced += joined[scanned...]
         var mapped: [RecoveredCredential] = []
         var insertedIndex = 0
-        for span in recovered {
+        for span in expandingRecoveredRanges(recovered, through: []) {
             let range = span.range
             while insertedIndex < insertedOffsets.count, insertedOffsets[insertedIndex] <= range.lowerBound { insertedIndex += 1 }
             let lower = range.lowerBound + insertedIndex * splicedBoundary.utf8.count
