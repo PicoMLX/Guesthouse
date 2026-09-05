@@ -127,12 +127,14 @@ extension Redactor {
         // over the lines that follow, so the block is detected above before the marker returns.
         // A secret label or a code prompt inside the fold opens a context the *next* line
         // completes, and only a scan arms that, so the rules run here for their state alone.
+        let closedValueTail = Self.closedQuotedValueTail(text[...]).map(String.init)
         if authorizationContinuation {
             state.quotedValue = Self.unterminatedQuote(in: text[...], kind: "authorization")
             if authorizationWasAwaitingValue, Self.valueStartsOnNextLine(text[...]) {
                 state.authorizationValueIsOnTheNextLine = true
             }
-            Self.armPendingContexts(from: text, state: &state)
+            if closedValueTail != nil { state.expectingAuthorizationValue = false }
+            Self.armPendingContexts(from: closedValueTail ?? text, state: &state)
             return RedactedLine(Self.marker("authorization"))
         }
         if secretContinuation {
@@ -140,7 +142,8 @@ extension Redactor {
             if state.expectingSecretValue, !Self.valueStartsOnNextLine(text[...]) {
                 state.expectingSecretValue = false
             }
-            Self.armPendingContexts(from: text, state: &state)
+            if closedValueTail != nil { state.expectingSecretContinuation = false }
+            Self.armPendingContexts(from: closedValueTail ?? text, state: &state)
             return RedactedLine(Self.marker("secret"))
         }
 
@@ -159,12 +162,12 @@ extension Redactor {
             let kind = secretExpected ? "secret" : "device-code"
             state.quotedValue = Self.unterminatedQuote(in: text[...], kind: kind)
             state.expectingSecretValue = false
-            _ = Self.applyPatterns(to: text, codeExpected: false, state: &state)
+            _ = Self.applyPatterns(to: closedValueTail ?? text, codeExpected: false, state: &state)
             // The consumed value may fold onto further indented lines. A lone opening quote
             // still introduces a value rather than satisfying the pending context.
             if secretExpected {
                 state.expectingSecretValue = state.expectingSecretValue || Self.valueStartsOnNextLine(text[...])
-                state.expectingSecretContinuation = true
+                state.expectingSecretContinuation = state.expectingSecretContinuation || closedValueTail == nil
             } else if Self.valueStartsOnNextLine(text[...]) {
                 state.expectingDeviceCode = true
             }

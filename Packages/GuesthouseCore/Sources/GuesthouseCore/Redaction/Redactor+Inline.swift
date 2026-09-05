@@ -26,9 +26,17 @@ extension Redactor {
     /// A completed quoted field owns only its value, so indented structured siblings cannot
     /// belong to its fold. Encoded diagnostic quotes follow the same closure rules as streams.
     static func isClosedQuotedValue(_ value: Substring) -> Bool {
-        let start = value.drop(while: { $0.isWhitespace }).drop(while: { $0 == "\\" })
-        guard start.first == "\"" || start.first == "'" else { return false }
-        return unterminatedQuote(in: value, kind: "secret") == nil
+        closedQuotedValueTail(value) != nil
+    }
+
+    static func closedQuotedValueTail(_ value: Substring) -> Substring? {
+        let start = value.drop(while: { $0.isWhitespace })
+        let depth = start.prefix(while: { $0 == "\\" }).count
+        let content = start.dropFirst(depth)
+        guard let quote = content.first, quote == "\"" || quote == "'",
+              let end = closingQuoteEnd(in: content.dropFirst(), for: .init(delimiter: quote, escapeDepth: depth, kind: "secret"))
+        else { return nil }
+        return value[end...]
     }
 
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
@@ -96,7 +104,7 @@ extension Redactor {
             }
             state.expectingDeviceCode = state.expectingDeviceCode
                 || (match.2.map(valueStartsOnNextLine) ?? true)
-            return "\(match.1) \(marker("device-code"))"
+            return "\(match.1) \(marker("device-code"))\(match.2.flatMap(closedQuotedValueTail) ?? "")"
         }
         text = text.replacing(p.secretLabelOnly) { match in
             labelAwaitsValue = true
