@@ -246,7 +246,11 @@ extension ObservedTuple {
         // normalized carries a digest of the inspected text, counted against the same limit.
         guard sanitized != escaped else { return sanitized }
         let room = max(16, limit - identitySuffixLength)
-        return "\(GuesthouseError.sanitize(escaped, limit: room)) \(identityMarker)\(digest(of: escaped))]"
+        // Making room for the suffix narrows the inspection window. That second pass can
+        // redact a run the first pass retained, so its provenance is a separate gate too.
+        let display = GuesthouseError.sanitizeReporting(escaped, limit: room)
+        guard !display.redacted else { return nil }
+        return "\(display.value) \(identityMarker)\(digest(of: escaped))]"
     }
 
     /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.

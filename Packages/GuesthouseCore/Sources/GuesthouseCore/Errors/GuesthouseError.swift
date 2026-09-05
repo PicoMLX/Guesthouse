@@ -233,6 +233,11 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         // would otherwise split it out of the redactor's reach.
         let spliced = Redactor.redactEscapeSplicedRuns(bounded)
         let stripped = Redactor.stripTerminalEscapes(spliced)
+        // OSC/DCS/APC/PM/SOS discard arbitrary payload, not just styling. Even an edge
+        // sequence can hide a credential whose digest must not become an identity. Keep
+        // ordinary SGR/charset normalization distinct: those carry no arbitrary payload.
+        let controlPayloadRemoved = stripped != spliced
+            && spliced.contains(#/\u{1B}[\]P_^X]|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}]/#)
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
@@ -248,6 +253,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         }))
         var truncationRedacted = false
         if truncated {
+            let opened = normalized
             // Normalization drops scalars, so a window full of raw input can normalize to far
             // less: a run of combining marks between a device code's first and last character
             // pushes that last character out of the window and leaves `AB12-CD3`, which no
@@ -263,7 +269,6 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             // recognized in both the spellings the redactor's own userinfo rule accepts, since a
             // URL that reached a log through JSON keeps that encoding's escaped slashes, and is
             // put back exactly as it came in.
-            let opened = normalized
             normalized = normalized.replacing(#/(:(?:\\?\/){2})[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
             // A JWT whose payload is longer than the window loses the second `.` the redactor
             // matches on, so a token that began inside the visible prefix would be emitted in
@@ -280,9 +285,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         }
         let redacted = Redactor().redact(fieldValue: normalized)
         // The truncation-time replacement counts as redaction, and so does the escape-spliced
-        // run dropped before normalization: both remove credential text, and a caller must not
-        // treat what is left as merely bounded and attach an identity digest of the original.
-        let wasRedacted = spliced != bounded || truncationRedacted || redacted != normalized
+        // run or control payload dropped before normalization: all can remove credential text,
+        // and a caller must not attach an identity digest of that original text.
+        let wasRedacted = spliced != bounded || controlPayloadRemoved || truncationRedacted || redacted != normalized
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return (redacted, wasRedacted) }
         return (String(String.UnicodeScalarView(scalars.prefix(limit))) + "…", wasRedacted)
