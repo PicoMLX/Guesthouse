@@ -49,8 +49,9 @@ extension Redactor {
         if stripped.spliced != stripped.joined {
             // Terminal recovery can mask a label inside a token. Retain the original reading's
             // pending contexts before replacing that evidence with a marker.
+            // Joined text has no terminal controls, so this scan has no alternate-reading recursion.
             var joinedScan = StreamState()
-            _ = Self.applyPatterns(to: stripped.joined, codeExpected: state.expectingDeviceCode, state: &joinedScan)
+            _ = redact(line: stripped.joined, state: &joinedScan)
             text = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)

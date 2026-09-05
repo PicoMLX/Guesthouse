@@ -58,6 +58,22 @@ import Testing
         #expect(Redactor.renderings(of: input).spliced == "[redacted:jwt]")
     }
 
+    @Test(arguments: [("sk-abcdefghijklmnopqrstuvwx", "api-key"), ("ghp_abcdefghijklmnopqrstuvwx", "github-token")])
+    func recoveryKeepsCredentialInitials(token: String, kind: String) {
+        #expect(Redactor.renderings(of: "filename\u{1B}[" + token).spliced == "filename" + Redactor.splicedBoundary + "[redacted:\(kind)]")
+    }
+
+    @Test func jwtSpansDoNotProtectTheFollowingFilenameBoundary() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.payload.signature"
+        let key = "sk-abcdefghijklmnopqrstuvwx"
+        #expect(Redactor.renderings(of: jwt + ".filename\u{1B}[31m" + key).spliced == jwt + ".filename" + Redactor.splicedBoundary + key)
+    }
+
+    @Test func overlappingPEMProtectionIncludesTheWholeCurrentBody() {
+        let input = "eyJhbGciOiJIUzI1NiIsI\u{1B}[mtpZCI6Im5hYmMifQ.payload.-----BEGIN PRIVATE KEY-----syntheticBody-----END PRIVATE KEY-----"
+        #expect(Redactor.renderings(of: input).spliced == "[redacted:jwt]")
+    }
+
     @Test func publicTerminalNormalizationDoesNotPerformRedaction() throws {
         let header = "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hYmMifQ"
         let position = try #require(header.firstIndex(of: "m"))

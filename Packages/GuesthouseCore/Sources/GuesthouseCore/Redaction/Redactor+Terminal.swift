@@ -35,18 +35,42 @@ extension Redactor {
     /// type put there.
     static let splicedBoundary = "\u{009F}"
 
+    private typealias RecoveredCredential = (range: Range<Int>, kind: String)
+
+    /// Boundary-free spans protect token interiors; recognition still requires each rule's
+    /// usual leading boundary unless an actual removed control supplied one at that position.
+    private static func terminalCredentialSpans(in text: String) -> [(range: Range<String.Index>, kind: String, needsBoundary: Bool)] {
+        var spans = text.matches(of: patterns.githubToken).map { ($0.range, "github-token", false) }
+        spans += text.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map { ($0.range, "api-key", true) }
+        spans += text.matches(of: patterns.distinctiveAPIKey).map { ($0.range, "api-key", false) }
+        spans += text.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map { ($0.range, "bearer-token", true) }
+        spans += text.matches(of: patterns.basicCredentialSpan).compactMap { match in
+            isBasicCredential(match.2) ? (match.range, "authorization", true) : nil
+        }
+        spans += text.matches(of: patterns.digestCredentialSpan).map { ($0.range, "authorization", true) }
+        spans += text.matches(of: patterns.specializedCredentialSpan).map { ($0.range, "authorization", true) }
+        spans += text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2).map { ($0, "jwt", false) } }
+        return spans
+    }
+
     /// A CSI introducer inserted into a token can consume its next character as the command's
     /// final byte. Keep two bounded alternate readings: parameterless CSI bodies, and all CSI
     /// bodies. The first also works beside ordinary parameterized styling in the same token.
-    /// Control-string payloads remain suppressed in both. Only recognized JOSE spans are mapped
+    /// Control-string payloads remain suppressed in both. Only recognized credential spans are mapped
     /// back; none of the retained command bytes themselves can reappear in the rendered output.
-    private static func recoveredJWTRanges(in text: String) -> [Range<Int>] {
-        var recovered: [Range<Int>] = []
+    private static func recoveredCredentialRanges(in text: String, joined: String) -> [RecoveredCredential] {
+        var recovered: [RecoveredCredential] = []
+        let ordinary = terminalCredentialSpans(in: joined).map { span -> RecoveredCredential in
+            let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
+            let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
+            return (lower..<upper, span.kind)
+        }.sorted { $0.range.lowerBound < $1.range.lowerBound }
         let escapes = text.matches(of: patterns.terminalEscape)
         for retainParameters in [false, true] {
             var alternate = ""
             var offsets = [0]
             var retained: [Range<Int>] = []
+            var boundaries: Set<Int> = []
             var joinedCount = 0
             var cursor = text.startIndex
             func appendLiteral(_ literal: Substring) {
@@ -55,6 +79,7 @@ extension Redactor {
             }
             for escape in escapes {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
+                boundaries.insert(offsets.count - 1)
                 let prefix = escape.0.hasPrefix("\u{1B}[") ? 2 : (escape.0.hasPrefix("\u{009B}") ? 1 : 0)
                 let body = escape.0.dropFirst(prefix)
                 if prefix > 0, !body.isEmpty, retainParameters || body.count == 1 {
@@ -67,40 +92,56 @@ extension Redactor {
             }
             guard !retained.isEmpty else { continue }
             appendLiteral(text[cursor...])
+            let recognizedStarts = Set(
+                alternate.matches(of: patterns.apiKey).map { $0.2.startIndex }
+                + alternate.matches(of: patterns.bearer).map { $0.2.startIndex }
+                + alternate.matches(of: patterns.basicAuthorization).map { $0.2.startIndex }
+                + alternate.matches(of: patterns.digestAuthorization).map { $0.1.endIndex }
+                + alternate.matches(of: patterns.specializedAuthorization).map { $0.1.endIndex }
+            )
             var retainedIndex = 0
-            for match in alternate.matches(of: patterns.jwt) {
-                for range in jwtRedactionRanges(match.2) {
-                    let lower = alternate.utf8.distance(from: alternate.utf8.startIndex, to: range.lowerBound)
-                    let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: range.upperBound)
-                    while retainedIndex < retained.count, retained[retainedIndex].upperBound <= lower { retainedIndex += 1 }
-                    if offsets[lower] < offsets[upper], retainedIndex < retained.count, retained[retainedIndex].lowerBound < upper {
-                        recovered.append(offsets[lower]..<offsets[upper])
+            var ordinaryIndex = 0
+            var coveredEnds: [String: Int] = [:]
+            for span in terminalCredentialSpans(in: alternate).sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+                let lower = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.lowerBound)
+                let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.upperBound)
+                guard !span.needsBoundary || boundaries.contains(lower) || recognizedStarts.contains(span.range.lowerBound) else { continue }
+                while retainedIndex < retained.count, retained[retainedIndex].upperBound <= lower { retainedIndex += 1 }
+                if offsets[lower] < offsets[upper], retainedIndex < retained.count, retained[retainedIndex].lowerBound < upper {
+                    while ordinaryIndex < ordinary.count, ordinary[ordinaryIndex].range.lowerBound <= offsets[lower] {
+                        let known = ordinary[ordinaryIndex]
+                        coveredEnds[known.kind] = max(coveredEnds[known.kind] ?? 0, known.range.upperBound)
+                        ordinaryIndex += 1
                     }
+                    // Preserve the normal renderer and its labels when it already recognizes
+                    // the whole projected credential. Only additional coverage needs a marker.
+                    if span.kind != "jwt", (coveredEnds[span.kind] ?? 0) >= offsets[upper] { continue }
+                    recovered.append((offsets[lower]..<offsets[upper], span.kind))
                 }
             }
         }
-        var merged: [Range<Int>] = []
-        for range in recovered.sorted(by: { $0.lowerBound < $1.lowerBound }) {
-            if let last = merged.last, range.lowerBound <= last.upperBound {
-                merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
-            } else { merged.append(range) }
+        var merged: [RecoveredCredential] = []
+        for span in recovered.sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+            if let last = merged.last, span.range.lowerBound <= last.range.upperBound {
+                merged[merged.count - 1] = (last.range.lowerBound..<max(last.range.upperBound, span.range.upperBound), last.kind)
+            } else { merged.append(span) }
         }
         return merged
     }
 
     /// Inserting a marker must never hide evidence of a larger credential recognized in the
     /// ordinary reading (for example a five-segment JWE or a longer Bearer value).
-    private static func expandingRecoveredRanges(_ recovered: [Range<Int>], through ordinary: [Range<Int>]) -> [Range<Int>] {
-        let spans = (recovered.map { (range: $0, recovered: true) } + ordinary.map { (range: $0, recovered: false) })
+    private static func expandingRecoveredRanges(_ recovered: [RecoveredCredential], through ordinary: [Range<Int>]) -> [RecoveredCredential] {
+        let spans = (recovered.map { (range: $0.range, kind: Optional($0.kind)) } + ordinary.map { (range: $0, kind: nil as String?) })
             .sorted { $0.range.lowerBound < $1.range.lowerBound }
-        var clusters: [(range: Range<Int>, recovered: Bool)] = []
+        var clusters: [(range: Range<Int>, kind: String?)] = []
         for span in spans {
             if let last = clusters.last, span.range.lowerBound < last.range.upperBound {
                 clusters[clusters.count - 1] = (last.range.lowerBound..<max(last.range.upperBound, span.range.upperBound),
-                                                last.recovered || span.recovered)
+                                                last.kind ?? span.kind)
             } else { clusters.append(span) }
         }
-        return clusters.filter(\.recovered).map(\.range)
+        return clusters.compactMap { span in span.kind.map { (span.range, $0) } }
     }
 
     /// The two readings of a line whose terminal escapes have been removed: `joined`, where the
@@ -108,7 +149,7 @@ extension Redactor {
     /// between two characters a token can contain leaves a boundary behind. Only the second one
     /// shows where a token begins when styling was put in front of it; only the first one keeps
     /// a label that styling interrupted spelled correctly. `spliced` is `joined` when no escape
-    /// stood in such a place, which is every ordinary line. The spliced reading also masks JOSE
+    /// stood in such a place, which is every ordinary line. The spliced reading also masks credential
     /// spans recovered before a CSI final byte could destroy their recognizable header.
     static func renderings(of text: String) -> (joined: String, spliced: String) {
         func isTokenCharacter(_ character: Character) -> Bool {
@@ -135,31 +176,20 @@ extension Redactor {
             return joined[..<boundary].last.map(isTokenCharacter) == true
                 && joined[boundary...].first.map(isTokenCharacter) == true
         }
-        var recovered = recoveredJWTRanges(in: text)
+        var recovered = recoveredCredentialRanges(in: text, joined: joined)
         guard !boundaryOffsets.isEmpty || !recovered.isEmpty else { return (joined, joined) }
 
         // A boundary inside a recognized token would let the first scan redact only a valid
         // prefix. Closing the boundary afterwards cannot recover the remaining suffix. Keep
         // recognized tokens whole in both readings, while retaining boundaries before tokens
         // that need them, such as `filename<control>sk-...`.
-        var tokenRanges = joined.matches(of: patterns.githubToken).map(\.range)
-        // These structural spans intentionally omit the leading boundary: the boundary before
-        // a token may itself need restoring. They only protect its interior from splitting;
-        // the actual redaction rules still require their usual boundary.
-        tokenRanges += joined.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map(\.range)
-        tokenRanges += joined.matches(of: patterns.distinctiveAPIKey).map(\.range)
-        tokenRanges += joined.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map(\.range)
-        tokenRanges += joined.matches(of: patterns.basicCredentialSpan).compactMap { match in
-            isBasicCredential(match.2) ? match.range : nil
-        }
-        tokenRanges += joined.matches(of: patterns.digestCredentialSpan).map(\.range)
-        tokenRanges += joined.matches(of: patterns.specializedCredentialSpan).map(\.range)
+        let tokenRanges = terminalCredentialSpans(in: joined).map(\.range)
         func byteRange(_ range: Range<String.Index>) -> Range<Int> {
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: range.upperBound)
             return lower..<upper
         }
-        var ordinaryRanges = tokenRanges + joined.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2) }
+        var ordinaryRanges = tokenRanges
         // A JOSE segment can spell a field/prompt name. Its marker must not hide that name
         // while leaving the independently recognized value outside the recovered token.
         ordinaryRanges += joined.matches(of: patterns.authorizationHeader).map(\.range)
@@ -168,11 +198,15 @@ extension Redactor {
         ordinaryRanges += joined.matches(of: patterns.codePrompt).map(\.range)
         ordinaryRanges += joined.matches(of: patterns.codePromptWithoutDelimiter).map(\.range)
         ordinaryRanges += joined.matches(of: patterns.declarativeCodePrompt).map(\.range)
-        recovered = expandingRecoveredRanges(recovered, through: ordinaryRanges.map(byteRange))
-        tokenRanges += joined.matches(of: patterns.jwt).compactMap { match in
-            redactedJWT(match.2) == String(match.2) ? nil : match.range
+        // A recovered segment can also contain the BEGIN word. Protect the current PEM body
+        // before replacing it; the stream scanner separately retains its normalized state.
+        ordinaryRanges += joined.matches(of: patterns.pemBegin).map { begin in
+            let tail = joined[begin.range.upperBound...]
+            let end = tail.range(of: "-----END \(begin.1)-----")?.upperBound ?? joined.endIndex
+            return begin.range.lowerBound..<end
         }
-        let byteRanges = (tokenRanges.map(byteRange) + recovered).sorted { $0.lowerBound < $1.lowerBound }
+        recovered = expandingRecoveredRanges(recovered, through: ordinaryRanges.map(byteRange))
+        let byteRanges = (tokenRanges.map(byteRange) + recovered.map(\.range)).sorted { $0.lowerBound < $1.lowerBound }
         var mergedRanges: [Range<Int>] = []
         for range in byteRanges {
             if let last = mergedRanges.last, range.lowerBound < last.upperBound {
@@ -199,21 +233,23 @@ extension Redactor {
             scanned = boundary
         }
         spliced += joined[scanned...]
-        var mapped: [Range<Int>] = []
+        var mapped: [RecoveredCredential] = []
         var insertedIndex = 0
-        for range in recovered {
+        for span in recovered {
+            let range = span.range
             while insertedIndex < insertedOffsets.count, insertedOffsets[insertedIndex] <= range.lowerBound { insertedIndex += 1 }
             let lower = range.lowerBound + insertedIndex * splicedBoundary.utf8.count
             while insertedIndex < insertedOffsets.count, insertedOffsets[insertedIndex] < range.upperBound { insertedIndex += 1 }
-            mapped.append(lower..<(range.upperBound + insertedIndex * splicedBoundary.utf8.count))
+            mapped.append((lower..<(range.upperBound + insertedIndex * splicedBoundary.utf8.count), span.kind))
         }
         var redacted = ""
         scanned = spliced.startIndex
-        for range in mapped {
+        for span in mapped {
+            let range = span.range
             let lower = spliced.utf8.index(spliced.utf8.startIndex, offsetBy: range.lowerBound)
             let upper = spliced.utf8.index(spliced.utf8.startIndex, offsetBy: range.upperBound)
             redacted += spliced[scanned..<lower]
-            redacted += marker("jwt")
+            redacted += marker(span.kind)
             scanned = upper
         }
         return (joined, redacted + spliced[scanned...])
