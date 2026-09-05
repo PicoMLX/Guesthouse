@@ -16,16 +16,22 @@ Guesthouse is a native macOS app that prepares an isolated development Mac (a ma
 
 ## Commands
 
-Package tests (fast, no signing):
+All package tests with the CI warning policy (fast, no signing):
 
 ```bash
-swift test --package-path Packages/GuesthouseCore
+./ci_scripts/ci_pre_xcodebuild.sh
+```
+
+One package:
+
+```bash
+swift test --package-path Packages/GuesthouseCore -Xswiftc -warnings-as-errors
 ```
 
 One package test:
 
 ```bash
-swift test --package-path Packages/GuesthouseCore --filter coreModuleIdentity
+swift test --package-path Packages/GuesthouseCore --filter coreModuleIdentity -Xswiftc -warnings-as-errors
 ```
 
 App build and tests through the shared scheme (also runs the package tests):
@@ -44,7 +50,15 @@ Open in Xcode with `open Guesthouse.xcodeproj`. Xcode 26.6 or later, macOS 26.4 
 
 ## Continuous integration and review
 
-Xcode Cloud runs the `Guesthouse` scheme's Test action on pull requests to `main` and reports a check to GitHub. Codex reviews every pull request automatically. Keep the scheme's Test action as the single source of truth for what CI runs; when you add a package, add its test target to the shared scheme.
+Xcode Cloud runs the `Guesthouse` scheme's Test action on pull requests to `main` and reports a check to GitHub. Keep the scheme's Test action as the source of truth for Xcode tests; when you add a package, add its test target to the shared scheme. Codex reviews every pull request automatically.
+
+The executable `ci_scripts/ci_pre_xcodebuild.sh` additionally runs every immediate `Packages/*/Package.swift` package with warnings treated as errors, independently guarding against missing scheme coverage (issue #2; `MVP-PLAN.md` §11). It uses `CI_PRIMARY_REPOSITORY_PATH` in Xcode Cloud and its own repository location locally, excludes `Fixtures/`, and fails if no packages are found. It skips only `test-without-building`: [Apple documents that phase as having no source checkout](https://developer.apple.com/documentation/xcode/configuring-your-xcode-cloud-workflow-s-actions); package tests have already run during `build-for-testing`.
+
+Validate hook discovery, paths with spaces, phase handling, and failure propagation without compiling Swift:
+
+```bash
+bash Tests/CI/test-package-hook.sh
+```
 
 ## Conventions
 
