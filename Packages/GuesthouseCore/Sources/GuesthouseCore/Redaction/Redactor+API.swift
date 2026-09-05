@@ -34,8 +34,13 @@ extension Redactor {
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
         var recoveredContexts = StreamState()
         for reading in stripped.contexts {
+            let contextText: String
+            if let quoted = state.quotedValue {
+                guard let end = Self.closingQuoteEnd(in: reading[...], for: quoted) else { continue }
+                contextText = String(reading[end...])
+            } else { contextText = reading }
             var scanned = StreamState()
-            _ = redact(line: reading, state: &scanned, isPhysicalLine: false)
+            _ = redact(line: contextText, state: &scanned, isPhysicalLine: false)
             Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
         }
         // Only the physical pass advances PPK framing. On its opening line, preserve any
@@ -43,6 +48,12 @@ extension Redactor {
         let wasReadingPPK = state.ppkPhase != .inactive
         let ppkLine = !wasReadingPPK
             ? stripped.contexts.first(where: { $0.contains(Self.patterns.ppkBegin) }) ?? stripped.joined : stripped.joined
+        if isPhysicalLine, !wasReadingPPK, let opener = ppkLine.firstMatch(of: Self.patterns.ppkBegin) {
+            // Contexts that end before this key do not enclose it. Reuse the ordinary closure
+            // transitions on that prefix without advancing physical PPK framing a second time.
+            _ = redact(line: String(ppkLine[..<opener.range.lowerBound]), state: &state,
+                       isPhysicalLine: false, codesAlwaysRedacted: codesAlwaysRedacted)
+        }
         if isPhysicalLine, Self.consumePPKLine(ppkLine, phase: &state.ppkPhase) {
             if !wasReadingPPK {
                 var joinedContext = StreamState()

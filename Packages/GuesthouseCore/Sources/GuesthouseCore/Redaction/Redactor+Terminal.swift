@@ -67,11 +67,20 @@ extension Redactor {
         guard changed else { return nil }
         appendLiteral(text[cursor...])
         let reading = String(corrected.map(\.character))
-        if !terminalContextSpans(in: reading).isEmpty { return reading }
         // Do not replace the whole line when the ordinary reading already covers this token.
         // Position-aware coverage prevents an unrelated token from suppressing new evidence.
         var offsets = corrected.flatMap { Array($0.bytes) }
         offsets.append(corrected.last?.bytes.upperBound ?? 0)
+        let ordinaryContexts = terminalContextSpans(in: joined).map {
+            let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: $0.lowerBound)
+            let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: $0.upperBound)
+            return lower..<upper
+        }
+        for span in terminalContextSpans(in: reading) {
+            let lower = offsets[reading.utf8.distance(from: reading.utf8.startIndex, to: span.lowerBound)]
+            let upper = offsets[reading.utf8.distance(from: reading.utf8.startIndex, to: span.upperBound)]
+            if !ordinaryContexts.contains(where: { $0.lowerBound <= lower && $0.upperBound >= upper }) { return reading }
+        }
         let ordinary = terminalCredentialSpans(in: joined).map { span in
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
