@@ -96,6 +96,21 @@ import Testing
         #expect(throws: LumeOwnershipStorageFailure.poisoned) { try second.read() }
     }
 
+    @Test func byteIdenticalLedgerReplacementInvalidatesTheSnapshotBeforeWriting() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.storage.root) }
+        let store = try LumeOwnershipLedger(storage: f.storage)
+        let expected = try store.read()
+        let bytes = try Data(contentsOf: f.ledger)
+        try FileManager.default.moveItem(at: f.ledger, to: f.storage.root.appending(path: "preserved"))
+        try write(bytes, to: f.ledger)
+        #expect(throws: LumeOwnershipStorageFailure.staleRecord) { try store.apply(.reserve(f.owner), expected: expected) }
+        #expect(throws: LumeOwnershipStorageFailure.poisoned) { try store.read() }
+        let names = try FileManager.default.contentsOfDirectory(atPath: f.storage.root.path)
+        #expect(!names.contains { $0.hasPrefix(".lume-ownership.tmp-") })
+        #expect(try Data(contentsOf: f.ledger) == bytes)
+    }
+
     @Test(arguments: ["both", "guard", "ledger"])
     func missingEnrollmentFilesNeverRecreateIdleState(missing: String) throws {
         let f = try fixture()
