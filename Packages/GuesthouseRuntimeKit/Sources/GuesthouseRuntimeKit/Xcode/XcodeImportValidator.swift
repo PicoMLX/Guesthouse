@@ -246,9 +246,10 @@ public enum XcodeImportValidator {
     ///
     /// A name is a single component and never a path: `CFBundleExecutable` comes out of a
     /// property list the user's selection supplied, and one carrying separators would otherwise
-    /// walk somewhere `Contents/MacOS` does not lead.
+    /// walk somewhere `Contents/MacOS` does not lead. A NUL would truncate the name at the
+    /// C path boundary, selecting a different executable from the one the bundle declared.
     static func hasExecutable(named name: String, in bundle: Int32) -> Bool {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { return false }
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.utf8.contains(0) else { return false }
         guard let descriptor = try? openFile(["Contents", "MacOS", name], in: bundle) else { return false }
         defer { close(descriptor) }
         var info = stat()

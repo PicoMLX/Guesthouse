@@ -224,6 +224,25 @@ import Testing
         #expect(XcodeImportValidator.hasExecutable(named: "Xcode", in: escapingDescriptor), "the program itself is still there; only the name it declared was not")
     }
 
+    @Test(arguments: ["Xcode\u{0}missing", "Xcode\u{0}"])
+    func aDeclaredExecutableContainingNULIsNotAnApplication(executable: String) throws {
+        let app = try bundle()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plist = app.appending(path: "Contents/Info.plist")
+        var info = try #require(PropertyListSerialization.propertyList(from: try Data(contentsOf: plist), format: nil) as? [String: Any])
+        info["CFBundleExecutable"] = executable
+        // A binary plist preserves NULs. The valid `Xcode` fixture remains on disk, so a C
+        // path truncated at the NUL would incorrectly make this malformed declaration pass.
+        let data = try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+        let decoded = try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        try #require(decoded["CFBundleExecutable"] as? String == executable)
+        try data.write(to: plist)
+
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.notAnApplication)) {
+            try XcodeImportValidator.candidate(at: app)
+        }
+    }
+
     @Test func metadataThatOutgrowsItsSizeCheckIsRefused() throws {
         // `fstat` reports a snapshot: a metadata file inside a user-writable bundle can grow
         // before it is read, or be appended to for as long as anyone reads it.
