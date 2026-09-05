@@ -138,7 +138,9 @@ extension Redactor {
                     quote = text[cursor]
                     // An encoded diagnostic quote can open at the beginning. Within a shell
                     // word, an odd backslash count escapes the quote as a literal character.
-                    quoteEscapeDepth = escapeStart == start ? escapeDepth : 0
+                    // Even leading slashes are literal shell backslashes before a raw quote;
+                    // only an odd depth denotes an escaped diagnostic delimiter.
+                    quoteEscapeDepth = escapeStart == start && !escapeDepth.isMultiple(of: 2) ? escapeDepth : 0
                 }
             } else if text[cursor].isWhitespace, escapeDepth.isMultiple(of: 2) {
                 return (cursor, nil, false)
