@@ -251,7 +251,7 @@ extension Redactor {
         var lineStart = text.startIndex
         func appendRedacted(_ line: Substring) {
             let redacted = redact(line: String(line), state: &state).text
-            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted, preserveAlgorithms: true) : redacted
+            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted) : redacted
         }
         // `\r\n` is one `Character`, so splitting on the newline character would leave a CRLF
         // stream as a single line and never apply the streaming rules to it. Each terminator is
