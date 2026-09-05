@@ -47,8 +47,13 @@ extension Redactor {
         // have been consumed below and unioned in on the way out.
         var boundaryScan = StreamState()
         if stripped.spliced != stripped.joined {
+            // Terminal recovery can mask a label inside a token. Retain the original reading's
+            // pending contexts before replacing that evidence with a marker.
+            var joinedScan = StreamState()
+            _ = Self.applyPatterns(to: stripped.joined, codeExpected: state.expectingDeviceCode, state: &joinedScan)
             text = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
+            Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
         let tokenAtLineEnd = stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }

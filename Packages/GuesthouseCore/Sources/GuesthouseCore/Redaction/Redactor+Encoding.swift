@@ -7,15 +7,24 @@ extension Redactor {
     /// adjacent tokens; every segment with at least two following it is tried as a JOSE header, and the
     /// segments around the tokens are kept.
     static func redactedJWT(_ candidate: Substring) -> String {
+        var result = ""
+        var cursor = candidate.startIndex
+        for range in jwtRedactionRanges(candidate) {
+            result += range.lowerBound >= cursor ? String(candidate[cursor..<range.lowerBound]) : "."
+            result += marker("jwt")
+            cursor = max(cursor, range.upperBound)
+        }
+        return result + candidate[cursor...]
+    }
+
+    /// Original spans are shared with terminal recovery so it cannot invent a second JOSE grammar.
+    /// Overlapping spans remain separate here; each header still represents a sensitive token.
+    static func jwtRedactionRanges(_ candidate: Substring) -> [Range<String.Index>] {
         let segments = candidate.split(separator: ".", omittingEmptySubsequences: false)
-        var redacted: [String] = []
-        redacted.reserveCapacity(segments.count)
+        var ranges: [Range<String.Index>] = []
         var coveredThrough = segments.startIndex
         for index in segments.indices {
-            guard index + 2 < segments.count, let start = joseHeaderStart(segments[index]) else {
-                if index >= coveredThrough { redacted.append(String(segments[index])) }
-                continue
-            }
+            guard index + 2 < segments.count, let start = joseHeaderStart(segments[index]) else { continue }
             let header = decodedJOSEHeader(segments[index][start...])
             // Claims are also JSON objects. Only a JOSE parameter identifies a competing
             // header within the current token; ordinary claims keep their original span.
@@ -23,11 +32,10 @@ extension Redactor {
             let count = header?["enc"] == nil ? 3 : 5
             // Never expose a filename prefix or segment already covered by an earlier token.
             // Overlapping headers extend that coverage, even if the later token is shorter.
-            let name = index >= coveredThrough ? String(segments[index][..<start]) : ""
-            redacted.append(name + marker("jwt"))
+            ranges.append(start..<segments[min(index + count, segments.endIndex) - 1].endIndex)
             coveredThrough = max(coveredThrough, min(index + count, segments.endIndex))
         }
-        return redacted.joined(separator: ".")
+        return ranges
     }
 
     /// Where the JOSE header begins inside a segment, including a header concatenated directly
