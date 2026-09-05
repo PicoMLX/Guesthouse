@@ -45,9 +45,9 @@ extension SanitizedText {
         }))
         let rawRedacted = Redactor().redact(fieldValue: credentialReading)
         let stripped = Redactor.stripTerminalEscapes(rawRedacted)
-        var normalized = rawRedacted == credentialReading ? joined
-            : Redactor().redact(fieldValue: String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar))))
         let joinedRedacted = Redactor().redact(fieldValue: joined)
+        var normalized = rawRedacted == credentialReading ? joinedRedacted
+            : Redactor().redact(fieldValue: String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar))))
         // A raw scan may replace a prefix before normalization assembles its secret suffix.
         // Neither transformed string retains offsets into the other. If the normalized reading
         // finds credential evidence and disagrees, quarantine this bounded display value whole.
