@@ -85,4 +85,16 @@ import Testing
         #expect(!output.joined().contains("syntheticKeyBody"))
         #expect(output[3] == "Finished")
     }
+
+    @Test(arguments: ["PRIVATE KEY", "RSA PRIVATE KEY"], [false, true])
+    func aPEMFooterInsideAQuoteCanOpenTheNextBlock(label: String, closeImmediately: Bool) {
+        let output = redactor.redact(lines: [
+            "password: \"-----BEGIN PRIVATE KEY-----", "syntheticFirstBody",
+            "-----END PRIVATE KEY----- -----BEGIN \(label)-----" + (closeImmediately ? "\"" : ""),
+            closeImmediately ? "syntheticSecondBody" : "close\"", "syntheticThirdBody",
+            "-----END \(label)-----", "Finished",
+        ]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[6] == "Finished")
+    }
 }

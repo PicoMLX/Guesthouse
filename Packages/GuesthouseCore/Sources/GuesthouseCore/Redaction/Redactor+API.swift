@@ -55,9 +55,7 @@ extension Redactor {
         if let quoted = state.quotedValue {
             // This branch masks the whole physical line, but still has to advance the
             // independently active PEM context before returning for the enclosing quote.
-            if let label = state.pemLabel, text.contains("-----END \(label)-----") {
-                state.pemLabel = nil
-            }
+            _ = Self.redactPEMBlocks(text, label: &state.pemLabel)
             // Inspect the original normalized text: replacement markers no longer contain the
             // closing delimiter. A closing line is redacted whole, but its suffix can open a new
             // pending field. Blank/styling-only lines do not close the quoted value.
@@ -161,25 +159,10 @@ extension Redactor {
         if !blankLine {
             state.expectingSecretContinuation = secretContinuation
         }
-        if let label = state.pemLabel {
-            guard let footer = text.range(of: "-----END \(label)-----") else {
-                return output(Self.marker("private-key"))
-            }
-            // The block ends here; whatever follows the footer is scanned like any other text,
-            // including another block that begins on the same line.
-            state.pemLabel = nil
-            text = Self.marker("private-key") + text[footer.upperBound...]
+        if let label = state.pemLabel, !text.contains("-----END \(label)-----") {
+            return output(Self.marker("private-key"))
         }
-        while let begin = text.firstMatch(of: Self.patterns.pemBegin) {
-            let label = String(begin.1)
-            if let end = text[begin.range.upperBound...].range(of: "-----END \(label)-----") {
-                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: Self.marker("private-key"))
-            } else {
-                state.pemLabel = label
-                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: Self.marker("private-key"))
-                break
-            }
-        }
+        text = Self.redactPEMBlocks(text, label: &state.pemLabel)
 
         // The continuation's own text is all credential, but a PEM block it opens keeps running
         // over the lines that follow, so the block is detected above before the marker returns.
@@ -248,6 +231,28 @@ extension Redactor {
         let redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
         return output(redacted)
+    }
+
+    /// Quoted and ordinary lines share the same footer-to-next-opener transition. Clearing
+    /// one block must not discard a second opener later on the same physical line.
+    private static func redactPEMBlocks(_ input: String, label: inout String?) -> String {
+        var text = input
+        if let active = label {
+            guard let footer = text.range(of: "-----END \(active)-----") else { return marker("private-key") }
+            label = nil
+            text = marker("private-key") + text[footer.upperBound...]
+        }
+        while let begin = text.firstMatch(of: patterns.pemBegin) {
+            let opened = String(begin.1)
+            if let end = text[begin.range.upperBound...].range(of: "-----END \(opened)-----") {
+                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: marker("private-key"))
+            } else {
+                label = opened
+                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: marker("private-key"))
+                break
+            }
+        }
+        return text
     }
 
     /// Redacts a single value that came from outside the app (a version string, a path, a
