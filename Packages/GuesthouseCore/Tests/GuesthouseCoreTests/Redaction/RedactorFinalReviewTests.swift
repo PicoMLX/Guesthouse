@@ -86,16 +86,17 @@ import Testing
     }
 
     @Test(arguments: [
-        ("run --password --token secondSecret --json", ["--password", "--token"]),
-        ("run --password --token=secondSecret --json", ["--password", "--token"]),
-        ("run --password --token --api-key secondSecret --json", ["--password", "--token", "--api-key"]),
+        ("run --password --token secondSecret --json", ["--password"]),
+        ("run --password --token=secondSecret --json", ["--password"]),
+        ("run --password --token --api-key secondSecret --json", ["--password"]),
         ("run --password=firstSecret --token secondSecret --json", ["--password", "--token"]),
     ])
-    func missingCLIValuesDoNotConsumeTheNextCredentialOption(input: String, options: [String]) {
+    func ambiguousCLIValuesDoNotHideTheNextCredentialValue(input: String, options: [String]) {
         let output = redactor.redact(input)
         #expect(!output.contains("firstSecret"))
         #expect(!output.contains("secondSecret"))
         #expect(output.contains("[redacted:secret]"))
+        // Only unambiguous names must survive; a following option may itself be a password.
         #expect(options.allSatisfy { output.contains($0) })
         #expect(output.hasSuffix(" --json"))
     }
