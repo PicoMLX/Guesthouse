@@ -72,4 +72,9 @@ import Testing
         #expect(!output.joined().contains("synthetic"))
         #expect(output[2] == "Finished")
     }
+
+    @Test(arguments: ["apiToken", "oauthToken", "githubToken"])
+    func qualifiedCamelCaseTokenFieldsUseTheSharedBoundaryRule(label: String) {
+        #expect(!Redactor().redact(label + ": syntheticCredential").contains("syntheticCredential"))
+    }
 }
