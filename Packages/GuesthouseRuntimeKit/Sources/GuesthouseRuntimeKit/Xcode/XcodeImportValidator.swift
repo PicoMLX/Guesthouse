@@ -116,7 +116,7 @@ public enum XcodeImportValidator {
     /// Resolves existing aliases without Foundation's normalization of `/private/tmp` and
     /// `/private/var` back to the symlinked `/tmp` and `/var` spellings.
     static func canonicalBundlePath(at location: URL) throws(GuesthouseError) -> String {
-        guard let path = realpath(location.path, nil) else { throw .xcodeSelectionRejected(.notAnApplication) }
+        guard let path = realpath(location.path, nil) else { throw pathLookupError(errno) }
         defer { free(path) }
         return String(cString: path)
     }
@@ -126,8 +126,14 @@ public enum XcodeImportValidator {
     /// Unlike `O_NOFOLLOW`, `O_NOFOLLOW_ANY` also protects ancestors (MVP-PLAN.md §3).
     static func openCanonicalBundle(at path: String) throws(GuesthouseError) -> Int32 {
         let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
-        guard descriptor >= 0 else { throw .xcodeSelectionRejected(.notAnApplication) }
+        guard descriptor >= 0 else { throw pathLookupError(errno) }
         return descriptor
+    }
+
+    /// A missing or non-directory component has the wrong bundle shape. Access, I/O and
+    /// symlink-resolution failures cannot establish that shape, so ask the user to choose again.
+    static func pathLookupError(_ code: Int32) -> GuesthouseError {
+        .xcodeSelectionRejected(code == ENOENT || code == ENOTDIR ? .notAnApplication : .unresolvable)
     }
 
     /// Whether `url` still names the very directory `descriptor` holds open.

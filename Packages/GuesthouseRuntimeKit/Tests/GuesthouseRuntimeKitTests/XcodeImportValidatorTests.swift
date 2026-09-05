@@ -296,10 +296,31 @@ import Testing
         try #require(legacy >= 0)
         defer { close(legacy) }
         #expect(XcodeImportValidator.stillNames(legacy, at: URL(fileURLWithPath: path)))
-        #expect(throws: GuesthouseError.xcodeSelectionRejected(.notAnApplication)) {
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.unresolvable)) {
             let descriptor = try XcodeImportValidator.openCanonicalBundle(at: path)
             close(descriptor)
         }
+    }
+
+    @Test func anInaccessibleBundleAncestorIsUnresolvable() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = try bundle(name: "Inaccessible/Xcode.app")
+        let ancestor = app.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: ancestor.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: ancestor.path) }
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.unresolvable)) {
+            try XcodeImportValidator.candidate(at: app)
+        }
+    }
+
+    @Test(arguments: [EACCES, EIO, ELOOP])
+    func pathAccessAndResolutionErrorsAreUnresolvable(code: Int32) {
+        #expect(XcodeImportValidator.pathLookupError(code) == .xcodeSelectionRejected(.unresolvable))
+    }
+
+    @Test(arguments: [ENOENT, ENOTDIR])
+    func missingOrNonDirectoryPathsAreNotApplications(code: Int32) {
+        #expect(XcodeImportValidator.pathLookupError(code) == .xcodeSelectionRejected(.notAnApplication))
     }
 
     @Test(arguments: ["/tmp", "/var/tmp"])
