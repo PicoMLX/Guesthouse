@@ -41,7 +41,7 @@ extension Redactor {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in

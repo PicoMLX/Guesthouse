@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorGrammarReviewTests {
+    @Test(arguments: ["Authorization:opaque", "Proxy-Authorization:opaque", "\"Authorization\":\"opaque\""])
+    func authorizationDelimitersBoundLabelsWithoutWhitespace(input: String) {
+        #expect(input.contains(Redactor.patterns.authorizationHeader))
+        #expect(!"AuthorizationExtra:opaque".contains(Redactor.patterns.authorizationHeader))
+    }
+
     @Test(arguments: ["device_code:first", "user_code:first", "\"device_code\":\"first\"", "'user_code':'first'"])
     func codeFieldDelimitersBoundLabelsWithoutWhitespace(input: String) throws {
         let match = try #require(input.firstMatch(of: Redactor.patterns.codeField))
