@@ -12,17 +12,27 @@ extension Redactor {
         mergePendingContexts(from: scanned, into: &state)
     }
 
-    static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
+    static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState,
+                              prepareQuotedValues: Bool = true) -> String {
         let p = patterns
-        var text = input
+        let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
+            var quotedState = StreamState()
+            let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
+            return (sanitized, quotedState)
+        } : ProtectedQuotedValues(text: input)
+        var text = protected.text
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
+            let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
-            state.expectingAuthorizationValue = true
+            state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
-                state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2)
-            return "\(match.1)Authorization: \(marker("authorization"))"
+                state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
+            state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || explicit
+            let header = match.0[..<match.2.startIndex].lowercased()
+            let name = header.contains("set-cookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
+            return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
@@ -48,25 +58,30 @@ extension Redactor {
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
-        // A labeled value can be folded onto the next line, so the label arms the continuation
-        // state the way an authorization header does.
-        var labelCarriedAValue = false
+        // Unquoted or unfinished quoted values can fold onto the next line. A closing quote
+        // bounds a completed structured value even when the next sibling is indented.
+        var labelMayContinue = false
         // Inspect the original input too: a preceding missing-value option may otherwise
         // consume this last option before the generic rules get to see it.
         var labelAwaitsValue = state.expectingSecretValue || input.contains(p.secretOptionOnly)
         text = text.replacing(p.labeledSecret) { match in
+            let explicit = fieldExplicitlyContinues(match.3, tail: text[match.range.upperBound...])
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
-            labelCarriedAValue = true
-            labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3)
+            labelMayContinue = labelMayContinue || !isClosedQuotedValue(match.3) || explicit
+            labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3) || explicit
+            state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || explicit
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
-        state.expectingSecretContinuation = labelCarriedAValue
+        state.expectingSecretContinuation = labelMayContinue
         text = text.replacing(p.codeField) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
+            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.3)
+                || fieldExplicitlyContinues(match.3, tail: text[match.range.upperBound...])
             return "\(match.1)\(match.2): \(marker("device-code"))"
         }
         text = text.replacing(p.codePrompt) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
+            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.0.dropFirst(match.1.count))
             let punctuation = match.0.hasSuffix(".") ? "." : ""
             return "\(match.1) \(marker("device-code"))\(punctuation)"
         }
@@ -84,14 +99,15 @@ extension Redactor {
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretValue = labelAwaitsValue
-        if text.contains(p.mentionsCode) || codeExpected {
-            text = applyDeviceCodePattern(to: text)
-        }
         // "Your one-time code is:" with the value on the next line. Only a line that asks for a
         // code arms the next one: arming on any mention of the word would replace the failure
         // that follows `process exited with code 1` with a device-code marker.
         if text.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
+        }
+        text = protected.restoring(in: text, state: &state)
+        if text.contains(p.mentionsCode) || codeExpected {
+            text = applyDeviceCodePattern(to: text)
         }
         return text
     }
