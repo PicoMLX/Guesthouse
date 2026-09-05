@@ -54,6 +54,7 @@ extension Redactor {
                 if quoted.enclosingAuthorizationFold { suffixState.quotedValue?.enclosingAuthorizationFold = true }
                 if quoted.enclosingSecretFold { suffixState.quotedValue?.enclosingSecretFold = true }
                 state.quotedValue = nil
+                state.wrappedTokenKind = suffixState.wrappedTokenKind
                 state.expectingSecretValue = explicitlyContinues && (quoted.kind == "secret" || quoted.enclosingSecretFold)
                 state.secretValueExplicitlyContinues = state.expectingSecretValue
                 state.expectingSecretContinuation = quoted.enclosingSecretFold || state.expectingSecretValue
@@ -78,11 +79,14 @@ extension Redactor {
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
-        let tokenAtLineEnd = stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+        let incompleteJWT = Self.incompleteJWTStartAtLineEnd(in: stripped.joined) != nil
+            || Self.incompleteJWTStartAtLineEnd(in: stripped.spliced) != nil
+        let tokenAtLineEnd = incompleteJWT ? "jwt" : stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
         if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
             state.wrappedTokenKind = nil
-            if let continuation = text.firstMatch(of: Self.patterns.tokenContinuation) {
+            let continuationPattern = kind == "jwt" ? #/^[ \t]*[A-Za-z0-9_.-]+/# : Self.patterns.tokenContinuation
+            if let continuation = text.firstMatch(of: continuationPattern) {
                 let fragment = String(continuation.0)
                 state.wrappedTokenKind = continuation.range.upperBound == text.endIndex ? kind : nil
                 // Detect and retain every ordinary redaction BEFORE masking the continuation.
@@ -205,7 +209,10 @@ extension Redactor {
             }
             return RedactedLine(Self.marker(kind))
         }
-        let redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
+        var redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
+        if let start = Self.incompleteJWTStartAtLineEnd(in: redacted) {
+            redacted.replaceSubrange(start..<redacted.endIndex, with: Self.marker("jwt"))
+        }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
         return RedactedLine(redacted)
     }
