@@ -83,13 +83,17 @@ public struct RuntimeStorage: Sendable {
         root.appending(path: subdirectory.rawValue)
     }
 
-    /// The VM store, for `TART_HOME`.
+    /// The VM store's location. Use `environmentForTart()` before a Tart operation so the
+    /// directory's current protection is checked before it becomes `TART_HOME`.
     public var tartHome: URL { url(for: .vms) }
 
     /// The explicit environment for every Tart invocation: only `TART_HOME`. `PATH` and the
-    /// rest of the service's environment are deliberately absent.
-    public func environmentForTart() -> [String: String] {
-        ["TART_HOME": tartHome.path]
+    /// rest of the service's environment are deliberately absent. Revalidate on every call:
+    /// this value may outlive the private directories that initialization prepared.
+    public func environmentForTart() throws -> [String: String] {
+        try Self.verify(root)
+        try Self.verify(tartHome)
+        return ["TART_HOME": tartHome.path]
     }
 
     // MARK: - Verification

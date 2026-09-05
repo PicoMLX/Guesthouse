@@ -25,7 +25,7 @@ import Testing
     @Test func tartHomeIsTheVMStoreAndTheEnvironmentHasNothingElse() throws {
         let storage = try RuntimeStorage(root: base)
         #expect(storage.tartHome == base.standardizedFileURL.appending(path: "vms"))
-        #expect(storage.environmentForTart() == ["TART_HOME": storage.tartHome.path])
+        #expect(try storage.environmentForTart() == ["TART_HOME": storage.tartHome.path])
     }
 
     @Test func largeOrTransientDirectoriesAreExcludedFromBackup() throws {
