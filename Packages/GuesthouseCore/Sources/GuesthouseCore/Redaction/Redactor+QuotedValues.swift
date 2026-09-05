@@ -52,7 +52,23 @@ extension Redactor {
         var cursor = input.startIndex
         var copied = cursor
         var identifier = 0
+        var contextCursor = cursor
+        var enclosingQuote: Character?
+        var escaped = false
         while let opener = input[cursor...].firstMatch(of: #/(\\+)(["'])/#) {
+            // Advance once through the source prefix, rather than rescanning each sibling.
+            // An encoded quote cannot open or close the raw wrapper containing it.
+            while contextCursor < opener.range.lowerBound {
+                let character = input[contextCursor]
+                if escaped { escaped = false }
+                else if character == "\\" { escaped = true }
+                else if character == enclosingQuote { enclosingQuote = nil }
+                else if enclosingQuote == nil, character == "\"" || character == "'",
+                        input[..<contextCursor].last.map({ $0.isWhitespace || "=:[{(,".contains($0) }) ?? true {
+                    enclosingQuote = character
+                }
+                input.formIndex(after: &contextCursor)
+            }
             guard let quote = opener.2.first,
                   let end = closingQuoteEnd(in: input[opener.range.upperBound...],
                       for: .init(delimiter: quote, escapeDepth: opener.1.count, kind: "secret")) else { break }
@@ -62,7 +78,13 @@ extension Redactor {
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
             // Closing delimiters from outer encodings can precede the structural boundary.
             // An arbitrary suffix (including another quoted word) is still ambiguous.
-            let structuralTail = tail.drop(while: { "\"'".contains($0) }).drop(while: { $0.isWhitespace })
+            var structuralTail = tail
+            if let closure = tail.first, closure == "\"" || closure == "'" {
+                // Only a proven, adjacent enclosing closure may precede the delimiter.
+                // A new/unmatched quote or whitespace-separated word is credential content.
+                guard input[end...].first == closure, enclosingQuote == closure else { continue }
+                structuralTail = tail.dropFirst().drop(while: { $0.isWhitespace })
+            }
             guard structuralTail.isEmpty || structuralTail.first.map({ ",;]}".contains($0) }) == true else { continue }
             let content = input[opener.range.upperBound..<end].dropLast(opener.1.count + 1)
             let previous = input[..<opener.range.lowerBound].last(where: { !$0.isWhitespace })
