@@ -16,6 +16,10 @@ extension Redactor {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     func redact(line: String, state: inout StreamState) -> RedactedLine {
+        redact(line: line, state: &state, isPhysicalLine: true)
+    }
+
+    private func redact(line: String, state: inout StreamState, isPhysicalLine: Bool) -> RedactedLine {
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
@@ -27,6 +31,11 @@ extension Redactor {
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        // Only the physical pass advances PPK framing. Alternate readings and suffix scans
+        // must neither count a body twice nor change the contexts enclosing the private key.
+        if isPhysicalLine, Self.consumePPKLine(stripped.joined, phase: &state.ppkPhase) {
+            return RedactedLine(Self.marker("private-key"))
+        }
         var text = stripped.joined
         if let quoted = state.quotedValue {
             // Inspect the original normalized text: replacement markers no longer contain the
@@ -38,7 +47,7 @@ extension Redactor {
                 // This suffix is still on the same physical line. Scan it independently so
                 // it cannot consume a next-line value or terminate the enclosing fold.
                 var suffixState = StreamState()
-                _ = redact(line: tail, state: &suffixState)
+                _ = redact(line: tail, state: &suffixState, isPhysicalLine: false)
                 if quoted.enclosingAuthorizationFold { suffixState.quotedValue?.enclosingAuthorizationFold = true }
                 if quoted.enclosingSecretFold { suffixState.quotedValue?.enclosingSecretFold = true }
                 state.quotedValue = nil
@@ -61,7 +70,7 @@ extension Redactor {
             // pending contexts before replacing that evidence with a marker.
             // Joined text has no terminal controls, so this scan has no alternate-reading recursion.
             var joinedScan = StreamState()
-            _ = redact(line: stripped.joined, state: &joinedScan)
+            _ = redact(line: stripped.joined, state: &joinedScan, isPhysicalLine: false)
             text = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
@@ -77,7 +86,7 @@ extension Redactor {
                 // Otherwise replacing `password` first destroys the evidence that its value
                 // must be removed. Future state alone cannot protect this line's value.
                 var originalScan = StreamState()
-                let sanitized = redact(line: text, state: &originalScan).text
+                let sanitized = redact(line: text, state: &originalScan, isPhysicalLine: false).text
                 Self.mergePendingContexts(from: originalScan, into: &boundaryScan)
                 text = sanitized.hasPrefix(fragment)
                     ? Self.marker(kind) + sanitized.dropFirst(fragment.count)
