@@ -1,4 +1,5 @@
 import Foundation
+import RegexBuilder
 
 /// Removes secrets from text before it can reach a log, the GUI, or a diagnostics export.
 ///
@@ -74,6 +75,8 @@ public struct Redactor: Sendable {
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
         }
         defer {
+            state.expectingAuthorizationValue = state.expectingAuthorizationValue || boundaryScan.expectingAuthorizationValue
+            state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || boundaryScan.authorizationValueIsOnTheNextLine
             state.expectingSecretValue = state.expectingSecretValue || boundaryScan.expectingSecretValue
             state.expectingSecretContinuation = state.expectingSecretContinuation || boundaryScan.expectingSecretContinuation
             state.expectingDeviceCode = state.expectingDeviceCode || boundaryScan.expectingDeviceCode
@@ -108,12 +111,6 @@ public struct Redactor: Sendable {
         if !blankLine {
             state.expectingSecretContinuation = secretContinuation
         }
-        if text.wholeMatch(of: Self.patterns.authorizationLabelOnly) != nil {
-            state.expectingAuthorizationValue = true
-            state.authorizationValueIsOnTheNextLine = true
-            return RedactedLine("Authorization: \(Self.marker("authorization"))")
-        }
-
         if let label = state.pemLabel {
             guard let footer = text.range(of: "-----END \(label)-----") else {
                 return RedactedLine(Self.marker("private-key"))
@@ -153,10 +150,6 @@ public struct Redactor: Sendable {
         }
         let codeExpected = state.expectingDeviceCode
         state.expectingDeviceCode = false
-        // A header whose value may continue on an indented line keeps the continuation state.
-        if text.contains(Self.patterns.authorizationLabel) {
-            state.expectingAuthorizationValue = true
-        }
         // The previous line was a label or a code prompt with no value, so this whole line is
         // the value: its shape is the provider's choice, and a device code that is not
         // `XXXX-XXXX` would otherwise be returned intact. The line is still scanned, because
@@ -274,6 +267,8 @@ public struct Redactor: Sendable {
     private static func armPendingContexts(from text: String, state: inout StreamState) {
         var scanned = state
         _ = applyPatterns(to: text, codeExpected: false, state: &scanned)
+        state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
+        state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
         state.expectingSecretValue = state.expectingSecretValue || scanned.expectingSecretValue
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
@@ -303,12 +298,6 @@ public struct Redactor: Sendable {
         let controlStringEnd = #/\u{9C}|\u{1B}\\/#
         /// An OSC ends at either of those or at BEL.
         let oscEnd = #/\u{07}|\u{9C}|\u{1B}\\/#
-        /// A folded header: the label alone on a line, value on the next. Both delimiters the
-        /// label rule below accepts count, since `Authorization=` on a line of its own leaves
-        /// its value on the next line exactly as `Authorization:` does.
-        let authorizationLabelOnly = #/\s*(?:\\?["'])?authorization(?:\\?["'])?\s*[:=]\s*/#.ignoresCase()
-        /// Any authorization label, for lines whose value may continue on the next line.
-        let authorizationLabel = #/(?:^|[^A-Za-z0-9])authorization\b(?:\\?["'])?\s*[:=]/#.ignoresCase()
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
@@ -325,7 +314,9 @@ public struct Redactor: Sendable {
         /// The whole header value, quoted or to the end of the line, so multi-parameter schemes
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?authorization\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        /// The same match determines continuation state before replacement. An empty value
+        /// arms the next line even when a logger prefixes or quotes the field name.
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?authorization\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -366,17 +357,44 @@ public struct Redactor: Sendable {
         /// the first space, because a passphrase is words: `password: correct horse battery`. It
         /// still has to start with one non-space character, so a bare label falls to the rule
         /// below and arms the next line instead of matching an empty value here.
-        let labeledSecret = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id)[ _-]?)?(?:password|passphrase|passwd|secret|token|api[_-]?key))\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        /// One vocabulary shared by inline fields, bare labels, and command options.
+        /// Explicit private-key labels are sensitive even when the value is not PEM.
+        private static var secretName: Regex<Substring> {
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id)[ _-]?)?(?:password|passphrase|passwd|secret|token|api[ _-]?key|private[ _-]?key)/#
+        }
+        private static var secretLabel: Regex<(Substring, Substring, Substring)> {
+            Regex {
+                #/(^|[^A-Za-z0-9])(?:\\?["'])?/#
+                Capture { secretName }
+                #/\b(?:\\?["'])?\s*[:=]\s*/#
+            }
+        }
+        let labeledSecret = Regex {
+            secretLabel
+            Capture {
+                #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*/#
+            }
+        }.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
         /// the value on the next line.
-        let secretLabelOnly = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id)[ _-]?)?(?:password|passphrase|passwd|secret|token|api[_-]?key))\b(?:\\?["'])?\s*[:=]\s*$/#.ignoresCase()
+        let secretLabelOnly = Regex {
+            secretLabel
+            Anchor.endOfSubject
+        }.ignoresCase()
         /// The same secret named as a command-line option, which CLI diagnostics echo back
         /// verbatim: `--password hunter2`, `--github-token opaqueCredential`. There is no `:`
         /// or `=` to key on, so the leading dash is what makes this a secret rather than the
         /// word `token` in a sentence. The value is one argv word, or a quoted one, rather than
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
-        let secretOption = #/(^|\s)(--?[A-Za-z0-9-]*(?:password|passphrase|passwd|secret|token|api[_-]?key))(\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#.ignoresCase()
+        let secretOption = Regex {
+            #/(^|\s)/#
+            Capture {
+                #/--?[A-Za-z0-9_-]*/#
+                secretName
+            }
+            #/(\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#
+        }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
@@ -408,24 +426,42 @@ public struct Redactor: Sendable {
         /// A prompt that names the code with no delimiter at all: `Enter the code ABC123 at the
         /// URL shown` is the prose an RFC 8628 provider prints, and only a value that happens to
         /// have the dotted or hyphenated shape above was removed from it. Two forms qualify: the
-        /// imperative one, which asks for the code, and the declarative one, `Your one-time code
-        /// is ABC123`, which names the same codes the delimited rule above knows and states them
-        /// instead of asking. The declarative form has to carry a copula, so a line that merely
-        /// mentions such a code is not a prompt. The value has to look like a code rather than
+        /// imperative one, which asks for the code, and a historical declaration with a copula.
+        /// Present-tense declarations also have the opaque-value rule below. Here a value has
+        /// to look like a code rather than
         /// like the next English word: four or more characters that are all upper-case or
         /// digits, or that carry a digit. `process exited with code 1`, `Enter the code shown
         /// below`, and `the login code was rejected` are all left alone. The words are matched
         /// without regard to case; the value's own alternatives are not, or every lower-case
         /// word after the label would be a code.
         let codePromptWithoutDelimiter = #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))\s+(?=[A-Za-z0-9._-]{4})(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])/#
+        /// Present-tense declarations explicitly supply the code. Lowercase, short, and
+        /// quoted values are opaque. Historical status prose keeps the conservative rule above.
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals))(?:\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)|\s*$)/#.ignoresCase()
     }
 
     private static let patterns = Patterns()
 
+    /// Pretty-printed values may start after an empty label or an opening quote on its own.
+    /// A completed empty string is already a value and must not consume the following line.
+    private static func valueStartsOnNextLine(_ value: Substring) -> Bool {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "", "\"", "'", "\\\"", "\\'": true
+        default: false
+        }
+    }
+
     private static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
         let p = patterns
         var text = input
-        text = text.replacing(p.authorizationHeader) { match in "\(match.1)Authorization: \(marker("authorization"))" }
+        // Recognition and continuation state use the original field, never its replacement
+        // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
+        text = text.replacing(p.authorizationHeader) { match in
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine =
+                state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2)
+            return "\(match.1)Authorization: \(marker("authorization"))"
+        }
         // Each token rule captures the character in front of the token, which is put back.
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
         // The GitHub rule captures nothing in front of the token: it needs no boundary there.
@@ -436,8 +472,10 @@ public struct Redactor: Sendable {
         // A labeled value can be folded onto the next line, so the label arms the continuation
         // state the way an authorization header does.
         var labelCarriedAValue = false
+        var labelAwaitsValue = false
         text = text.replacing(p.labeledSecret) { match in
             labelCarriedAValue = true
+            labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3)
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretContinuation = labelCarriedAValue
@@ -447,7 +485,11 @@ public struct Redactor: Sendable {
         text = text.replacing(p.codeField) { match in "\(match.1)\(match.2): \(marker("device-code"))" }
         text = text.replacing(p.codePrompt) { match in "\(match.1) \(marker("device-code"))" }
         text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
-        var labelAwaitsValue = false
+        text = text.replacing(p.declarativeCodePrompt) { match in
+            state.expectingDeviceCode = state.expectingDeviceCode
+                || (match.2.map(valueStartsOnNextLine) ?? true)
+            return "\(match.1) \(marker("device-code"))"
+        }
         text = text.replacing(p.secretLabelOnly) { match in
             labelAwaitsValue = true
             return "\(match.1)\(match.2): \(marker("secret"))"
@@ -469,9 +511,9 @@ public struct Redactor: Sendable {
         input.replacing(patterns.deviceCode) { match in "\(match.1)\(marker("device-code"))" }
     }
 
-    /// Replaces the three segments of every JWT inside a run of dot-separated segments. A dot is
+    /// Replaces all three JWS or five JWE segments inside a run of dot-separated segments. A dot is
     /// not a word boundary, so the run can begin with a label such as `session.` and can hold two
-    /// adjacent tokens; every segment that has two behind it is tried as the JOSE header, and the
+    /// adjacent tokens; every segment with at least two following it is tried as a JOSE header, and the
     /// segments around the tokens are kept.
     static func redactedJWT(_ candidate: Substring) -> String {
         var segments = candidate.split(separator: ".", omittingEmptySubsequences: false)
@@ -479,7 +521,10 @@ public struct Redactor: Sendable {
         while index + 2 < segments.count {
             if let start = joseHeaderStart(segments[index]) {
                 let name = segments[index][..<start]
-                segments.replaceSubrange(index...(index + 2), with: [name + Substring(marker("jwt"))])
+                let count = joseSegmentCount(segments[index][start...]) ?? 3
+                // A truncated token is still sensitive; remove all available token segments.
+                let end = min(index + count, segments.endIndex)
+                segments.replaceSubrange(index..<end, with: [name + Substring(marker("jwt"))])
             }
             index += 1
         }
@@ -501,13 +546,20 @@ public struct Redactor: Sendable {
         return nil
     }
 
-    /// Whether a Base64URL segment decodes to text that starts a JSON object.
+    /// Whether a Base64URL segment decodes to a JOSE header object.
     static func isJOSEHeader(_ segment: Substring) -> Bool {
+        joseSegmentCount(segment) != nil
+    }
+
+    /// The required JWE "enc" parameter distinguishes five-segment encrypted tokens from JWS.
+    static func joseSegmentCount(_ segment: Substring) -> Int? {
         var base64 = String(segment).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         let remainder = base64.count % 4
-        if remainder == 1 { return false }
+        if remainder == 1 { return nil }
         if remainder > 0 { base64 += String(repeating: "=", count: 4 - remainder) }
-        guard let data = Data(base64Encoded: base64) else { return false }
-        return String(decoding: data, as: UTF8.self).drop(while: \.isWhitespace).first == "{"
+        guard let data = Data(base64Encoded: base64),
+              let header = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return header["enc"] == nil ? 3 : 5
     }
 }
