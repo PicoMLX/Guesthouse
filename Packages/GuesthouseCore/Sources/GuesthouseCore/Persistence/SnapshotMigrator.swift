@@ -132,6 +132,9 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     case duplicateMigration(from: SchemaVersion)
     case fileUnwritable(name: String)
     case fileUnreadable(name: String)
+    /// Writing began, but the record's durability or location could not be confirmed. Keep
+    /// the storage failure actionable while requiring inspection before another mutation.
+    indirect case journalWriteUncertain(cause: StateStoreError)
     /// A value in memory cannot be written as JSON, so it was never saved.
     case unencodable(name: String)
 
@@ -165,6 +168,8 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
             "Guesthouse could not write \(name) in its state folder."
         case .fileUnreadable(let name):
             "Guesthouse could not read \(name) in its state folder."
+        case .journalWriteUncertain(let cause):
+            "Guesthouse could not confirm that the journal record was saved. Inspect the actual state before retrying the operation. \(cause.userMessage)"
         case .unencodable(let name):
             "Guesthouse could not save \(name): one of the values could not be written. Nothing was changed on disk."
         }
@@ -178,6 +183,7 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
         case .unsupportedJournalFormat, .newerSchemaVersion, .migrationMissing, .migrationProducedWrongVersion, .migrationFailed, .duplicateMigration: [.reinstallApp, .cancel]
         case .fileUnwritable: [.freeDiskSpace, .openSettings, .cancel]
         case .fileUnreadable: [.inspectState, .openSettings, .cancel]
+        case .journalWriteUncertain(let cause): [.inspectState] + cause.recoveryActions.filter { $0 != .inspectState }
         }
     }
 

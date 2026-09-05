@@ -162,6 +162,8 @@ public actor StateStore {
             throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
         }
         try synchronizeDirectory()
+        try requireAnchoredDirectoryIsCurrent()
+        try Self.requireEntryStillNames(descriptor, in: directory, name: Self.snapshotFileName)
     }
 
     // MARK: - Journal
@@ -203,6 +205,7 @@ public actor StateStore {
         if state.unterminatedRecord {
             line.insert(0x0A, at: line.startIndex)
         }
+        var writeAttempted = false
         do {
             if state.truncatedTail {
                 guard ftruncate(descriptor, off_t(state.byteCount)) == 0 else {
@@ -212,6 +215,7 @@ public actor StateStore {
             guard lseek(descriptor, 0, SEEK_END) >= 0 else {
                 throw StateStoreError.fileUnwritable(name: Self.journalFileName)
             }
+            writeAttempted = true
             try Self.writeAll(descriptor, line, name: Self.journalFileName)
             try Self.fullySynchronize(descriptor, name: Self.journalFileName)
             // Durable, but only in the file this descriptor names. If the entry now names some
@@ -230,6 +234,12 @@ public actor StateStore {
             // The file no longer matches what was read, so nothing about it is remembered.
             journal = JournalState()
             journalEntryIsDurable = false
+            if writeAttempted {
+                // Some or all of this record may already be on disk. Storage recovery alone
+                // cannot establish the mutation's outcome (AGENTS.md: inspect before retrying).
+                let cause = error as? StateStoreError ?? .fileUnwritable(name: Self.journalFileName)
+                throw StateStoreError.journalWriteUncertain(cause: cause)
+            }
             throw error
         }
         // The record now ends the file; any torn tail was truncated above.
@@ -312,9 +322,19 @@ public actor StateStore {
         // A complete record that lost only its newline — a restore or a repair can leave one —
         // is a record, not a torn write. Dropping it would hide a `started` mutation and let the
         // next one run on that environment without inspecting anything.
-        guard let record = try decode(unterminated, number: state.records.count + 1), accepts(record, in: state) else {
+        let number = state.records.count + 1
+        guard let record = try decode(unterminated, number: number) else {
+            // Complete JSON with invalid record fields is corruption too. Only incomplete
+            // syntax can represent a torn encoder write; deleting a complete value would
+            // discard evidence that recovery needs before starting another mutation.
+            if (try? JSONSerialization.jsonObject(with: unterminated, options: .fragmentsAllowed)) != nil {
+                throw StateStoreError.corruptJournal(line: number)
+            }
             state.truncatedTail = true
             return
+        }
+        guard accepts(record, in: state) else {
+            throw StateStoreError.corruptJournal(line: number)
         }
         state.adopt(record, bytes: unterminated.count)
         state.unterminatedRecord = true

@@ -22,10 +22,12 @@ import Testing
                 try Data().write(to: journal)
             }
         })
-        let expected: StateStoreError = replaceDirectory
+        let cause: StateStoreError = replaceDirectory
             ? .insecureDirectory(reason: "the folder was renamed, removed, or replaced while Guesthouse was using it")
             : .fileUnwritable(name: StateStore.journalFileName)
+        let expected = StateStoreError.journalWriteUncertain(cause: cause)
         await #expect(throws: expected) { try await store.begin(.startEnvironment, for: EnvironmentID()) }
+        #expect(expected.recoveryActions.first == .inspectState)
         let retainedJournal = replaceDirectory ? detached.appending(path: StateStore.journalFileName) : detached
         #expect(!(try Data(contentsOf: retainedJournal)).isEmpty)
         let reopened = try StateStore(rootURL: root)
@@ -45,7 +47,9 @@ import Testing
             try StateStore.fullySynchronize(descriptor, name: name)
         })
         let environment = EnvironmentID()
-        await #expect(throws: failure) { try await store.begin(.startEnvironment, for: environment) }
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: failure)) {
+            try await store.begin(.startEnvironment, for: environment)
+        }
         let started = try #require(try await store.replay().inFlight.values.first)
         await #expect(throws: StateStoreError.operationUnresolved(started.id)) {
             try await store.begin(.startEnvironment, for: environment)

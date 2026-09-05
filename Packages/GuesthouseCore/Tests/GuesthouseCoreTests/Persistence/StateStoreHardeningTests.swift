@@ -154,6 +154,7 @@ import Testing
             .inconsistentRecord(OperationID()), .newerSchemaVersion(found: SchemaVersion(2)!, current: SchemaVersion(1)!),
             .migrationMissing(from: SchemaVersion(1)!), .migrationProducedWrongVersion(from: SchemaVersion(1)!, produced: SchemaVersion(3)!),
             .duplicateMigration(from: SchemaVersion(1)!), .fileUnwritable(name: "x"), .fileUnreadable(name: "x"), .unencodable(name: "x"),
+            .journalWriteUncertain(cause: .fileUnwritable(name: StateStore.journalFileName)),
         ]
         for error in errors {
             #expect(!error.userMessage.isEmpty)
