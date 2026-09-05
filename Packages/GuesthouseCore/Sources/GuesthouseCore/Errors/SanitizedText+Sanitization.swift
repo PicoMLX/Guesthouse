@@ -40,9 +40,13 @@ extension SanitizedText {
         let originalStripped = Redactor.stripTerminalEscapes(spliceSafe)
         let joined = String(String.UnicodeScalarView(originalStripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
         let normalizationShortened = joined.unicodeScalars.count < limit + Self.sanitizeLookahead
-        let credentialReading = spliceSafe.replacing(#/[\u{000B}\u{000C}\u{0085}\u{2028}\u{2029}]/#, with: "\n")
-        let stripped = Redactor.stripTerminalEscapes(Redactor().redact(fieldValue: credentialReading))
-        var normalized = Redactor().redact(fieldValue: String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar))))
+        let credentialReading = String(String.UnicodeScalarView(spliceSafe.unicodeScalars.map {
+            CharacterSet.whitespacesAndNewlines.contains($0) ? " " : $0
+        }))
+        let rawRedacted = Redactor().redact(fieldValue: credentialReading)
+        let stripped = Redactor.stripTerminalEscapes(rawRedacted)
+        var normalized = rawRedacted == credentialReading ? joined
+            : Redactor().redact(fieldValue: String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar))))
         let joinedRedacted = Redactor().redact(fieldValue: joined)
         // A raw scan may replace a prefix before normalization assembles its secret suffix.
         // Neither transformed string retains offsets into the other. If the normalized reading
