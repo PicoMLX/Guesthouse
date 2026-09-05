@@ -4,10 +4,12 @@ import RegexBuilder
 extension Redactor {
     /// Pretty-printed values may start after an empty label or an opening quote on its own.
     /// A completed empty string is already a value and must not consume the following line.
+    /// An odd trailing backslash explicitly continues the value onto the next line.
     static func valueStartsOnNextLine(_ value: Substring) -> Bool {
-        switch value.trimmingCharacters(in: .whitespacesAndNewlines) {
-        case "", "\"", "'", "\\\"", "\\'": true
-        default: false
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch value {
+        case "", "\"", "'", "\\\"", "\\'": return true
+        default: return !value.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
         }
     }
 
@@ -33,12 +35,18 @@ extension Redactor {
                 continue
             }
             if character == quoted.delimiter,
-               quoted.escapeDepth == 0 ? slashes.isMultiple(of: 2) : slashes == quoted.escapeDepth {
+               quoted.singleQuotesAreLiteral || quoteCloses(depth: quoted.escapeDepth, slashes: slashes) {
                 return value.index(after: index)
             }
             slashes = 0
         }
         return nil
+    }
+
+    private static func quoteCloses(depth: Int, slashes: Int) -> Bool {
+        // Encoded delimiters can follow any even number of backslashes, each expanded
+        // by the surrounding encoding layer. Serialized single quotes also use escapes.
+        slashes >= depth && (slashes - depth).isMultiple(of: 2 * (depth + 1))
     }
 
     /// Scan argument boundaries before replacing them. Plain shell quotes, quotes escaped by
@@ -51,9 +59,12 @@ extension Redactor {
             // A missing value must not consume a later option's name and leave that option's
             // value unlabelled. Only a recognized secret option is left for another scan:
             // an opaque password beginning with a dash must still be removed.
-            if match.3 != "=", text[match.range.upperBound...].prefixMatch(of: patterns.secretOption) != nil {
+            let remainder = text[match.range.upperBound...]
+            let bareOption = remainder.prefixMatch(of: patterns.secretOptionOnly) != nil
+            if match.3 != "=", bareOption || remainder.prefixMatch(of: patterns.secretOption) != nil {
                 result += match.0
                 cursor = match.range.upperBound
+                state.expectingSecretValue = state.expectingSecretValue || bareOption
                 continue
             }
             let argument = secretArgument(in: text, from: match.range.upperBound)
@@ -86,9 +97,9 @@ extension Redactor {
                 break
             }
             if let delimiter = quote {
-                let closesQuote = quoteEscapeDepth == 0
-                    ? escapeDepth.isMultiple(of: 2)
-                    : escapeDepth == quoteEscapeDepth
+                // Unlike serialized diagnostic strings, shell single quotes have no escapes.
+                let closesQuote = (delimiter == "'" && quoteEscapeDepth == 0)
+                    || quoteCloses(depth: quoteEscapeDepth, slashes: escapeDepth)
                 if text[cursor] == delimiter, closesQuote {
                     quote = nil
                 }
@@ -104,7 +115,10 @@ extension Redactor {
             }
             text.formIndex(after: &cursor)
         }
-        return (text.endIndex, quote.map { .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret") }, continuesLine)
+        return (text.endIndex, quote.map {
+            .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret",
+                  singleQuotesAreLiteral: $0 == "'" && quoteEscapeDepth == 0)
+        }, continuesLine)
     }
 
     static func redactSerializedOptions(_ text: String, state: inout StreamState) -> String {

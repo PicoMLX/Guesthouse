@@ -12,17 +12,6 @@ extension Redactor {
         mergePendingContexts(from: scanned, into: &state)
     }
 
-    static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
-        state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
-        state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
-        state.expectingSecretValue = state.expectingSecretValue || scanned.expectingSecretValue
-        state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
-        state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
-        state.quotedValue = state.quotedValue ?? scanned.quotedValue
-        state.pemLabel = state.pemLabel ?? scanned.pemLabel
-        state.wrappedTokenKind = state.wrappedTokenKind ?? scanned.wrappedTokenKind
-    }
-
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
         let p = patterns
         var text = input

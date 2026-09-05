@@ -7,19 +7,27 @@ extension Redactor {
     /// adjacent tokens; every segment with at least two following it is tried as a JOSE header, and the
     /// segments around the tokens are kept.
     static func redactedJWT(_ candidate: Substring) -> String {
-        var segments = candidate.split(separator: ".", omittingEmptySubsequences: false)
-        var index = segments.startIndex
-        while index + 2 < segments.count {
-            if let start = joseHeaderStart(segments[index]) {
-                let name = segments[index][..<start]
-                let count = joseSegmentCount(segments[index][start...]) ?? 3
-                // A truncated token is still sensitive; remove all available token segments.
-                let end = min(index + count, segments.endIndex)
-                segments.replaceSubrange(index..<end, with: [name + Substring(marker("jwt"))])
+        let segments = candidate.split(separator: ".", omittingEmptySubsequences: false)
+        var redacted: [String] = []
+        redacted.reserveCapacity(segments.count)
+        var coveredThrough = segments.startIndex
+        for index in segments.indices {
+            guard index + 2 < segments.count, let start = joseHeaderStart(segments[index]) else {
+                if index >= coveredThrough { redacted.append(String(segments[index])) }
+                continue
             }
-            index += 1
+            let header = decodedJOSEHeader(segments[index][start...])
+            // Claims are also JSON objects. Only a JOSE parameter identifies a competing
+            // header within the current token; ordinary claims keep their original span.
+            guard index >= coveredThrough || header?["alg"] != nil || header?["enc"] != nil else { continue }
+            let count = header?["enc"] == nil ? 3 : 5
+            // Never expose a filename prefix or segment already covered by an earlier token.
+            // Overlapping headers extend that coverage, even if the later token is shorter.
+            let name = index >= coveredThrough ? String(segments[index][..<start]) : ""
+            redacted.append(name + marker("jwt"))
+            coveredThrough = max(coveredThrough, min(index + count, segments.endIndex))
         }
-        return segments.joined(separator: ".")
+        return redacted.joined(separator: ".")
     }
 
     /// Where the JOSE header begins inside a segment, including a header concatenated directly
@@ -90,10 +98,13 @@ extension Redactor {
 
     /// The required JWE "enc" parameter distinguishes five-segment encrypted tokens from JWS.
     static func joseSegmentCount(_ segment: Substring) -> Int? {
-        guard let data = decodedBase64URL(segment),
-              let header = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
+        guard let header = decodedJOSEHeader(segment) else { return nil }
         return header["enc"] == nil ? 3 : 5
+    }
+
+    private static func decodedJOSEHeader(_ segment: Substring) -> [String: Any]? {
+        guard let data = decodedBase64URL(segment) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     static func decodedBase64URL(_ segment: Substring) -> Data? {
