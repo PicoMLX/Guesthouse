@@ -31,6 +31,17 @@ struct Redactor: Sendable {
             var enclosingSecretFold = false
         }
 
+        /// Syntax-only PPK framing; no key material is retained or decoded.
+        enum PPKPhase: Hashable, Sendable {
+            case inactive
+            case headers(macDigits: Int)
+            case privateLines(remaining: Int, macDigits: Int)
+            case mac(digits: Int)
+            case invalid
+        }
+
+        var ppkPhase = PPKPhase.inactive
+
         /// The label of the PEM block being removed, until its matching footer.
         var pemLabel: String?
         /// The previous line was a bare `Authorization:` label; the value follows on this line.
