@@ -33,14 +33,6 @@ extension Redactor {
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text
-        // Scan DSNs before introducing colon-bearing redaction markers. Scheme URLs use
-        // their dedicated authority rule below, not the schemeless DSN grammar.
-        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
-            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in
-                return "\(match.1)\(marker("userinfo"))\(match.2)"
-            }
-            text = String(prefix) + text[end...]
-        }
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -56,7 +48,20 @@ extension Redactor {
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
-        text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
+        if text.wholeMatch(of: #/[ \t]*(?i:Bearer)[ \t]*(?:\\[ \t]*)?/#) != nil {
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
+        }
+        text = text.replacing(p.bearer) { match in
+            let tail = text[match.range.upperBound...]
+            if tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }), valueExplicitlyContinues(tail) {
+                state.expectingAuthorizationValue = true
+                state.authorizationValueIsOnTheNextLine = true
+                state.authorizationValueExplicitlyContinues = true
+            }
+            return "\(match.1)Bearer \(marker("bearer-token"))"
+        }
         text = text.replacing(p.basicAuthorization) { match in
             guard isBasicCredential(match.3) else { return String(match.0) }
             state.expectingAuthorizationValue = true
@@ -136,6 +141,12 @@ extension Redactor {
         // that follows `process exited with code 1` with a device-code marker.
         if text.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
+        }
+        // Establish field/prompt/quote continuation from original text before a DSN can
+        // conceal those openers. Existing userinfo markers are excluded by the DSN grammar.
+        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
+            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
+            text = String(prefix) + text[end...]
         }
         text = protected.restoring(in: text, state: &state)
         if text.contains(p.mentionsCode) || codeExpected {

@@ -53,4 +53,28 @@ import Testing
         let input = "[redacted:userinfo]@tcp(host)/app alice:syntheticPassword@cloudsql(instance)/app"
         #expect(!Redactor().redact(input).contains("syntheticPassword"))
     }
+
+    @Test(arguments: ["$alice", "alice+admin", "alice@example", "用户", "alice=admin", "first last", "alice'quoted", "[alice]", ""])
+    func usernamePunctuationCannotPreventPasswordConcealment(username: String) {
+        #expect(!Redactor().redact("dsn=" + username + ":syntheticPassword@tcp(db:3306)/app").contains("syntheticPassword"))
+    }
+
+    @Test(arguments: ["ws", "wss", "WS", "WSS"])
+    func webSocketPathsAreNotDatabaseCredentials(scheme: String) {
+        let input = scheme + "://example.com/users/alice@room/events"
+        #expect(Redactor().redact(input) == input)
+    }
+
+    @Test(arguments: ["password", "passphrase", "Authorization", "device_code"])
+    func aDSNInsideAQuotedFieldKeepsPhysicalContinuation(label: String) {
+        let lines = [label + ": \"syntheticFirst alice:p@tcp/db", "syntheticSecond\"", "Finished"]
+        let output = Redactor().redact(lines: lines).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: ["apiToken", "oauthToken", "githubToken"])
+    func qualifiedCamelCaseTokenFieldsUseTheSharedBoundaryRule(label: String) {
+        #expect(!Redactor().redact(label + ": syntheticCredential").contains("syntheticCredential"))
+    }
 }

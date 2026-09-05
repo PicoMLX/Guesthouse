@@ -5,6 +5,8 @@ extension Redactor {
     /// https://www.puttyssh.org/0.83/htmldoc/AppendixC.html
     /// Counts only bound the expected sequence; they never size an allocation or end protection.
     /// A malformed sequence stays closed until the caller supplies a fresh StreamState.
+    /// An embedded opener fails closed too. Framing requires original physical key lines;
+    /// arbitrary logger prefixes are not stripped from untrusted key material to guess a footer.
     /// Call exactly once per physical line, after removing terminal controls and their payloads.
     static func consumePPKLine(_ line: String, phase: inout StreamState.PPKPhase) -> Bool {
         switch phase {

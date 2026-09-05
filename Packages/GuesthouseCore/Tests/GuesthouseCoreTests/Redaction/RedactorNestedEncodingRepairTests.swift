@@ -63,4 +63,25 @@ import Testing
         for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
         #expect(!Redactor().redact(input).contains("OpaqueSynthetic987"))
     }
+
+    @Test(arguments: ["\"", "'"], ["", " "])
+    func unmatchedRawQuotesCannotReleaseACredentialTail(quote: String, separator: String) {
+        let input = #"password: \"first\""# + separator + quote + ", syntheticTail"
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test(arguments: [("it's ", "'"), ("some\"word ", "\"")])
+    func anInWordQuoteDoesNotProveAnEnclosingWrapper(parts: (String, String)) {
+        let input = parts.0 + #"password: \"first\""# + parts.1 + ", syntheticTail"
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test(arguments: [3, 7, 15])
+    func encodedSerializedArraysRetainOptionValuePairing(depth: Int) {
+        let quote = String(repeating: "\\", count: depth) + "\""
+        let input = "[" + quote + "--password" + quote + ", " + quote + "syntheticPassword" + quote + ", " + quote + "--verbose" + quote + "]"
+        let output = Redactor().redact(input)
+        #expect(!output.contains("syntheticPassword"))
+        #expect(output.contains("--verbose"))
+    }
 }
