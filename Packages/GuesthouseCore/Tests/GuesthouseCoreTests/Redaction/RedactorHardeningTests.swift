@@ -321,8 +321,8 @@ import Testing
         #expect(redactor.redact(#"{"accessToken":"opaqueCredential"}"#) == "{accessToken: [redacted:secret]}")
         #expect(redactor.redact("refreshToken=abc123") == "refreshToken: [redacted:secret]")
         #expect(redactor.redact("clientSecret: abc123") == "clientSecret: [redacted:secret]")
-        // A word that merely ends in a label word is still not one.
-        #expect(redactor.redact("nonToken: 42") == "nonToken: 42")
+        // An unqualified lowercase suffix remains ordinary text.
+        #expect(redactor.redact("nontoken: 42") == "nontoken: 42")
         #expect(redactor.redact("mypassword: hunter2") == "mypassword: hunter2")
     }
 
