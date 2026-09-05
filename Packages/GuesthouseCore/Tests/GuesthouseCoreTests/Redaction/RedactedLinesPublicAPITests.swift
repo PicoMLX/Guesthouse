@@ -18,6 +18,15 @@ func outgoingBatchesRejectEmbeddedPhysicalLineBoundaries(separator: String) {
     }
 }
 
+@Test(arguments: [2, 3, 4])
+func outgoingBatchesKeepJWEContinuationWhenDotStartsNextRecord(count: Int) throws {
+    let segments = ["eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0", "wrappedKey", "iv", "syntheticCiphertext", "syntheticTag"]
+    let batch = try RedactedLines(redacting: [segments.prefix(count).joined(separator: "."),
+        "." + segments.dropFirst(count).joined(separator: "."), "[status] Finished"])
+    #expect(!batch.lines.map(\.text).joined().contains("synthetic"))
+    #expect(batch.lines.last?.text == "[status] Finished")
+}
+
 @Test func decodedLineBatchesAreAvailableWithoutTestableImport() throws {
     let input = Data(#"["password:","syntheticValue","Finished"]"#.utf8)
     let batch = try JSONDecoder().decode(RedactedLines.self, from: input)
