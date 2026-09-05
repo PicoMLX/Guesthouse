@@ -82,11 +82,13 @@ import Testing
     }
 
     @Test(arguments: ["HMAC-SHA256", "PBKDF2-HMAC-SHA256", "ECDSA-SHA256", "CHACHA20-POLY1305"])
-    func knownAlgorithmsSurviveOnlyContextFreeShapeMatching(algorithm: String) throws {
+    func knownAlgorithmsSurviveOnlyContextualDiagnosticLogs(algorithm: String) throws {
         let input = "using " + algorithm + " for signing"
-        #expect(redactor.redact(untrusted: input) == input)
-        #expect(redactor.redact(fieldValue: input) == input)
-        #expect(try JSONDecoder().decode(RedactedLine.self, from: JSONEncoder().encode(input)).text == input)
+        let concealed = "using [redacted:device-code] for signing"
+        #expect(redactor.redact(input) == input)
+        #expect(redactor.redact(untrusted: input) == concealed)
+        #expect(redactor.redact(fieldValue: input) == concealed)
+        #expect(try JSONDecoder().decode(RedactedLine.self, from: JSONEncoder().encode(input)).text == concealed)
         #expect(!redactor.redact(untrusted: "device_code: " + algorithm).contains(algorithm))
         #expect(!redactor.redact(untrusted: "Your code is " + algorithm).contains(algorithm))
     }
