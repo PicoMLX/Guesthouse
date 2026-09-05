@@ -49,9 +49,9 @@ public enum IntegrationWorkspaceWriter {
     /// made: the guest can replace it in the same window, and an identity nobody recorded is an
     /// identity nothing below can compare.
     ///
-    /// `afterCheck` is a test seam: it runs in exactly the window a substitution has to land
-    /// in, so the rule can be exercised rather than raced.
-    static func openRoot(_ resolvedRoot: URL, afterCheck: () -> Void = {}) throws -> Int32 {
+    /// The test seams run between the absence check and creation, and between the identity
+    /// check and open, so substitutions can be exercised without racing the scheduler.
+    static func openRoot(_ resolvedRoot: URL, beforeCreate: () throws -> Void = {}, afterCheck: () -> Void = {}) throws -> Int32 {
         let name = resolvedRoot.lastPathComponent
         let container = resolvedRoot.deletingLastPathComponent()
         var containerDescriptor = open(container.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -75,8 +75,18 @@ public enum IntegrationWorkspaceWriter {
         defer { close(containerDescriptor) }
         var rootInfo = stat()
         if fstatat(containerDescriptor, name, &rootInfo, AT_SYMLINK_NOFOLLOW) != 0 {
-            guard mkdirat(containerDescriptor, name, 0o755) == 0 || errno == EEXIST else {
-                throw GeneratedFileError.unwritable(path: name, reason: reason(errno))
+            let checkError = errno
+            guard checkError == ENOENT else {
+                throw GeneratedFileError.unwritable(path: name, reason: reason(checkError))
+            }
+            try beforeCreate()
+            guard mkdirat(containerDescriptor, name, 0o755) == 0 else {
+                let code = errno
+                // Absence was observed above. An entry that arrived before creation belongs
+                // to somebody else, even when it is a real directory with a stable identity.
+                throw code == EEXIST
+                    ? GeneratedFileError.pathOutsideWorkspace(name)
+                    : GeneratedFileError.unwritable(path: name, reason: reason(code))
             }
             guard fstatat(containerDescriptor, name, &rootInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
                 throw GeneratedFileError.unwritable(path: name, reason: reason(errno))

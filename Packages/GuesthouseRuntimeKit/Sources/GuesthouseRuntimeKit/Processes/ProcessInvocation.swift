@@ -18,8 +18,9 @@ public struct ProcessInvocation: Hashable, Sendable {
     /// Wall-clock limit for the whole run. SIGTERM at the deadline, SIGKILL after the grace period.
     public var timeout: Duration
     public var terminationGracePeriod: Duration
-    /// Output kept per run, both streams together. Beyond it, further output is discarded and
-    /// the exit reports `outputTruncated`, so a chatty child cannot exhaust the service.
+    /// Redacted UTF-8 output kept per run, both streams together, counting one byte per record
+    /// ending. A record that does not fit and all later output are discarded, and the exit
+    /// reports `outputTruncated`. Nonpositive limits suppress all output.
     public var maximumOutputBytes: Int
 
     public static let defaultMaximumOutputBytes = 16 << 20

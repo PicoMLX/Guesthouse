@@ -593,7 +593,7 @@ private final class OutputReaders: @unchecked Sendable {
 
     init(continuation: AsyncStream<ProcessOutput>.Continuation, maximumBytes: Int, truncated: @escaping @Sendable () -> Void) {
         self.continuation = continuation
-        self.maximumBytes = maximumBytes
+        self.maximumBytes = max(0, maximumBytes)
         self.truncated = truncated
     }
 
@@ -658,19 +658,9 @@ private final class OutputReaders: @unchecked Sendable {
     private func emit(_ record: RecordSplitter.Record, id: ObjectIdentifier, kind: Kind) {
         let lineData = record.bytes
         let redacted: RedactedLine? = lock.withLock {
-            // The ending that closed the record is charged too, so a child printing nothing
-            // but newlines still reaches the cap instead of streaming for as long as it runs.
-            let cost = lineData.count + 1
-            // A record is admitted only when the whole of it fits. One record can be 64 KiB,
-            // so admitting one against a single remaining byte would overshoot the bound the
-            // run promises; cutting it to fit instead could hand out the head of a token the
-            // redactor only recognizes whole. Reaching the cap ends the output for the run,
-            // so what is delivered is a prefix rather than a gapped selection.
-            guard emittedBytes + cost <= maximumBytes else {
-                emittedBytes = maximumBytes
-                return nil
-            }
-            emittedBytes += cost
+            // Decode and redact before charging: replacement scalars and redaction markers
+            // can be larger than the original bytes. State advances even for suppressed
+            // records, preserving the context of credentials split across record boundaries.
             var state = states[id] ?? Redactor.StreamState()
             let result = redactor.redact(
                 processOutputLine: String(decoding: lineData, as: UTF8.self),
@@ -680,6 +670,15 @@ private final class OutputReaders: @unchecked Sendable {
                 state: &state
             )
             states[id] = state
+            // Charge an ending too, so newline-only output also reaches the cap. Admit only
+            // whole redacted records, preserving both markers and UTF-8 scalars. Once one
+            // does not fit, suppress all later records so the output remains a prefix.
+            let cost = result.text.utf8.count + 1
+            guard cost <= maximumBytes - emittedBytes else {
+                emittedBytes = maximumBytes
+                return nil
+            }
+            emittedBytes += cost
             return result
         }
         guard let redacted else {

@@ -208,14 +208,33 @@ import Testing
         try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
 
         #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
-            _ = try IntegrationWorkspaceWriter.openRoot(root) {
+            _ = try IntegrationWorkspaceWriter.openRoot(root, afterCheck: {
                 // A guest agent moves a repository into the root's pathname in the window
                 // between the check and the open, which no link is involved in.
                 try? FileManager.default.removeItem(at: root)
                 try? FileManager.default.moveItem(at: decoy, to: root)
-            }
+            })
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty, "the substituted repository was not opened for writing")
+    }
+
+    @Test func aRootThatAppearsAfterTheAbsenceCheckIsRefused() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "CreationRace-\(UUID().uuidString)")
+        let root = base.appending(path: "workspace")
+        let checkout = base.appending(path: "repos/MyApp")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let original = Data("guest checkout".utf8)
+        try original.write(to: checkout.appending(path: "README.md"))
+
+        #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
+            let descriptor = try IntegrationWorkspaceWriter.openRoot(root, beforeCreate: {
+                try FileManager.default.moveItem(at: checkout, to: root)
+            })
+            defer { close(descriptor) }
+            try IntegrationWorkspaceWriter.writeFile(Data("generated".utf8), named: "AGENTS.md", in: descriptor, of: "AGENTS.md")
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["README.md"])
+        #expect(try Data(contentsOf: root.appending(path: "README.md")) == original)
     }
 
     /// A root the writer had to create is bound to its identity the same way: having just made
@@ -227,10 +246,10 @@ import Testing
         try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
 
         #expect(throws: GeneratedFileError.pathOutsideWorkspace("workspace")) {
-            _ = try IntegrationWorkspaceWriter.openRoot(root) {
+            _ = try IntegrationWorkspaceWriter.openRoot(root, afterCheck: {
                 try? FileManager.default.removeItem(at: root)
                 try? FileManager.default.moveItem(at: decoy, to: root)
-            }
+            })
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty, "the substituted repository was not opened for writing")
     }

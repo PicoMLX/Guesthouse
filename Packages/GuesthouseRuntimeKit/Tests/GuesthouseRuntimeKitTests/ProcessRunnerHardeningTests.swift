@@ -439,6 +439,52 @@ import Testing
         #expect(result.exit.reason == .status(0))
     }
 
+    @Test func theOutputCapCountsExpandedRedactionMarkers() async throws {
+        let run = try await runner.run(ProcessInvocation(
+            executable: URL(fileURLWithPath: "/bin/echo"),
+            arguments: [Array(repeating: "AB12-CD34", count: 10).joined(separator: "\n")],
+            maximumOutputBytes: 100
+        ))
+        let result = await collect(run)
+        #expect(result.lines == Array(repeating: "[redacted:device-code]", count: 4))
+        #expect(result.lines.reduce(0) { $0 + $1.utf8.count + 1 } <= 100)
+        #expect(result.exit.outputTruncated)
+    }
+
+    @Test func theOutputCapCountsReplacementScalars() async throws {
+        let run = try await runner.run(ProcessInvocation(
+            executable: URL(fileURLWithPath: "/bin/cat"),
+            standardInput: .data(Data([0xFF, 0x0A, 0xFF, 0x0A, 0xFF, 0x0A])),
+            maximumOutputBytes: 8
+        ))
+        let result = await collect(run)
+        #expect(result.lines == ["\u{FFFD}", "\u{FFFD}"])
+        #expect(result.lines.reduce(0) { $0 + $1.utf8.count + 1 } == 8)
+        #expect(result.exit.outputTruncated)
+    }
+
+    @Test func aRedactedRecordFitsWhenItsOriginalBytesDoNot() async throws {
+        let run = try await runner.run(ProcessInvocation(
+            executable: URL(fileURLWithPath: "/bin/echo"),
+            arguments: ["ghp_" + String(repeating: "a", count: 36)],
+            maximumOutputBytes: "[redacted:github-token]".utf8.count + 1
+        ))
+        let result = await collect(run)
+        #expect(result.lines == ["[redacted:github-token]"])
+        #expect(!result.exit.outputTruncated)
+    }
+
+    @Test func aRejectedExpandedRecordSuppressesLaterSmallerRecords() async throws {
+        let run = try await runner.run(ProcessInvocation(
+            executable: URL(fileURLWithPath: "/bin/echo"),
+            arguments: ["ok\nAB12-CD34\nok"],
+            maximumOutputBytes: 13
+        ))
+        let result = await collect(run)
+        #expect(result.lines == ["ok"])
+        #expect(result.exit.outputTruncated)
+    }
+
     @Test func aWorkingDirectoryThatIsALinkIsRefused() async throws {
         let base = FileManager.default.temporaryDirectory.appending(path: "cwd-\(UUID().uuidString)")
         let real = base.appending(path: "elsewhere")
