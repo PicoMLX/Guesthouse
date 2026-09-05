@@ -27,9 +27,12 @@ public enum ProvisioningEvent: Hashable, Sendable {
     case userActionRequired(OperationID, GuesthouseError)
     /// The XPC connection dropped while the operation was in flight, or is still down.
     case connectionInterrupted(OperationID)
-    /// Actual state was inspected after an interruption or before a retry. Only accepted for
-    /// the inspection that is currently outstanding.
+    /// An inspection without a known operation found the stage's actual state. Only accepted
+    /// for an unscoped inspection; it cannot settle an identified operation's unknown outcome.
     case reconciled(EffectToken, ReconciledOutcome)
+    /// Inspection checked the named operation across all stages. Both the inspection token
+    /// and operation identity must match before its active or quiescent outcome is accepted.
+    case operationReconciled(EffectToken, OperationID, OperationInspectionOutcome)
     /// The inspection itself could not be carried out — the runtime is still unreachable, or
     /// the guest query failed. The outcome stays unknown; the error says what to do about it.
     case inspectionFailed(EffectToken, GuesthouseError)
@@ -62,6 +65,7 @@ public enum ProvisioningEvent: Hashable, Sendable {
         case .userActionRequired: "userActionRequired"
         case .connectionInterrupted: "connectionInterrupted"
         case .reconciled: "reconciled"
+        case .operationReconciled: "operationReconciled"
         case .inspectionFailed: "inspectionFailed"
         case .cleanupFinished: "cleanupFinished"
         case .cleanupFailed: "cleanupFailed"
@@ -100,13 +104,27 @@ public enum ReconciledOutcome: Hashable, Sendable {
     case notStarted
 }
 
+/// What an inspection established about one identified operation, wherever it is running.
+public enum OperationInspectionOutcome: Hashable, Sendable {
+    case stillRunning
+    case stillNeedsUserAction(GuesthouseError)
+    /// The named operation can no longer mutate anything. Only after establishing that fact
+    /// may inspection report the reserved stage's actual state here. An active operation
+    /// outcome is contradictory and rejected; an independently tracked cleanup is permitted
+    /// because its identity is retained and provisioning stays blocked until it finishes.
+    case quiescent(ReconciledOutcome)
+}
+
 /// Side effects the coordinator must perform. Descriptions only; nothing runs here.
 ///
 /// Each carries the token the matching callback must echo.
 public enum ProvisioningEffect: Hashable, Sendable {
-    /// Query the actual state for `stage`, then send `reconciled` or `inspectionFailed`, before
-    /// deciding anything else.
-    case inspectActualState(ProvisioningStage, EffectToken)
+    /// With an operation identity, inspect that operation globally across all stages and send
+    /// `operationReconciled`. An active operation cannot be called absent merely because it
+    /// is running at a different stage. Once it can no longer mutate, reconcile the reserved
+    /// stage and report `quiescent`. Without an identity, inspect the stage and send `reconciled`.
+    /// Either inspection may report `inspectionFailed`; uncertainty never authorizes a restart.
+    case inspectActualState(ProvisioningStage, EffectToken, operation: OperationID?)
     /// Write the checkpoint to the journal, then send `checkpointPersisted` or
     /// `checkpointPersistenceFailed`.
     case persistCheckpoint(Checkpoint, EffectToken)
@@ -202,9 +220,10 @@ public enum ProvisioningReducer: Sendable {
         }
         /// Mints the inspection's token once, so the status and the effect asking for it can
         /// never name different inspections.
-        func inspect(_ status: (EffectToken) -> StageStatus) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
+        func inspect(operation: OperationID? = nil) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
             let token = mint()
-            return at(status(token), [.inspectActualState(stage, token)])
+            let status = operation.map { StageStatus.unknownOutcome($0, inspection: token) } ?? .awaitingInspection(token)
+            return at(status, [.inspectActualState(stage, token, operation: operation)])
         }
         /// Reserves a start for `requested`, carrying forward the durable partial work the
         /// reservation was made from so a refusal cannot orphan it.
@@ -273,7 +292,7 @@ public enum ProvisioningReducer: Sendable {
             // This request has answered, so its reservation is no longer live. An acceptance
             // at the wrong stage may already be mutating; keep its operation identified and
             // inspect the reserved stage instead of leaving an unresolvable live reservation.
-            guard requested == stage else { return inspect { .unknownOutcome(id, inspection: $0) } }
+            guard requested == stage else { return inspect(operation: id) }
             return at(.inProgress(id))
 
         case (.startRequested(let request, let resuming), .startRequestRejected(let error, let token)):
@@ -284,12 +303,12 @@ public enum ProvisioningReducer: Sendable {
 
         case (.startRequested(let request, _), .startRequestInterrupted(let token)):
             try requireRequest(request, token)
-            return inspect(StageStatus.awaitingInspection)
+            return inspect()
 
         case (.startRequested(nil, _), .inspectionRequested):
             // Only a legacy saved reservation lacks a token. Its old request cannot still be
             // live in this coordinator, and no uncorrelated callback is accepted in its place.
-            return inspect(StageStatus.awaitingInspection)
+            return inspect()
 
         case (.startRequested, .inspectionRequested):
             // The reservation stays held: the request is still live, so the runtime may still
@@ -312,11 +331,12 @@ public enum ProvisioningReducer: Sendable {
             guard pending == persisted else { throw .checkpointMismatch(expected: pending, actual: persisted) }
             return at(.completed(persisted))
 
-        case (.persistingCheckpoint(_, _, let write), .checkpointPersistenceFailed(let token, let error)):
+        case (.persistingCheckpoint(_, let writer, let write), .checkpointPersistenceFailed(let token, let error)):
             // Reality is ahead of the journal. The failure is shown with its recovery actions;
             // the user's retry inspects, finds the checkpoint reached, and persists it again.
+            // A failed write does not settle its operation, so recovery must keep that identity.
             try requireOutstanding(write, token)
-            return at(.recoverableFailure(error, interrupted: nil))
+            return at(.recoverableFailure(error, interrupted: writer))
 
         case (.persistingCheckpoint(_, let writer, _), .connectionInterrupted(let id)):
             // The write's result is unknown; the journal is inspected before anything else.
@@ -326,7 +346,7 @@ public enum ProvisioningReducer: Sendable {
             // abandon a live write and make its own successful callback stale.
             guard let writer else { throw .illegalTransition(status: state.status.caseName, event: event.caseName) }
             try requireSame(writer, id)
-            return inspect { .unknownOutcome(writer, inspection: $0) }
+            return inspect(operation: writer)
 
         case (.persistingCheckpoint(_, let writer, _), .userRetried),
              (.persistingCheckpoint(_, let writer, _), .inspectionRequested):
@@ -337,8 +357,7 @@ public enum ProvisioningReducer: Sendable {
             // the second (MVP-PLAN.md §3). A checkpoint restored after a relaunch is exactly
             // that case: the write is lost, the operation behind it need not be. The unscoped
             // status is left to a reconciled write, which has no operation behind it.
-            if let writer { return inspect { .unknownOutcome(writer, inspection: $0) } }
-            return inspect(StageStatus.awaitingInspection)
+            return inspect(operation: writer)
 
         case (.inProgress(let current), .operationFailed(let id, let error)),
              (.needsUserAction(let current, _), .operationFailed(let id, let error)):
@@ -361,27 +380,27 @@ public enum ProvisioningReducer: Sendable {
 
         case (.needsUserAction(let current, _), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return inspect { .unknownOutcome(id, inspection: $0) }
+            return inspect(operation: id)
 
         case (.inProgress(let current), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return inspect { .unknownOutcome(id, inspection: $0) }
+            return inspect(operation: id)
 
         case (.unknownOutcome(let current, _), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return inspect { .unknownOutcome(id, inspection: $0) }
+            return inspect(operation: id)
 
         case (.unknownOutcome(let current, _), .userRetried), (.unknownOutcome(let current, _), .inspectionRequested):
             // A fresh inspection replaces the outstanding one rather than joining it: the reply
             // to the earlier one describes a state that may already be obsolete, and its token
             // is no longer accepted.
-            return inspect { .unknownOutcome(current, inspection: $0) }
+            return inspect(operation: current)
 
         case (.awaitingInspection, .userRetried), (.awaitingInspection, .inspectionRequested):
             // Reissued rather than suppressed: an inspection whose request was never submitted,
             // whose reply was lost, or that was still outstanding when the app was relaunched
             // would otherwise leave no event that can produce a `reconciled` result.
-            return inspect(StageStatus.awaitingInspection)
+            return inspect()
 
         case (.cleanupRequired, .userRetried):
             // The cleanup's result is unknown; inspect rather than clean up blindly again. If
@@ -394,13 +413,13 @@ public enum ProvisioningReducer: Sendable {
             // this cleanup's token with an inspection and make its own `cleanupFinished` stale.
             // A coordinator that loses contact while a cleanup is pending asks for the
             // inspection by name with `inspectionRequested`, which lands in the same place.
-            return inspect(StageStatus.awaitingInspection)
+            return inspect()
 
         case (.inProgress(let current), .inspectionRequested), (.needsUserAction(let current, _), .inspectionRequested):
             // The operation is still live, so its identity is carried through the inspection:
             // an unscoped one would adopt a `stillRunning` naming some other operation, or a
             // `notStarted` that permits a second mutation while this one keeps going.
-            return inspect { .unknownOutcome(current, inspection: $0) }
+            return inspect(operation: current)
 
         case (.recoverableFailure(_, .some(let interrupted)), .inspectionRequested),
              (.recoverableFailure(_, .some(let interrupted)), .userRetried):
@@ -409,22 +428,32 @@ public enum ProvisioningReducer: Sendable {
             // inspection stays scoped to it. An unscoped one would adopt whatever identity the
             // next answer happens to name while the first operation may still be mutating
             // (MVP-PLAN.md §3).
-            return inspect { .unknownOutcome(interrupted, inspection: $0) }
+            return inspect(operation: interrupted)
 
         case (_, .inspectionRequested):
-            return inspect(StageStatus.awaitingInspection)
+            return inspect()
 
         case (.recoverableFailure, .userRetried), (.canceled, .userRetried):
-            return inspect(StageStatus.awaitingInspection)
+            return inspect()
 
         case (.needsUserAction(let current, _), .userActionCompleted):
             // The operation the user was asked to unblock may still be running, so the
             // inspection stays scoped to it rather than accepting whatever it reports.
-            return inspect { .unknownOutcome(current, inspection: $0) }
+            return inspect(operation: current)
 
-        case (.unknownOutcome(let interrupted, let inspection), .reconciled(let token, let outcome)):
+        case (.unknownOutcome(let interrupted, let inspection), .operationReconciled(let token, let operation, let outcome)):
             try requireOutstanding(inspection, token)
-            return try adopt(outcome, interrupted: interrupted)
+            try requireSame(interrupted, operation)
+            switch outcome {
+            case .stillRunning:
+                return at(.inProgress(operation))
+            case .stillNeedsUserAction(let error):
+                return at(.needsUserAction(operation, error))
+            case .quiescent(.stillRunning), .quiescent(.stillNeedsUserAction):
+                throw .illegalTransition(status: state.status.caseName, event: event.caseName)
+            case .quiescent(let reconciled):
+                return try adopt(reconciled, interrupted: interrupted)
+            }
 
         case (.awaitingInspection(let inspection), .reconciled(let token, let outcome)):
             try requireOutstanding(inspection, token)

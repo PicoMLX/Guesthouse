@@ -14,7 +14,7 @@ import Testing
     /// back in the callback, and so do these tests.
     func token(of effects: [ProvisioningEffect]) throws -> EffectToken {
         switch try #require(effects.first) {
-        case .inspectActualState(_, let token), .persistCheckpoint(_, let token), .cleanUp(_, let token): token
+        case .inspectActualState(_, let token, _), .persistCheckpoint(_, let token), .cleanUp(_, let token): token
         }
     }
 
@@ -24,8 +24,43 @@ import Testing
         guard case .recoverableFailure(let error, _) = failed.state.status else { Issue.record("expected recoverableFailure"); return }
         #expect(error.recoveryActions.contains(.freeDiskSpace))
         let retried = try ProvisioningReducer.reduce(failed.state, .userRetried)
-        let persisted = try ProvisioningReducer.reduce(retried.state, .reconciled(try token(of: retried.effects), .completed(checkpoint)))
+        let persisted = try ProvisioningReducer.reduce(retried.state, .operationReconciled(try token(of: retried.effects), operation, .quiescent(.completed(checkpoint))))
         #expect(persisted.effects == [.persistCheckpoint(checkpoint, try token(of: persisted.effects))])
+    }
+
+    /// A failed journal write settles the write, not the operation that reached its checkpoint.
+    /// Its identity must survive either recovery route and any replacement checkpoint write.
+    @Test(arguments: [ProvisioningEvent.userRetried, .inspectionRequested])
+    func checkpointWriteFailurePreservesItsWriterDuringRecovery(recovery: ProvisioningEvent) throws {
+        let error = GuesthouseError.insufficientDisk(requiredBytes: 2, availableBytes: 1, volumePath: "/")
+        for writer in [Optional(operation), nil] {
+            let writing = state(.persistingCheckpoint(checkpoint, operation: writer, write: outstanding))
+            let failed = try ProvisioningReducer.reduce(writing, .checkpointPersistenceFailed(outstanding, error))
+            #expect(failed.state.status == .recoverableFailure(error, interrupted: writer))
+            #expect(failed.effects.isEmpty)
+            let restored = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(failed.state))
+            let inspected = try ProvisioningReducer.reduce(restored, recovery)
+            let inspection = try token(of: inspected.effects)
+            #expect(inspected.effects == [.inspectActualState(.first, inspection, operation: writer)])
+            if let writer {
+                #expect(inspected.state.status == .unknownOutcome(writer, inspection: inspection))
+                #expect(throws: ProvisioningTransitionError.operationMismatch(expected: writer, actual: stranger)) {
+                    try ProvisioningReducer.reduce(inspected.state, .operationReconciled(inspection, stranger, .stillRunning))
+                }
+                #expect(try ProvisioningReducer.reduce(inspected.state, .operationReconciled(inspection, writer, .stillRunning)).state.status == .inProgress(writer))
+            } else {
+                #expect(inspected.state.status == .awaitingInspection(inspection))
+                #expect(try ProvisioningReducer.reduce(inspected.state, .reconciled(inspection, .stillRunning(stranger))).state.status == .inProgress(stranger))
+            }
+            let completed: ProvisioningEvent = writer.map { .operationReconciled(inspection, $0, .quiescent(.completed(checkpoint))) } ?? .reconciled(inspection, .completed(checkpoint))
+            let rewritten = try ProvisioningReducer.reduce(inspected.state, completed)
+            let replacement = try token(of: rewritten.effects)
+            #expect(rewritten.state.status == .persistingCheckpoint(checkpoint, operation: writer, write: replacement))
+            #expect(throws: ProvisioningTransitionError.staleEffect(expected: replacement, actual: outstanding)) {
+                try ProvisioningReducer.reduce(rewritten.state, .checkpointPersistenceFailed(outstanding, .canceled))
+            }
+            #expect(try ProvisioningReducer.reduce(rewritten.state, .checkpointPersisted(replacement, checkpoint)).state.status == .completed(checkpoint))
+        }
     }
 
     @Test func interruptedCheckpointWritesAndCleanupsAreInspected() throws {
@@ -34,7 +69,7 @@ import Testing
         // different operation without checking.
         let write = try ProvisioningReducer.reduce(state(.persistingCheckpoint(checkpoint, operation: operation, write: outstanding)), .connectionInterrupted(operation))
         #expect(write.state.status == .unknownOutcome(operation, inspection: try token(of: write.effects)))
-        #expect(write.effects == [.inspectActualState(.first, try token(of: write.effects))])
+        #expect(write.effects == [.inspectActualState(.first, try token(of: write.effects), operation: operation)])
         // A cleanup is an effect, not an operation, so an interruption naming an operation is
         // never about it; the cleanup's token would otherwise be replaced by a late callback
         // belonging to something else, and its own `cleanupFinished` would arrive stale.
@@ -44,11 +79,11 @@ import Testing
         let cleanup = try ProvisioningReducer.reduce(state(.cleanupRequired(.canceled, cleanup: outstanding)), .inspectionRequested)
         #expect(cleanup.state.status.caseName == "awaitingInspection")
         let cleanupRetry = try ProvisioningReducer.reduce(state(.cleanupRequired(.canceled, cleanup: outstanding)), .userRetried)
-        #expect(cleanupRetry.effects == [.inspectActualState(.first, try token(of: cleanupRetry.effects))])
+        #expect(cleanupRetry.effects == [.inspectActualState(.first, try token(of: cleanupRetry.effects), operation: nil)])
     }
 
     @Test func aStillRunningOperationResumesMonitoringUnderItsIdentity() throws {
-        let resumed = try ProvisioningReducer.reduce(state(.unknownOutcome(operation, inspection: outstanding)), .reconciled(outstanding, .stillRunning(operation)))
+        let resumed = try ProvisioningReducer.reduce(state(.unknownOutcome(operation, inspection: outstanding)), .operationReconciled(outstanding, operation, .stillRunning))
         #expect(resumed.state.status == .inProgress(operation))
         #expect(resumed.effects.isEmpty)
         #expect(throws: ProvisioningTransitionError.self) {
@@ -59,7 +94,7 @@ import Testing
     @Test func connectionLossWhileAwaitingUserActionBecomesUnknown() throws {
         let lost = try ProvisioningReducer.reduce(state(.needsUserAction(operation, .loginExpired(.github))), .connectionInterrupted(operation))
         #expect(lost.state.status == .unknownOutcome(operation, inspection: try token(of: lost.effects)))
-        #expect(lost.effects == [.inspectActualState(.first, try token(of: lost.effects))])
+        #expect(lost.effects == [.inspectActualState(.first, try token(of: lost.effects), operation: operation)])
     }
 
     /// An inspection whose request was never submitted, whose reply was lost, or that was still
@@ -71,7 +106,7 @@ import Testing
         let second = try ProvisioningReducer.reduce(first.state, .inspectionRequested)
         let live = try token(of: second.effects)
         #expect(live != lost)
-        #expect(second.effects == [.inspectActualState(.first, live)])
+        #expect(second.effects == [.inspectActualState(.first, live, operation: nil)])
         #expect(throws: ProvisioningTransitionError.staleEffect(expected: live, actual: lost)) {
             try ProvisioningReducer.reduce(second.state, .reconciled(lost, .notStarted))
         }
@@ -93,7 +128,7 @@ import Testing
         #expect(live != first)
         #expect(again.state.status == .unknownOutcome(operation, inspection: live))
         #expect(throws: ProvisioningTransitionError.staleEffect(expected: live, actual: first)) {
-            try ProvisioningReducer.reduce(again.state, .reconciled(first, .completed(checkpoint)))
+            try ProvisioningReducer.reduce(again.state, .operationReconciled(first, operation, .quiescent(.completed(checkpoint))))
         }
     }
 
@@ -118,7 +153,7 @@ import Testing
             let result = try ProvisioningReducer.reduce(state(status), .inspectionRequested)
             let issued = try token(of: result.effects)
             #expect(result.state.status == .awaitingInspection(issued), "\(status.caseName)")
-            #expect(result.effects == [.inspectActualState(.first, issued)], "\(status.caseName)")
+            #expect(result.effects == [.inspectActualState(.first, issued, operation: nil)], "\(status.caseName)")
         }
         // An unknown outcome keeps the interrupted operation's identity while it inspects again.
         let unknown = try ProvisioningReducer.reduce(state(.unknownOutcome(operation, inspection: outstanding)), .inspectionRequested)
@@ -140,7 +175,7 @@ import Testing
             let issued = try token(of: result.effects)
             #expect(result.state.status == .unknownOutcome(operation, inspection: issued), "\(status.caseName)/\(event.caseName)")
             #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger), "\(status.caseName)/\(event.caseName)") {
-                try ProvisioningReducer.reduce(result.state, .reconciled(issued, .stillRunning(stranger)))
+                try ProvisioningReducer.reduce(result.state, .operationReconciled(issued, stranger, .stillRunning))
             }
         }
     }
@@ -171,7 +206,7 @@ import Testing
             for event in [ProvisioningEvent.userRetried, .inspectionRequested] {
                 let again = try ProvisioningReducer.reduce(failed.state, event)
                 let token = try token(of: again.effects)
-                #expect(again.effects == [.inspectActualState(.first, token)], "\(status.caseName)")
+                #expect(again.effects == [.inspectActualState(.first, token, operation: unaccountedFor)], "\(status.caseName)")
                 // The replacement inspection is scoped exactly as the failed one was.
                 let expected = unaccountedFor.map { StageStatus.unknownOutcome($0, inspection: token) } ?? .awaitingInspection(token)
                 #expect(again.state.status == expected, "\(status.caseName)")
@@ -189,9 +224,9 @@ import Testing
         #expect(retried.state.status == .unknownOutcome(operation, inspection: replacement))
         let other = OperationID()
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: other)) {
-            try ProvisioningReducer.reduce(retried.state, .reconciled(replacement, .stillRunning(other)))
+            try ProvisioningReducer.reduce(retried.state, .operationReconciled(replacement, other, .stillRunning))
         }
-        #expect(try ProvisioningReducer.reduce(retried.state, .reconciled(replacement, .stillRunning(operation))).state.status == .inProgress(operation))
+        #expect(try ProvisioningReducer.reduce(retried.state, .operationReconciled(replacement, operation, .stillRunning)).state.status == .inProgress(operation))
     }
 
     /// A paused operation is still alive: it can die with the guest, and it can resume and reach
@@ -298,26 +333,112 @@ import Testing
         let inspection = try token(of: accepted.effects)
         #expect(accepted.state.stage == .first)
         #expect(accepted.state.status == .unknownOutcome(operation, inspection: inspection))
-        #expect(accepted.effects == [.inspectActualState(.first, inspection)])
+        #expect(accepted.effects == [.inspectActualState(.first, inspection, operation: operation)])
         #expect(inspection.value > request.value)
+        #expect(throws: ProvisioningTransitionError.illegalTransition(status: "unknownOutcome", event: "reconciled")) {
+            try ProvisioningReducer.reduce(accepted.state, .reconciled(inspection, .notStarted))
+        }
         #expect(throws: ProvisioningTransitionError.self) {
             try ProvisioningReducer.reduce(accepted.state, .startRequested(stage: .first))
         }
-        #expect(try ProvisioningReducer.reduce(accepted.state, .reconciled(inspection, .stillRunning(operation))).state.status == .inProgress(operation))
+        #expect(try ProvisioningReducer.reduce(accepted.state, .operationReconciled(inspection, operation, .stillRunning)).state.status == .inProgress(operation))
         let failed = try ProvisioningReducer.reduce(accepted.state, .inspectionFailed(inspection, .runtimeMissing)).state
         #expect(failed.status == .recoverableFailure(.runtimeMissing, interrupted: operation))
+        let relaunched = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(accepted.state))
         for event in [ProvisioningEvent.inspectionRequested, .userRetried] {
             // Both direct recovery and recovery after a failed inspection must stay scoped.
-            for recoverable in [accepted.state, failed] {
+            for recoverable in [accepted.state, failed, relaunched] {
                 let retried = try ProvisioningReducer.reduce(recoverable, event)
                 let retry = try token(of: retried.effects)
                 #expect(retried.state.status == .unknownOutcome(operation, inspection: retry))
+                #expect(retried.effects == [.inspectActualState(.first, retry, operation: operation)])
                 #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
-                    try ProvisioningReducer.reduce(retried.state, .reconciled(retry, .stillRunning(stranger)))
+                    try ProvisioningReducer.reduce(retried.state, .operationReconciled(retry, stranger, .stillRunning))
                 }
-                #expect(try ProvisioningReducer.reduce(retried.state, .reconciled(retry, .stillRunning(operation))).state.status == .inProgress(operation))
+                #expect(try ProvisioningReducer.reduce(retried.state, .operationReconciled(retry, operation, .stillRunning)).state.status == .inProgress(operation))
             }
         }
+    }
+
+    @Test(arguments: [
+        OperationInspectionOutcome.stillRunning,
+        .stillNeedsUserAction(.credentialsLocked(.guestKeychain)),
+        .quiescent(.notStarted),
+    ])
+    func operationInspectionRepliesRequireBothCurrentTokenAndOperation(outcome: OperationInspectionOutcome) throws {
+        let original = state(.unknownOutcome(operation, inspection: outstanding))
+        let renewed = try ProvisioningReducer.reduce(original, .inspectionRequested)
+        let inspection = try token(of: renewed.effects)
+        #expect(renewed.effects == [.inspectActualState(.first, inspection, operation: operation)])
+        #expect(throws: ProvisioningTransitionError.staleEffect(expected: inspection, actual: outstanding)) {
+            try ProvisioningReducer.reduce(renewed.state, .operationReconciled(outstanding, operation, outcome))
+        }
+        #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
+            try ProvisioningReducer.reduce(renewed.state, .operationReconciled(inspection, stranger, outcome))
+        }
+        let current = try ProvisioningReducer.reduce(renewed.state, .operationReconciled(inspection, operation, outcome)).state
+        switch outcome {
+        case .quiescent:
+            #expect(current.status == .notStarted)
+            #expect(try ProvisioningReducer.reduce(current, .startRequested(stage: .first)).state.status.caseName == "startRequested")
+        case .stillRunning, .stillNeedsUserAction:
+            #expect(throws: ProvisioningTransitionError.self) {
+                try ProvisioningReducer.reduce(current, .startRequested(stage: .first))
+            }
+            let rechecked = try ProvisioningReducer.reduce(current, .inspectionRequested)
+            #expect(rechecked.effects == [.inspectActualState(.first, try token(of: rechecked.effects), operation: operation)])
+        }
+    }
+
+    @Test func aQuiescentOperationCannotAlsoBeReportedActive() {
+        let inspecting = state(.unknownOutcome(operation, inspection: outstanding))
+        for active in [ReconciledOutcome.stillRunning(operation), .stillNeedsUserAction(operation, .credentialsLocked(.guestKeychain))] {
+            #expect(throws: ProvisioningTransitionError.illegalTransition(status: "unknownOutcome", event: "operationReconciled")) {
+                try ProvisioningReducer.reduce(inspecting, .operationReconciled(outstanding, operation, .quiescent(active)))
+            }
+        }
+    }
+
+    @Test func aSeparateCleanupKeepsRestartBlockedAfterTheOperationIsQuiescent() throws {
+        let inspecting = state(.unknownOutcome(operation, inspection: outstanding))
+        let cleanup = EffectToken(7)
+        let continued = try ProvisioningReducer.reduce(inspecting, .operationReconciled(outstanding, operation, .quiescent(.cleanupRunning(cleanup, .canceled))))
+        #expect(continued.state.status == .cleanupRequired(.canceled, cleanup: cleanup))
+        #expect(continued.effects.isEmpty)
+        #expect(throws: ProvisioningTransitionError.self) {
+            try ProvisioningReducer.reduce(continued.state, .startRequested(stage: .first))
+        }
+        let finished = try ProvisioningReducer.reduce(continued.state, .cleanupFinished(cleanup)).state
+        #expect(try ProvisioningReducer.reduce(finished, .startRequested(stage: .first)).state.status == .startRequested(request: EffectToken(8), resuming: nil))
+    }
+
+    /// Fixture: the reserved preflight stage has not started, but this operation is running at
+    /// runtimeReady. Looking only at preflight would falsely permit a second start.
+    @Test func inspectionFindsTheNamedOperationOutsideTheReservedStage() throws {
+        let requested = try ProvisioningReducer.reduce(.initial, .startRequested(stage: .first)).state
+        let accepted = try ProvisioningReducer.reduce(requested, .operationStarted(operation, stage: .runtimeReady, request: #require(requested.status.pendingEffect)))
+        var runningByStage: [ProvisioningStage: OperationID] = [.runtimeReady: operation]
+        let effect = try #require(accepted.effects.first)
+        guard case .inspectActualState(let reservedStage, let inspection, let target) = effect else { Issue.record("expected inspection"); return }
+        #expect(reservedStage == .preflight)
+        let targetOperation = try #require(target)
+        #expect(targetOperation == operation)
+        #expect(runningByStage[reservedStage] == nil)
+        let found = try #require(runningByStage.first { $0.value == targetOperation })
+        #expect(found.key == .runtimeReady)
+        let monitored = try ProvisioningReducer.reduce(accepted.state, .operationReconciled(inspection, targetOperation, .stillRunning)).state
+        #expect(monitored.stage == .preflight)
+        #expect(monitored.status == .inProgress(operation))
+        #expect(throws: ProvisioningTransitionError.self) {
+            try ProvisioningReducer.reduce(monitored, .startRequested(stage: .preflight))
+        }
+        let stoppedCheck = try ProvisioningReducer.reduce(monitored, .inspectionRequested)
+        #expect(stoppedCheck.effects == [.inspectActualState(.preflight, try token(of: stoppedCheck.effects), operation: operation)])
+        // The fixture reports quiescence only after the named operation has stopped everywhere.
+        runningByStage.removeValue(forKey: .runtimeReady)
+        #expect(!runningByStage.values.contains(operation))
+        let quiescent = try ProvisioningReducer.reduce(stoppedCheck.state, .operationReconciled(try token(of: stoppedCheck.effects), operation, .quiescent(.notStarted))).state
+        #expect(try ProvisioningReducer.reduce(quiescent, .startRequested(stage: .preflight)).state.status.caseName == "startRequested")
     }
 
     /// These are the schema-1 shapes written before start requests carried a token: nil
@@ -351,7 +472,7 @@ import Testing
         }
         let inspecting = try ProvisioningReducer.reduce(restored, .inspectionRequested)
         #expect(inspecting.state.status == .awaitingInspection(EffectToken(10)))
-        #expect(inspecting.effects == [.inspectActualState(.first, EffectToken(10))])
+        #expect(inspecting.effects == [.inspectActualState(.first, EffectToken(10), operation: nil)])
         let inspected = try ProvisioningReducer.reduce(inspecting.state, .reconciled(EffectToken(10), .notStarted)).state
         #expect(try ProvisioningReducer.reduce(inspected, .startRequested(stage: .first)).state.status == .startRequested(request: EffectToken(11), resuming: nil))
     }
@@ -429,13 +550,13 @@ import Testing
         let paused = GuesthouseError.credentialsLocked(.guestKeychain)
         let lost = try ProvisioningReducer.reduce(state(.needsUserAction(operation, paused)), .connectionInterrupted(operation))
         let inspection = try token(of: lost.effects)
-        let restored = try ProvisioningReducer.reduce(lost.state, .reconciled(inspection, .stillNeedsUserAction(operation, paused)))
+        let restored = try ProvisioningReducer.reduce(lost.state, .operationReconciled(inspection, operation, .stillNeedsUserAction(paused)))
         #expect(restored.state.status == .needsUserAction(operation, paused))
         #expect(restored.effects.isEmpty)
         guard case .needsUserAction(_, let error) = restored.state.status else { Issue.record("expected needsUserAction"); return }
         #expect(error.recoveryActions.contains(.openConsole))
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
-            try ProvisioningReducer.reduce(lost.state, .reconciled(inspection, .stillNeedsUserAction(stranger, paused)))
+            try ProvisioningReducer.reduce(lost.state, .operationReconciled(inspection, stranger, .stillNeedsUserAction(paused)))
         }
         // The user can still report the step done, and that inspects under the same identity.
         #expect(try ProvisioningReducer.reduce(restored.state, .userActionCompleted).state.status.caseName == "unknownOutcome")
@@ -447,7 +568,7 @@ import Testing
         let reached = try ProvisioningReducer.reduce(state(.inProgress(operation)), .checkpointReached(operation, checkpoint))
         let abandoned = try token(of: reached.effects)
         let interrupted = try ProvisioningReducer.reduce(reached.state, .connectionInterrupted(operation))
-        let rewritten = try ProvisioningReducer.reduce(interrupted.state, .reconciled(try token(of: interrupted.effects), .completed(checkpoint)))
+        let rewritten = try ProvisioningReducer.reduce(interrupted.state, .operationReconciled(try token(of: interrupted.effects), operation, .quiescent(.completed(checkpoint))))
         let live = try token(of: rewritten.effects)
         #expect(live != abandoned)
         #expect(throws: ProvisioningTransitionError.staleEffect(expected: live, actual: abandoned)) {
@@ -462,7 +583,7 @@ import Testing
         let lost = try ProvisioningReducer.reduce(state(.inProgress(operation)), .connectionInterrupted(operation))
         let inspection = try token(of: lost.effects)
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
-            try ProvisioningReducer.reduce(lost.state, .reconciled(inspection, .stillRunning(stranger)))
+            try ProvisioningReducer.reduce(lost.state, .operationReconciled(inspection, stranger, .stillRunning))
         }
         // Inspection after a relaunch knows no identity, so the reported one is the only one.
         let adopted = try ProvisioningReducer.reduce(state(.awaitingInspection(outstanding)), .reconciled(outstanding, .stillRunning(stranger)))
@@ -589,9 +710,9 @@ import Testing
         let retried = try ProvisioningReducer.reduce(restored, request)
         #expect(retried.state.status == .unknownOutcome(operation, inspection: try token(of: retried.effects)))
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
-            try ProvisioningReducer.reduce(retried.state, .reconciled(try token(of: retried.effects), .stillRunning(stranger)))
+            try ProvisioningReducer.reduce(retried.state, .operationReconciled(try token(of: retried.effects), stranger, .stillRunning))
         }
-        #expect(try ProvisioningReducer.reduce(retried.state, .reconciled(try token(of: retried.effects), .stillRunning(operation))).state.status == .inProgress(operation))
+        #expect(try ProvisioningReducer.reduce(retried.state, .operationReconciled(try token(of: retried.effects), operation, .stillRunning)).state.status == .inProgress(operation))
         // A write reconciliation started has no operation behind it, and still inspects unscoped.
         let reconciled = try ProvisioningReducer.reduce(state(.persistingCheckpoint(checkpoint, operation: nil, write: outstanding)), request)
         #expect(reconciled.state.status.caseName == "awaitingInspection")

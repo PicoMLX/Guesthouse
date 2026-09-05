@@ -34,7 +34,7 @@ import Testing
     /// in the callback, and so do these tests.
     func token(of effects: [ProvisioningEffect]) throws -> EffectToken {
         switch try #require(effects.first) {
-        case .inspectActualState(_, let token), .persistCheckpoint(_, let token), .cleanUp(_, let token): token
+        case .inspectActualState(_, let token, _), .persistCheckpoint(_, let token), .cleanUp(_, let token): token
         }
     }
 
@@ -53,7 +53,7 @@ import Testing
             .init(name: "runtime rejects the request: error kept, nothing ran", from: state(.preflight, .startRequested(request: pending, resuming: nil)), event: .startRequestRejected(failure, request: pending), expectedStatus: "startRejected", expectedEffects: []),
             .init(name: "a new request after a rejection needs no inspection", from: state(.preflight, .startRejected(failure, resuming: nil)), event: .startRequested(stage: .preflight), expectedStatus: "startRequested", expectedEffects: []),
             .init(name: "user cancels while a console step is pending", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .operationCanceled(op), expectedStatus: "canceled", expectedEffects: []),
-            .init(name: "request interrupted: inspect", from: state(.preflight, .startRequested(request: pending, resuming: nil)), event: .startRequestInterrupted(request: pending), expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight, next)]),
+            .init(name: "request interrupted: inspect", from: state(.preflight, .startRequested(request: pending, resuming: nil)), event: .startRequestInterrupted(request: pending), expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.preflight, next, operation: nil)]),
             .init(name: "checkpoint reached waits for persistence", from: state(.preflight, .inProgress(op)), event: .checkpointReached(op, checkpoint(.preflight)), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.preflight), pending)]),
             .init(name: "persisted checkpoint completes the stage", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight), operation: op, write: pending)), event: .checkpointPersisted(pending, checkpoint(.preflight)), expectedStatus: "completed", expectedEffects: []),
             .init(name: "persistence failure is shown with its recovery", from: state(.preflight, .persistingCheckpoint(checkpoint(.preflight), operation: op, write: pending)), event: .checkpointPersistenceFailed(pending, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
@@ -62,20 +62,20 @@ import Testing
             .init(name: "failure is recoverable", from: state(.sshPaired, .inProgress(op)), event: .operationFailed(op, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
             .init(name: "cancel", from: state(.sshPaired, .inProgress(op)), event: .operationCanceled(op), expectedStatus: "canceled", expectedEffects: []),
             .init(name: "user action required", from: state(.needsGuestSetup, .inProgress(op)), event: .userActionRequired(op, consoleNeeded), expectedStatus: "needsUserAction", expectedEffects: []),
-            .init(name: "interruption becomes unknown and inspects", from: state(.macOSInstalled, .inProgress(op)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled, pending)]),
-            .init(name: "still disconnected: inspect again", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled, next)]),
-            .init(name: "user asks to check again while unknown", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .userRetried, expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled, next)]),
-            .init(name: "user asks to check again while inspecting", from: state(.macOSInstalled, .awaitingInspection(pending)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.macOSInstalled, next)]),
-            .init(name: "retry after failure inspects first", from: state(.sshPaired, .recoverableFailure(failure, interrupted: nil)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired, pending)]),
-            .init(name: "retry after cancel inspects first", from: state(.sshPaired, .canceled), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired, pending)]),
-            .init(name: "user finished console step, inspect under the paused operation's identity", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .userActionCompleted, expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.needsGuestSetup, pending)]),
+            .init(name: "interruption becomes unknown and inspects", from: state(.macOSInstalled, .inProgress(op)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled, pending, operation: op)]),
+            .init(name: "still disconnected: inspect again", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .connectionInterrupted(op), expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled, next, operation: op)]),
+            .init(name: "user asks to check again while unknown", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .userRetried, expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.macOSInstalled, next, operation: op)]),
+            .init(name: "user asks to check again while inspecting", from: state(.macOSInstalled, .awaitingInspection(pending)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.macOSInstalled, next, operation: nil)]),
+            .init(name: "retry after failure inspects first", from: state(.sshPaired, .recoverableFailure(failure, interrupted: nil)), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired, pending, operation: nil)]),
+            .init(name: "retry after cancel inspects first", from: state(.sshPaired, .canceled), event: .userRetried, expectedStatus: "awaitingInspection", expectedEffects: [.inspectActualState(.sshPaired, pending, operation: nil)]),
+            .init(name: "user finished console step, inspect under the paused operation's identity", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .userActionCompleted, expectedStatus: "unknownOutcome", expectedEffects: [.inspectActualState(.needsGuestSetup, pending, operation: op)]),
             .init(name: "a paused operation that fails is a recoverable failure", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .operationFailed(op, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
             .init(name: "a paused operation's checkpoint is persisted", from: state(.needsGuestSetup, .needsUserAction(op, consoleNeeded)), event: .checkpointReached(op, checkpoint(.needsGuestSetup)), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.needsGuestSetup), pending)]),
             .init(name: "a failed inspection is a recoverable failure, not a silent loop", from: state(.sshPaired, .awaitingInspection(pending)), event: .inspectionFailed(pending, failure), expectedStatus: "recoverableFailure", expectedEffects: []),
-            .init(name: "reconciled: actually completed, persist it", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .reconciled(pending, .completed(checkpoint(.macOSInstalled))), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.macOSInstalled), next)]),
-            .init(name: "reconciled: still running, resume monitoring", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .reconciled(pending, .stillRunning(op)), expectedStatus: "inProgress", expectedEffects: []),
-            .init(name: "reconciled: still waiting on the user", from: state(.needsGuestSetup, .unknownOutcome(op, inspection: pending)), event: .reconciled(pending, .stillNeedsUserAction(op, consoleNeeded)), expectedStatus: "needsUserAction", expectedEffects: []),
-            .init(name: "reconciled: resumable partial work", from: state(.runtimeReady, .unknownOutcome(op, inspection: pending)), event: .reconciled(pending, .resumable(evidence)), expectedStatus: "resumable", expectedEffects: []),
+            .init(name: "reconciled: actually completed, persist it", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .operationReconciled(pending, op, .quiescent(.completed(checkpoint(.macOSInstalled)))), expectedStatus: "persistingCheckpoint", expectedEffects: [.persistCheckpoint(checkpoint(.macOSInstalled), next)]),
+            .init(name: "reconciled: still running, resume monitoring", from: state(.macOSInstalled, .unknownOutcome(op, inspection: pending)), event: .operationReconciled(pending, op, .stillRunning), expectedStatus: "inProgress", expectedEffects: []),
+            .init(name: "reconciled: still waiting on the user", from: state(.needsGuestSetup, .unknownOutcome(op, inspection: pending)), event: .operationReconciled(pending, op, .stillNeedsUserAction(consoleNeeded)), expectedStatus: "needsUserAction", expectedEffects: []),
+            .init(name: "reconciled: resumable partial work", from: state(.runtimeReady, .unknownOutcome(op, inspection: pending)), event: .operationReconciled(pending, op, .quiescent(.resumable(evidence))), expectedStatus: "resumable", expectedEffects: []),
             .init(name: "reconciled: failed and needs cleanup", from: state(.runtimeReady, .awaitingInspection(pending)), event: .reconciled(pending, .failedNeedsCleanup(failure)), expectedStatus: "cleanupRequired", expectedEffects: [.cleanUp(.runtimeReady, next)]),
             .init(name: "reconciled: the earlier cleanup is still running", from: state(.runtimeReady, .awaitingInspection(next)), event: .reconciled(next, .cleanupRunning(pending, failure)), expectedStatus: "cleanupRequired", expectedEffects: []),
             .init(name: "reconciled: failed, user must act", from: state(.sshPaired, .awaitingInspection(pending)), event: .reconciled(pending, .failed(failure)), expectedStatus: "recoverableFailure", expectedEffects: []),
@@ -199,7 +199,7 @@ import Testing
     @Test func interruptedThenCompletedContinuesToNextStage() throws {
         var state = state(.macOSInstalled, .inProgress(op))
         let inspecting = try Reducer.reduce(state, .connectionInterrupted(op))
-        let reconciled = try Reducer.reduce(inspecting.state, .reconciled(try token(of: inspecting.effects), .completed(checkpoint(.macOSInstalled))))
+        let reconciled = try Reducer.reduce(inspecting.state, .operationReconciled(try token(of: inspecting.effects), op, .quiescent(.completed(checkpoint(.macOSInstalled)))))
         state = try Reducer.reduce(reconciled.state, .checkpointPersisted(try token(of: reconciled.effects), checkpoint(.macOSInstalled))).state
         state = try Reducer.reduce(state, .startRequested(stage: .needsGuestSetup)).state
         state = try Reducer.reduce(state, .operationStarted(other, stage: .needsGuestSetup, request: #require(state.status.pendingEffect))).state

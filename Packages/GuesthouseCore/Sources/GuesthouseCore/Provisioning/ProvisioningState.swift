@@ -26,6 +26,9 @@ extension EffectToken: Codable {
 
 /// Where one environment is in provisioning, and what is happening at that stage.
 public struct ProvisioningState: Hashable, Sendable {
+    /// This record's layout version, independent of changes to unrelated persisted formats.
+    /// Change it only with a migration for provisioning records (MVP-PLAN.md §3).
+    public static let currentSchema = SchemaVersion(1) ?? .current
     /// Record schema, so the state store can migrate a persisted state after this type changes.
     public private(set) var schemaVersion: SchemaVersion
     /// The checkpoint being worked toward, or the last one completed.
@@ -49,7 +52,7 @@ public struct ProvisioningState: Hashable, Sendable {
 
     public init(stage: ProvisioningStage, status: StageStatus, issuedEffects: UInt64 = 0) {
         precondition(Self.isConsistent(stage: stage, status: status), "checkpoint stage does not match \(stage.rawValue)")
-        schemaVersion = .current
+        schemaVersion = Self.currentSchema
         self.stage = stage
         self.status = status
         // The count may never trail the outstanding token, or the next effect would be minted
@@ -95,8 +98,8 @@ extension ProvisioningState: Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(SchemaVersion.self, forKey: .schemaVersion)
-        guard version == SchemaVersion.current else {
-            throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "provisioning state schema \(version) is not \(SchemaVersion.current)")
+        guard version == Self.currentSchema else {
+            throw DecodingError.dataCorruptedError(forKey: .schemaVersion, in: container, debugDescription: "provisioning state schema \(version) is not \(Self.currentSchema)")
         }
         let stage = try container.decode(ProvisioningStage.self, forKey: .stage)
         let status = try container.decode(StageStatus.self, forKey: .status)
