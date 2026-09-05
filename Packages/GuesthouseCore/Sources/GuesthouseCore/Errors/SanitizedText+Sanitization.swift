@@ -2,12 +2,12 @@ import Foundation
 
 extension SanitizedText {
     /// Values that can originate outside the app (CLI output, guest responses, file names)
-    /// are normalized, redacted, and bounded before interpolation, in that order. Error
+    /// are redacted, normalized, scanned again, and bounded before interpolation. Error
     /// messages and encoded values share this single-line display-value policy.
     ///
-    /// Order matters: normalization first, so a token split by a control character cannot be
-    /// reassembled after redaction; the bound is in Unicode scalars, so a run of combining
-    /// marks cannot hide behind a single `Character`.
+    /// Both scans matter: control whitespace can delimit a credential, while normalization
+    /// can also assemble a control-split token. Neither reading can discard the other's evidence.
+    /// The bound is in Unicode scalars, so combining marks cannot hide behind one `Character`.
     /// Input is bounded before any work: only the first `limit + lookahead` scalars are
     /// normalized and redacted, so an oversized value costs a bounded amount of memory and CPU.
     /// Credentials can exceed this finite lookahead. The repairs below therefore remove
@@ -29,7 +29,12 @@ extension SanitizedText {
         // with it, because stripping it would silently repair a credential into something the
         // patterns below no longer recognize. Combining marks go too: a mark inside a token
         // would otherwise split it out of the redactor's reach.
-        let stripped = Redactor.stripTerminalEscapes(Redactor.redactEscapeSplicedRuns(bounded))
+        let spliceSafe = Redactor.redactEscapeSplicedRuns(bounded)
+        let originalStripped = Redactor.stripTerminalEscapes(spliceSafe)
+        let normalizationShortened = originalStripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar).count
+            < limit + Self.sanitizeLookahead
+        let credentialReading = spliceSafe.replacing(#/[\u{000B}\u{000C}\u{0085}\u{2028}\u{2029}]/#, with: "\n")
+        let stripped = Redactor.stripTerminalEscapes(Redactor().redact(fieldValue: credentialReading))
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
         if truncated {
             // Normalization drops scalars, so a window full of raw input can normalize to far
@@ -39,7 +44,7 @@ extension SanitizedText {
             // the run at the cut is a fragment of something unknown and does not survive. A
             // value that was only long, not padded, keeps the whole window and the two repairs
             // below.
-            if normalized.unicodeScalars.count < limit + Self.sanitizeLookahead {
+            if normalizationShortened {
                 normalized = normalized.replacing(#/\S+$/#, with: Redactor.marker("truncated"))
             }
             // A URL authority still open at the cut may be userinfo whose terminating `@` fell
@@ -47,7 +52,7 @@ extension SanitizedText {
             // recognized in both the spellings the redactor's own userinfo rule accepts, since a
             // URL that reached a log through JSON keeps that encoding's escaped slashes, and is
             // put back exactly as it came in.
-            normalized = normalized.replacing(#/(:(?:\\?\/){2})[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
+            normalized = normalized.replacing(#/((?::|^|[\s\u{001F}"'(<\[{]|(?:^|[\s\u{001F}"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
             // A JWT whose payload is longer than the window loses the second `.` the redactor
             // matches on, so a token that began inside the visible prefix would be emitted in
             // the clear. A JOSE header followed by a segment running to the cut is one. The

@@ -5,6 +5,47 @@ import Testing
 @Suite struct RedactorContinuationRepairTests {
     private let redactor = Redactor()
 
+    @Test(arguments: [2, 4, 6], ["\"", "'"])
+    func evenSlashShellOpenersUseOrdinaryQuoteClosers(depth: Int, quote: String) {
+        let input = "run --password " + String(repeating: "\\", count: depth) + quote + "synthetic value" + quote + " --verbose"
+        let output = redactor.redact(lines: [input, "Finished"]).map(\.text)
+        #expect(output[0] == "run --password [redacted:secret] --verbose")
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: ["Bearer", "Bearer \\", "Bearer syntheticFirst\\", "Bearer syntheticFirst \\"])
+    func valueLessAndContinuedBearerSchemesProtectTheNextRecord(first: String) {
+        let output = redactor.redact(lines: [first, "syntheticCredential", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: ["", "artifact", "session."])
+    func jwtWrappingBeforeTheFinalSegmentRemainsSensitive(prefix: String) {
+        let header = "eyJhbGciOiJIUzI1NiJ9"
+        let output = redactor.redact(lines: [prefix + header + ".eyJzdWIiOiIxMjM0In0", ".syntheticSignature", "[status] Finished"]).map(\.text)
+        #expect(!output.joined().contains(header))
+        #expect(!output.joined().contains("syntheticSignature"))
+        #expect(output[2] == "[status] Finished")
+    }
+
+    @Test func aQuotedJWTBoundaryDoesNotConsumeTheFollowingDiagnostic() {
+        let output = redactor.redact(lines: ["password: \"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0", ".syntheticSignature\"", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticSignature"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: ["Bearer syntheticComplete", "Bearer syntheticComplete \\\\",
+                      "eyJhbGciOiJIUzI1NiJ9.eyJhbGciOiJIUzI1NiJ9.syntheticSignature"])
+    func completedCredentialsDoNotArmAnotherPhysicalRecord(input: String) {
+        #expect(redactor.redact(lines: [input, "Finished"]).last?.text == "Finished")
+    }
+
+    @Test(arguments: ["build.manifest", "eyJzdWIiOiIxMjM0In0.release", "artifact.2026."])
+    func ordinaryDotSeparatedValuesDoNotBecomeWrappedJWTs(input: String) {
+        #expect(redactor.redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
+    }
+
     @Test(arguments: [
         "run --password --token --verbose",
         "run --password --token=syntheticValue --verbose",
