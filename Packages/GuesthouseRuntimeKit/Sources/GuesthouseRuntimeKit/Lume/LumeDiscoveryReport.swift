@@ -45,7 +45,7 @@ public enum LumeDiscoveryReport {
         return .init(
             version: found.value,
             verified: false,
-            problem: .runtimeIncompatible(found: found, required: LumePin.version.description)
+            problem: .runtimeIncompatible(found: found, required: SanitizedText(LumePin.version.description))
         )
     }
 
@@ -70,7 +70,7 @@ public enum LumeDiscoveryReport {
                 verified: true,
                 problem: .runtimeIncompatible(
                     found: SanitizedText(found.description),
-                    required: required.description
+                    required: SanitizedText(required.description)
                 )
             )
         }

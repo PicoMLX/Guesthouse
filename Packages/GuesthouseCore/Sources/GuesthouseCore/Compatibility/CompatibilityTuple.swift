@@ -44,7 +44,13 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
     public var codexCLIInstallations: Int
     /// Capability identifiers the CLI reports, sorted and without duplicates. Empty when it
     /// reports none.
-    public var codexCLICapabilities: [String]
+    ///
+    /// Renormalized on assignment, not only at construction: equality decides whether a
+    /// recorded connection is found again, and a tuple whose list was replaced field by field
+    /// would never match the freshly normalized observation of the same guest.
+    public var codexCLICapabilities: [String] {
+        didSet { codexCLICapabilities = Self.normalize(codexCLICapabilities) }
+    }
     public var githubCLIVersion: String
     public var provisioningScriptVersion: String
 
@@ -82,10 +88,22 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
         self.provisioningScriptVersion = provisioningScriptVersion
     }
 
+    /// The most capability identifiers one report may carry. A CLI names a handful, so a
+    /// longer list is noise or a hostile probe; it is refused before it is normalized, because
+    /// building a set of it and persisting it would cost CPU, memory, and state-file space in
+    /// proportion to whatever the guest chose to send.
+    public static let maximumCapabilities = 64
+
+    static let capabilityCountMessage = "a capability list may name at most \(maximumCapabilities) identifiers"
+
     /// Decoding goes through the initializer so a document with capabilities in another
     /// order or listed twice compares equal to the normalized form.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let capabilities = try c.decode([String].self, forKey: .codexCLICapabilities)
+        guard capabilities.count <= Self.maximumCapabilities else {
+            throw DecodingError.dataCorruptedError(forKey: .codexCLICapabilities, in: c, debugDescription: Self.capabilityCountMessage)
+        }
         self.init(
             hostMacOSVersion: try c.decode(SemanticVersion.self, forKey: .hostMacOSVersion),
             hostMacOSBuild: try c.decode(String.self, forKey: .hostMacOSBuild),
@@ -99,15 +117,25 @@ public struct CompatibilityTuple: Codable, Hashable, Sendable {
             codexCLIVersion: try c.decode(String.self, forKey: .codexCLIVersion),
             codexCLIPath: try c.decode(String.self, forKey: .codexCLIPath),
             codexCLIInstallations: try c.decode(Int.self, forKey: .codexCLIInstallations),
-            codexCLICapabilities: try c.decode([String].self, forKey: .codexCLICapabilities),
+            codexCLICapabilities: capabilities,
             githubCLIVersion: try c.decode(String.self, forKey: .githubCLIVersion),
             provisioningScriptVersion: try c.decode(String.self, forKey: .provisioningScriptVersion)
         )
     }
 
     /// Sorted, without duplicates: the canonical form every comparison uses.
+    ///
+    /// A list longer than the maximum is not canonicalized. Deduplicating it first would
+    /// collapse a million repetitions of one identifier into a one-element list that
+    /// `ConnectionVerificationRecord.validate` then accepts and persists, and building a set of
+    /// whatever a guest chose to send costs CPU and memory in proportion to it. The bounded
+    /// prefix that comes back instead is still longer than the maximum, so a construction or an
+    /// assignment the decoders' own count check never saw is refused rather than repaired.
     public static func normalize(_ capabilities: [String]) -> [String] {
-        Array(Set(capabilities)).sorted()
+        guard capabilities.count <= maximumCapabilities else {
+            return Array(capabilities.prefix(maximumCapabilities + 1))
+        }
+        return Array(Set(capabilities)).sorted()
     }
 
     /// The fields whose values differ between two tuples.
@@ -180,13 +208,20 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
         self.codexCLIVersion = codexCLIVersion
         self.codexCLIPath = codexCLIPath
         self.codexCLIInstallations = codexCLIInstallations
-        self.codexCLICapabilities = codexCLICapabilities.map(CompatibilityTuple.normalize)
+        // An observation is capped for the wire, not refused, so it canonicalizes through its
+        // own rule: the record type's `normalize` deliberately leaves an oversized list
+        // uncollapsed so a count check can refuse it.
+        self.codexCLICapabilities = codexCLICapabilities.map(ObservedTuple.canonicalCapabilities)
         self.githubCLIVersion = githubCLIVersion
         self.provisioningScriptVersion = provisioningScriptVersion
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let capabilities = try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities)
+        guard (capabilities?.count ?? 0) <= CompatibilityTuple.maximumCapabilities else {
+            throw DecodingError.dataCorruptedError(forKey: .codexCLICapabilities, in: c, debugDescription: CompatibilityTuple.capabilityCountMessage)
+        }
         self.init(
             hostMacOSVersion: try c.decodeIfPresent(SemanticVersion.self, forKey: .hostMacOSVersion),
             hostMacOSBuild: try c.decodeIfPresent(String.self, forKey: .hostMacOSBuild),
@@ -200,12 +235,12 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
             codexCLIVersion: try c.decodeIfPresent(String.self, forKey: .codexCLIVersion),
             codexCLIPath: try c.decodeIfPresent(String.self, forKey: .codexCLIPath),
             codexCLIInstallations: try c.decodeIfPresent(Int.self, forKey: .codexCLIInstallations),
-            codexCLICapabilities: try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities),
+            codexCLICapabilities: capabilities,
             githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
             provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion)
         )
         // A decoded observation is untrusted: it came from another process or from disk.
-        self = sanitizedForWire()
+        self = boundedForDecoding()
     }
 
     public init(_ tuple: CompatibilityTuple) {
