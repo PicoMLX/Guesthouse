@@ -89,6 +89,48 @@ import Testing
         #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
+    func lumeEnvironmentRejectsPermissionDriftAfterInitialization(relativePath: String) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "lume-mode-drift"))
+        let target = relativePath.isEmpty ? storage.root : storage.root.appending(path: relativePath)
+        let unpublishedWork = target.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "permissions are not 0700")) {
+            try storage.environmentForLume()
+        }
+
+        #expect(try FileManager.default.attributesOfItem(atPath: target.path)[.posixPermissions] as? Int == 0o755)
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
+    }
+
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
+    func lumeEnvironmentRejectsACLDriftAfterInitialization(relativePath: String) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "lume-acl-drift"))
+        let target = relativePath.isEmpty ? storage.root : storage.root.appending(path: relativePath)
+        try #require(try addAccessControlEntry("everyone allow read,list", to: target))
+
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "carries access control entries")) {
+            try storage.environmentForLume()
+        }
+        #expect(try RuntimeStorage.hasAccessControlEntries(target))
+    }
+
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
+    func lumeEnvironmentRejectsReplacedPathsAfterInitialization(relativePath: String) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "lume-link-drift"))
+        let target = relativePath.isEmpty ? storage.root : storage.root.appending(path: relativePath)
+        let moved = root.appending(path: "preserved-directory")
+        try FileManager.default.moveItem(at: target, to: moved)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: moved)
+
+        #expect(throws: RuntimeStorageError.insecureDirectory(path: target.path, reason: "symbolic link")) {
+            try storage.environmentForLume()
+        }
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: target.path) == moved.path)
+    }
+
     @Test func anUnsafeAncestorIsRefusedBeforeProtectionDriftIsRepaired() throws {
         let storage = try RuntimeStorage(root: root.appending(path: "storage"))
         let unpublishedWork = storage.tartHome.appending(path: "unpublished-work.txt")

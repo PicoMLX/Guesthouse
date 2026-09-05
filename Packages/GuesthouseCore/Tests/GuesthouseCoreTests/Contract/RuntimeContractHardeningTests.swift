@@ -48,6 +48,22 @@ import Testing
         #expect(decoded.tart?.version.contains("\u{1B}") == false)
     }
 
+    @Test func theLumeVersionIsSanitizedOnTheWire() throws {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let info = RuntimeVersionInfo(
+            serviceVersion: "1.0",
+            serviceBuild: "1",
+            lume: .init(version: "0.5.3\u{1B}[31m \(token)", verified: true)
+        )
+        #expect(info.lume?.version?.contains("\u{1B}") == false)
+        #expect(info.lume?.version?.contains(token) == false)
+
+        let json = #"{"serviceVersion":"1.0","serviceBuild":"1","protocolVersion":1,"lume":{"version":"0.5.3\u001b[31m ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab","verified":true}}"#
+        let decoded = try JSONDecoder().decode(RuntimeVersionInfo.self, from: Data(json.utf8))
+        #expect(decoded.lume?.version?.contains("\u{1B}") == false)
+        #expect(decoded.lume?.version?.contains(token) == false)
+    }
+
     @Test func aPhaseFractionIsAlwaysEncodable() throws {
         let phase = ProgressPhase(kind: .copying, fraction: 0.5)
         #expect(phase.measured(.nan).fraction == nil)

@@ -33,12 +33,22 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
     public var protocolVersion: RuntimeProtocolVersion
     /// `nil` until the service has located a runtime bundle.
     public var tart: TartRuntimeInfo?
+    /// Phase-zero Lume candidate information. This is separate from `tart` until a recorded
+    /// hardware run chooses the production VM provider.
+    public var lume: LumeRuntimeInfo?
 
-    public init(serviceVersion: String, serviceBuild: String, protocolVersion: RuntimeProtocolVersion = .current, tart: TartRuntimeInfo? = nil) {
+    public init(
+        serviceVersion: String,
+        serviceBuild: String,
+        protocolVersion: RuntimeProtocolVersion = .current,
+        tart: TartRuntimeInfo? = nil,
+        lume: LumeRuntimeInfo? = nil
+    ) {
         self.serviceVersion = serviceVersion
         self.serviceBuild = serviceBuild
         self.protocolVersion = protocolVersion
         self.tart = tart
+        self.lume = lume
     }
 
     public struct TartRuntimeInfo: Codable, Hashable, Sendable {
@@ -58,6 +68,61 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
         public init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             self.init(version: try c.decode(String.self, forKey: .version), verified: try c.decode(Bool.self, forKey: .verified))
+        }
+    }
+
+    public struct LumeRuntimeInfo: Codable, Hashable, Sendable {
+        /// The bundle metadata version, or the version reported by the verified executable.
+        /// External CLI text is redacted and bounded before it reaches the GUI.
+        public private(set) var version: String?
+        /// Only the pinned identity, signature, executable, and entitlements are covered.
+        public var verified: Bool
+        /// CLI surface observed from this exact executable. These are not hardware gate results.
+        public var capabilities: LumeCapabilities?
+        public var problem: GuesthouseError?
+
+        public init(
+            version: String?,
+            verified: Bool,
+            capabilities: LumeCapabilities? = nil,
+            problem: GuesthouseError? = nil
+        ) {
+            self.version = version.map { GuesthouseError.sanitize($0, limit: 64) }
+            self.verified = verified
+            self.capabilities = capabilities
+            self.problem = problem
+        }
+
+        private enum CodingKeys: String, CodingKey { case version, verified, capabilities, problem }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                version: try c.decodeIfPresent(String.self, forKey: .version),
+                verified: try c.decode(Bool.self, forKey: .verified),
+                capabilities: try c.decodeIfPresent(LumeCapabilities.self, forKey: .capabilities),
+                problem: try c.decodeIfPresent(GuesthouseError.self, forKey: .problem)
+            )
+        }
+    }
+
+    public struct LumeCapabilities: Codable, Hashable, Sendable {
+        /// Advertised CLI surfaces only. In particular, stable 0.5.3's unattended Tahoe
+        /// credentials are not production-safe; the human gate must test their removal.
+        public var unattendedTahoe: Bool
+        /// The create, detached-run, and attach surfaces all advertise `--storage`. Other
+        /// lifecycle commands still require the human Phase-0 run.
+        public var createRunAttachStorage: Bool
+        public var detachedRun: Bool
+        public var nativeAttach: Bool
+        public var vncCanBeDisabled: Bool
+
+        public init(unattendedTahoe: Bool, createRunAttachStorage: Bool, detachedRun: Bool, nativeAttach: Bool, vncCanBeDisabled: Bool) {
+            self.unattendedTahoe = unattendedTahoe
+            self.createRunAttachStorage = createRunAttachStorage
+            self.detachedRun = detachedRun
+            self.nativeAttach = nativeAttach
+            self.vncCanBeDisabled = vncCanBeDisabled
         }
     }
 }
