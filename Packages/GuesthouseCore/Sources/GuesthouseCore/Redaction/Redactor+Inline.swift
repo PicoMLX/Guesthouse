@@ -23,6 +23,14 @@ extension Redactor {
         state.wrappedTokenKind = state.wrappedTokenKind ?? scanned.wrappedTokenKind
     }
 
+    /// A completed quoted field owns only its value, so indented structured siblings cannot
+    /// belong to its fold. Encoded diagnostic quotes follow the same closure rules as streams.
+    static func isClosedQuotedValue(_ value: Substring) -> Bool {
+        let start = value.drop(while: { $0.isWhitespace }).drop(while: { $0 == "\\" })
+        guard start.first == "\"" || start.first == "'" else { return false }
+        return unterminatedQuote(in: value, kind: "secret") == nil
+    }
+
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
         let p = patterns
         var text = input
@@ -30,7 +38,7 @@ extension Redactor {
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
-            state.expectingAuthorizationValue = true
+            state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2)
             state.authorizationValueIsOnTheNextLine =
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2)
             return "\(match.1)Authorization: \(marker("authorization"))"
@@ -59,19 +67,19 @@ extension Redactor {
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
-        // A labeled value can be folded onto the next line, so the label arms the continuation
-        // state the way an authorization header does.
-        var labelCarriedAValue = false
+        // Unquoted or unfinished quoted values can fold onto the next line. A closing quote
+        // bounds a completed structured value even when the next sibling is indented.
+        var labelMayContinue = false
         // Inspect the original input too: a preceding missing-value option may otherwise
         // consume this last option before the generic rules get to see it.
         var labelAwaitsValue = state.expectingSecretValue || input.contains(p.secretOptionOnly)
         text = text.replacing(p.labeledSecret) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
-            labelCarriedAValue = true
+            labelMayContinue = labelMayContinue || !isClosedQuotedValue(match.3)
             labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3)
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
-        state.expectingSecretContinuation = labelCarriedAValue
+        state.expectingSecretContinuation = labelMayContinue
         text = text.replacing(p.codeField) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
             return "\(match.1)\(match.2): \(marker("device-code"))"
