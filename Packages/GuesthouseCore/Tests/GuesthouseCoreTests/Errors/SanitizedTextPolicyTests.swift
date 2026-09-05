@@ -3,6 +3,18 @@ import Testing
 @testable import GuesthouseCore
 
 struct SanitizedTextPolicyTests {
+    @Test(arguments: ["\u{00A0}", "\u{2007}", "\t", "\n", "\u{2028}"])
+    func competingRawAndNormalizedCredentialReadingsFailClosed(separator: String) {
+        let output = SanitizedText("ghp_" + separator + "syntheticCredential").value
+        #expect(!output.contains("synthetic"))
+        #expect(output == "[redacted:normalized-value]")
+    }
+
+    @Test func disagreementCannotReleaseAnotherCredentialFoundOnlyByTheRawReading() {
+        let output = SanitizedText("--password\tsyntheticValue ghp_\u{00A0}syntheticToken").value
+        #expect(!output.contains("synthetic"))
+    }
+
     @Test(arguments: ["//user:", "url=//user:", "(//user:", #"url=\/\/user:"#])
     func networkPathCredentialsBeyondTheInspectionWindowStayPrivate(prefix: String) {
         let input = prefix + String(repeating: "syntheticSecret", count: 150) + "@host/path"
