@@ -359,6 +359,17 @@ extension RedactedLine: Codable {
 public struct RedactedLines: Hashable, Sendable, Codable {
     public let lines: [RedactedLine]
 
+    public enum ValidationError: Error, Sendable { case embeddedLineTerminator }
+
+    /// Constructs an outgoing transcript using one shared stream state. Each entry must be
+    /// one physical record; context-free device codes are concealed as on the decoding path.
+    public init(redacting raw: [String]) throws {
+        guard !raw.contains(where: { $0.contains(Redactor.patterns.lineSeparator) }) else {
+            throw ValidationError.embeddedLineTerminator
+        }
+        lines = Redactor().redact(untrustedLines: raw)
+    }
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode([String].self)
@@ -366,7 +377,7 @@ public struct RedactedLines: Hashable, Sendable, Codable {
             throw DecodingError.dataCorruptedError(in: container,
                 debugDescription: "A physical-line batch cannot contain embedded line terminators.")
         }
-        lines = Redactor().redact(untrustedLines: raw)
+        try self.init(redacting: raw)
     }
 
     public func encode(to encoder: any Encoder) throws {
