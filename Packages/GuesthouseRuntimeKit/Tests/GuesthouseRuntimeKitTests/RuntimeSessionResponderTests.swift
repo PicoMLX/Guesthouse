@@ -11,17 +11,19 @@ private struct RuntimeResponderTestRequest: Codable {
 @Suite(.serialized) struct RuntimeSessionResponderTests {
     @Test func terminalReplyIsDeliveredBeforeTheSessionCloses() throws {
         let serverSession = Mutex<XPCSession?>(nil)
+        let lifetime = Mutex(RuntimeDispatcher.SessionLifetime())
         let expected = GuesthouseError.protocolMismatch(client: 1, service: 2)
         let listener = XPCListener(options: .inactive) { request in
             let accepted: (XPCListener.IncomingSessionRequest.Decision, XPCSession) = request.accept {
                 (message: XPCReceivedMessage) -> (any Encodable)? in
                 guard let session = serverSession.withLock({ $0 }) else { return nil }
-                RuntimeSessionResponder.replyAndClose(
-                    .failed(OperationID(), expected),
-                    to: message,
-                    session: session,
-                    reason: .protocolMismatch
-                )
+                guard lifetime.withLock({ $0.began() }) != nil else { return nil }
+                let event = RuntimeEvent.failed(OperationID(), expected)
+                lifetime.withLock { $0.refuse(event) }
+                if message.expectsReply { message.reply(event) }
+                if lifetime.withLock({ $0.finished() }) {
+                    session.cancel(reason: "session refused")
+                }
                 return nil
             }
             serverSession.withLock { $0 = accepted.1 }

@@ -98,6 +98,87 @@ import Testing
         #expect(error?.recoveryMessage.isEmpty == false)
     }
 
+    @Test func theInventoryCarriesItsFormatVersion() throws {
+        let data = try JSONEncoder().encode(VMSlotInventory())
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["schemaVersion"] != nil, "a persisted record says which format it is in")
+        let newer = Data("{\"schemaVersion\":99,\"slots\":[]}".utf8)
+        let error = #expect(throws: VMSlotError.self) { try JSONDecoder().decode(VMSlotInventory.self, from: newer) }
+        #expect(error == .corruptInventory(reason: .unsupportedSchemaVersion(99)))
+    }
+
+    @Test func aPresetNeedsPositiveResources() throws {
+        #expect(ResourcePreset(name: "x", memoryBytes: 0, cpuCount: 4, diskBytes: 1, verification: .planBaseline) == nil)
+        #expect(ResourcePreset(name: "x", memoryBytes: 1, cpuCount: 0, diskBytes: 1, verification: .planBaseline) == nil)
+        #expect(ResourcePreset(name: "", memoryBytes: 1, cpuCount: 1, diskBytes: 1, verification: .planBaseline) == nil)
+        #expect(ResourcePreset(name: "x", memoryBytes: 1, cpuCount: 1, diskBytes: 1, verification: .planBaseline) != nil)
+        let bad = Data(#"{"name":"x","memoryBytes":0,"cpuCount":4,"diskBytes":1,"verification":"planBaseline"}"#.utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ResourcePreset.self, from: bad) }
+    }
+
+    @Test func anUnreadableEnvironmentRecordIsActionable() throws {
+        #expect(throws: EnvironmentRecordError.malformed) { try DevelopmentEnvironment.decode(Data("nope".utf8)) }
+        let environment = DevelopmentEnvironment(name: "Dev Mac")
+        let data = try JSONEncoder().encode(environment)
+        #expect(try DevelopmentEnvironment.decode(data) == environment)
+        for error in [EnvironmentRecordError.malformed, .unsupportedSchemaVersion(9)] {
+            #expect(!error.userMessage.isEmpty)
+            #expect(!error.recoveryMessage.isEmpty)
+        }
+    }
+
+    @Test func aGuestDiskIsAlwaysPositive() throws {
+        let preset = ResourcePreset.recommended
+        #expect(DevelopmentEnvironment(name: "Dev Mac", preset: preset, guestDiskBytes: 0).guestDiskBytes == preset.diskBytes, "a zero override means the preset's capacity")
+        var environment = DevelopmentEnvironment(name: "Dev Mac", preset: preset)
+        let refused = environment.setGuestDiskBytes(0)
+        #expect(refused == false)
+        #expect(environment.guestDiskBytes == preset.diskBytes, "a refused resize changes nothing")
+        let resized = environment.setGuestDiskBytes(preset.diskBytes * 2)
+        #expect(resized)
+        #expect(environment.guestDiskBytes == preset.diskBytes * 2)
+        var json = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(environment)) as? [String: Any])
+        json["guestDiskBytes"] = 0
+        let zeroed = try JSONSerialization.data(withJSONObject: json)
+        #expect(throws: EnvironmentRecordError.malformed) { try DevelopmentEnvironment.decode(zeroed) }
+    }
+
+    @Test func aRecordFromANewerGuesthouseIsRecognizedEvenWhenItsShapeChanged() throws {
+        // The version is read before the record, so a newer format that renamed a field is
+        // reported as "written by a newer Guesthouse", not as damage.
+        let newer = Data(#"{"schemaVersion":99,"id":"nope","renamedField":true}"#.utf8)
+        #expect(throws: EnvironmentRecordError.unsupportedSchemaVersion(99)) { try DevelopmentEnvironment.decode(newer) }
+        #expect(throws: EnvironmentRecordError.malformed) { try DevelopmentEnvironment.decode(Data(#"{"schemaVersion":1}"#.utf8)) }
+    }
+
+    @Test func aVersionThatNoReaderWouldAcceptCannotBeConstructed() {
+        #expect(SchemaVersion(0) == nil)
+        #expect(SchemaVersion(-1) == nil)
+        #expect(SchemaVersion(2)?.rawValue == 2)
+    }
+
+    @Test func theUnversionedSentinelIsNeverWritten() {
+        // It names a document that predates versioning; encoding it would produce a record
+        // this build's own decoder refuses.
+        #expect(throws: EncodingError.self) { try JSONEncoder().encode(SchemaVersion.unversioned) }
+        #expect(throws: Never.self) { try JSONEncoder().encode(SchemaVersion.current) }
+    }
+
+    @Test func aPersistedSchemaVersionMustBePositive() {
+        for value in ["0", "-3"] {
+            #expect(throws: DecodingError.self, "version \(value)") { try JSONDecoder().decode(SchemaVersion.self, from: Data(value.utf8)) }
+            let inventory = Data("{\"schemaVersion\":\(value),\"slots\":[]}".utf8)
+            #expect(throws: VMSlotError.self, "inventory \(value)") { try JSONDecoder().decode(VMSlotInventory.self, from: inventory) }
+        }
+    }
+
+    @Test func aNewerRecordIsNotOfferedARebuild() {
+        let newer = VMSlotError.corruptInventory(reason: .unsupportedSchemaVersion(99))
+        #expect(newer.recoveryMessage.contains("Update Guesthouse"))
+        #expect(!newer.recoveryMessage.contains("rebuild the record"), "rebuilding here would discard what the newer format keeps")
+        #expect(VMSlotError.corruptInventory(reason: .malformed).recoveryMessage.contains("rebuild"))
+    }
+
     @Test func structuralDecodeFailuresAreAlsoActionable() {
         for json in ["{}", "{\"slots\":3}", "{\"slots\":[{\"environmentID\":\"not-a-uuid\"}]}"] {
             let error = #expect(throws: VMSlotError.self, "\(json)") {

@@ -89,11 +89,11 @@ import Testing
         let store = try StateStore(rootURL: root)
         let environment = EnvironmentID()
         let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let done = try await store.begin(.startEnvironment, for: environment, at: now)
-        try await store.append(JournalRecord(id: done, environmentID: environment, operation: .startEnvironment, timestamp: now, outcome: .checkpoint(.runtimeReady)))
-        try await store.append(JournalRecord(id: done, environmentID: environment, operation: .startEnvironment, timestamp: now, outcome: .completed))
+        let done = try await store.begin(.provision(stage: .runtimeReady), for: environment, at: now)
+        try await store.append(JournalRecord(id: done, environmentID: environment, operation: .provision(stage: .runtimeReady), timestamp: now, outcome: .checkpoint(.runtimeReady)))
+        try await store.append(JournalRecord(id: done, environmentID: environment, operation: .provision(stage: .runtimeReady), timestamp: now, outcome: .completed))
         let failed = try await store.begin(.importXcode, for: environment, at: now)
-        try await store.append(JournalRecord(id: failed, environmentID: environment, operation: .importXcode, timestamp: now, outcome: .failed(.canceled)))
+        try await store.append(JournalRecord(id: failed, environmentID: environment, operation: .importXcode, timestamp: now, outcome: .failed(.runtimeMissing)))
         let lost = try await store.begin(.stopEnvironment, for: environment, at: now)
         try await store.append(JournalRecord(id: lost, environmentID: environment, operation: .stopEnvironment, timestamp: now, outcome: .unknown))
 
@@ -153,19 +153,34 @@ import Testing
         """
         try Data(future.utf8).write(to: root.appending(path: StateStore.snapshotFileName))
         let store = try StateStore(rootURL: root)
-        await #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(99), current: .current)) {
+        await #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(99)!, current: .current)) {
             try await store.loadSnapshot()
         }
     }
 
+    @Test func everyOperationKeepsItsDetailThroughTheJournal() async throws {
+        let store = try StateStore(rootURL: root)
+        var expected: [JournalOperation] = []
+        for operation in JournalOperation.allCases {
+            let environment = EnvironmentID()
+            let id = try await store.begin(operation, for: environment)
+            try await store.append(JournalRecord(id: id, environmentID: environment, operation: operation, timestamp: Date(), outcome: .completed))
+            expected.append(operation)
+        }
+        let recorded = try await store.replay().records.filter { $0.outcome == .started }.map(\.operation)
+        #expect(recorded == expected)
+        #expect(recorded.contains(.provision(stage: .sshPaired)))
+        #expect(recorded.contains(.repair(kind: .credentials)))
+    }
+
     @Test func migrationsRunInSequenceAndMissingStepFails() throws {
-        let v2 = SnapshotMigrator(current: SchemaVersion(2), migrations: [
-            .init(from: SchemaVersion(0)) { data in
+        let v2 = SnapshotMigrator(current: SchemaVersion(2)!, migrations: [
+            .init(from: SchemaVersion.unversioned) { data in
                 var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 object["schemaVersion"] = 1
                 return try JSONSerialization.data(withJSONObject: object)
             },
-            .init(from: SchemaVersion(1)) { data in
+            .init(from: SchemaVersion(1)!) { data in
                 var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 object["schemaVersion"] = 2
                 object["migrated"] = true
@@ -173,13 +188,13 @@ import Testing
             },
         ])
         let (data, from) = try v2.migrate(Data("{}".utf8))
-        #expect(from == SchemaVersion(0))
+        #expect(from == SchemaVersion.unversioned)
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(object["schemaVersion"] as? Int == 2)
         #expect(object["migrated"] as? Bool == true)
 
-        let gap = SnapshotMigrator(current: SchemaVersion(3), migrations: [])
-        #expect(throws: StateStoreError.migrationMissing(from: SchemaVersion(1))) {
+        let gap = SnapshotMigrator(current: SchemaVersion(3)!, migrations: [])
+        #expect(throws: StateStoreError.migrationMissing(from: SchemaVersion(1)!)) {
             try gap.migrate(Data("{\"schemaVersion\":1}".utf8))
         }
     }

@@ -154,7 +154,7 @@ import Testing
     }
 
     @Test func newestRecordWinsForRecordedAt() {
-        let newer = try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day.addingTimeInterval(3600), evidence: .machineReadableStatus(source: "test"))
+        let newer = try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day.addingTimeInterval(3600), evidence: .userConfirmedWorkspaceOpened)
         let state = CompatibilityEvaluator.evaluate(observed: ObservedTuple(Self.tuple()), manifest: manifest, history: [record, newer])
         #expect(state == .verified(recordedAt: newer.verifiedAt))
     }
@@ -167,14 +167,16 @@ import Testing
     }
 
     @Test func stateAndRecordsRoundTrip() throws {
-        let record = try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .machineReadableStatus(source: "desktop-status"))
+        let record = try! ConnectionVerificationRecord(tuple: Self.tuple(), verifiedAt: day, evidence: .userConfirmedWorkspaceOpened)
         let data = try JSONEncoder().encode(record)
         #expect(try JSONDecoder().decode(ConnectionVerificationRecord.self, from: data) == record)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(json["schemaVersion"] as? Int == SchemaVersion.current.rawValue)
-        let future = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(SchemaVersion.current.rawValue)", with: "\"schemaVersion\":99")
-        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(future.utf8)) }
-        let older = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(SchemaVersion.current.rawValue)", with: "\"schemaVersion\":0")
+        #expect(json["schemaVersion"] as? Int == ConnectionVerificationRecord.currentSchema.rawValue)
+        let future = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(ConnectionVerificationRecord.currentSchema.rawValue)", with: "\"schemaVersion\":99")
+        #expect(throws: CompatibilityRecordError.unsupportedSchema(found: SchemaVersion(99)!, supported: ConnectionVerificationRecord.currentSchema)) {
+            try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(future.utf8))
+        }
+        let older = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":\(ConnectionVerificationRecord.currentSchema.rawValue)", with: "\"schemaVersion\":0")
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ConnectionVerificationRecord.self, from: Data(older.utf8)) }
         for state in [CompatibilityState.needsValidation(.changedSinceLastVerified([.tartVersion, .xcodeBuild])), .needsValidation(.competingInstallations(count: 3)), .needsValidation(.verifiedOnDifferentHost)] {
             let stateData = try JSONEncoder().encode(state)

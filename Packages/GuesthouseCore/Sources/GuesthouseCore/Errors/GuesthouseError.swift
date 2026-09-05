@@ -45,13 +45,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case downloadVerificationFailed(artifact: SanitizedText, check: VerificationCheck)
     case runtimeStorageUnavailable(RuntimeStorageProblem)
     case runtimeMissing
-    case runtimeIncompatible(found: SanitizedText?, required: String)
+    case runtimeIncompatible(found: SanitizedText?, required: SanitizedText)
     case runtimeProbeFailed
     case guestNotReachable(EnvironmentID)
     case hostKeyChanged(EnvironmentID)
     case credentialsLocked(CredentialStore)
     case loginExpired(Provider)
-    case toolMismatch(tool: String, found: SanitizedText?, expected: String)
+    case toolMismatch(tool: SanitizedText, found: SanitizedText?, expected: SanitizedText)
     case xcodeComponentsIncomplete(missing: MissingComponents)
     case vmSlotUnavailable(maximum: Int)
     case operationOutcomeUnknown(OperationID)
@@ -63,9 +63,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
         case notAppleSilicon
         /// The Mac's processor is not the one the configured policy requires. `notAppleSilicon`
-        /// is the default-policy spelling of this; this case carries both sides.
-        case wrongArchitecture(found: SanitizedText, required: String)
-        case macOSTooOld(found: SanitizedText, minimum: String)
+        /// is the default-policy spelling of this; this case carries both sides. Both are
+        /// `SanitizedText`, so what a decoded payload put in either is bounded and redacted
+        /// where the value is built rather than where it is shown, and re-encoding the error
+        /// cannot carry the original through.
+        case wrongArchitecture(found: SanitizedText, required: SanitizedText)
+        case macOSTooOld(found: SanitizedText, minimum: SanitizedText)
         /// The processor architecture could not be determined; the check can be run again.
         case architectureUnknown
         case insufficientMemory(foundBytes: UInt64, minimumBytes: UInt64)
@@ -113,13 +116,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public var userMessage: String {
         switch self {
         case .unsupportedHost(.wrongArchitecture(let found, let required)):
-            "This Mac has \(found.value); Guesthouse needs \(GuesthouseError.sanitize(required, limit: 40)). Development Macs cannot run here."
+            "This Mac has \(found.value); Guesthouse needs \(required.value). Development Macs cannot run here."
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
         case .unsupportedHost(.architectureUnknown):
             "Guesthouse could not determine this Mac's processor type. Check this Mac again; if it keeps failing, export diagnostics."
         case .unsupportedHost(.macOSTooOld(let found, let minimum)):
-            "This Mac runs macOS \(found.value). Guesthouse needs macOS \(Self.sanitize(minimum)) or later."
+            "This Mac runs macOS \(found.value). Guesthouse needs macOS \(minimum.value) or later."
         case .unsupportedHost(.insufficientMemory(let found, let minimum)):
             "This Mac has \(Self.formatMemory(found)) of memory. Guesthouse needs at least \(Self.formatMemory(minimum)) to run a development Mac alongside your other apps."
         case .insufficientDisk(let required, let available, let volume):
@@ -138,7 +141,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible(let found, let required):
-            "The installed virtual machine runtime (\(found?.value ?? "unknown version")) is not the tested version \(Self.sanitize(required))."
+            "The installed virtual machine runtime (\(found?.value ?? "unknown version")) is not the tested version \(required.value)."
         case .runtimeProbeFailed:
             "Guesthouse could not inspect the installed virtual machine runtime. It may be damaged or unresponsive."
         case .guestNotReachable(let id):
@@ -152,7 +155,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired(let provider):
             "Your \(Self.name(of: provider)) sign-in on the development Mac has expired."
         case .toolMismatch(let tool, let found, let expected):
-            "The development Mac has \(Self.sanitize(tool)) \(found?.value ?? "missing") but the tested version is \(Self.sanitize(expected))."
+            "The development Mac has \(tool.value) \(found?.value ?? "missing") but the tested version is \(expected.value)."
         case .xcodeComponentsIncomplete(let missing):
             "Xcode is installed on the development Mac but is missing required components: \(Self.list(missing))."
         case .vmSlotUnavailable(let maximum):
@@ -270,7 +273,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// Input is bounded before any work: only the first `limit + lookahead` scalars are
     /// normalized and redacted, so an oversized value costs a bounded amount of memory and CPU.
     /// The lookahead is longer than any credential the redactor recognizes, so a secret that
-    /// begins inside the visible prefix is always fully inside the redacted window.
+    /// begins inside the visible prefix is inside the window unless scalars that normalization
+    /// drops padded it out; the repairs below cover the value left standing at the cut.
     static let sanitizeLookahead = 512
 
     public static func sanitize(_ value: String, limit: Int = 80) -> String {
@@ -281,36 +285,73 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// need to tell "a secret was removed" from "the text merely happens to contain the
     /// marker" use this rather than searching the result for marker text.
     public static func sanitizeReporting(_ value: String, limit: Int = 80) -> (value: String, redacted: Bool) {
+        // This is public API, so the bound is clamped rather than trusted: an extreme limit
+        // would otherwise overflow the window arithmetic and a negative one would hand
+        // `prefix` an invalid length, trapping instead of returning sanitized text.
+        let limit = min(max(limit, 1), SanitizedText.maximumLimit)
         // Only the window plus one scalar is ever looked at, so the cost is independent of the
         // input's size.
         let window = value.unicodeScalars.prefix(limit + Self.sanitizeLookahead + 1)
         let truncated = window.count > limit + Self.sanitizeLookahead
         let bounded = String(String.UnicodeScalarView(window.prefix(limit + Self.sanitizeLookahead)))
         // Complete escape sequences go first, so styling inside a token cannot leave a
-        // fragment behind once the bare control scalars are dropped. Combining marks go too:
-        // a mark inside a token would otherwise split it out of the redactor's reach.
-        let stripped = Redactor.stripTerminalEscapes(bounded)
+        // fragment behind once the bare control scalars are dropped. A sequence that can only
+        // have borrowed its terminator from the value goes further and takes its whole run
+        // with it, because stripping it would silently repair a credential into something the
+        // patterns below no longer recognize. Combining marks go too: a mark inside a token
+        // would otherwise split it out of the redactor's reach.
+        let spliced = Redactor.redactEscapeSplicedRuns(bounded)
+        let stripped = Redactor.stripTerminalEscapes(spliced)
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
                  .nonspacingMark, .spacingMark, .enclosingMark:
                 false
+            case .spaceSeparator:
+                // A no-break or ideographic space splits a credential exactly as a control
+                // character does. The ordinary space is a real word boundary and stays.
+                scalar == " "
             default:
                 true
             }
         }))
         var truncationRedacted = false
         if truncated {
+            // Normalization drops scalars, so a window full of raw input can normalize to far
+            // less: a run of combining marks between a device code's first and last character
+            // pushes that last character out of the window and leaves `AB12-CD3`, which no
+            // pattern recognizes. Whenever the window was cut and normalization shortened it,
+            // the run at the cut is a fragment of something unknown and does not survive. A
+            // value that was only long, not padded, keeps the whole window and the two repairs
+            // below.
+            if normalized.unicodeScalars.count < limit + Self.sanitizeLookahead {
+                normalized = normalized.replacing(#/\S+$/#, with: Redactor.marker("truncated"))
+            }
             // A URL authority still open at the cut may be userinfo whose terminating `@` fell
-            // outside the window: treat the whole remainder as a credential.
+            // outside the window: treat the whole remainder as a credential. The delimiter is
+            // recognized in both the spellings the redactor's own userinfo rule accepts, since a
+            // URL that reached a log through JSON keeps that encoding's escaped slashes, and is
+            // put back exactly as it came in.
             let opened = normalized
-            normalized = normalized.replacing(#/(:\/\/)[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
+            normalized = normalized.replacing(#/(:(?:\\?\/){2})[^\s\/]*$/#) { match in "\(match.1)\(Redactor.marker("userinfo"))" }
+            // A JWT whose payload is longer than the window loses the second `.` the redactor
+            // matches on, so a token that began inside the visible prefix would be emitted in
+            // the clear. A JOSE header followed by a segment running to the cut is one. The
+            // header is looked for the way `redactedJWT` looks for it, after each `_` and `-`
+            // as well as at the start: those are Base64URL characters, so an untrusted name
+            // concatenated in front of the token (`artifact_<jwt>`) is inside the segment this
+            // rule captures, and asking `isJOSEHeader` about the whole of it always says no.
+            normalized = normalized.replacing(#/\b([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*$/#) { match in
+                guard let start = Redactor.joseHeaderStart(match.1) else { return String(match.0) }
+                return match.1[..<start] + Redactor.marker("jwt")
+            }
             truncationRedacted = normalized != opened
         }
         let redacted = Redactor().redact(fieldValue: normalized)
-        // The truncation-time replacement counts as redaction: a caller must not treat the
-        // result as merely bounded and attach an identity digest of the credential.
-        let wasRedacted = truncationRedacted || redacted != normalized
+        // The truncation-time replacement counts as redaction, and so does the escape-spliced
+        // run dropped before normalization: both remove credential text, and a caller must not
+        // treat what is left as merely bounded and attach an identity digest of the original.
+        let wasRedacted = spliced != bounded || truncationRedacted || redacted != normalized
         let scalars = redacted.unicodeScalars
         guard scalars.count > limit else { return (redacted, wasRedacted) }
         return (String(String.UnicodeScalarView(scalars.prefix(limit))) + "…", wasRedacted)
@@ -335,12 +376,17 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         return "This step needs \(requiredText) free on \(sanitize(volume)), but only \(availableText) is available, \(shortfallText) short."
     }
 
+    /// `ByteCountFormatter` takes an `Int64`, so an amount above that range would be shown as
+    /// half of itself. An amount that large is named exactly instead, so a requirement no
+    /// disk could satisfy is not reported as a plausible one.
     private static func formatBytes(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
+        guard let representable = Int64(exactly: bytes) else { return "\(bytes.formatted()) bytes" }
+        return ByteCountFormatter.string(fromByteCount: representable, countStyle: .file)
     }
 
     private static func formatMemory(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .memory)
+        guard let representable = Int64(exactly: bytes) else { return "\(bytes.formatted()) bytes" }
+        return ByteCountFormatter.string(fromByteCount: representable, countStyle: .memory)
     }
 }
 

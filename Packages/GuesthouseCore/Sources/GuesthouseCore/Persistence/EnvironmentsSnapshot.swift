@@ -27,19 +27,50 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         self.provisioning = provisioning
     }
 
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, environments, slots, provisioning
+    }
+
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             schemaVersion: try c.decode(SchemaVersion.self, forKey: .schemaVersion),
             environments: try c.decode([DevelopmentEnvironment].self, forKey: .environments),
             slots: try c.decode(VMSlotInventory.self, forKey: .slots),
-            provisioning: try c.decode([EnvironmentID: ProvisioningState].self, forKey: .provisioning)
+            provisioning: try Self.decodeProvisioning(from: c)
         )
         do {
             try validate()
         } catch {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: error.userMessage))
         }
+    }
+
+    /// Reads the provisioning object one key at a time instead of straight into a dictionary.
+    /// Two spellings of one UUID — the same identifier in upper and lower case — are distinct
+    /// JSON keys but the same `EnvironmentID`, so decoding into a dictionary would keep one
+    /// entry and drop the other's provisioning checkpoint without a word. A document that names
+    /// one development Mac twice is damaged, and is reported as such.
+    private static func decodeProvisioning(from container: KeyedDecodingContainer<CodingKeys>) throws -> [EnvironmentID: ProvisioningState] {
+        let object = try container.nestedContainer(keyedBy: UUIDKey.self, forKey: .provisioning)
+        var provisioning: [EnvironmentID: ProvisioningState] = [:]
+        for key in object.allKeys {
+            guard let id = EnvironmentID(codingKey: key) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: object, debugDescription: "\(key.stringValue) is not a development Mac identifier")
+            }
+            let state = try object.decode(ProvisioningState.self, forKey: key)
+            guard provisioning.updateValue(state, forKey: id) == nil else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: object, debugDescription: "two provisioning entries name one development Mac")
+            }
+        }
+        return provisioning
+    }
+
+    private struct UUIDKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
     }
 
     public static let empty = EnvironmentsSnapshot()
@@ -59,6 +90,14 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         guard Set(provisioning.keys).isSubset(of: slotIDs) else {
             throw .inconsistentSnapshot(reason: "provisioning state for an unknown environment")
         }
+        // A record's own version is checked too. The outer version says what this build wrote;
+        // an environment carrying a different one was never understood by whatever produced it
+        // and must be migrated, not read or rewritten as if it were current.
+        for environment in environments {
+            guard environment.schemaVersion == SchemaVersion.current else {
+                throw .inconsistentSnapshot(reason: "a development Mac record with another schema version")
+            }
+        }
         // The values are checked the way their decoder checks them, so a snapshot is never
         // written that the next load would call corrupt.
         for state in provisioning.values {
@@ -67,6 +106,14 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
             }
             guard state.isConsistent else {
                 throw .inconsistentSnapshot(reason: "provisioning checkpoint does not match its stage")
+            }
+            // A state that has kept minting since it was read may stand one above the ceiling
+            // without being wrong — that headroom is what keeps the next transition from
+            // trapping — but the ceiling is a rule about *persisted* records, and the decoder
+            // refuses one that carries a counter above it. Writing that state would report the
+            // whole snapshot corrupt on the next launch, losing every other environment with it.
+            guard max(state.issuedEffects, state.status.pendingEffect?.value ?? 0) <= ProvisioningState.maximumIssuedEffects else {
+                throw .inconsistentSnapshot(reason: "provisioning effect counter is beyond \(ProvisioningState.maximumIssuedEffects)")
             }
         }
     }
