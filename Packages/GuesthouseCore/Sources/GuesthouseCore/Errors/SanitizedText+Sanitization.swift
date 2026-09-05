@@ -22,7 +22,12 @@ extension SanitizedText {
         let limit = min(max(limit, 1), SanitizedText.maximumLimit)
         // Only the window plus one scalar is ever looked at, so the cost is independent of the
         // input's size.
-        let (bounded, truncated) = Self.inspectionWindow(value.unicodeScalars, maximum: limit + Self.sanitizeLookahead)
+        let (window, truncated) = Self.inspectionWindow(value.unicodeScalars, maximum: limit + Self.sanitizeLookahead)
+        // At the cut, a colon-bearing value may be a DSN whose transport is outside our budget;
+        // a Basic fragment may no longer decode. Their unknown remainder cannot prove safety.
+        let ambiguousCut = truncated && (window.contains(":")
+            || window.contains(#/(?:^|[^A-Za-z0-9])(?i:Basic)[ \t]+[A-Za-z0-9+\/=]*$/#))
+        let bounded = ambiguousCut ? Redactor.marker("truncated") : window
         // Complete escape sequences go first, so styling inside a token cannot leave a
         // fragment behind once the bare control scalars are dropped. A sequence that can only
         // have borrowed its terminator from the value goes further and takes its whole run
