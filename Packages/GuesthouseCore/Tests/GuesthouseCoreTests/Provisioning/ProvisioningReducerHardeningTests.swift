@@ -444,6 +444,15 @@ import Testing
         #expect(ResumeEvidence(summary: "x", stagingPath: kept).stagingPath == kept)
     }
 
+    @Test(arguments: [
+        "downloads/eyJhbGciOiJIUzI1NiJ9.\u{0301}eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+        "downloads/eyJhbGciOiJIUzI1NiJ9. eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+        "downloads/https:\\\u{0301}/\\\u{0301}/user:password@host/restore.partial",
+    ])
+    func normalizedCredentialsKeepTheirSeparatorsForDetection(path: String) {
+        #expect(ResumeEvidence(summary: "partial download", stagingPath: path).stagingPath == nil)
+    }
+
     /// A checkpoint write restored after a relaunch has lost its effect but not the operation
     /// that reached the checkpoint. Retrying the check must keep that identity, or the reducer
     /// adopts whatever the inspection names and leaves the first operation unaccounted for.

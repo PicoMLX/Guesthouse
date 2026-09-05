@@ -167,35 +167,27 @@ public struct ResumeEvidence: Hashable, Sendable {
         guard !unsafe else { return nil }
         let components = value.split(separator: "/", omittingEmptySubsequences: false)
         guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
-        // The redactor sees a probe, not the path: `/` and `.` are word separators to a reader
-        // but not always to Unicode word segmentation, so a credential used as a file name with
-        // an extension would sit inside one "word" and survive. Marks and spaces come out of the
-        // probe for the opposite reason: a token split by one is still a whole token, and
-        // dropping them is exactly what `GuesthouseError.sanitize` does before it redacts, so a
-        // path is measured against the same reassembled text an error message would be. The path
-        // itself is never the redacted text — it is kept whole or refused.
+        // Both probes reassemble credentials split by marks or spaces. One preserves the dots
+        // and slashes needed by JWT and URL rules; the other treats them as word boundaries so
+        // a credential used as a file name stays visible. Combining both transformations in a
+        // single reading would reassemble a split JWT while destroying its required dots.
+        // These are detection readings only: an accepted path is always stored unchanged.
+        var normalizedScalars = String.UnicodeScalarView()
         var probeScalars = String.UnicodeScalarView()
         for scalar in scalars {
-            guard scalar != "/", scalar != "." else {
-                probeScalars.append(" ")
-                continue
-            }
             switch scalar.properties.generalCategory {
             case .nonspacingMark, .spacingMark, .enclosingMark, .spaceSeparator:
                 continue
             default:
-                probeScalars.append(scalar)
+                normalizedScalars.append(scalar)
             }
+            probeScalars.append(scalar == "/" || scalar == "." ? " " : scalar)
         }
+        let normalized = String(normalizedScalars)
+        guard Redactor().redact(fieldValue: normalized) == normalized else { return nil }
         let probe = String(probeScalars)
         guard Redactor().redact(fieldValue: probe) == probe else { return nil }
-        // The probe is one reading, not the only one: rewriting `/` and `.` also destroys the
-        // rules that need those characters. A URL authority whose slashes are escaped the way
-        // JSON escapes them, `https:\/\/user:password@host`, passes the component checks — the
-        // backslashes keep it from splitting into an empty component the way `://` does — and
-        // then loses its `:\/\/` to the rewrite. A JWT-shaped file name loses its dots the same
-        // way. The path is therefore measured in both readings and kept only if neither holds
-        // a credential.
+        // The original reading also retains spacing and marks that may delimit a credential.
         return Redactor().redact(fieldValue: value) == value ? value : nil
     }
 }
