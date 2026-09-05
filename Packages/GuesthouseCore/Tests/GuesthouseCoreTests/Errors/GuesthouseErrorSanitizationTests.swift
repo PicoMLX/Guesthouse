@@ -45,7 +45,9 @@ extension GuesthouseErrorTests {
     @Test func splitTokensBidiControlsAndBareDeviceCodesAreNeutralized() {
         let split = GuesthouseError.toolMismatch(tool: "gh", found: "ghp_\nABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab", expected: "2.80.0")
         #expect(!split.redactedDescription.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
-        #expect(split.redactedDescription.contains("[redacted:github-token]"))
+        // Raw physical records and normalized joined text disagree on token coverage, so the
+        // entire bounded value is quarantined rather than retaining either partial rendering.
+        #expect(split.redactedDescription.contains("[redacted:normalized-value]"))
 
         let bidi = GuesthouseError.downloadVerificationFailed(artifact: "Tart\u{202E}gnp.evil", check: .digest)
         #expect(!bidi.userMessage.contains("\u{202E}"))
@@ -71,7 +73,7 @@ extension GuesthouseErrorTests {
         let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
         let spaced = GuesthouseError.toolMismatch(tool: "gh", found: "ghp_\u{00A0}ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab", expected: "1")
         #expect(!spaced.redactedDescription.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
-        #expect(spaced.redactedDescription.contains("[redacted:github-token]"))
+        #expect(spaced.redactedDescription.contains("[redacted:normalized-value]"))
         #expect(GuesthouseError.sanitize("tart 2.36.0") == "tart 2.36.0", "an ordinary space is still a word boundary")
         #expect(!GuesthouseError.sanitize("ghp_\u{2007}\(token.dropFirst(4))").contains("ABCDEF"))
 
