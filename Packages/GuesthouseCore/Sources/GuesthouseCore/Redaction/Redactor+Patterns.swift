@@ -43,7 +43,7 @@ extension Redactor {
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name. Cookie
         /// headers share this state: opaque session identifiers convey authority (RFC 6265 §8.4).
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookies?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -122,8 +122,8 @@ extension Redactor {
         /// Common URL schemes retain their URI interpretation when the spellings overlap.
         /// Do not exempt arbitrary passwords starting `//`: those are valid unescaped DSNs.
         /// Skip an already-concealed userinfo marker without consuming a later DSN.
-        let mysqlUserInfo = #/((?:^|[\s\u{001F}"'=<\[{(])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?)(?!\[?redacted:userinfo\]@)(?!(?:(?i:https?|wss?|ssh|git|s?ftp|ftps|file):)?(?:\\?\/){2})[^\s:=]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\/)/#
-        let mysqlTransport = #/@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\//#
+        let mysqlUserInfo = #/((?:^|[\s\u{001F}"'=<\[{(])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?)(?!\[?redacted:userinfo\]@)(?!(?:(?i:https?|wss?|smb|ssh|git|s?ftp|ftps|file):)?(?:\\?\/){2})[^\s:=]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^\r\n]*\))?)?\/)/#
+        let mysqlTransport = #/@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^\r\n]*\))?)?\//#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names

@@ -2,7 +2,7 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorDiagnosticFieldRepairTests {
-    @Test(arguments: ["Cookie", "setCookie", "requestCookie", "set_cookie", "request-cookie"], ["", "\""])
+    @Test(arguments: ["Cookie", "setCookie", "requestCookie", "set_cookie", "request-cookie", "cookies", "setCookies", "requestCookies"], ["", "\""])
     func serializedCookieAliasesConcealOpaqueSessionValues(name: String, quote: String) {
         let input = quote + name + quote + ": SID=syntheticSession"
         #expect(!Redactor().redact(input).contains("syntheticSession"))
@@ -11,12 +11,12 @@ import Testing
         #expect(output[2] == "Finished")
     }
 
-    @Test(arguments: ["CookieCount: 42", "setCookieCount=42", "requestCookiePolicy: required"])
+    @Test(arguments: ["CookieCount: 42", "setCookieCount=42", "requestCookiePolicy: required", "CookiesCount: 42", "setCookiesPolicy: required"])
     func longerOrdinaryCookiePropertyNamesRemainVisible(input: String) {
         #expect(Redactor().redact(input) == input)
     }
 
-    @Test(arguments: ["tcp(db:3306)", "tcp6([::1]:3306)", "unix(/tmp/mysql.sock)", "tcp", "",
+    @Test(arguments: ["tcp(db:3306)", "tcp6([::1]:3306)", "unix(/tmp/mysql.sock)", "unix(/tmp/mysql(test).sock)", "unix(/tmp/(nested(test)).sock)", "tcp", "",
                       "cloudsql(project:region:instance)", "custom+net(address)", "registered_transport"],
           ["syntheticPassword", "synthetic@part/with: spaces", "synthetic\"quoted'value", "//synthetic/part"])
     func conventionalSchemelessDSNsConcealAllUserinfo(protocolAndAddress: String, password: String) {
@@ -59,7 +59,7 @@ import Testing
         #expect(!Redactor().redact("dsn=" + username + ":syntheticPassword@tcp(db:3306)/app").contains("syntheticPassword"))
     }
 
-    @Test(arguments: ["ws", "wss", "WS", "WSS"])
+    @Test(arguments: ["ws", "wss", "WS", "WSS", "smb", "SMB"])
     func webSocketPathsAreNotDatabaseCredentials(scheme: String) {
         let input = scheme + "://example.com/users/alice@room/events"
         #expect(Redactor().redact(input) == input)
@@ -76,5 +76,13 @@ import Testing
     @Test(arguments: ["apiToken", "oauthToken", "githubToken"])
     func qualifiedCamelCaseTokenFieldsUseTheSharedBoundaryRule(label: String) {
         #expect(!Redactor().redact(label + ": syntheticCredential").contains("syntheticCredential"))
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{9B}", "\u{1B}[31"])
+    func sameLineCodeContextParticipatesInTerminalRecovery(control: String) {
+        let output = Redactor().redact(lines: ["received device_code AB12-" + control + "DC34", "Finished"]).map(\.text)
+        #expect(!output[0].contains("AB12"))
+        #expect(!output[0].contains("C34"))
+        #expect(output[1] == "Finished")
     }
 }
