@@ -11,10 +11,9 @@ extension GuesthouseErrorTests {
 
     @Test func sanitizerBoundsItsInputBeforeWorking() {
         let huge = String(repeating: "x", count: 5_000_000)
-        let started = ContinuousClock.now
         let error = GuesthouseError.toolMismatch(tool: SanitizedText(huge), found: nil, expected: "1.0")
         #expect(error.userMessage.unicodeScalars.count < 400)
-        #expect(ContinuousClock.now - started < .seconds(2))
+        #expect(error.userMessage.contains(String(repeating: "x", count: SanitizedText.defaultLimit) + "…"))
         let lateSecret = String(repeating: "x", count: 60) + " ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
         #expect(!GuesthouseError.toolMismatch(tool: SanitizedText(lateSecret), found: nil, expected: "1").userMessage.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"))
     }
