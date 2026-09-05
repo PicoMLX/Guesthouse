@@ -1,17 +1,22 @@
 import RegexBuilder
 
 extension Redactor {
-    /// PuTTY v2/v3 framing, not key validation: metadata and both key halves are all hidden.
+    /// PuTTY framing, not key validation: metadata and both key halves are all hidden.
     /// https://www.puttyssh.org/0.83/htmldoc/AppendixC.html
     /// Counts only bound the expected sequence; they never size an allocation or end protection.
     /// A malformed sequence stays closed until the caller supplies a fresh StreamState.
+    /// An embedded opener fails closed too. Framing requires original physical key lines;
+    /// arbitrary logger prefixes are not stripped from untrusted key material to guess a footer.
     /// Call exactly once per physical line, after removing terminal controls and their payloads.
     static func consumePPKLine(_ line: String, phase: inout StreamState.PPKPhase) -> Bool {
         switch phase {
         case .inactive:
             // The distinctive opener also survives a logger prefix or an enclosing quoted value.
-            guard let start = line.firstMatch(of: #/PuTTY-User-Key-File-([23]):/#) else { return false }
-            phase = .headers(macDigits: start.1 == "2" ? 40 : 64)
+            guard let start = line.firstMatch(of: patterns.ppkBegin) else { return false }
+            // Legacy v1 and unknown versions still identify private keys. Without a supported
+            // closing grammar, conceal the rest of this stream rather than guessing its end.
+            phase = start.1 == "2" || start.1 == "3"
+                ? .headers(macDigits: start.1 == "2" ? 40 : 64) : .invalid
         case .headers(let macDigits):
             if let count = line.wholeMatch(of: #/[ \t]*Private-Lines:[ \t]*([0-9]+)[ \t]*/#),
                let remaining = Int(count.1), remaining > 0 {
