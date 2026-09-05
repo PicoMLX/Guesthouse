@@ -12,7 +12,7 @@ public struct SanitizedText: Hashable, Sendable, Codable, CustomStringConvertibl
     public let value: String
 
     public init(_ raw: String, limit: Int = SanitizedText.defaultLimit) {
-        value = GuesthouseError.sanitize(raw, limit: min(max(limit, 1), Self.maximumLimit))
+        value = Self.sanitize(raw, limit: min(max(limit, 1), Self.maximumLimit))
     }
 
     public init(stringLiteral value: String) {
