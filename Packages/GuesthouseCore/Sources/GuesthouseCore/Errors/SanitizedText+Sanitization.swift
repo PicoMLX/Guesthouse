@@ -26,8 +26,9 @@ extension SanitizedText {
         // At the cut, a colon-bearing value may be a DSN whose transport is outside our budget;
         // a Basic fragment may no longer decode. Their unknown remainder cannot prove safety.
         // A whole open URL authority already has the explicit userinfo cutoff repair below.
+        // A quoted diagnostic cut before its closure cannot certify the encoded content either.
         let openAuthority = window.wholeMatch(of: #/[A-Za-z][A-Za-z0-9+.-]*:(?:\\?\/){2}[^\s\/?#]*$/#) != nil
-        let ambiguousCut = truncated && ((window.contains(":") && !openAuthority)
+        let ambiguousCut = truncated && (window.contains(#/["']/#) || (window.contains(":") && !openAuthority)
             || window.contains(#/(?:^|[^A-Za-z0-9])(?i:Basic)[ \t]+[A-Za-z0-9+\/=]*$/#))
         let bounded = ambiguousCut ? Redactor.marker("truncated") : window
         // Complete escape sequences go first, so styling inside a token cannot leave a
@@ -41,7 +42,8 @@ extension SanitizedText {
         let joined = String(String.UnicodeScalarView(originalStripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
         let normalizationShortened = joined.unicodeScalars.count < limit + Self.sanitizeLookahead
         let credentialReading = String(String.UnicodeScalarView(spliceSafe.unicodeScalars.map {
-            CharacterSet.whitespacesAndNewlines.contains($0) ? " " : $0
+            CharacterSet.whitespacesAndNewlines.contains($0)
+                || (!Redactor.sanitizationKeepsScalar($0) && $0.properties.generalCategory != .control) ? " " : $0
         }))
         let rawRedacted = Redactor().redact(fieldValue: credentialReading)
         let stripped = Redactor.stripTerminalEscapes(rawRedacted)
