@@ -17,6 +17,11 @@ extension Redactor {
                     // DCS/APC/PM/SOS payload must not detach its remaining text from its opener.
                     run.recovered += String(String.UnicodeScalarView(scalars[payload].filter(sanitizationKeepsScalar)))
                     run.hasRecovery = true
+                    // A nested terminal program has more than one possible recovered reading.
+                    // Quarantine this bounded display value instead of guessing or emitting a fragment.
+                    run.ambiguousRecovery = run.ambiguousRecovery || scalars[payload].contains {
+                        $0.value == 27 || (128...159).contains($0.value)
+                    }
                 } else {
                     run.output += String(String.UnicodeScalarView(scalars[index..<escape.end]))
                     run.redact = run.redact || !escape.safeStyling
@@ -74,11 +79,13 @@ extension Redactor {
         var visible = ""
         var recovered = ""
         var hasRecovery = false
+        var ambiguousRecovery = false
         var redact = false
         var pendingBoundary = false
         var lastVisible: Unicode.Scalar?
 
         func finish(following: String) -> (text: String, consumesRemainder: Bool) {
+            if ambiguousRecovery { return (Redactor.marker("spliced-escape"), true) }
             // Reuse the shared credential rules for recovered edge characters. A second,
             // already recognizable credential in this run must not suppress fragment repair.
             let recoveredCredential = hasRecovery && !visible.isEmpty && visible != recovered
@@ -86,7 +93,8 @@ extension Redactor {
             guard redact || recoveredCredential else { return (output, false) }
             // Removing a label must not detach its following value from the context that
             // protects it, including same-line code fields that do not arm stream state.
-            return (Redactor.marker("spliced-escape"), consumesFollowingValue(visible, following) || consumesFollowingValue(recovered, following))
+            return (Redactor.marker("spliced-escape"), consumesFollowingValue(output, following)
+                    || consumesFollowingValue(visible, following) || consumesFollowingValue(recovered, following))
         }
 
         private func consumesFollowingValue(_ text: String, _ following: String) -> Bool {
