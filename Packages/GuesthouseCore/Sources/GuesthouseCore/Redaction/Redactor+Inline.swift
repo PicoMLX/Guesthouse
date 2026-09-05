@@ -22,6 +22,7 @@ extension Redactor {
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
             let normalized = unwrappingCompleteDecodedString(removingQuotedEncodingLayer(value))
+                .replacing(#/\\+[nrtfv]/#, with: " ")
             var nestedState = StreamState()
             let nested = applyPatterns(to: normalized, codeExpected: false, state: &nestedState,
                                        encodingDepth: encodingDepth + 1)
