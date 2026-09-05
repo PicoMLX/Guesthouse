@@ -3,6 +3,18 @@ import Testing
 
 /// Synthetic credentials distinguish completed structured fields from values that still fold.
 @Suite struct RedactorClosedValueTests {
+    @Test(arguments: ["Authorization", "password", "device_code"], ["Authorization", "password", "device_code"])
+    func encodedQuotedValuesRetainFollowingPendingSiblings(first: String, next: String) {
+        let quote = "\\\""
+        let lines = [quote + first + quote + ": " + quote + "syntheticFirst" + quote + ", " + quote + next + quote + ":",
+                     "  " + quote + "syntheticSecond" + quote, "done"]
+        let output = Redactor().redact(lines: lines).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[0].contains(next))
+        #expect(output[2] == "done")
+        #expect(Redactor().redact(lines.joined(separator: "\n")) == output.joined(separator: "\n"))
+    }
+
     @Test(arguments: ["Authorization", "password"], ["\"syntheticValue\",", "\\\"synthetic value\\\",", "\"\",", "''"])
     func nextLineQuotedValuesReleaseIndentedSiblings(field: String, value: String) {
         let lines = ["  \"\(field)\":", "    " + value, "  \"status\": \"ready\""]
