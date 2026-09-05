@@ -91,6 +91,12 @@ import Testing
         #expect(phase == .privateLines(remaining: Int.max - 1, macDigits: 64))
     }
 
+    @Test func unknownLoggerEnvelopesDoNotGuessAPrivateKeyBoundary() {
+        let lines = Self.key().enumerated().map { "[time \($0.offset)] " + $0.element }
+        #expect(Redactor().redact(lines: lines + ["Finished"]).allSatisfy { $0.text == Self.marker })
+        #expect(Redactor().redact(lines: ["Fresh stream"]).first?.text == "Fresh stream")
+    }
+
     @Test func incompleteFilesRemainSensitiveAndStreamsAreIndependent() {
         let redactor = Redactor()
         var incomplete = Redactor.StreamState()
