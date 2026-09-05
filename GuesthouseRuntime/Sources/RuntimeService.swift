@@ -1,6 +1,8 @@
 import Foundation
 import GuesthouseCore
+import GuesthouseRuntimeKit
 import OSLog
+import Synchronization
 import XPC
 
 /// The service's only log sink.
@@ -34,6 +36,12 @@ final class RuntimeService: Sendable {
     static let peerRequirement = XPCPeerRequirement.isFromSameTeam(andMatchesSigningIdentifier: clientSigningIdentifier)
 
     private let log = ServiceLog(category: "service")
+    // A present value with no version, capabilities, or problem means discovery is still in
+    // progress. Keeping that state explicit lets the listener remain responsive while an
+    // external executable is interrogated.
+    private let lumeInfo = Mutex<RuntimeVersionInfo.LumeRuntimeInfo?>(
+        LumeDiscoveryReport.checking
+    )
 
     /// A diagnostic that carries a value, as a line the sink accepts.
     ///
@@ -127,21 +135,84 @@ final class RuntimeService: Sendable {
     private func perform(_ request: RuntimeRequest) -> RuntimeEvent {
         switch request {
         case .runtimeVersion:
-            return .runtimeVersion(Self.versionInfo)
+            return .runtimeVersion(versionInfo)
         case .environmentStatus, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation:
             log.notice(Self.line("operation not implemented yet:", request.caseName))
             return .failed(OperationID(), .invalidRequest(.unsupportedOperation))
         }
     }
 
-    static var versionInfo: RuntimeVersionInfo {
+    var versionInfo: RuntimeVersionInfo {
         let info = Bundle.main.infoDictionary ?? [:]
         return RuntimeVersionInfo(
             serviceVersion: info["CFBundleShortVersionString"] as? String ?? "0",
             serviceBuild: info["CFBundleVersion"] as? String ?? "0",
             protocolVersion: .current,
-            tart: nil
+            tart: nil,
+            lume: lumeInfo.withLock { $0 }
         )
+    }
+
+    /// Runs in the background after the listener activates. Version replies report `checking`
+    /// until it finishes, and only a bundle that passes static verification is executed.
+    func discoverLume() async {
+        let storage: RuntimeStorage
+        do {
+            storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
+        } catch let error as RuntimeStorageError {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error(Self.line("runtime storage unavailable:", diagnostic.value))
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.storageUnavailable(error) }
+            return
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error(Self.line("runtime storage discovery failed:", diagnostic.value))
+            lumeInfo.withLock {
+                $0 = .init(version: nil, verified: false, problem: .runtimeProbeFailed)
+            }
+            return
+        }
+        let bundle: LumeBundle
+        do {
+            guard let located = try LumeBundle.locate(in: storage) else {
+                log.notice(RedactedLine(literal: "no Lume bundle at the pinned location"))
+                lumeInfo.withLock { $0 = LumeDiscoveryReport.missing }
+                return
+            }
+            bundle = located
+        } catch let error as RuntimeStorageError {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error(Self.line("unsafe Lume storage path rejected:", diagnostic.value))
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.storageUnavailable(error) }
+            return
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error(Self.line("Lume location discovery failed:", diagnostic.value))
+            lumeInfo.withLock {
+                $0 = .init(version: nil, verified: false, problem: .runtimeProbeFailed)
+            }
+            return
+        }
+        let verifiedBundle: VerifiedLumeBundle
+        do {
+            verifiedBundle = try bundle.verify()
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error(Self.line("Lume bundle failed verification:", diagnostic.value))
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.rejectedBundle(error) }
+            return
+        }
+        do {
+            let result = try await LumeBackend(bundle: verifiedBundle, storage: storage, runner: ProcessRunner()).probe()
+            lumeInfo.withLock { $0 = LumeDiscoveryReport.succeeded(result) }
+            log.notice(RedactedLine(literal: "Lume candidate located, verified, and probed"))
+        } catch {
+            let diagnostic = LumeDiscoveryReport.redactedDiagnostic(for: error)
+            log.error(Self.line("verified Lume bundle probe failed:", diagnostic.value))
+            lumeInfo.withLock {
+                $0 = LumeDiscoveryReport.failedProbe(error, claimedVersion: verifiedBundle.version)
+            }
+        }
     }
 
     /// Per-session state: what the session still owes its peer, and the rejection it was

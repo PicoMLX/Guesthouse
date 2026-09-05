@@ -20,10 +20,20 @@ do {
     FileHandle.standardError.write(Data("GuesthouseRuntime: cannot create the XPC listener\n".utf8))
     exit(EXIT_FAILURE)
 }
+// Accept clients immediately: a missing or hung external executable must never make the XPC
+// service look dead. `runtimeVersion` reports a checking state until discovery finishes.
 do {
     try listener.activate()
 } catch {
     FileHandle.standardError.write(Data("GuesthouseRuntime: cannot activate the XPC listener\n".utf8))
     exit(EXIT_FAILURE)
+}
+// Discovery happens outside a received-message lifetime, so explicitly hold an XPC transaction.
+// Otherwise launchd may idle-exit the service mid-probe and every relaunch would start over at
+// `checking`. Balance it on every task exit; normal request/reply transactions stay automatic.
+xpc_transaction_begin()
+Task {
+    defer { xpc_transaction_end() }
+    await service.discoverLume()
 }
 dispatchMain()

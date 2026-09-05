@@ -3,6 +3,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct GuesthouseErrorTests {
+    static let storageDrift = RuntimeStorageProblem(
+        kind: .protectionDrift,
+        path: "/private/Guesthouse/vms",
+        detail: "permissions are not 0700"
+    )
+
     /// One representative value per case. Keep in sync with `expectedCaseNames`; the exhaustive
     /// switches in `GuesthouseError` force a source update when a case is added.
     static let samples: [GuesthouseError] = [
@@ -11,8 +17,10 @@ import Testing
         .unsupportedHost(.insufficientMemory(foundBytes: 8 << 30, minimumBytes: 16 << 30)),
         .insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 50_000_000_000, volumePath: "/"),
         .downloadVerificationFailed(artifact: "Tart 2.36.0", check: .digest),
+        .runtimeStorageUnavailable(storageDrift),
         .runtimeMissing,
         .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
+        .runtimeProbeFailed,
         .guestNotReachable(EnvironmentID()),
         .hostKeyChanged(EnvironmentID()),
         .credentialsLocked(.guestKeychain),
@@ -30,8 +38,8 @@ import Testing
     ]
 
     static let expectedCaseNames: Set<String> = [
-        "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeMissing",
-        "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
+        "unsupportedHost", "insufficientDisk", "downloadVerificationFailed", "runtimeStorageUnavailable", "runtimeMissing",
+        "runtimeIncompatible", "runtimeProbeFailed", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
         "canceled",
@@ -66,6 +74,8 @@ import Testing
     @Test func retryableErrorsOfferRetry() {
         #expect(GuesthouseError.guestNotReachable(EnvironmentID()).isRetryable)
         #expect(GuesthouseError.downloadVerificationFailed(artifact: "x", check: .signature).isRetryable)
+        #expect(!GuesthouseError.runtimeStorageUnavailable(Self.storageDrift).isRetryable)
+        #expect(!GuesthouseError.runtimeProbeFailed.isRetryable)
         #expect(!GuesthouseError.hostKeyChanged(EnvironmentID()).isRetryable)
         #expect(!GuesthouseError.unauthorizedCaller.isRetryable)
     }
@@ -201,6 +211,64 @@ import Testing
             #expect(error.recoveryActions.contains(.exportWork))
         }
         #expect(GuesthouseError.runtimeIncompatible(found: "1", required: "2").recoveryActions.contains(.exportWork))
+    }
+
+    @Test func runtimeStorageRecoveryPreservesWorkAndMatchesTheCause() throws {
+        let path = "/private/Guesthouse/vms"
+        let drift = GuesthouseError.runtimeStorageUnavailable(.init(
+            kind: .protectionDrift,
+            path: path,
+            detail: "permissions are not 0700"
+        ))
+        let insecure = GuesthouseError.runtimeStorageUnavailable(.init(
+            kind: .insecureDirectory,
+            path: path,
+            detail: "symbolic link"
+        ))
+        let unwritable = GuesthouseError.runtimeStorageUnavailable(.init(
+            kind: .unwritable,
+            path: path,
+            detail: "No space left on device"
+        ))
+
+        for error in [drift, insecure, unwritable] {
+            #expect(error.userMessage.contains("unpublished work"))
+            #expect(!error.recoveryActions.contains(.openSettings))
+            #expect(!error.recoveryActions.contains(.retry))
+            #expect(!error.userMessage.contains("move or remove"))
+            #expect(!error.userMessage.contains("delete"))
+            let encoded = try JSONEncoder().encode(error)
+            #expect(try JSONDecoder().decode(GuesthouseError.self, from: encoded) == error)
+        }
+        #expect(drift.userMessage.contains("Quit and reopen Guesthouse"))
+        #expect(drift.recoveryActions == [.cancel])
+        #expect(insecure.userMessage.contains("Preserve"))
+        #expect(insecure.recoveryActions == [.cancel])
+        #expect(unwritable.recoveryActions == [.cancel])
+        #expect(unwritable.recoverySuggestion == "Free disk space or restore write access, then quit and reopen Guesthouse.")
+        #expect(!unwritable.recoverySuggestion!.contains("try again"))
+    }
+
+    @Test func decodedRuntimeStorageContextIsRedactedAndFieldBounded() throws {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let raw: [String: String] = [
+            "kind": "unwritable",
+            "path": "/private/\n\(token)/" + String(repeating: "p", count: 2_000),
+            "detail": "Authorization: Bearer abcdefghijklmnop\n" + String(repeating: "d", count: 2_000),
+        ]
+        let problem = try JSONDecoder().decode(
+            RuntimeStorageProblem.self,
+            from: JSONEncoder().encode(raw)
+        )
+        #expect(problem.path.value.unicodeScalars.count <= 201)
+        #expect(problem.detail.value.unicodeScalars.count <= 121)
+        #expect(!problem.path.value.contains("\n"))
+        #expect(!problem.path.value.contains(token))
+        #expect(!problem.detail.value.contains("abcdefghijklmnop"))
+
+        let encoded = String(decoding: try JSONEncoder().encode(problem), as: UTF8.self)
+        #expect(!encoded.contains(token))
+        #expect(!encoded.contains("abcdefghijklmnop"))
     }
 
     @Test func slotAndProtocolErrorsOfferTheRealRemedy() {
