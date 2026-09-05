@@ -53,8 +53,12 @@ private struct DummyLumeBundle {
 @Suite(.serialized) struct LumeBundleTests {
     let root = FileManager.default.temporaryDirectory.appending(path: "LumeBundleTests-\(UUID().uuidString)")
 
-    init() {
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    init() throws {
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
     }
 
     @Test func releaseFactsStayInternallyConsistent() {
