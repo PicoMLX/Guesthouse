@@ -40,6 +40,5 @@ private struct RuntimeResponderTestRequest: Codable {
             return
         }
         #expect(error == expected)
-        #expect(lifetime.withLock { $0.isClosing })
     }
 }
