@@ -340,8 +340,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     /// The synthetic request takes a ticket like any other, so it cannot overtake a `send`
     /// that was made before the consumer went away.
     private func recordImplicitCancellation(of id: OperationID) {
-        let explicit = configuration.withLock { $0.explicitCancellations[id] != nil }
         guard Task.isCancelled, !canceledOperations.contains(id) else { return }
+        // One snapshot gives the suppression a position relative to concurrent sends. Taking
+        // the reservation and ticket separately could move it behind a send between those reads.
+        let reservation = configuration.withLock {
+            (isExplicit: $0.explicitCancellations[id] != nil, nextTicket: $0.nextTicket)
+        }
         // The reserved request may still fail, so what it suppressed is remembered rather
         // than dropped: releasing the reservation replays it, in the slot reserved here. The
         // slot is read from the ticket counter rather than taken from it — a ticket has to be
@@ -349,11 +353,11 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         // reservation would stall every later request — so it names the moment before the next
         // request is sent and after every request that has already taken its ticket, whether or
         // not that request has reached the log yet.
-        if explicit {
+        if reservation.isExplicit {
             guard suppressedCancellations[id] == nil else { return }
             defer { nextSuppression += 1 }
             suppressedCancellations[id] = LogKey(
-                ticket: 2 * configuration.withLock { $0.nextTicket },
+                ticket: 2 * reservation.nextTicket,
                 suppression: nextSuppression
             )
             return
