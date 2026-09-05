@@ -26,10 +26,11 @@ import Testing
     }
 
     @Test func batchDecodingStillConcealsContextFreeDeviceCodes() throws {
-        let input = ["prefix\u{1B}[31mAB12-CD34", "Finished"]
+        let input = ["prefix\u{1B}[31mAB12-CD34", "HMAC-SHA256", "Finished"]
         let decoded = try JSONDecoder().decode(RedactedLines.self, from: JSONEncoder().encode(input))
         #expect(!decoded.lines[0].text.contains("AB12-CD34"))
-        #expect(decoded.lines[1].text == "Finished")
+        #expect(decoded.lines[1].text == "[redacted:device-code]")
+        #expect(decoded.lines[2].text == "Finished")
     }
 
     @Test(arguments: ["\n", "\r", "\r\n"])

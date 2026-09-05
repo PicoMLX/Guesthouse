@@ -27,7 +27,7 @@ import Testing
         #expect(!Redactor().redact(fieldValue: input).contains("AB12-CD34"))
         // A log without a code context retains the previous conservative shape-only policy.
         #expect(Redactor().redact(input) == "prefixAB12-CD34")
-        #expect(Redactor().redact(untrusted: "prefix" + control + "HMAC-SHA256") == "prefixHMAC-SHA256")
+        #expect(Redactor().redact(untrusted: "prefix" + control + "HMAC-SHA256") == "prefix[redacted:device-code]")
     }
 
     @Test(arguments: ["\u{0000}", "\u{1B}[31m"])
