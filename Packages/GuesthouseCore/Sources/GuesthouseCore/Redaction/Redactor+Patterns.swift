@@ -88,12 +88,13 @@ extension Redactor {
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
         let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*/#
-        let wrappedTokenAtLineEnd = #/((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-)[A-Za-z0-9_-]*$/#
+        /// At line end a boundary-delimited bare `sk-` conservatively arms wrapped-key redaction.
+        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
         let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
         /// remain intact.
-        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-[A-Za-z0-9_-]{16,})/#
+        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-(?:[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]*$))/#
         let distinctiveAPIKey = #/sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]*/#
         /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
         /// which one decodes to a JSON object, whitespace allowed. More than three segments are
@@ -124,13 +125,13 @@ extension Redactor {
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
                 #/(^|[^A-Za-z0-9])(?:\\?["'])?/#
                 Capture { secretName }
-                #/\b(?:\\?["'])?\s*[:=]\s*/#
+                #/(?:\\?["'])?\s*[:=]\s*/#
             }
         }
         let labeledSecret = Regex {
@@ -183,7 +184,7 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
