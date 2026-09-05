@@ -24,6 +24,7 @@ public struct Redactor: Sendable {
             let delimiter: Character
             let escapeDepth: Int
             let kind: String
+            var singleQuotesAreLiteral = false
         }
 
         /// The label of the PEM block being removed, until its matching footer.
