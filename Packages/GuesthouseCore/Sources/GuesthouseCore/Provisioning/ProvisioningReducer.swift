@@ -15,9 +15,9 @@ public enum ProvisioningEvent: Hashable, Sendable {
     /// The operation reached its checkpoint. It is not durable until `checkpointPersisted`.
     case checkpointReached(OperationID, Checkpoint)
     /// The journal write for the checkpoint succeeded.
-    case checkpointPersisted(Checkpoint)
+    case checkpointPersisted(EffectToken, Checkpoint)
     /// The journal write for the checkpoint failed. Reality may be ahead of the journal.
-    case checkpointPersistenceFailed(GuesthouseError)
+    case checkpointPersistenceFailed(EffectToken, GuesthouseError)
     /// The operation failed with an error a retry or repair can address.
     case operationFailed(OperationID, GuesthouseError)
     /// The user canceled the operation and the runtime confirmed it stopped.
@@ -26,20 +26,25 @@ public enum ProvisioningEvent: Hashable, Sendable {
     case userActionRequired(OperationID, GuesthouseError)
     /// The XPC connection dropped while the operation was in flight, or is still down.
     case connectionInterrupted(OperationID)
-    /// Actual state was inspected after an interruption or before a retry.
-    case reconciled(ReconciledOutcome)
+    /// Actual state was inspected after an interruption or before a retry. Only accepted for
+    /// the inspection that is currently outstanding.
+    case reconciled(EffectToken, ReconciledOutcome)
+    /// The inspection itself could not be carried out — the runtime is still unreachable, or
+    /// the guest query failed. The outcome stays unknown; the error says what to do about it.
+    case inspectionFailed(EffectToken, GuesthouseError)
     /// The cleanup requested after a confirmed failure finished.
-    case cleanupFinished
+    case cleanupFinished(EffectToken)
     /// The cleanup could not complete.
-    case cleanupFailed(GuesthouseError)
+    case cleanupFailed(EffectToken, GuesthouseError)
     /// The user asked to retry, or to inspect again while the outcome is unknown.
     case userRetried
     /// The user reports the out-of-app step is done.
     case userActionCompleted
     /// The coordinator (or the user through a recovery action) asks for the actual state to be
     /// inspected from any status where the reducer cannot know what happened: a stale or
-    /// mismatched callback, a lost effect, a relaunch. Illegal only while already inspecting or
-    /// while the outcome is being reconciled.
+    /// mismatched callback, a lost effect, a relaunch. Illegal only while a start request is
+    /// still live, because inspecting then would release a reservation the runtime may still
+    /// turn into a mutation.
     case inspectionRequested
 
     public var caseName: String {
@@ -56,6 +61,7 @@ public enum ProvisioningEvent: Hashable, Sendable {
         case .userActionRequired: "userActionRequired"
         case .connectionInterrupted: "connectionInterrupted"
         case .reconciled: "reconciled"
+        case .inspectionFailed: "inspectionFailed"
         case .cleanupFinished: "cleanupFinished"
         case .cleanupFailed: "cleanupFailed"
         case .userRetried: "userRetried"
@@ -67,11 +73,21 @@ public enum ProvisioningEvent: Hashable, Sendable {
 
 /// What inspection of the real VM, guest, and journal found.
 public enum ReconciledOutcome: Hashable, Sendable {
-    /// The stage's checkpoint was in fact reached. It still has to be persisted.
+    /// A checkpoint was in fact reached. It still has to be persisted. It may name a later
+    /// stage than the saved state does: the runtime can have journaled or finished a further
+    /// step before the crash that left the state behind.
     case completed(Checkpoint)
     /// The runtime still has the operation in flight (the connection came back while it was
     /// running). Monitoring resumes under the same identity; nothing is restarted.
     case stillRunning(OperationID)
+    /// The operation is still paused for the out-of-app step it was paused for when contact
+    /// was lost. The prompt and its recovery actions are restored rather than being flattened
+    /// into "running" or offered for a restart.
+    case stillNeedsUserAction(OperationID, GuesthouseError)
+    /// The cleanup that was running when contact was lost is still running. The coordinator
+    /// names the cleanup it is still waiting on, so monitoring resumes instead of a second
+    /// cleanup being launched over the first one's staging data.
+    case cleanupRunning(EffectToken, GuesthouseError)
     /// Durable partial work exists; the next start resumes from it.
     case resumable(ResumeEvidence)
     /// The attempt failed and left state that must be removed before starting again.
@@ -84,14 +100,17 @@ public enum ReconciledOutcome: Hashable, Sendable {
 }
 
 /// Side effects the coordinator must perform. Descriptions only; nothing runs here.
+///
+/// Each carries the token the matching callback must echo.
 public enum ProvisioningEffect: Hashable, Sendable {
-    /// Query the actual state for `stage` before deciding anything else.
-    case inspectActualState(ProvisioningStage)
+    /// Query the actual state for `stage`, then send `reconciled` or `inspectionFailed`, before
+    /// deciding anything else.
+    case inspectActualState(ProvisioningStage, EffectToken)
     /// Write the checkpoint to the journal, then send `checkpointPersisted` or
     /// `checkpointPersistenceFailed`.
-    case persistCheckpoint(Checkpoint)
+    case persistCheckpoint(Checkpoint, EffectToken)
     /// Remove the leftovers of a failed attempt, then send `cleanupFinished` or `cleanupFailed`.
-    case cleanUp(ProvisioningStage)
+    case cleanUp(ProvisioningStage, EffectToken)
 }
 
 public enum ProvisioningTransitionError: Error, Hashable, Sendable {
@@ -103,6 +122,12 @@ public enum ProvisioningTransitionError: Error, Hashable, Sendable {
     case stageMismatch(expected: ProvisioningStage, actual: ProvisioningStage)
     /// The persisted checkpoint is not the one being persisted.
     case checkpointMismatch(expected: Checkpoint, actual: Checkpoint)
+    /// The callback answers an effect that is no longer outstanding.
+    case staleEffect(expected: EffectToken, actual: EffectToken)
+    /// Inspection was asked for while a start request is still in flight. Told apart from a
+    /// plain illegal transition because `inspectState` is the one recovery that cannot work
+    /// here: offering it would send the same refused event again.
+    case inspectionWhileStartRequestLive
     /// `ready` has no next stage.
     case alreadyReady
 }
@@ -112,10 +137,12 @@ extension ProvisioningTransitionError: LocalizedError {
     /// needs to know the environment's state is uncertain and what to do about it.
     public var userMessage: String {
         switch self {
-        case .illegalTransition, .operationMismatch, .checkpointMismatch:
+        case .illegalTransition, .operationMismatch, .checkpointMismatch, .staleEffect:
             "Guesthouse received a status update that does not match what it was doing. The environment's state is uncertain until it is checked."
         case .stageMismatch:
             "Guesthouse tried to run a setup step out of order. The environment's state is uncertain until it is checked."
+        case .inspectionWhileStartRequestLive:
+            "Guesthouse is still waiting for its runtime to answer a request to start this setup step, so it cannot check the environment yet."
         case .alreadyReady:
             "This development Mac is already fully set up; there is no further setup step to run."
         }
@@ -124,6 +151,7 @@ extension ProvisioningTransitionError: LocalizedError {
     public var recoveryMessage: String {
         switch self {
         case .alreadyReady: "No action is needed."
+        case .inspectionWhileStartRequestLive: "Wait for that request to finish. Guesthouse reports a request it lost contact with by itself, and checks the environment then."
         default: "Check the environment before starting anything else. If this repeats, export diagnostics and report it."
         }
     }
@@ -134,7 +162,7 @@ extension ProvisioningTransitionError: LocalizedError {
     /// The recovery actions the GUI should offer.
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .alreadyReady: [.cancel]
+        case .alreadyReady, .inspectionWhileStartRequestLive: [.cancel]
         default: [.inspectState, .cancel]
         }
     }
@@ -149,7 +177,10 @@ extension ProvisioningTransitionError: LocalizedError {
 ///   unpersisted checkpoint, and never twice.
 /// - Failure, cancellation, interruption, and user action all lead to an inspection before
 ///   anything re-runs, so a retry can never blindly repeat a step whose real outcome is unknown
-///   (MVP-PLAN.md §3, §4, §9). Inspection can be requested again while the outcome is unknown.
+///   (MVP-PLAN.md §3, §4, §9). Inspection can be requested again at any time except while a
+///   start request is still live; each request replaces the outstanding one.
+/// - Every effect is issued with a token and only the callback naming the outstanding token is
+///   accepted, so a lost effect can be reissued and a late reply to a replaced one is rejected.
 /// - A checkpoint counts only once the journal has it (§3: "Persist ... before updating the UI").
 public enum ProvisioningReducer: Sendable {
     public static func reduce(
@@ -157,52 +188,140 @@ public enum ProvisioningReducer: Sendable {
         _ event: ProvisioningEvent
     ) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
         let stage = state.stage
+        var issued = state.issuedEffects
+        func mint() -> EffectToken {
+            issued += 1
+            return EffectToken(issued)
+        }
         func at(_ status: StageStatus, _ effects: [ProvisioningEffect] = []) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
-            (ProvisioningState(stage: stage, status: status), effects)
+            (ProvisioningState(stage: stage, status: status, issuedEffects: issued), effects)
+        }
+        /// Mints the inspection's token once, so the status and the effect asking for it can
+        /// never name different inspections.
+        func inspect(_ status: (EffectToken) -> StageStatus) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
+            let token = mint()
+            return at(status(token), [.inspectActualState(stage, token)])
+        }
+        /// Reserves a start for `requested`, carrying forward the durable partial work the
+        /// reservation was made from so a refusal cannot orphan it.
+        func reserve(_ requested: ProvisioningStage, resuming: ResumeEvidence?) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
+            guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
+            return at(.startRequested(resuming: resuming))
+        }
+        /// Applies what inspection found. `interrupted` is the operation the reducer was
+        /// tracking when contact was lost, when it knows one; a reported identity has to be
+        /// that operation, or a second one would be adopted while the first can still mutate.
+        func adopt(_ outcome: ReconciledOutcome, interrupted: OperationID?) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
+            switch outcome {
+            case .completed(let checkpoint):
+                // A later checkpoint is adopted: the journal is the durable truth, and pinning
+                // the saved stage would offer a start for a step the runtime already ran.
+                guard checkpoint.stage >= stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
+                let write = mint()
+                let status = StageStatus.persistingCheckpoint(checkpoint, operation: interrupted, write: write)
+                return (ProvisioningState(stage: checkpoint.stage, status: status, issuedEffects: issued), [.persistCheckpoint(checkpoint, write)])
+            case .stillRunning(let id):
+                if let interrupted { try requireSame(interrupted, id) }
+                return at(.inProgress(id))
+            case .stillNeedsUserAction(let id, let error):
+                if let interrupted { try requireSame(interrupted, id) }
+                return at(.needsUserAction(id, error))
+            case .cleanupRunning(let cleanup, let error):
+                return at(.cleanupRequired(error, cleanup: cleanup))
+            case .resumable(let evidence):
+                return at(.resumable(evidence))
+            case .failedNeedsCleanup(let error):
+                let cleanup = mint()
+                return at(.cleanupRequired(error, cleanup: cleanup), [.cleanUp(stage, cleanup)])
+            case .failed(let error):
+                return at(.recoverableFailure(error, interrupted: nil))
+            case .notStarted:
+                return at(.notStarted)
+            }
         }
 
         switch (state.status, event) {
 
-        case (.notStarted, .startRequested(let requested)), (.resumable, .startRequested(let requested)), (.startRejected, .startRequested(let requested)):
-            guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
-            return at(.startRequested)
+        case (.notStarted, .startRequested(let requested)):
+            return try reserve(requested, resuming: nil)
+
+        case (.resumable(let evidence), .startRequested(let requested)):
+            return try reserve(requested, resuming: evidence)
+
+        case (.startRejected(_, let resuming), .startRequested(let requested)):
+            return try reserve(requested, resuming: resuming)
 
         case (.completed, .startRequested(let requested)):
             guard let next = stage.next else { throw .alreadyReady }
             guard requested == next else { throw .stageMismatch(expected: next, actual: requested) }
-            return (ProvisioningState(stage: next, status: .startRequested), [])
+            return (ProvisioningState(stage: next, status: .startRequested(resuming: nil), issuedEffects: issued), [])
 
         case (.startRequested, .operationStarted(let id, let requested)):
             guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
             return at(.inProgress(id))
 
-        case (.startRequested, .startRequestRejected(let error)):
-            return at(.startRejected(error))
+        case (.startRequested(let resuming), .startRequestRejected(let error)):
+            // The refusal did nothing, so whatever durable partial work the reservation was made
+            // from is still there and still has to be resumed from once the refusal is dealt with.
+            return at(.startRejected(error, resuming: resuming))
 
         case (.startRequested, .startRequestInterrupted):
-            return at(.awaitingInspection, [.inspectActualState(stage)])
+            return inspect(StageStatus.awaitingInspection)
 
-        case (.inProgress(let current), .checkpointReached(let id, let checkpoint)):
+        case (.startRequested, .inspectionRequested):
+            // The reservation stays held: the request is still live, so the runtime may still
+            // accept it, and an inspection that reported `notStarted` would let a second start
+            // race the first. A dropped connection is reported as `startRequestInterrupted`,
+            // which ends the request and does inspect.
+            throw .inspectionWhileStartRequestLive
+
+        case (.inProgress(let current), .checkpointReached(let id, let checkpoint)),
+             (.needsUserAction(let current, _), .checkpointReached(let id, let checkpoint)):
+            // A paused operation resumes as soon as the user does the out-of-app step, which can
+            // be before the GUI reports it; refusing its checkpoint would drop a reached one.
             try requireSame(current, id)
             guard checkpoint.stage == stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
-            return at(.persistingCheckpoint(checkpoint), [.persistCheckpoint(checkpoint)])
+            let write = mint()
+            return at(.persistingCheckpoint(checkpoint, operation: current, write: write), [.persistCheckpoint(checkpoint, write)])
 
-        case (.persistingCheckpoint(let pending), .checkpointPersisted(let persisted)):
+        case (.persistingCheckpoint(let pending, _, let write), .checkpointPersisted(let token, let persisted)):
+            try requireOutstanding(write, token)
             guard pending == persisted else { throw .checkpointMismatch(expected: pending, actual: persisted) }
             return at(.completed(persisted))
 
-        case (.persistingCheckpoint, .checkpointPersistenceFailed(let error)):
+        case (.persistingCheckpoint(_, _, let write), .checkpointPersistenceFailed(let token, let error)):
             // Reality is ahead of the journal. The failure is shown with its recovery actions;
             // the user's retry inspects, finds the checkpoint reached, and persists it again.
-            return at(.recoverableFailure(error))
+            try requireOutstanding(write, token)
+            return at(.recoverableFailure(error, interrupted: nil))
 
-        case (.persistingCheckpoint, .connectionInterrupted), (.persistingCheckpoint, .userRetried):
+        case (.persistingCheckpoint(_, let writer, _), .connectionInterrupted(let id)):
             // The write's result is unknown; the journal is inspected before anything else.
-            return at(.awaitingInspection, [.inspectActualState(stage)])
+            // An interruption belonging to another operation says nothing about this write, and
+            // a write reconciliation started has no operation behind it at all, so no
+            // operation-scoped interruption is about it either: taking one as relevant would
+            // abandon a live write and make its own successful callback stale.
+            guard let writer else { throw .illegalTransition(status: state.status.caseName, event: event.caseName) }
+            try requireSame(writer, id)
+            return inspect { .unknownOutcome(writer, inspection: $0) }
 
-        case (.inProgress(let current), .operationFailed(let id, let error)):
+        case (.persistingCheckpoint(_, let writer, _), .userRetried):
+            // The operation that reached the checkpoint keeps its identity through the check,
+            // for the same reason every other live operation does: it may still be mutating,
+            // and an unscoped inspection would adopt a `stillRunning(B)` naming another one
+            // without `requireSame`, leaving the first unaccounted for while the reducer follows
+            // the second (MVP-PLAN.md §3). A checkpoint restored after a relaunch is exactly
+            // that case: the write is lost, the operation behind it need not be. The unscoped
+            // status is left to a reconciled write, which has no operation behind it.
+            if let writer { return inspect { .unknownOutcome(writer, inspection: $0) } }
+            return inspect(StageStatus.awaitingInspection)
+
+        case (.inProgress(let current), .operationFailed(let id, let error)),
+             (.needsUserAction(let current, _), .operationFailed(let id, let error)):
+            // A paused operation can still time out or die with the guest. Keeping the obsolete
+            // prompt and discarding the failure would hide why the step stopped (MVP-PLAN.md §9).
             try requireSame(current, id)
-            return at(.recoverableFailure(error))
+            return at(.recoverableFailure(error, interrupted: nil))
 
         case (.inProgress(let current), .operationCanceled(let id)):
             try requireSame(current, id)
@@ -218,62 +337,100 @@ public enum ProvisioningReducer: Sendable {
 
         case (.needsUserAction(let current, _), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return at(.unknownOutcome(id), [.inspectActualState(stage)])
+            return inspect { .unknownOutcome(id, inspection: $0) }
 
         case (.inProgress(let current), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return at(.unknownOutcome(id), [.inspectActualState(stage)])
+            return inspect { .unknownOutcome(id, inspection: $0) }
 
-        case (.unknownOutcome(let current), .connectionInterrupted(let id)):
+        case (.unknownOutcome(let current, _), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return at(.unknownOutcome(id), [.inspectActualState(stage)])
+            return inspect { .unknownOutcome(id, inspection: $0) }
 
-        case (.unknownOutcome, .userRetried):
-            return at(state.status, [.inspectActualState(stage)])
+        case (.unknownOutcome(let current, _), .userRetried), (.unknownOutcome(let current, _), .inspectionRequested):
+            // A fresh inspection replaces the outstanding one rather than joining it: the reply
+            // to the earlier one describes a state that may already be obsolete, and its token
+            // is no longer accepted.
+            return inspect { .unknownOutcome(current, inspection: $0) }
 
-        case (.awaitingInspection, .userRetried):
-            // One inspection at a time: a second request while one is pending issues nothing,
-            // so a stale response can never be taken for a newer inspection.
-            return at(state.status)
+        case (.awaitingInspection, .userRetried), (.awaitingInspection, .inspectionRequested):
+            // Reissued rather than suppressed: an inspection whose request was never submitted,
+            // whose reply was lost, or that was still outstanding when the app was relaunched
+            // would otherwise leave no event that can produce a `reconciled` result.
+            return inspect(StageStatus.awaitingInspection)
 
-        case (.cleanupRequired, .connectionInterrupted), (.cleanupRequired, .userRetried):
-            // The cleanup's result is unknown; inspect rather than clean up blindly again.
-            return at(.awaitingInspection, [.inspectActualState(stage)])
+        case (.cleanupRequired, .userRetried):
+            // The cleanup's result is unknown; inspect rather than clean up blindly again. If
+            // it turns out to still be running, `cleanupRunning` resumes monitoring it.
+            //
+            // `connectionInterrupted` is deliberately not here. A cleanup is an effect, not an
+            // operation, so no operation-scoped interruption is about it — the same reason the
+            // checkpoint write refuses one that names another operation. Accepting any would
+            // let an interruption belonging to an unrelated operation, delivered late, replace
+            // this cleanup's token with an inspection and make its own `cleanupFinished` stale.
+            // A coordinator that loses contact while a cleanup is pending asks for the
+            // inspection by name with `inspectionRequested`, which lands in the same place.
+            return inspect(StageStatus.awaitingInspection)
 
-        case (.awaitingInspection, .inspectionRequested), (.unknownOutcome, .inspectionRequested):
-            throw .illegalTransition(status: state.status.caseName, event: event.caseName)
+        case (.inProgress(let current), .inspectionRequested), (.needsUserAction(let current, _), .inspectionRequested):
+            // The operation is still live, so its identity is carried through the inspection:
+            // an unscoped one would adopt a `stillRunning` naming some other operation, or a
+            // `notStarted` that permits a second mutation while this one keeps going.
+            return inspect { .unknownOutcome(current, inspection: $0) }
+
+        case (.recoverableFailure(_, .some(let interrupted)), .inspectionRequested),
+             (.recoverableFailure(_, .some(let interrupted)), .userRetried):
+            // This failure is a check that could not answer for `interrupted`, so that
+            // operation's outcome is exactly as unknown as it was and the replacement
+            // inspection stays scoped to it. An unscoped one would adopt whatever identity the
+            // next answer happens to name while the first operation may still be mutating
+            // (MVP-PLAN.md §3).
+            return inspect { .unknownOutcome(interrupted, inspection: $0) }
 
         case (_, .inspectionRequested):
-            return at(.awaitingInspection, [.inspectActualState(stage)])
+            return inspect(StageStatus.awaitingInspection)
 
         case (.recoverableFailure, .userRetried), (.canceled, .userRetried):
-            return at(.awaitingInspection, [.inspectActualState(stage)])
+            return inspect(StageStatus.awaitingInspection)
 
-        case (.needsUserAction, .userActionCompleted):
-            return at(.awaitingInspection, [.inspectActualState(stage)])
+        case (.needsUserAction(let current, _), .userActionCompleted):
+            // The operation the user was asked to unblock may still be running, so the
+            // inspection stays scoped to it rather than accepting whatever it reports.
+            return inspect { .unknownOutcome(current, inspection: $0) }
 
-        case (.unknownOutcome, .reconciled(let outcome)), (.awaitingInspection, .reconciled(let outcome)):
-            switch outcome {
-            case .completed(let checkpoint):
-                guard checkpoint.stage == stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
-                return at(.persistingCheckpoint(checkpoint), [.persistCheckpoint(checkpoint)])
-            case .stillRunning(let id):
-                return at(.inProgress(id))
-            case .resumable(let evidence):
-                return at(.resumable(evidence))
-            case .failedNeedsCleanup(let error):
-                return at(.cleanupRequired(error), [.cleanUp(stage)])
-            case .failed(let error):
-                return at(.recoverableFailure(error))
-            case .notStarted:
-                return at(.notStarted)
-            }
+        case (.unknownOutcome(let interrupted, let inspection), .reconciled(let token, let outcome)):
+            try requireOutstanding(inspection, token)
+            return try adopt(outcome, interrupted: interrupted)
 
-        case (.cleanupRequired, .cleanupFinished):
+        case (.awaitingInspection(let inspection), .reconciled(let token, let outcome)):
+            try requireOutstanding(inspection, token)
+            // Nothing here knows which operation was in flight, so a reported identity is the
+            // only one there is.
+            return try adopt(outcome, interrupted: nil)
+
+        case (.awaitingInspection(let inspection), .inspectionFailed(let token, let error)):
+            // The inspection could not answer, so nothing is known that was not known before.
+            // Keeping the error rather than dropping it is what lets the coordinator show why
+            // the check failed and what to do; a retry from a recoverable failure inspects
+            // again, so no mutation can be repeated on the strength of a failed check.
+            try requireOutstanding(inspection, token)
+            return at(.recoverableFailure(error, interrupted: nil))
+
+        case (.unknownOutcome(let interrupted, let inspection), .inspectionFailed(let token, let error)):
+            // The same, except that this state knows which operation is unaccounted for. It
+            // travels with the error: a failed check settles nothing, so forgetting the
+            // operation here would let the retry's inspection adopt a different one while this
+            // one may still be mutating.
+            try requireOutstanding(inspection, token)
+            return at(.recoverableFailure(error, interrupted: interrupted))
+
+        case (.cleanupRequired(_, let cleanup), .cleanupFinished(let token)):
+            try requireOutstanding(cleanup, token)
             return at(.notStarted)
 
-        case (.cleanupRequired, .cleanupFailed(let error)):
-            return at(.recoverableFailure(error))
+        case (.cleanupRequired(_, let cleanup), .cleanupFailed(let token, let error)):
+            try requireOutstanding(cleanup, token)
+            return at(.recoverableFailure(error, interrupted: nil))
 
         default:
             throw .illegalTransition(status: state.status.caseName, event: event.caseName)
@@ -282,5 +439,9 @@ public enum ProvisioningReducer: Sendable {
 
     private static func requireSame(_ expected: OperationID, _ actual: OperationID) throws(ProvisioningTransitionError) {
         guard expected == actual else { throw .operationMismatch(expected: expected, actual: actual) }
+    }
+
+    private static func requireOutstanding(_ expected: EffectToken, _ actual: EffectToken) throws(ProvisioningTransitionError) {
+        guard expected == actual else { throw .staleEffect(expected: expected, actual: actual) }
     }
 }

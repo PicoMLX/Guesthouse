@@ -107,12 +107,13 @@ import Testing
     }
 
     @Test func checkoutNamesAndRemotesMustBeUnique() {
-        var clash = package(); clash.remote = RemoteURL("https://github.com/Other/SharedUI")!
-        #expect(throws: WorkspaceValidationError.duplicateCheckoutName("SharedUI")) { try manifest([app(), package(), clash]).validate() }
-        var sameRemote = package(); sameRemote.checkoutName = DirectoryName("SharedUI2")!; sameRemote.remote = RemoteURL("https://github.com/picomlx/sharedui")!
-        #expect(throws: WorkspaceValidationError.duplicateRemote("https://github.com/picomlx/sharedui")) { try manifest([app(), package(), sameRemote]).validate() }
-        var caseClash = package(); caseClash.checkoutName = DirectoryName("sharedui")!; caseClash.remote = RemoteURL("https://github.com/Other/Thing")!
-        #expect(throws: WorkspaceValidationError.duplicateCheckoutName("sharedui")) { try manifest([app(), package(), caseClash]).validate() }
+        var sameName = package(); sameName.remote = RemoteURL("https://github.com/Other/MyApp")!; sameName.checkoutName = DirectoryName("MyApp")!
+        #expect(throws: WorkspaceValidationError.duplicateCheckoutName("MyApp")) { try manifest([app(), sameName]).validate() }
+        var caseClash = sameName; caseClash.checkoutName = DirectoryName("myapp")!
+        #expect(throws: WorkspaceValidationError.duplicateCheckoutName("myapp")) { try manifest([app(), caseClash]).validate() }
+        var renamedApp = app(); renamedApp.checkoutName = DirectoryName("TheApp")!
+        var sameRemote = package(); sameRemote.remote = renamedApp.remote; sameRemote.checkoutName = DirectoryName("MyApp")!
+        #expect(throws: WorkspaceValidationError.duplicateRemote("https://github.com/PicoMLX/MyApp")) { try manifest([renamedApp, sameRemote]).validate() }
     }
 
     @Test func packageCheckoutsMustCarryTheRepositoryDerivedIdentity() {
@@ -122,13 +123,15 @@ import Testing
         #expect(throws: Never.self) { try manifest([appRenamed]).validate() }
         let a = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/OrgA/Common")!, checkoutName: DirectoryName("Common")!, baseBranch: BranchName("main")!, taskBranch: BranchName("t")!)
         let b = WorkspaceRepository(role: .package, remote: RemoteURL("https://github.com/OrgB/Common")!, checkoutName: DirectoryName("common")!, baseBranch: BranchName("main")!, taskBranch: BranchName("t")!)
-        #expect(throws: WorkspaceValidationError.duplicateCheckoutName("common")) { try manifest([app(), a, b]).validate() }
+        // Renaming one folder is the recovery `duplicateCheckoutName` asks for and the identity
+        // rule forbids, so the ambiguity itself is what the user is told about.
+        #expect(throws: WorkspaceValidationError.duplicatePackageIdentity("common")) { try manifest([app(), a, b]).validate() }
         var c = b; c.checkoutName = DirectoryName("Common2")!
         #expect(throws: WorkspaceValidationError.checkoutNameDoesNotMatchRepository(checkout: "Common2", repository: "Common")) { try manifest([app(), a, c]).validate() }
     }
 
     @Test func unsupportedHostsAndBadBranchesAreRejected() {
-        var gitlab = package(); gitlab.remote = RemoteURL("https://gitlab.com/group/thing")!
+        var gitlab = package(); gitlab.remote = RemoteURL("https://gitlab.com/group/thing")!; gitlab.checkoutName = DirectoryName("thing")!
         #expect(throws: WorkspaceValidationError.unsupportedHost("gitlab.com")) { try manifest([app(), gitlab]).validate() }
         var sameBranch = app(); sameBranch.taskBranch = sameBranch.baseBranch
         #expect(throws: WorkspaceValidationError.taskBranchCollidesWithBaseBranch("MyApp")) { try manifest([sameBranch]).validate() }

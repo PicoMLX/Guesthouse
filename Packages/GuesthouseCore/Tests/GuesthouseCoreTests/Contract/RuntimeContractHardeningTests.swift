@@ -124,7 +124,7 @@ import Testing
         let second = ObservedTuple(codexCLICapabilities: other).sanitizedForWire().codexCLICapabilities
         #expect(first?.count == 64)
         #expect(first != second, "two lists that share their first entries keep different identities")
-        #expect(first?.last?.contains("137 more") == true)
+        #expect(first?.contains { $0.contains("137 more") } == true)
         let few = ObservedTuple(codexCLICapabilities: ["a", "b"]).sanitizedForWire().codexCLICapabilities
         #expect(few == ["a", "b"], "a list under the cap is untouched")
     }
@@ -166,13 +166,173 @@ import Testing
         _ = try JSONEncoder().encode(RuntimeEvent.progress(OperationID(), ProgressPhase(kind: .copying, fraction: .nan)))
     }
 
+    @Test func neutralizingAnIdentityMarkerIsInjective() {
+        let plain = ObservedTuple(codexCLIPath: "/opt/tool [exact:0123456789ab]").sanitizedForWire().codexCLIPath
+        let alreadyEscaped = ObservedTuple(codexCLIPath: "/opt/tool [exact\u{FFFD}:0123456789ab]").sanitizedForWire().codexCLIPath
+        #expect(plain != alreadyEscaped, "neutralizing a marker never maps two reported values onto one identity")
+    }
+
+    @Test func aLiteralCapabilityCannotImpersonateACappedList() {
+        let capped = ObservedTuple(codexCLICapabilities: (0..<200).map { "cap\($0)" }).sanitizedForWire().codexCLICapabilities ?? []
+        // A probe reporting the capped list verbatim stays under the cap, so its entries are
+        // taken literally; the omitted-count entry must not survive that as an identity.
+        let forged = ObservedTuple(codexCLICapabilities: capped).sanitizedForWire().codexCLICapabilities ?? []
+        #expect(Set(forged) != Set(capped), "a literal capability cannot pass a different set off as a capped one")
+    }
+
+    /// The sanitizer reads the bound plus its lookahead and nothing more. A value longer than
+    /// that has a tail nothing inspected: it is neither redacted nor covered by a digest, so two
+    /// such values used to bound to one identical value that still counted as an exact
+    /// observation, and a replaced executable could match the record of the one before it.
+    @Test func anObservationLongerThanTheInspectedWindowIsUnknown() {
+        let unseen = String(repeating: "a", count: 800)
+        let first = ObservedTuple(codexCLIPath: unseen + "device-code-one").sanitizedForWire()
+        let second = ObservedTuple(codexCLIPath: unseen + "device-code-two").sanitizedForWire()
+        #expect(first.codexCLIPath == nil)
+        #expect(second.codexCLIPath == nil)
+        #expect(first.unknownFields.contains(.codexCLIPath))
+        // Everything the sanitizer does read keeps its identity; the window is the bound plus
+        // the lookahead, and the first scalar past it is what makes the value unknown.
+        let window = 256 + GuesthouseError.sanitizeLookahead
+        #expect(ObservedTuple(codexCLIPath: String(repeating: "a", count: window)).sanitizedForWire().codexCLIPath?.contains("[exact:") == true)
+        #expect(ObservedTuple(codexCLIPath: String(repeating: "a", count: window + 1)).sanitizedForWire().codexCLIPath == nil)
+        // Nothing past the window is escaped or copied on the way to that answer: the marker
+        // neutralization now runs on the window, not on arbitrarily long CLI output.
+        #expect(ObservedTuple(codexCLIPath: String(repeating: "/opt [exact:0123456789ab] ", count: 100_000)).sanitizedForWire().codexCLIPath == nil)
+        // Escaping doubles every escape scalar, so a value inside the window when it was
+        // measured can leave it before the sanitizer reads it. The tail is then neither
+        // redacted nor visible, and the digest would still cover the credential in it.
+        let token = " ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let grown = String(repeating: "\u{FFFD}", count: window - token.unicodeScalars.count) + token
+        #expect(grown.unicodeScalars.count == window)
+        #expect(ObservedTuple(codexCLIPath: grown).sanitizedForWire().codexCLIPath == nil)
+    }
+
+    /// Two paths that differ only in a credential redact to the same text. Reporting that text
+    /// as an exact observation reused one executable's connection-verification record for
+    /// another (MVP-PLAN.md §5), so a value a secret was removed from is unknown instead.
+    @Test func anObservationASecretWasRemovedFromIsNotAnIdentity() {
+        let first = ObservedTuple(codexCLIPath: "/opt/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab/codex").sanitizedForWire()
+        let second = ObservedTuple(codexCLIPath: "/opt/ghp_ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210ba/codex").sanitizedForWire()
+        #expect(first.codexCLIPath == nil)
+        #expect(second.codexCLIPath == nil)
+        #expect(first.unknownFields.contains(.codexCLIPath))
+        // A fully known observation stops being exact when one of its values is redacted, so
+        // nothing can be verified against a record that named a different executable.
+        var complete = ObservedTuple(Self.knownTuple)
+        #expect(complete.sanitizedForWire().exact != nil)
+        complete.codexCLIPath = "/opt/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab/codex"
+        #expect(complete.sanitizedForWire().exact == nil)
+    }
+
+    /// A credential split by a parameterless escape sequence is removed before the redactor
+    /// runs, so the sanitizer used to report the result as merely normalized and an identity
+    /// digest of the original credential was published alongside it.
+    @Test func aCredentialSplicedByAnEscapeCountsAsRedaction() {
+        let spliced = "ghp_ABCDEFGHIJ\u{1B}[KLMNOPQRSTUVWXYZ0123456789ab"
+        let (text, redacted) = GuesthouseError.sanitizeReporting(spliced, limit: 256)
+        #expect(text.contains("[redacted:spliced-escape]"))
+        #expect(redacted, "dropping the spliced run removes a credential; that is redaction, not normalization")
+        let observed = ObservedTuple(codexCLIPath: "/opt/" + spliced).sanitizedForWire()
+        #expect(observed.codexCLIPath == nil, "no digest of the removed credential, and no identity either")
+    }
+
+    /// Every entry is redacted and bounded and the canonical list is built before the 64-entry
+    /// cap applies, so the raw count is what has to be bounded first: otherwise a guest that
+    /// answers a capability probe with its whole output decides how much work a status costs.
+    @Test func aCapabilityListLongerThanAProbeCouldReportIsUnknown() {
+        var reported = ObservedTuple()
+        reported.codexCLICapabilities = (0...ObservedTuple.maximumReportedCapabilities).map { "cap\($0)" }
+        #expect(reported.sanitizedForWire().codexCLICapabilities == nil, "reported unknown rather than inspected in full")
+        var atTheBound = ObservedTuple()
+        atTheBound.codexCLICapabilities = (0..<ObservedTuple.maximumReportedCapabilities).map { "cap\($0)" }
+        #expect(atTheBound.sanitizedForWire().codexCLICapabilities?.count == ObservedTuple.maximumCapabilities)
+    }
+
+    /// A probe may report the same capabilities in any order, or twice. Which entries the cap
+    /// keeps and what the digest covers must not depend on that, or one capability set would
+    /// produce two identities and revalidate a connection that never changed.
+    @Test func aCappedCapabilityListDoesNotDependOnTheOrderItWasReported() {
+        let many = (0..<200).map { "cap\($0)" }
+        // Assigned rather than passed to the initializer, which normalizes on the way in.
+        var reported = ObservedTuple()
+        reported.codexCLICapabilities = many
+        var shuffled = ObservedTuple()
+        shuffled.codexCLICapabilities = many.reversed() + ["cap7", "cap7"]
+        let canonical = reported.sanitizedForWire().codexCLICapabilities
+        #expect(canonical?.count == 64)
+        #expect(canonical == shuffled.sanitizedForWire().codexCLICapabilities, "one capability set has one identity, however it is ordered or repeated")
+        var changed = ObservedTuple()
+        changed.codexCLICapabilities = Array(many.dropLast()) + ["different"]
+        #expect(changed.sanitizedForWire().codexCLICapabilities != canonical, "a set that really differs still does")
+    }
+
+    static let knownTuple = CompatibilityTuple(
+        hostMacOSVersion: SemanticVersion([26, 4]),
+        hostMacOSBuild: "25E200",
+        codexDesktopVersion: "1.2.0",
+        codexDesktopBuild: "120",
+        codexDesktopPath: "/Applications/Codex.app",
+        runtimeProtocolVersion: 1,
+        tartVersion: "2.36.0",
+        guestMacOSBuild: "25E200",
+        xcodeBuild: "17A100",
+        codexCLIVersion: "0.50.0",
+        codexCLIPath: "/usr/local/bin/codex",
+        codexCLIInstallations: 1,
+        codexCLICapabilities: ["apply-patch"],
+        githubCLIVersion: "2.60.0",
+        provisioningScriptVersion: "1.0.0"
+    )
+
+    @Test func aSanitizedStatusSurvivesTheWireUnchanged() throws {
+        let observed = ObservedTuple(
+            codexDesktopPath: String(repeating: "a", count: 400),
+            codexCLICapabilities: (0..<200).map { "cap\($0)" }
+        )
+        let status = EnvironmentStatus(environmentID: EnvironmentID(), vm: .stopped, readiness: .ready, observed: observed)
+        #expect(status.observed.codexDesktopPath?.contains("[exact:") == true)
+        let decoded = try JSONDecoder().decode(EnvironmentStatus.self, from: JSONEncoder().encode(status))
+        #expect(decoded == status, "the receiver evaluates the identity the sender computed, not a re-escaped one")
+    }
+
+    @Test func credentialShapedDisplayNamesAreRefused() {
+        // The bundle name ends where the extension begins, which is no word boundary at all.
+        for bad in ["ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab.app", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"] {
+            #expect(throws: RequestValidationError.invalidDisplayName, "\(bad)") {
+                try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: bad))
+            }
+        }
+        // A decomposed name is ordinary on this filesystem; only a credential is refused.
+        for good in ["Xcode.app", "Cafe\u{301}.app"] {
+            #expect(throws: Never.self, "\(good)") {
+                try RequestValidator.validate(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: good))
+            }
+        }
+    }
+
+    @Test func anUncertainReasonIsBoundedAndRedacted() throws {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+        let state = EnvironmentStatus.VMState.uncertain(reason: SanitizedText("pid 42 \u{1B}[31mheld \(token)"))
+        guard case .uncertain(let reason) = state else { Issue.record("not uncertain"); return }
+        #expect(!reason.value.contains(token))
+        #expect(!reason.value.contains("\u{1B}"))
+        let decoded = try JSONDecoder().decode(EnvironmentStatus.VMState.self, from: Data(#"{"uncertain":{"reason":"\#(token)"}}"#.utf8))
+        #expect(decoded == .uncertain(reason: "[redacted:github-token]"))
+    }
+
     @Test func observedValuesAreBoundedAndRedactedOnTheWire() throws {
         let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
         let observed = ObservedTuple(codexCLIVersion: "0.50.0 \(token)", codexCLIPath: String(repeating: "x", count: 5_000), codexCLICapabilities: (0..<200).map { "cap\($0)\u{1B}[31m" })
         let status = EnvironmentStatus(environmentID: EnvironmentID(), vm: .stopped, readiness: .ready, observed: observed)
-        #expect(status.observed.codexCLIVersion?.contains(token) == false)
-        #expect(status.observed.codexCLIVersion?.contains("[redacted:github-token]") == true)
-        #expect((status.observed.codexCLIPath?.unicodeScalars.count ?? 0) <= 257)
+        // A value the redactor emptied of a secret, and one longer than the sanitizer reads,
+        // are both unknown: neither can serve as the identity the tuple is compared by.
+        #expect(status.observed.codexCLIVersion == nil)
+        #expect(status.observed.codexCLIPath == nil)
+        #expect(status.observed.unknownFields.contains(.codexCLIVersion))
+        #expect(status.observed.unknownFields.contains(.codexCLIPath))
+        // A value the sanitizer merely normalized keeps its place, and its identity.
+        #expect(ObservedTuple(codexCLIVersion: "0.50.0\u{1B}[31m").sanitizedForWire().codexCLIVersion?.hasPrefix("0.50.0 [exact:") == true)
         #expect(status.observed.codexCLICapabilities?.count == 64)
         #expect(status.observed.codexCLICapabilities?.allSatisfy { !$0.contains("\u{1B}") } == true)
         let decoded = try JSONDecoder().decode(ObservedTuple.self, from: Data(#"{"tartVersion":"\#(token)"}"#.utf8))

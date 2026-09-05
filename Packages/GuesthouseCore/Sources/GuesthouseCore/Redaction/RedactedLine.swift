@@ -20,9 +20,10 @@ public struct RedactedLine: Hashable, Sendable, CustomStringConvertible {
 
 extension RedactedLine: Codable {
     /// Decoded text is redacted again: a serialized or XPC-provided value is not trusted to
-    /// have passed through `Redactor` on the other side.
+    /// have passed through `Redactor` on the other side. The line that gave a device code its
+    /// context did not survive serialization, so codes are redacted unconditionally here.
     public init(from decoder: any Decoder) throws {
-        text = Redactor().redact(try decoder.singleValueContainer().decode(String.self))
+        text = Redactor().redact(untrusted: try decoder.singleValueContainer().decode(String.self))
     }
 
     public func encode(to encoder: any Encoder) throws {

@@ -30,29 +30,41 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
 
     /// Evidence of a real desktop connection for one exact host, attached to a tested entry.
     public struct Verification: Codable, Hashable, Sendable {
-        public var verifiedAt: Date
-        public var hostMacOSVersion: SemanticVersion
-        public var hostMacOSBuild: String
+        /// Rounded at construction to the precision the encoded form carries, so a value and
+        /// its own decoded form compare equal and hash alike.
+        public let verifiedAt: Date
+        public let hostMacOSVersion: SemanticVersion
+        public let hostMacOSBuild: String
         /// Where the evidence lives, for example `docs/phase0/compat.md`.
-        public var evidence: String
+        public let evidence: String
 
         public init(verifiedAt: Date, hostMacOSVersion: SemanticVersion, hostMacOSBuild: String, evidence: String) {
-            self.verifiedAt = verifiedAt
+            self.verifiedAt = Self.encodablePrecision(verifiedAt)
             self.hostMacOSVersion = hostMacOSVersion
             self.hostMacOSBuild = hostMacOSBuild
             self.evidence = evidence
         }
 
-        /// `verifiedAt` has one fixed representation, an ISO 8601 string with fractional
-        /// seconds, whatever encoder or decoder is used, so a manifest produced with
-        /// `JSONEncoder` reads back through `decode(from:)`.
+        /// The instant `verifiedAt` becomes once encoded. A `Date` carries far more precision
+        /// than the encoded form does, and keeping the extra digits would mean a value that
+        /// never compares equal to itself after a round trip.
+        private static func encodablePrecision(_ date: Date) -> Date {
+            Date(timeIntervalSinceReferenceDate: date.timeIntervalSinceReferenceDate.rounded())
+        }
+
+        /// `verifiedAt` has one fixed representation, an ISO 8601 string in whole seconds,
+        /// whatever encoder or decoder is used, so a manifest produced with `JSONEncoder`
+        /// reads back through `decode(from:)`. Whole seconds because `ISO8601FormatStyle`'s
+        /// fractional seconds do not survive their own round trip, and when a connection was
+        /// recorded is not a sub-second fact. A document written with fractional seconds still
+        /// decodes; it is rounded like any other input.
         private enum CodingKeys: String, CodingKey { case verifiedAt, hostMacOSVersion, hostMacOSBuild, evidence }
-        private static let dateStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        private static let dateStyle = Date.ISO8601FormatStyle()
 
         public init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             let text = try c.decode(String.self, forKey: .verifiedAt)
-            guard let date = (try? Self.dateStyle.parse(text)) ?? (try? Date.ISO8601FormatStyle().parse(text)) else {
+            guard let date = (try? Self.dateStyle.parse(text)) ?? (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text)) else {
                 throw DecodingError.dataCorruptedError(forKey: .verifiedAt, in: c, debugDescription: "not an ISO 8601 date")
             }
             self.init(
@@ -77,23 +89,27 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
     }
 
     /// One tested combination. Host macOS is a range; every other field is exact.
+    ///
+    /// Immutable throughout: `verification` names evidence for the combination the other fields
+    /// spell out, so editing one field in place would leave the evidence attached to a
+    /// combination it never covered. Replacing the whole entry states the pairing again.
     public struct TestedTuple: Codable, Hashable, Sendable {
-        public var hostMacOS: VersionRange
-        public var codexDesktopVersion: String
-        public var codexDesktopBuild: String
-        public var codexDesktopPath: String
-        public var runtimeProtocolVersion: Int
-        public var tartVersion: String
-        public var guestMacOSBuild: String
-        public var xcodeBuild: String
-        public var codexCLIVersion: String
-        public var codexCLIPath: String
-        public var codexCLICapabilities: [String]
-        public var githubCLIVersion: String
-        public var provisioningScriptVersion: String
+        public let hostMacOS: VersionRange
+        public let codexDesktopVersion: String
+        public let codexDesktopBuild: String
+        public let codexDesktopPath: String
+        public let runtimeProtocolVersion: Int
+        public let tartVersion: String
+        public let guestMacOSBuild: String
+        public let xcodeBuild: String
+        public let codexCLIVersion: String
+        public let codexCLIPath: String
+        public let codexCLICapabilities: [String]
+        public let githubCLIVersion: String
+        public let provisioningScriptVersion: String
         /// Present only when a real desktop connection was recorded, and then only for the exact
         /// host it names.
-        public var verification: Verification?
+        public let verification: Verification?
 
         public init(
             hostMacOS: VersionRange,
@@ -140,7 +156,9 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
                 xcodeBuild: try c.decode(String.self, forKey: .xcodeBuild),
                 codexCLIVersion: try c.decode(String.self, forKey: .codexCLIVersion),
                 codexCLIPath: try c.decode(String.self, forKey: .codexCLIPath),
-                codexCLICapabilities: try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities) ?? [],
+                // Required, never defaulted: a manifest that omits the key is stale rather than
+                // one that reports a CLI with no capabilities, and the difference decides matches.
+                codexCLICapabilities: try c.decode([String].self, forKey: .codexCLICapabilities),
                 githubCLIVersion: try c.decode(String.self, forKey: .githubCLIVersion),
                 provisioningScriptVersion: try c.decode(String.self, forKey: .provisioningScriptVersion),
                 verification: try c.decodeIfPresent(Verification.self, forKey: .verification)
@@ -163,7 +181,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
                 && codexCLIVersion == tuple.codexCLIVersion
                 && codexCLIPath == tuple.codexCLIPath
                 && tuple.codexCLIInstallations == 1
-                && codexCLICapabilities == tuple.codexCLICapabilities
+                && codexCLICapabilities == CompatibilityTuple.normalize(tuple.codexCLICapabilities)
                 && githubCLIVersion == tuple.githubCLIVersion
                 && provisioningScriptVersion == tuple.provisioningScriptVersion
         }
@@ -173,30 +191,70 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
     /// for the rule to apply; an unknown observed field never triggers it. A rule can single
     /// out one CLI executable, one capability set, or one desktop bundle, so a broken
     /// installation can be blocked without blocking a working one of the same version.
+    ///
+    /// Immutable throughout: a rule blocks handoff, and the evaluator hands its `reason` and
+    /// `recoveryActions` straight to the GUI, so both invariants below have to survive from
+    /// construction to the moment the rule fires.
     public struct KnownIncompatibility: Codable, Hashable, Sendable {
-        /// What stays available when a rule fires: the console, work export, and stopping the
-        /// environment (the persistent stop control is never an error button).
-        public static let defaultRecoveryActions: [RecoveryAction] = [.openConsole, .exportWork, .cancel]
+        /// What stays available when a rule fires: a targeted repair of the tools whose
+        /// combination is blocked, the console, work export, and stopping the environment (the
+        /// persistent stop control is never an error button).
+        ///
+        /// The repair leads: a blocked combination that offered only console access and export
+        /// would refuse every new handoff with no way out of it, and MVP-PLAN.md §5 asks for a
+        /// route back rather than a dead end.
+        public static let defaultRecoveryActions: [RecoveryAction] = [.repair(.tools), .openConsole, .exportWork, .cancel]
 
-        public var hostMacOS: VersionRange?
-        public var hostMacOSBuild: String?
-        public var codexDesktopVersion: String?
-        public var codexDesktopBuild: String?
-        public var codexDesktopPath: String?
-        public var runtimeProtocolVersion: Int?
-        public var tartVersion: String?
-        public var guestMacOSBuild: String?
-        public var xcodeBuild: String?
-        public var codexCLIVersion: String?
-        public var codexCLIPath: String?
+        /// A rule's own actions with everything §5 requires of a blocked state added back.
+        ///
+        /// MVP-PLAN.md §5 asks for an idle-time repair path for known-incompatible versions and
+        /// says to "preserve console access, shutdown, and work export in **every** state", so
+        /// this is not something a rule gets to choose. Expecting each rule to name the right
+        /// actions itself was enough while the manifest was written here, but the rules are data:
+        /// a `[.cancel]` in a decoded manifest, or an updated one that simply lists fewer, would
+        /// otherwise hand the GUI a blocked handoff and a single dead end.
+        ///
+        /// The rule's own actions keep their order and lead, because they were written for this
+        /// combination — except that a repair goes in front of them when the rule names none,
+        /// which is where `defaultRecoveryActions` puts it and why. A repair the rule does name
+        /// counts as the repair whatever it repairs: some incompatibilities are not fixed by the
+        /// tools flow, and offering a second button that cannot help is worse than none.
+        static func completed(_ actions: [RecoveryAction]) -> [RecoveryAction] {
+            let namesARepair = actions.contains { if case .repair = $0 { true } else { false } }
+            var completed: [RecoveryAction] = namesARepair ? [] : [.repair(.tools)]
+            completed += actions
+            for required in defaultRecoveryActions {
+                // A repair is present either way by now, its own or the default one; asking
+                // whether *this* repair is present would add the tools flow beside it.
+                if case .repair = required { continue }
+                guard !completed.contains(required) else { continue }
+                completed.append(required)
+            }
+            return completed
+        }
+
+        public let hostMacOS: VersionRange?
+        public let hostMacOSBuild: String?
+        public let codexDesktopVersion: String?
+        public let codexDesktopBuild: String?
+        public let codexDesktopPath: String?
+        public let runtimeProtocolVersion: Int?
+        public let tartVersion: String?
+        public let guestMacOSBuild: String?
+        public let xcodeBuild: String?
+        public let codexCLIVersion: String?
+        public let codexCLIPath: String?
         /// Matches when the observed capability list, normalized, equals this list.
-        public var codexCLICapabilities: [String]?
-        public var githubCLIVersion: String?
-        public var provisioningScriptVersion: String?
-        public var reason: String
+        public let codexCLICapabilities: [String]?
+        public let githubCLIVersion: String?
+        public let provisioningScriptVersion: String?
+        /// Why handoff is blocked, in the user's words. Never empty.
+        public let reason: String
         /// What the GUI offers when this rule fires. Never empty.
-        public var recoveryActions: [RecoveryAction]
+        public let recoveryActions: [RecoveryAction]
 
+        /// - Precondition: `reason` is not empty or whitespace only. A rule that blocks handoff
+        ///   without saying why leaves the GUI with a button and no explanation.
         public init(
             hostMacOS: VersionRange? = nil,
             hostMacOSBuild: String? = nil,
@@ -215,6 +273,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             reason: String,
             recoveryActions: [RecoveryAction] = KnownIncompatibility.defaultRecoveryActions
         ) {
+            precondition(!Self.isBlank(reason), "an incompatibility rule must explain itself")
             self.hostMacOS = hostMacOS
             self.hostMacOSBuild = hostMacOSBuild
             self.codexDesktopVersion = codexDesktopVersion
@@ -230,11 +289,19 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
             self.githubCLIVersion = githubCLIVersion
             self.provisioningScriptVersion = provisioningScriptVersion
             self.reason = reason
-            self.recoveryActions = recoveryActions.isEmpty ? Self.defaultRecoveryActions : recoveryActions
+            self.recoveryActions = Self.completed(recoveryActions)
+        }
+
+        private static func isBlank(_ text: String) -> Bool {
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
 
         public init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
+            let reason = try c.decode(String.self, forKey: .reason)
+            guard !Self.isBlank(reason) else {
+                throw DecodingError.dataCorruptedError(forKey: .reason, in: c, debugDescription: "an incompatibility rule must explain itself")
+            }
             self.init(
                 hostMacOS: try c.decodeIfPresent(VersionRange.self, forKey: .hostMacOS),
                 hostMacOSBuild: try c.decodeIfPresent(String.self, forKey: .hostMacOSBuild),
@@ -250,7 +317,7 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
                 codexCLICapabilities: try c.decodeIfPresent([String].self, forKey: .codexCLICapabilities),
                 githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
                 provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion),
-                reason: try c.decode(String.self, forKey: .reason),
+                reason: reason,
                 recoveryActions: try c.decodeIfPresent([RecoveryAction].self, forKey: .recoveryActions) ?? Self.defaultRecoveryActions
             )
         }
@@ -279,38 +346,72 @@ public struct CompatibilityManifest: Codable, Hashable, Sendable {
                 && check(xcodeBuild, observed.xcodeBuild)
                 && check(codexCLIVersion, observed.codexCLIVersion)
                 && check(codexCLIPath, observed.codexCLIPath)
-                && check(codexCLICapabilities, observed.codexCLICapabilities)
+                // The rule's list is normalized at construction; an observation assembled field
+                // by field need not be, and order must never decide whether a rule fires.
+                && check(codexCLICapabilities, observed.codexCLICapabilities.map(CompatibilityTuple.normalize))
                 && check(githubCLIVersion, observed.githubCLIVersion)
                 && check(provisioningScriptVersion, observed.provisioningScriptVersion)
         }
     }
 
-    /// The manifest shipped inside this package.
-    public static func bundled() throws -> CompatibilityManifest {
-        guard let url = Bundle.module.url(forResource: "compatibility-manifest", withExtension: "json") else {
-            throw CocoaError(.fileNoSuchFile)
+    /// Refuses any schema this build cannot interpret: a newer document may carry a
+    /// compatibility dimension this evaluator would silently ignore. The check lives here so
+    /// that a plain `JSONDecoder().decode(CompatibilityManifest.self, from:)` enforces it too.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try c.decode(SchemaVersion.self, forKey: .schemaVersion)
+        guard schemaVersion == SchemaVersion.current else {
+            throw CompatibilityManifestError.unsupportedSchema(found: schemaVersion, supported: .current)
         }
-        return try decode(from: try Data(contentsOf: url))
+        self.init(
+            schemaVersion: schemaVersion,
+            manifestVersion: try c.decode(Int.self, forKey: .manifestVersion),
+            notes: try c.decodeIfPresent(String.self, forKey: .notes),
+            tested: try c.decode([TestedTuple].self, forKey: .tested),
+            incompatibilities: try c.decode([KnownIncompatibility].self, forKey: .incompatibilities)
+        )
     }
 
-    /// Decodes a manifest and refuses any schema this build cannot interpret: a newer document
-    /// may carry a compatibility dimension this evaluator would silently ignore.
-    public static func decode(from data: Data) throws -> CompatibilityManifest {
-        let manifest = try JSONDecoder().decode(CompatibilityManifest.self, from: data)
-        guard manifest.schemaVersion == SchemaVersion.current else {
-            throw CompatibilityManifestError.unsupportedSchema(found: manifest.schemaVersion, supported: .current)
+    /// The manifest shipped inside this package.
+    public static func bundled() throws -> CompatibilityManifest {
+        guard let url = Bundle.module.url(forResource: "compatibility-manifest", withExtension: "json"),
+              let data = try? Data(contentsOf: url)
+        else {
+            throw CompatibilityManifestError.unreadableManifest
         }
-        return manifest
+        return try decode(from: data)
+    }
+
+    /// Decodes a manifest, reporting every failure as something the user can act on rather than
+    /// as a raw decoding fault: the only manifest the app reads is one it shipped with, so a
+    /// failure here means the installation, not the document, is wrong.
+    public static func decode(from data: Data) throws -> CompatibilityManifest {
+        do {
+            return try JSONDecoder().decode(CompatibilityManifest.self, from: data)
+        } catch let error as CompatibilityManifestError {
+            throw error
+        } catch {
+            throw CompatibilityManifestError.malformedManifest
+        }
     }
 }
 
 public enum CompatibilityManifestError: Error, Hashable, Sendable, LocalizedError {
     case unsupportedSchema(found: SchemaVersion, supported: SchemaVersion)
+    /// The shipped resource is missing from the bundle or could not be read.
+    case unreadableManifest
+    /// The document is not a compatibility manifest this build can parse. What was found is
+    /// deliberately not quoted; resource content does not belong in a user-facing message.
+    case malformedManifest
 
     public var userMessage: String {
         switch self {
         case .unsupportedSchema(let found, let supported):
             "The compatibility list shipped with this copy of Guesthouse uses format \(found.rawValue), which this version reads as \(supported.rawValue). The app and its resources do not match; reinstall Guesthouse."
+        case .unreadableManifest:
+            "The compatibility list shipped with this copy of Guesthouse is missing or cannot be read. The installation is damaged; reinstall Guesthouse."
+        case .malformedManifest:
+            "The compatibility list shipped with this copy of Guesthouse is not a list this version can read. The installation is damaged; reinstall Guesthouse."
         }
     }
 

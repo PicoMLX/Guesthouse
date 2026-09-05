@@ -59,9 +59,12 @@ extension SemanticVersion: Codable {
 }
 
 /// An inclusive version range; `maximum == nil` means open-ended.
+///
+/// The bounds are immutable: a range that could be inverted after construction would let a
+/// rule that once matched silently stop firing, without passing any of the checks below.
 public struct VersionRange: Codable, Hashable, Sendable {
-    public var minimum: SemanticVersion
-    public var maximum: SemanticVersion?
+    public let minimum: SemanticVersion
+    public let maximum: SemanticVersion?
 
     /// An inverted range would contain nothing and let a rule silently never fire.
     public init(minimum: SemanticVersion, maximum: SemanticVersion? = nil) {

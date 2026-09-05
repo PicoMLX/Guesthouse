@@ -74,20 +74,26 @@ public struct ProcessExit: Hashable, Sendable {
     /// True when output was dropped: the per-run cap was reached, or the consumer fell too
     /// far behind the child.
     public let outputTruncated: Bool
+    /// True when a process this run owned was still itself and refused the signal meant to
+    /// stop it. It may still be running, so whatever it was doing has an unknown outcome
+    /// (MVP-PLAN.md §4) and the caller has to inspect the development Mac rather than repeat
+    /// the operation.
+    public let terminationRefused: Bool
 
-    public init(reason: Reason, timedOut: Bool = false, terminated: Bool = false, standardInputFailed: Bool = false, outputTruncated: Bool = false) {
+    public init(reason: Reason, timedOut: Bool = false, terminated: Bool = false, standardInputFailed: Bool = false, outputTruncated: Bool = false, terminationRefused: Bool = false) {
         self.reason = reason
         self.timedOut = timedOut
         self.terminated = terminated
         self.standardInputFailed = standardInputFailed
         self.outputTruncated = outputTruncated
+        self.terminationRefused = terminationRefused
     }
 
     /// Exit status zero, and nothing interrupted the run: an interrupted mutation that exits
-    /// zero on SIGTERM is not a success.
+    /// zero on SIGTERM is not a success, and neither is one that left a process behind.
     public var succeeded: Bool {
         guard case .status(0) = reason else { return false }
-        return !timedOut && !terminated && !standardInputFailed
+        return !timedOut && !terminated && !standardInputFailed && !terminationRefused
     }
 }
 
@@ -96,6 +102,9 @@ public enum ProcessLaunchError: Error, Hashable, Sendable, LocalizedError {
     case executableNotFound(String)
     /// The executable name and a sanitized launch diagnostic.
     case launchFailed(executable: String, reason: SanitizedText)
+    /// The folder the program had to run in is gone or cannot be entered. Nothing about the
+    /// runtime is wrong, so the runtime repair is not offered.
+    case workingDirectoryUnavailable(String)
 
     public var userMessage: String {
         switch self {
@@ -103,6 +112,8 @@ public enum ProcessLaunchError: Error, Hashable, Sendable, LocalizedError {
             "The program \(GuesthouseError.sanitize(name)) is missing from the Guesthouse runtime. Repair reinstalls the tested runtime."
         case .launchFailed(let name, let reason):
             "The program \(GuesthouseError.sanitize(name)) could not be started (\(reason.value)). Repair reinstalls the tested runtime; if that does not help, try again after checking the runtime folder in Settings."
+        case .workingDirectoryUnavailable(let name):
+            "The folder \(GuesthouseError.sanitize(name)) this step had to run in is missing or cannot be opened. Check what is actually on the development Mac before running it again."
         }
     }
 
@@ -111,6 +122,7 @@ public enum ProcessLaunchError: Error, Hashable, Sendable, LocalizedError {
         switch self {
         case .executableNotFound: [.repair(.runtime), .cancel]
         case .launchFailed: [.repair(.runtime), .retry, .openSettings, .cancel]
+        case .workingDirectoryUnavailable: [.inspectState, .retry, .cancel]
         }
     }
 
