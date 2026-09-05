@@ -42,8 +42,7 @@ extension SanitizedText {
         let joined = String(String.UnicodeScalarView(originalStripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
         let normalizationShortened = joined.unicodeScalars.count < limit + Self.sanitizeLookahead
         let credentialReading = String(String.UnicodeScalarView(spliceSafe.unicodeScalars.map {
-            CharacterSet.whitespacesAndNewlines.contains($0)
-                || (!Redactor.sanitizationKeepsScalar($0) && $0.properties.generalCategory != .control) ? " " : $0
+            CharacterSet.whitespacesAndNewlines.contains($0) ? " " : $0
         }))
         let rawRedacted = Redactor().redact(fieldValue: credentialReading)
         let stripped = Redactor.stripTerminalEscapes(rawRedacted)
@@ -54,6 +53,16 @@ extension SanitizedText {
         // Neither transformed string retains offsets into the other. If the normalized reading
         // finds credential evidence and disagrees, quarantine this bounded display value whole.
         if joinedRedacted != joined, joinedRedacted != normalized {
+            normalized = Redactor.marker("normalized-value")
+        }
+        let boundaryReading = String(String.UnicodeScalarView(credentialReading.unicodeScalars.map {
+            !Redactor.sanitizationKeepsScalar($0) && $0.properties.generalCategory != .control ? " " : $0
+        }))
+        let boundaryRedacted = Redactor().redact(fieldValue: boundaryReading)
+        // Artificial boundaries must not release evidence either. An existing whole-value
+        // marker already covers every source byte; otherwise disagreement is quarantined.
+        if boundaryReading != credentialReading, boundaryRedacted != boundaryReading, boundaryRedacted != normalized,
+           normalized.wholeMatch(of: #/\[redacted:[a-z-]+\]/#) == nil {
             normalized = Redactor.marker("normalized-value")
         }
         if truncated {
