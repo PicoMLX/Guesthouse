@@ -67,6 +67,17 @@ public struct RuntimeRequestEnvelope: Codable, Hashable, Sendable {
         public let client: RuntimeProtocolVersion
         public var error: GuesthouseError { .protocolMismatch(client: client.rawValue, service: RuntimeProtocolVersion.current.rawValue) }
     }
+
+    /// The version header on its own. Decoding this reads one integer and never looks at the
+    /// request, so a peer that is being refused before its payload is decoded can still be
+    /// answered with an error its own protocol version knows how to read.
+    public struct Header: Decodable, Hashable, Sendable {
+        public let protocolVersion: RuntimeProtocolVersion
+
+        public init(protocolVersion: RuntimeProtocolVersion) {
+            self.protocolVersion = protocolVersion
+        }
+    }
 }
 
 public struct StartOptions: Codable, Hashable, Sendable {

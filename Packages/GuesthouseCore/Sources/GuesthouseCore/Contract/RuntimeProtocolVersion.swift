@@ -9,9 +9,9 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
         self.rawValue = rawValue
     }
 
-    // Version 6 adopts event envelopes on native XPC. Versions 2–5 were already used by
-    // pre-envelope descendants; their independent payload additions must be reconciled.
-    public static let current = RuntimeProtocolVersion(6)
+    /// Version 7 combines versioned native-XPC events (6) with `tooManyInFlight`, originally
+    /// introduced by pre-envelope version 2. Do not restore either older wire shape here.
+    public static let current = RuntimeProtocolVersion(7)
 
     public static func < (lhs: RuntimeProtocolVersion, rhs: RuntimeProtocolVersion) -> Bool {
         lhs.rawValue < rhs.rawValue
