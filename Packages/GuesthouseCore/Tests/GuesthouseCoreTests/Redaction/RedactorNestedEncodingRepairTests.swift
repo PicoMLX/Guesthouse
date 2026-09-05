@@ -3,6 +3,20 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorNestedEncodingRepairTests {
+    @Test func aRawWrapperClosedInsideAnEncodedValueCannotCloseAgainAfterIt() {
+        let input = #"prefix=' password: \"first'stuff\"', syntheticTail"#
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test(arguments: 2...5, ["https://user:syntheticSecret@example.com", "eyJhbGciOiJIUzI1NiJ9.syntheticPayload"])
+    func nestedURLsAndIncompleteJWTsConcealTheirClosedContainer(layers: Int, credential: String) throws {
+        var input = credential
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[1] == "Finished")
+    }
+
     @Test(arguments: 2...5)
     func nestedEncodedFieldsStillConcealTheirOpaqueValues(layers: Int) throws {
         var input = #"{"password":"syntheticCredential","note":"ordinaryValue"}"#
