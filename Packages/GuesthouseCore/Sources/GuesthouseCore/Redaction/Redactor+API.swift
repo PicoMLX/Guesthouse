@@ -255,7 +255,9 @@ extension Redactor {
             redacted.replaceSubrange(start..<redacted.endIndex, with: Self.marker("jwt"))
         }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
-        return output(redacted)
+        // A different rule may have replaced the JOSE header with its own token marker.
+        // Preserve all original incomplete-token evidence, without releasing a partial payload.
+        return output(incompleteJWT ? Self.marker("jwt") : redacted)
     }
 
     /// Quoted and ordinary lines share the same footer-to-next-opener transition. Clearing
