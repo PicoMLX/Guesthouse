@@ -24,11 +24,15 @@ extension Redactor {
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
+            let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
-            state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2)
+            state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
-                state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2)
-            return "\(match.1)Authorization: \(marker("authorization"))"
+                state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
+            state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || explicit
+            let header = match.0[..<match.2.startIndex].lowercased()
+            let name = header.contains("set-cookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
+            return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
@@ -61,15 +65,18 @@ extension Redactor {
         // consume this last option before the generic rules get to see it.
         var labelAwaitsValue = state.expectingSecretValue || input.contains(p.secretOptionOnly)
         text = text.replacing(p.labeledSecret) { match in
+            let explicit = fieldExplicitlyContinues(match.3, tail: text[match.range.upperBound...])
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
-            labelMayContinue = labelMayContinue || !isClosedQuotedValue(match.3)
-            labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3)
+            labelMayContinue = labelMayContinue || !isClosedQuotedValue(match.3) || explicit
+            labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3) || explicit
+            state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || explicit
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretContinuation = labelMayContinue
         text = text.replacing(p.codeField) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
             state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.3)
+                || fieldExplicitlyContinues(match.3, tail: text[match.range.upperBound...])
             return "\(match.1)\(match.2): \(marker("device-code"))"
         }
         text = text.replacing(p.codePrompt) { match in

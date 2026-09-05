@@ -75,6 +75,7 @@ extension Redactor {
             let argument = secretArgument(in: text, from: match.range.upperBound)
             state.quotedValue = state.quotedValue ?? argument.quoted
             state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
+            state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || argument.continuesLine
             // Canonicalize equals to a space so the generic field rule cannot treat the
             // replacement and later arguments as a single unquoted passphrase.
             let separator = match.3 == "=" ? " " : String(match.3)

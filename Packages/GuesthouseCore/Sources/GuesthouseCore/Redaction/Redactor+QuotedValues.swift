@@ -51,6 +51,13 @@ extension Redactor {
 
     static func isClosedQuotedValue(_ value: Substring) -> Bool { closedQuotedValueTail(value) != nil }
 
+    /// A raw quote ends a regex capture before an explicit physical-line continuation.
+    /// Only whitespace/backslashes may follow it; a sibling field owns its own suffix.
+    static func fieldExplicitlyContinues(_ value: Substring, tail: Substring) -> Bool {
+        valueExplicitlyContinues(value) || (isClosedQuotedValue(value)
+            && tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
+    }
+
     static func closedQuotedValueTail(_ value: Substring) -> Substring? {
         let start = value.drop(while: { $0.isWhitespace })
         let depth = start.prefix(while: { $0 == "\\" }).count

@@ -23,4 +23,13 @@ import Testing
         #expect(!output.contains("abcdefghijklmnopqrstuvwxyz"))
         #expect(output.contains(#"\"path\":\"/tmp/report\""#))
     }
+
+    @Test(arguments: ["Authorization:", "password:", "device_code:", "Cookie:"], ["\"", "\\\""])
+    func initialQuotedFieldsKeepExplicitPhysicalContinuation(label: String, quote: String) {
+        let lines = [label + " " + quote + "synthetic" + quote + " \\", "opaque:Secret", "done"]
+        let output = Redactor().redact(lines: lines).map(\.text)
+        #expect(!output[0].contains("synthetic"))
+        #expect(!output[1].contains("opaque:Secret"))
+        #expect(output[2] == "done")
+    }
 }
