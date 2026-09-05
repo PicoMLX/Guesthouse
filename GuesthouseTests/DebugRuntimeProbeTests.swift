@@ -27,36 +27,49 @@ import Testing
             problem: .runtimeProbeFailed
         ))
 
-        #expect(description.contains("VNC disable not checked"))
-        #expect(!description.contains("VNC disable unavailable"))
+        #expect(description.contains("CLI capabilities: unattended Tahoe not checked, create/run/attach storage not checked, detached run not checked, native attach not checked, VNC disable not checked"))
+        #expect(!description.contains("unavailable"))
     }
 
-    @Test func observedVNCResultStillDistinguishesFalseFromTrue() {
-        let unavailable = RuntimeVersionInfo.LumeCapabilities(
-            unattendedTahoe: true,
-            createRunAttachStorage: true,
-            detachedRun: true,
-            nativeAttach: true,
-            vncCanBeDisabled: false
-        )
-        let available = RuntimeVersionInfo.LumeCapabilities(
+    @Test func allObservedCapabilitiesAreReportedAvailable() {
+        let capabilities = RuntimeVersionInfo.LumeCapabilities(
             unattendedTahoe: true,
             createRunAttachStorage: true,
             detachedRun: true,
             nativeAttach: true,
             vncCanBeDisabled: true
         )
+        let description = DebugRuntimeProbe.describe(.init(
+            version: "0.5.3",
+            verified: true,
+            capabilities: capabilities
+        ))
 
-        #expect(DebugRuntimeProbe.describe(.init(
+        #expect(description == "0.5.3 verified, CLI capabilities: unattended Tahoe available, create/run/attach storage available, detached run available, native attach available, VNC disable available")
+    }
+
+    @Test(arguments: [
+        (0, "unattended Tahoe"),
+        (1, "create/run/attach storage"),
+        (2, "detached run"),
+        (3, "native attach"),
+        (4, "VNC disable")
+    ])
+    func eachUnavailableCapabilityIsVisible(failedCapability: Int, label: String) {
+        let capabilities = RuntimeVersionInfo.LumeCapabilities(
+            unattendedTahoe: failedCapability != 0,
+            createRunAttachStorage: failedCapability != 1,
+            detachedRun: failedCapability != 2,
+            nativeAttach: failedCapability != 3,
+            vncCanBeDisabled: failedCapability != 4
+        )
+        let description = DebugRuntimeProbe.describe(.init(
             version: "0.5.3",
             verified: true,
-            capabilities: unavailable
-        )).contains("VNC disable unavailable"))
-        #expect(DebugRuntimeProbe.describe(.init(
-            version: "0.5.3",
-            verified: true,
-            capabilities: available
-        )).contains("VNC disable available"))
+            capabilities: capabilities
+        ))
+
+        #expect(description.contains("\(label) unavailable"))
     }
 
     @Test func lumeProblemsExposeTheirDeclaredRecoveryChoices() {

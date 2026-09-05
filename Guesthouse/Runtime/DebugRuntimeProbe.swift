@@ -46,15 +46,22 @@ final class DebugRuntimeProbe {
         if lume.version == nil, lume.capabilities == nil, lume.problem == nil {
             return "checking"
         }
-        let vncStatus = lume.capabilities.map {
-            $0.vncCanBeDisabled ? "available" : "unavailable"
-        } ?? "not checked"
+        let capabilities = [
+            ("unattended Tahoe", lume.capabilities?.unattendedTahoe),
+            ("create/run/attach storage", lume.capabilities?.createRunAttachStorage),
+            ("detached run", lume.capabilities?.detachedRun),
+            ("native attach", lume.capabilities?.nativeAttach),
+            ("VNC disable", lume.capabilities?.vncCanBeDisabled)
+        ].map { name, available in
+            let status = available.map { $0 ? "available" : "unavailable" } ?? "not checked"
+            return "\(name) \(status)"
+        }.joined(separator: ", ")
         let problem = lume.problem.map {
             let actions = $0.recoveryActions.map(Self.describe).joined(separator: "; ")
             let recovery = actions.isEmpty ? "" : " Declared recovery: \(actions)."
             return " (\($0.userMessage)\(recovery))"
         } ?? ""
-        return "\(lume.version ?? "unknown version")\(lume.verified ? " verified" : " unverified"), VNC disable \(vncStatus)\(problem)"
+        return "\(lume.version ?? "unknown version")\(lume.verified ? " verified" : " unverified"), CLI capabilities: \(capabilities)\(problem)"
     }
 
     private static func describe(_ action: RecoveryAction) -> String {
