@@ -3,6 +3,20 @@ import Testing
 @testable import GuesthouseCore
 
 struct SanitizedTextPolicyTests {
+    @Test(arguments: 0...3)
+    func truncatedBasicCredentialsDoNotDependOnBase64Alignment(padding: Int) {
+        let credential = Data(("user:" + String(repeating: "syntheticPassword", count: 100)).utf8).base64EncodedString()
+        let output = SanitizedText(String(repeating: " ", count: padding) + "Basic " + credential).value
+        #expect(!output.contains(String(credential.prefix(12))))
+    }
+
+    @Test(arguments: ["user:", "dsn=user:", "prefix user:"])
+    func truncatedUnclassifiedColonValuesCannotExposeDSNPasswords(prefix: String) {
+        let output = SanitizedText(prefix + String(repeating: "syntheticPassword", count: 100) + "@tcp(host)/db").value
+        #expect(!output.contains("synthetic"))
+        #expect(SanitizedText("compiler: ordinary diagnostic").value == "compiler: ordinary diagnostic")
+    }
+
     @Test(arguments: ["\u{00A0}", "\u{2007}", "\t", "\n", "\u{2028}"])
     func competingRawAndNormalizedCredentialReadingsFailClosed(separator: String) {
         let output = SanitizedText("ghp_" + separator + "syntheticCredential").value
