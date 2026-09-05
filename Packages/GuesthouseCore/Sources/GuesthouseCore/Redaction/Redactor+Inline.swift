@@ -80,15 +80,26 @@ extension Redactor {
             return "\(match.1)\(match.2): \(marker("device-code"))"
         }
         text = text.replacing(p.codePrompt) { match in
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
-            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.0.dropFirst(match.1.count))
+            let value = match.0.dropFirst(match.1.count)
+            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(value)
+                || fieldExplicitlyContinues(value, tail: text[match.range.upperBound...])
             let punctuation = match.0.hasSuffix(".") ? "." : ""
             return "\(match.1) \(marker("device-code"))\(punctuation)"
         }
-        text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
+        text = text.replacing(p.codePromptWithoutDelimiter) { match in
+            let tail = text[match.range.upperBound...]
+            state.expectingDeviceCode = state.expectingDeviceCode
+                || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
+            return "\(match.1) \(marker("device-code"))"
+        }
         text = text.replacing(p.declarativeCodePrompt) { match in
             if let value = match.2 {
                 state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+                state.expectingDeviceCode = state.expectingDeviceCode
+                    || fieldExplicitlyContinues(value, tail: text[match.range.upperBound...])
+                    || (text[match.range.upperBound...].allSatisfy({ $0.isWhitespace || $0 == "\\" })
+                        && valueExplicitlyContinues(text[match.range.upperBound...]))
             }
             state.expectingDeviceCode = state.expectingDeviceCode
                 || (match.2.map(valueStartsOnNextLine) ?? true)
@@ -107,7 +118,7 @@ extension Redactor {
         }
         text = protected.restoring(in: text, state: &state)
         if text.contains(p.mentionsCode) || codeExpected {
-            text = applyDeviceCodePattern(to: text)
+            text = applyDeviceCodePattern(to: text, preserveAlgorithms: !codeExpected)
         }
         return text
     }

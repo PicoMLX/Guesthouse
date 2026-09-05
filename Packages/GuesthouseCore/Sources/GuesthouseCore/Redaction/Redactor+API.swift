@@ -38,6 +38,11 @@ extension Redactor {
         }
         var text = stripped.joined
         if let quoted = state.quotedValue {
+            // This branch masks the whole physical line, but still has to advance the
+            // independently active PEM context before returning for the enclosing quote.
+            if let label = state.pemLabel, text.contains("-----END \(label)-----") {
+                state.pemLabel = nil
+            }
             // Inspect the original normalized text: replacement markers no longer contain the
             // closing delimiter. A closing line is redacted whole, but its suffix can open a new
             // pending field. Blank/styling-only lines do not close the quoted value.
