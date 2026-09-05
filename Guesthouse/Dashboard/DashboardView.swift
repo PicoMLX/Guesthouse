@@ -5,18 +5,26 @@ import GuesthouseCore
 /// cards, an empty state that leads to the setup wizard, and the two-slot cap explained.
 struct DashboardView: View {
     @Environment(AppModel.self) private var model
-    @State private var showingWizard = false
     @State private var showingDiagnostics = false
     /// Which environment the sheet is about, so Export writes the failing development Mac's
     /// evidence rather than whichever environment was created first.
     @State private var diagnosticsSubject: EnvironmentID?
+    /// Setup is opened, not presented, from here. This view is removed the moment the runtime
+    /// connection drops, and a sheet it owned would go with it: a transient failure would
+    /// close the host check in the middle and leave no way back to it, since the interrupted
+    /// screen has no setup entry point of its own.
+    let openSetup: () -> Void
+
+    init(openSetup: @escaping () -> Void) {
+        self.openSetup = openSetup
+    }
 
     var body: some View {
         let cards = model.cardStates()
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if cards.isEmpty {
-                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { diagnosticsSubject = nil; showingDiagnostics = true }) { showingWizard = true }
+                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { diagnosticsSubject = nil; showingDiagnostics = true }, create: openSetup)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16)], alignment: .leading, spacing: 16) {
                         ForEach(cards) { card in
@@ -28,13 +36,12 @@ struct DashboardView: View {
                                 openDiagnostics: { diagnosticsSubject = card.id; showingDiagnostics = true }
                             )
                         }
-                        SlotView(availability: model.createAvailability) { showingWizard = true }
+                        SlotView(availability: model.createAvailability, create: openSetup)
                     }
                 }
             }
             .padding(20)
         }
-        .sheet(isPresented: $showingWizard) { WizardPlaceholderView() }
         .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model, subject: diagnosticsSubject) }
     }
 }
@@ -232,22 +239,6 @@ struct AvailabilityButton: View {
     }
 }
 
-/// Stands in for the setup wizard until #31 lands.
-struct WizardPlaceholderView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Create a development Mac").font(.headline)
-            Text("The setup wizard is not implemented yet. It will check this Mac, create the virtual machine, finish macOS setup, connect securely, add Xcode, sign in, add a workspace, and validate the Codex handoff (MVP-PLAN.md §2).")
-                .foregroundStyle(.secondary)
-            HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
-        }
-        .padding(20)
-        .frame(width: 460)
-    }
-}
-
 // MARK: - Previews
 
 /// Loads a `PreviewScenarios` case into a model and shows the dashboard over it.
@@ -258,7 +249,7 @@ struct ScenarioPreview: View {
     var body: some View {
         Group {
             if let model {
-                DashboardView().environment(model)
+                DashboardView(openSetup: {}).environment(model)
             } else {
                 ProgressView()
             }

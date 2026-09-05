@@ -242,8 +242,11 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
     public var recoveryActions: [RecoveryAction] {
         switch self {
         case .volumeUnavailable: [.retry, .openSettings, .cancel]
-        case .notADirectory: [.openSettings, .cancel]
-        case .destinationNotWritable: [.openSettings, .retry, .cancel]
+        // Checking again is what the user does after moving the file out of the way, and it
+        // is the only recovery the app can perform today: without it an undetermined disk
+        // check would block first-launch setup with nothing to do about it.
+        case .notADirectory: [.retry, .openSettings, .cancel]
+        case .destinationNotWritable: [.retry, .openSettings, .cancel]
         }
     }
 

@@ -88,7 +88,7 @@ struct StubProbe: HostProbe {
         let report = PreflightCheck.run(probe: probe, storageRoot: hostile, now: Date(timeIntervalSince1970: 1_800_000_000))
         guard case .undetermined(let detail, _) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
         #expect(!detail.value.contains("\u{202E}"))
-        #expect(!report.storage.storageRootPath.contains("\u{202E}"))
+        #expect(report.storage.storageRootPath?.contains("\u{202E}") == false)
     }
 
     @Test func largeOperationRequirementsThatOverflowAreInsufficient() {
@@ -199,6 +199,50 @@ struct StubProbe: HostProbe {
         #expect(json.contains("[redacted:github-token]"))
         let restored = try JSONDecoder().decode(GuesthouseError.self, from: Data(json.utf8))
         #expect(restored == error)
+    }
+
+    @Test func theVolumeCanBeMeasuredThroughAPathTheCallerCanOpen() {
+        final class Recorder: HostProbe, @unchecked Sendable {
+            let cpuArchitecture: CPUArchitecture = .appleSilicon
+            let operatingSystemVersion = SemanticVersion([26, 5, 2])
+            let operatingSystemBuild: String? = "25F84"
+            let physicalMemoryBytes: UInt64 = 32 * ResourcePreset.gibibyte
+            let powerSource: PowerSource = .externalPower
+            private(set) nonisolated(unsafe) var asked: [URL] = []
+            func freeBytes(at url: URL) throws -> UInt64 {
+                asked.append(url)
+                return 500 * ResourcePreset.gigabyte
+            }
+            func installedApplication(bundleIdentifier: String) -> InstalledApplication? { nil }
+        }
+        let probe = Recorder()
+        let reachable = URL(fileURLWithPath: "/Users/dev/Library/Containers/app/Data", isDirectory: true)
+        let report = PreflightCheck.run(probe: probe, storageRoot: root, measuredAt: reachable, now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(probe.asked == [reachable], "the volume is measured where the caller may look")
+        #expect(report.storage.storageRootPath == root.path, "and the report still names where the development Mac will live")
+        #expect(report.canProceed)
+        // Measuring a proxy is not inspecting the destination, and the detail says so rather
+        // than letting a pass read as though the runtime's own root had been checked.
+        guard case .pass(let detail) = report.result(.freeDisk)!.outcome else { Issue.record("expected pass"); return }
+        #expect(detail.value.contains(reachable.path))
+        #expect(detail.value.contains("checked when the development Mac is created"))
+    }
+
+    @Test func aRootThatCannotBeResolvedLeavesTheDiskCheckUndetermined() {
+        // No account record means no destination and no volume: the step blocks instead of
+        // measuring this process's own home and calling it the runtime's.
+        let report = PreflightCheck.run(probe: StubProbe(), storageRoot: nil, now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(!report.canProceed)
+        #expect(report.storage.storageRootPath == nil, "a summary that cannot name the root names nothing")
+        guard case .undetermined(let detail, let recovery) = report.result(.freeDisk)!.outcome else { Issue.record("expected undetermined"); return }
+        #expect(detail.value.contains("home directory"))
+        #expect(recovery == [.retry])
+    }
+
+    @Test func aResolvedRootIsMeasuredAtTheDestinationWhenNoProxyIsGiven() {
+        let report = PreflightCheck.run(probe: StubProbe(), storageRoot: root, now: Date(timeIntervalSince1970: 1_800_000_000))
+        guard case .pass(let detail) = report.result(.freeDisk)!.outcome else { Issue.record("expected pass"); return }
+        #expect(!detail.value.contains("Measured at"), "nothing was substituted, so there is nothing to disclose")
     }
 
     @Test func aReportMissingACheckNeverProceeds() {
