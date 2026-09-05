@@ -223,19 +223,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         // patterns below no longer recognize. Combining marks go too: a mark inside a token
         // would otherwise split it out of the redactor's reach.
         let stripped = Redactor.stripTerminalEscapes(Redactor.redactEscapeSplicedRuns(bounded))
-        var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
-            switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
-                 .nonspacingMark, .spacingMark, .enclosingMark:
-                false
-            case .spaceSeparator:
-                // A no-break or ideographic space splits a credential exactly as a control
-                // character does. The ordinary space is a real word boundary and stays.
-                scalar == " "
-            default:
-                true
-            }
-        }))
+        var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
         if truncated {
             // Normalization drops scalars, so a window full of raw input can normalize to far
             // less: a run of combining marks between a device code's first and last character
