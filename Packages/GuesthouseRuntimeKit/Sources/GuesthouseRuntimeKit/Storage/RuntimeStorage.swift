@@ -104,6 +104,7 @@ public struct RuntimeStorage: Sendable {
     /// writable path and its managed parent before it becomes an invocation environment.
     public func environmentForLume() throws -> [String: String] {
         try Self.verify(root)
+        try Self.verify(url(for: .vms))
         try Self.verify(url(for: .state))
         try Self.verify(url(for: .lumeConfiguration))
         try Self.verify(url(for: .staging))
