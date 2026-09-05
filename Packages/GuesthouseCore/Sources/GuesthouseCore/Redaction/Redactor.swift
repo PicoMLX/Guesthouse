@@ -39,6 +39,8 @@ public struct Redactor: Sendable {
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
         var expectingDeviceCode = false
+        /// A distinctive GitHub prefix reached a line boundary; payload may continue after it.
+        var expectingGitHubContinuation = false
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
         var quotedValue: QuotedValue?
         /// A terminal control string opened on an earlier line and has not been terminated yet.
@@ -97,7 +99,19 @@ public struct Redactor: Sendable {
             text = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
         }
+        let githubRunsToLineEnd = stripped.joined.firstMatch(of: Self.patterns.githubTokenAtLineEnd) != nil
+        if state.expectingGitHubContinuation, !text.allSatisfy(\.isWhitespace) {
+            state.expectingGitHubContinuation = false
+            if let continuation = text.firstMatch(of: Self.patterns.githubContinuation) {
+                // Scan the original line for any following field/PEM context before replacing
+                // its first token-shaped fragment. The normal scan still handles the suffix.
+                Self.armPendingContexts(from: text, state: &boundaryScan)
+                state.expectingGitHubContinuation = continuation.range.upperBound == text.endIndex
+                text.replaceSubrange(continuation.range, with: Self.marker("github-token"))
+            }
+        }
         defer {
+            state.expectingGitHubContinuation = state.expectingGitHubContinuation || githubRunsToLineEnd
             state.expectingAuthorizationValue = state.expectingAuthorizationValue || boundaryScan.expectingAuthorizationValue
             state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || boundaryScan.authorizationValueIsOnTheNextLine
             state.expectingSecretValue = state.expectingSecretValue || boundaryScan.expectingSecretValue
@@ -225,7 +239,7 @@ public struct Redactor: Sendable {
         var lineStart = text.startIndex
         func appendRedacted(_ line: Substring) {
             let redacted = redact(line: String(line), state: &state).text
-            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted) : redacted
+            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted, preserveAlgorithms: true) : redacted
         }
         // `\r\n` is one `Character`, so splitting on the newline character would leave a CRLF
         // stream as a single line and never apply the streaming rules to it. Each terminator is
@@ -313,6 +327,7 @@ public struct Redactor: Sendable {
             isBasicCredential(match.2) ? match.range : nil
         }
         tokenRanges += joined.matches(of: patterns.digestCredentialSpan).map(\.range)
+        tokenRanges += joined.matches(of: patterns.specializedCredentialSpan).map(\.range)
         tokenRanges += joined.matches(of: patterns.jwt).compactMap { match in
             redactedJWT(match.2) == String(match.2) ? nil : match.range
         }
@@ -413,7 +428,7 @@ public struct Redactor: Sendable {
         /// `cache.<token>`, or in `payload.Authorization` is not a break, and a secret beside
         /// one would survive. The character is captured so it can be put back. A label may also
         /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
-        let bearer = #/(^|[^A-Za-z0-9_])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
+        let bearer = #/(^|[^A-Za-z0-9])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
         /// A standalone authentication value can reach decoded diagnostics without its header
         /// name. Basic is recognized only when the Base64 decodes to a user/password separator;
         /// Digest must start with an authentication parameter assignment, not ordinary prose.
@@ -422,7 +437,7 @@ public struct Redactor: Sendable {
         }
         let basicCredentialSpan = basicValue.ignoresCase()
         let basicAuthorization = Regex {
-            #/(^|[^A-Za-z0-9_])/#
+            #/(^|[^A-Za-z0-9])/#
             basicValue
         }.ignoresCase()
         private static var digestValue: Regex<Substring> {
@@ -430,8 +445,18 @@ public struct Redactor: Sendable {
         }
         let digestCredentialSpan = digestValue.ignoresCase()
         let digestAuthorization = Regex {
-            #/(^|[^A-Za-z0-9_])/#
+            #/(^|[^A-Za-z0-9])/#
             digestValue
+        }.ignoresCase()
+        /// Distinctive integrated-auth blobs and signed AWS requests remain recognizable after
+        /// their header name is lost. Ordinary scheme-name prose alone is not a credential.
+        private static var specializedValue: Regex<Substring> {
+            #/(?:ntlm|negotiate)[ \t]+[A-Za-z0-9+\/_-]{8,}={0,2}|aws4-hmac-sha256[ \t]+(?=(?:credential|signedheaders|signature)\s*=)[^\r\n]+/#
+        }
+        let specializedCredentialSpan = specializedValue.ignoresCase()
+        let specializedAuthorization = Regex {
+            #/(^|[^A-Za-z0-9])/#
+            specializedValue
         }.ignoresCase()
         /// Classic and fine-grained GitHub tokens. Nothing at all is required in front of the
         /// prefix, not even a delimiter: an untrusted file, branch, or cache name is glued
@@ -441,7 +466,10 @@ public struct Redactor: Sendable {
         /// `ghp`, `ghs`, or `github_pat` immediately before twenty alphanumerics is far rarer
         /// than the concatenation. The API-key rule below keeps its boundary, because `sk-` is
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
-        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/#
+        /// Even a short fragment is sensitive once its distinctive prefix is present.
+        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*/#
+        let githubTokenAtLineEnd = #/(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*)$/#
+        let githubContinuation = #/^[ \t]*[A-Za-z0-9_]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
         /// remain intact.
@@ -474,7 +502,7 @@ public struct Redactor: Sendable {
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
@@ -509,6 +537,11 @@ public struct Redactor: Sendable {
             }
             #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
+        let secretOptionOnly = Regex {
+            #/(^|\s)--?[A-Za-z0-9_-]*/#
+            secretName
+            #/[ \t]*(?:=[ \t]*)?$/#
+        }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
@@ -519,12 +552,12 @@ public struct Redactor: Sendable {
         /// word, such as `process exited with code 1`, is a diagnostic, not a prompt. The
         /// `user_code` and `device_code` fields keep their own rule above, which keeps the field
         /// name in the output, so they are deliberately absent here.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
         /// nothing else on it for the word to belong to.
-        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\?["'])?(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?|^\s*codes?)\s*[:=]\s*$/#.ignoresCase()
+        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\?["'])?(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\?["'])?(?:\s+\S+){0,2}?|^\s*codes?)\s*[:=]\s*$/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D` and the `WDJB.MJHT` an RFC 8628 provider may print:
         /// runs of four to eight upper-case characters joined by single separators. Applied only
         /// on lines that mention a code (including the `user_code` and `device_code` field names
@@ -551,7 +584,7 @@ public struct Redactor: Sendable {
         let codePromptWithoutDelimiter = #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))\s+(?=[A-Za-z0-9._-]{4})(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])/#
         /// Present-tense declarations explicitly supply the code. Lowercase, short, and
         /// quoted values are opaque. Historical status prose keeps the conservative rule above.
-        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals))(?:\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)|\s*$)/#.ignoresCase()
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals))(?:\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)|\s*$)/#.ignoresCase()
     }
 
     private static let patterns = Patterns()
@@ -618,6 +651,10 @@ public struct Redactor: Sendable {
             state.expectingAuthorizationValue = true
             return "\(match.1)Digest \(marker("authorization"))"
         }
+        text = text.replacing(p.specializedAuthorization) { match in
+            state.expectingAuthorizationValue = true
+            return "\(match.1)\(marker("authorization"))"
+        }
         // The GitHub rule captures nothing in front of the token: it needs no boundary there.
         text = text.replacing(p.githubToken, with: marker("github-token"))
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
@@ -628,7 +665,9 @@ public struct Redactor: Sendable {
         // A labeled value can be folded onto the next line, so the label arms the continuation
         // state the way an authorization header does.
         var labelCarriedAValue = false
-        var labelAwaitsValue = false
+        // Inspect the original input too: a preceding missing-value option may otherwise
+        // consume this last option before the generic rules get to see it.
+        var labelAwaitsValue = input.contains(p.secretOptionOnly)
         text = text.replacing(p.labeledSecret) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
             labelCarriedAValue = true
@@ -642,7 +681,8 @@ public struct Redactor: Sendable {
         }
         text = text.replacing(p.codePrompt) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
-            return "\(match.1) \(marker("device-code"))"
+            let punctuation = match.0.hasSuffix(".") ? "." : ""
+            return "\(match.1) \(marker("device-code"))\(punctuation)"
         }
         text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
         text = text.replacing(p.declarativeCodePrompt) { match in
@@ -670,8 +710,15 @@ public struct Redactor: Sendable {
         return text
     }
 
-    static func applyDeviceCodePattern(to input: String) -> String {
-        input.replacing(patterns.deviceCode) { match in "\(match.1)\(marker("device-code"))" }
+    static func applyDeviceCodePattern(to input: String, preserveAlgorithms: Bool = false) -> String {
+        input.replacing(patterns.deviceCode) { match in
+            // Only context-free shape matching has this exception. Explicit credential fields
+            // and code prompts still remove even a value that happens to name an algorithm.
+            if preserveAlgorithms, match.2.wholeMatch(of: #/(?:HMAC|ECDSA|RSA)-SHA(?:1|224|256|384|512)|PBKDF2-HMAC-SHA(?:1|224|256|384|512)|CHACHA20-POLY1305/#) != nil {
+                return String(match.0)
+            }
+            return "\(match.1)\(marker("device-code"))"
+        }
     }
 
     /// Scan argument boundaries before replacing them. Plain shell quotes, quotes escaped by
