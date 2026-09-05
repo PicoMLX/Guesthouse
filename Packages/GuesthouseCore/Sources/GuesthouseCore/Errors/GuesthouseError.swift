@@ -209,6 +209,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     static let sanitizeLookahead = 512
 
     public static func sanitize(_ value: String, limit: Int = 80) -> String {
+        sanitizeReporting(value, limit: limit).value
+    }
+
+    /// The sanitized text, and whether the redactor actually replaced something. Callers that
+    /// need to tell "a secret was removed" from "the text merely happens to contain the
+    /// marker" use this rather than searching the result for marker text.
+    public static func sanitizeReporting(_ value: String, limit: Int = 80) -> (value: String, redacted: Bool) {
         // This is public API, so the bound is clamped rather than trusted: an extreme limit
         // would otherwise overflow the window arithmetic and a negative one would hand
         // `prefix` an invalid length, trapping instead of returning sanitized text.
@@ -224,7 +231,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         // with it, because stripping it would silently repair a credential into something the
         // patterns below no longer recognize. Combining marks go too: a mark inside a token
         // would otherwise split it out of the redactor's reach.
-        let stripped = Redactor.stripTerminalEscapes(Redactor.redactEscapeSplicedRuns(bounded))
+        let spliced = Redactor.redactEscapeSplicedRuns(bounded)
+        let stripped = Redactor.stripTerminalEscapes(spliced)
+        // OSC/DCS/APC/PM/SOS discard arbitrary payload, not just styling. Even an edge
+        // sequence can hide a credential whose digest must not become an identity. Keep
+        // ordinary SGR/charset normalization distinct: those carry no arbitrary payload.
+        let controlPayloadRemoved = stripped != spliced
+            && spliced.contains(#/\u{1B}[\]P_^X]|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}]/#)
         var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter { scalar in
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned,
@@ -238,7 +251,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
                 true
             }
         }))
+        var truncationRedacted = false
         if truncated {
+            let opened = normalized
             // Normalization drops scalars, so a window full of raw input can normalize to far
             // less: a run of combining marks between a device code's first and last character
             // pushes that last character out of the window and leaves `AB12-CD3`, which no
@@ -266,11 +281,16 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
                 guard let start = Redactor.joseHeaderStart(match.1) else { return String(match.0) }
                 return match.1[..<start] + Redactor.marker("jwt")
             }
+            truncationRedacted = normalized != opened
         }
         let redacted = Redactor().redact(fieldValue: normalized)
+        // The truncation-time replacement counts as redaction, and so does the escape-spliced
+        // run or control payload dropped before normalization: all can remove credential text,
+        // and a caller must not attach an identity digest of that original text.
+        let wasRedacted = spliced != bounded || controlPayloadRemoved || truncationRedacted || redacted != normalized
         let scalars = redacted.unicodeScalars
-        guard scalars.count > limit else { return redacted }
-        return String(String.UnicodeScalarView(scalars.prefix(limit))) + "…"
+        guard scalars.count > limit else { return (redacted, wasRedacted) }
+        return (String(String.UnicodeScalarView(scalars.prefix(limit))) + "…", wasRedacted)
     }
 
     static func list(_ components: MissingComponents) -> String {

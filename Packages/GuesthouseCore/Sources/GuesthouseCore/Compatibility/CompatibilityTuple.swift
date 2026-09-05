@@ -208,7 +208,10 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
         self.codexCLIVersion = codexCLIVersion
         self.codexCLIPath = codexCLIPath
         self.codexCLIInstallations = codexCLIInstallations
-        self.codexCLICapabilities = codexCLICapabilities.map(CompatibilityTuple.normalize)
+        // An observation is capped for the wire, not refused, so it canonicalizes through its
+        // own rule: the record type's `normalize` deliberately leaves an oversized list
+        // uncollapsed so a count check can refuse it.
+        self.codexCLICapabilities = codexCLICapabilities.map(ObservedTuple.canonicalCapabilities)
         self.githubCLIVersion = githubCLIVersion
         self.provisioningScriptVersion = provisioningScriptVersion
     }
@@ -236,6 +239,8 @@ public struct ObservedTuple: Codable, Hashable, Sendable {
             githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
             provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion)
         )
+        // A decoded observation is untrusted: it came from another process or from disk.
+        self = boundedForDecoding()
     }
 
     public init(_ tuple: CompatibilityTuple) {
