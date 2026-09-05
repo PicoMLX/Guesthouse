@@ -174,7 +174,7 @@ extension Redactor {
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the

@@ -2,6 +2,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorGrammarReviewTests {
+    @Test(arguments: ["device_code:first", "user_code:first", "\"device_code\":\"first\"", "'user_code':'first'"])
+    func codeFieldDelimitersBoundLabelsWithoutWhitespace(input: String) throws {
+        let match = try #require(input.firstMatch(of: Redactor.patterns.codeField))
+        #expect(match.3.contains("first"))
+    }
+
+    @Test(arguments: ["device_codesecret:first", "user_codesecret:first"])
+    func longerIdentifiersDoNotBecomeCodeFields(input: String) {
+        #expect(!input.contains(Redactor.patterns.codeField))
+    }
+
     @Test(arguments: ["--password", "--token", "--api-key", "--github-token"])
     func terminalSplicesRemainOptionBoundaries(option: String) {
         #expect(("filename\u{009F}" + option + " synthetic").contains(Redactor.patterns.secretOption))
