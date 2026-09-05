@@ -5,9 +5,9 @@ import Synchronization
 /// A direct child created by this owner, never a PID adopted from a later lookup.
 ///
 /// The runtime must be the exclusive reaper of its children: no wildcard waits, SIGCHLD
-/// handlers, or SA_NOCLDWAIT changes during this lifetime. Targeted observation, signaling,
-/// and final reaping share one mutex. WNOWAIT keeps the child unreaped until this owner
-/// disables all future signals and calls waitpid. No process-group signals are exposed yet.
+/// handlers, or SA_NOCLDWAIT changes during this lifetime. Signal decisions and final reaping
+/// share one mutex. Only the blocking observer reaps, preserving the child's PID until its
+/// WNOWAIT wait returns. No process-group signals are exposed yet.
 /// A reaped direct child is NOT evidence that its descendants or private session are quiet.
 final class OwnedChild: Sendable {
     enum Failure: Error, Equatable, Sendable {
@@ -18,6 +18,7 @@ final class OwnedChild: Sendable {
 
     enum SignalResult: Equatable, Sendable {
         case delivered
+        case alreadyExited
         case alreadyReaped
         case authorityLost
         case refused(Int32)
@@ -33,6 +34,7 @@ final class OwnedChild: Sendable {
     /// an owner; production callers cannot turn an arbitrary PID into signal authority.
     struct SystemCalls: Sendable {
         var observe: @Sendable (pid_t) -> Observation
+        var waitForExit: @Sendable (pid_t) -> Result<Void, Failure>
         var reap: @Sendable (pid_t) -> Result<ProcessExit.Reason, Failure>
         var signal: @Sendable (pid_t, Int32) -> SignalResult
 
@@ -42,6 +44,14 @@ final class OwnedChild: Sendable {
                 return errno == EINTR ? .running : .failed(errno)
             }
             return information.si_pid == pid ? .exited : .running
+        }, waitForExit: { pid in
+            var information = siginfo_t()
+            var result: Int32
+            repeat { result = waitid(P_PID, id_t(pid), &information, WEXITED | WNOWAIT) }
+            while result == -1 && errno == EINTR
+            guard result == 0 else { return .failure(.waitAuthorityLost(errno)) }
+            guard information.si_pid == pid else { return .failure(.waitAuthorityLost(ECHILD)) }
+            return .success(())
         }, reap: { pid in
             var status: Int32 = 0
             var result: pid_t
@@ -59,7 +69,6 @@ final class OwnedChild: Sendable {
     private struct State {
         var result: Result<ProcessExit.Reason, Failure>?
         var waiters: [CheckedContinuation<Result<ProcessExit.Reason, Failure>, Never>] = []
-        var observer: Task<Void, Never>?
     }
 
     /// Caller-supplied correlation for a durable intent, not transferable signal authority.
@@ -94,52 +103,50 @@ final class OwnedChild: Sendable {
         // Observe before signaling, including ECHILD, under the same lock as the syscall.
         // The exclusive-reaper contract prevents PID reuse between these operations.
         let result = state.withLock { state -> SignalResult in
-            refreshLocked(&state)
             if let completed = state.result {
                 if case .success = completed { return .alreadyReaped }
                 return .authorityLost
             }
-            return calls.signal(processIdentifier, signal)
+            switch calls.observe(processIdentifier) {
+            case .running: return calls.signal(processIdentifier, signal)
+            case .exited: return .alreadyExited
+            case .failed(let error):
+                state.result = .failure(.waitAuthorityLost(error))
+                return .authorityLost
+            }
         }
         // Publish any terminal state and resume every waiter outside the lock.
-        _ = poll()
+        publishCompletion()
         return result
     }
 
     private func startObservation() {
-        // An unstructured owner task is intentional: the child must outlive cancellation or
-        // release of every caller. It releases itself only on observed/reaped exit or loss
-        // of wait authority. No blocking wait runs on the cooperative executor.
-        let observer = Task { [self] in
-            while !poll() { try? await Task.sleep(for: .milliseconds(10)) }
-        }
-        state.withLock { state in
-            if state.result == nil { state.observer = observer }
+        // One noncooperative dispatch waiter retains ownership through cancellation or
+        // release of every caller, without periodic wakeups. The wait is outside the mutex
+        // so signals remain possible. Only this callback may reap: an earlier reap could let
+        // the blocking wait start or resume against a different child that reused the PID.
+        DispatchQueue(label: "GuesthouseRuntimeKit.OwnedChild.exit", qos: .utility).async { [self] in
+            let observed = calls.waitForExit(processIdentifier)
+            state.withLock { state in
+                guard state.result == nil else { return }
+                switch observed {
+                case .success: state.result = calls.reap(processIdentifier)
+                case .failure(let failure): state.result = .failure(failure)
+                }
+            }
+            publishCompletion()
         }
     }
 
-    @discardableResult
-    private func poll() -> Bool {
+    private func publishCompletion() {
         let delivery = state.withLock { state -> (Result<ProcessExit.Reason, Failure>, [CheckedContinuation<Result<ProcessExit.Reason, Failure>, Never>])? in
-            refreshLocked(&state)
             guard let result = state.result else { return nil }
             let waiters = state.waiters
             state.waiters.removeAll()
             return (result, waiters)
         }
-        guard let delivery else { return false }
+        guard let delivery else { return }
         for waiter in delivery.1 { waiter.resume(returning: delivery.0) }
-        return true
-    }
-
-    private func refreshLocked(_ state: inout State) {
-        guard state.result == nil else { return }
-        switch calls.observe(processIdentifier) {
-        case .running: return
-        case .failed(let error): state.result = .failure(.waitAuthorityLost(error))
-        case .exited: state.result = calls.reap(processIdentifier)
-        }
-        state.observer = nil
     }
 
     /// Stdio descriptors are borrowed only until spawn returns; spawn duplicates and closes

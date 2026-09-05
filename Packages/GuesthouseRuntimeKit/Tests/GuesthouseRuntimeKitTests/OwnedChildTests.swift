@@ -108,12 +108,13 @@ import Testing
     func waitErrorsPermanentlyWithdrawSignalAuthority(errorCode: Int32) async throws {
         let signals = Mutex(0), reaps = Mutex(0)
         var calls = OwnedChild.SystemCalls.live
-        calls.observe = { pid in
+        calls.waitForExit = { pid in
             // Simulate a competing targeted reaper: consume this actual short-lived fixture
             // before returning the injected authority error. No fixture is left unowned.
             var status: Int32 = 0
-            let result = waitpid(pid, &status, WNOHANG)
-            return result == 0 ? .running : .failed(errorCode)
+            var result: pid_t
+            repeat { result = waitpid(pid, &status, 0) } while result == -1 && errno == EINTR
+            return .failure(.waitAuthorityLost(errorCode))
         }
         calls.reap = { _ in reaps.withLock { $0 += 1 }; return .failure(.waitAuthorityLost(ECHILD)) }
         calls.signal = { _, _ in signals.withLock { $0 += 1 }; return .delivered }
@@ -123,6 +124,32 @@ import Testing
         #expect(child.signal(SIGTERM) == .authorityLost)
         #expect(signals.withLock { $0 } == 0)
         #expect(reaps.withLock { $0 } == 0)
+    }
+
+    @Test func anObservedExitStaysUnreapedUntilTheBlockingWaitReturns() async throws {
+        let (events, continuation) = AsyncStream.makeStream(of: Bool.self)
+        let release = DispatchSemaphore(value: 0), reaps = Mutex(0)
+        defer { release.signal() }
+        var calls = OwnedChild.SystemCalls.live
+        calls.waitForExit = { pid in
+            let observed = OwnedChild.SystemCalls.live.waitForExit(pid)
+            continuation.yield(true)
+            release.wait() // Only this dedicated dispatch waiter blocks, never an async task.
+            return observed
+        }
+        calls.reap = { pid in
+            reaps.withLock { $0 += 1 }
+            return OwnedChild.SystemCalls.live.reap(pid)
+        }
+        let child = try spawn(output: Pipe(), error: Pipe(), calls: calls)
+        var iterator = events.makeAsyncIterator()
+        #expect(await iterator.next() == true)
+        #expect(child.signal(SIGKILL) == .alreadyExited)
+        #expect(reaps.withLock { $0 } == 0)
+        release.signal()
+        #expect(await child.waitForReapedExit() == .success(.status(0)))
+        #expect(reaps.withLock { $0 } == 1)
+        #expect(child.signal(SIGKILL) == .alreadyReaped)
     }
 
     @Test func aRenamedWorkingDirectoryCannotRedirectTheChild() async throws {
