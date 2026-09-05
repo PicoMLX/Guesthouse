@@ -12,17 +12,52 @@ extension Redactor {
         mergePendingContexts(from: scanned, into: &state)
     }
 
+    /// A completed quoted field owns only its value, so indented structured siblings cannot
+    /// belong to its fold. Encoded diagnostic quotes follow the same closure rules as streams.
+    static func isClosedQuotedValue(_ value: Substring) -> Bool {
+        closedQuotedValueTail(value) != nil
+    }
+
+    static func closedQuotedValueTail(_ value: Substring) -> Substring? {
+        let start = value.drop(while: { $0.isWhitespace })
+        let depth = start.prefix(while: { $0 == "\\" }).count
+        let content = start.dropFirst(depth)
+        guard let quote = content.first, quote == "\"" || quote == "'",
+              let end = closingQuoteEnd(in: content.dropFirst(), for: .init(delimiter: quote, escapeDepth: depth, kind: "secret"))
+        else { return nil }
+        return value[end...]
+    }
+
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
         let p = patterns
         var text = input
+        var tailState = StreamState()
+        var tails: [(key: String, value: String)] = []
+        defer { mergePendingContexts(from: tailState, into: &state) }
+        func redactedTail(of value: Substring) -> String {
+            guard let tail = closedQuotedValueTail(value), !tail.isEmpty else { return "" }
+            return applyPatterns(to: String(tail), codeExpected: false, state: &tailState)
+        }
+        func deferClosedValue(_ value: Substring, rendered: String) -> String {
+            guard isClosedQuotedValue(value) else { return rendered }
+            // Keep sanitized fields out of subsequent rules' original-value state.
+            var index = tails.count
+            var key = "\u{E001}\(index)\u{E002}"
+            while input.contains(key) || tails.contains(where: { $0.key == key }) {
+                index += 1
+                key = "\u{E001}\(index)\u{E002}"
+            }
+            tails.append((key, rendered))
+            return key
+        }
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
-            state.expectingAuthorizationValue = true
+            state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2)
             state.authorizationValueIsOnTheNextLine =
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2)
-            return "\(match.1)Authorization: \(marker("authorization"))"
+            return deferClosedValue(match.2, rendered: "\(match.1)Authorization: \(marker("authorization"))\(redactedTail(of: match.2))")
         }
         // Each token rule captures the character in front of the token, which is put back.
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
@@ -48,27 +83,30 @@ extension Redactor {
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
-        // A labeled value can be folded onto the next line, so the label arms the continuation
-        // state the way an authorization header does.
-        var labelCarriedAValue = false
+        // Unquoted or unfinished quoted values can fold onto the next line. A closing quote
+        // bounds a completed structured value even when the next sibling is indented.
+        var labelMayContinue = false
         // Inspect the original input too: a preceding missing-value option may otherwise
         // consume this last option before the generic rules get to see it.
         var labelAwaitsValue = state.expectingSecretValue || input.contains(p.secretOptionOnly)
         text = text.replacing(p.labeledSecret) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
-            labelCarriedAValue = true
+            labelMayContinue = labelMayContinue || !isClosedQuotedValue(match.3)
             labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3)
-            return "\(match.1)\(match.2): \(marker("secret"))"
+            return deferClosedValue(match.3, rendered: "\(match.1)\(match.2): \(marker("secret"))\(redactedTail(of: match.3))")
         }
-        state.expectingSecretContinuation = labelCarriedAValue
+        state.expectingSecretContinuation = labelMayContinue
         text = text.replacing(p.codeField) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
-            return "\(match.1)\(match.2): \(marker("device-code"))"
+            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.3)
+            return deferClosedValue(match.3, rendered: "\(match.1)\(match.2): \(marker("device-code"))\(redactedTail(of: match.3))")
         }
         text = text.replacing(p.codePrompt) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
+            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.0.dropFirst(match.1.count))
             let punctuation = match.0.hasSuffix(".") ? "." : ""
-            return "\(match.1) \(marker("device-code"))\(punctuation)"
+            let value = match.0.dropFirst(match.1.count)
+            return deferClosedValue(value, rendered: "\(match.1) \(marker("device-code"))\(punctuation)\(redactedTail(of: value))")
         }
         text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
         text = text.replacing(p.declarativeCodePrompt) { match in
@@ -77,7 +115,8 @@ extension Redactor {
             }
             state.expectingDeviceCode = state.expectingDeviceCode
                 || (match.2.map(valueStartsOnNextLine) ?? true)
-            return "\(match.1) \(marker("device-code"))"
+            let rendered = "\(match.1) \(marker("device-code"))\(match.2.map { redactedTail(of: $0) } ?? "")"
+            return match.2.map { deferClosedValue($0, rendered: rendered) } ?? rendered
         }
         text = text.replacing(p.secretLabelOnly) { match in
             labelAwaitsValue = true
@@ -93,6 +132,7 @@ extension Redactor {
         if text.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
         }
+        for tail in tails.reversed() { text = text.replacingOccurrences(of: tail.key, with: tail.value) }
         return text
     }
 
