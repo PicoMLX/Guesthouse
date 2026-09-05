@@ -56,49 +56,128 @@ struct EnvironmentCardState: Equatable, Identifiable {
     /// True while the runtime is reconciling or an operation is in flight.
     let isBusy: Bool
     let phase: ProgressPhase?
+    /// The running operation, for the progress view.
+    let progress: OperationProgressPresentation?
     /// The problem the runtime reported, if any, with its recovery actions.
     let attention: GuesthouseError?
     /// What the user can do about `attention`, in the error's own order. The card renders
     /// these, so an error whose recovery is an inspection or a repair is never shown as text
     /// with no way out (AGENTS.md: every error carries at least one recovery action).
     let recoveryActions: [RecoveryAction]
-    /// Whether clearing `attention` would change anything. A problem the status itself keeps
-    /// reporting comes straight back, so the card does not offer a control that does nothing.
-    let canDismiss: Bool
+
+    /// What to show for the problem, or for an operation whose outcome is unknown.
+    let recovery: RecoveryPresentation?
+    /// True after a lost connection until a status query succeeds.
+    let outcomeUnknown: Bool
+    let logs: [RedactedLine]
     let details: [Detail]
     let availability: [Action: Availability]
 
-    /// - Parameter statusCheckFailed: this environment's last status query ended in a failure
-    ///   and no other query is running. The status is unread, but nothing is being checked.
-    init(environment: DevelopmentEnvironment, status: EnvironmentStatus?, operation: AppModel.OperationState?, lastError: GuesthouseError?, statusUnread: Bool = false, statusCheckFailed: Bool = false, startBlockedElsewhere: String? = nil, runtimeVersion: RuntimeVersionInfo? = nil) {
+    init(
+        environment: DevelopmentEnvironment,
+        status: EnvironmentStatus?,
+        operation: AppModel.OperationState?,
+        lastError: GuesthouseError?,
+        statusUnread: Bool = false,
+        /// This environment's last status query ended in a failure and no other query is
+        /// running. The status is unread, but nothing is being checked.
+        statusCheckFailed: Bool = false,
+        unknownOutcome: OperationID? = nil,
+        /// The failure of this environment's last status query, when that is what failed.
+        statusQueryFailure: GuesthouseError? = nil,
+        reconciling: Bool = false,
+        logs: [RedactedLine] = [],
+        retryAvailable: Bool = true,
+        retryBlockedReason: String? = nil,
+        startBlockedElsewhere: String? = nil,
+        runtimeVersion: RuntimeVersionInfo? = nil
+    ) {
         id = environment.id
         name = environment.name
         let statusAttention: GuesthouseError? = {
             if case .needsAttention(let error)? = status?.readiness { return error }
             return nil
         }()
-        let attention: GuesthouseError? = statusAttention ?? lastError
+        // While an operation runs, a failure this window just caused — a cancellation the
+        // runtime refused — is the news the user is waiting for; the status's standing
+        // attention is not new and would otherwise hide it (MVP-PLAN.md §2). An operation only
+        // the status reports counts the same way: a recovered operation has no local record,
+        // so a refused cancellation of one used to sit behind the standing attention and the
+        // user could believe the stop they asked for had been accepted.
+        let running = operation != nil || status?.inFlightOperation != nil
+        let attention: GuesthouseError? = (running ? lastError : nil) ?? statusAttention ?? lastError
         self.attention = attention
         recoveryActions = attention?.recoveryActions ?? []
-        canDismiss = statusAttention == nil && lastError != nil
         phase = operation?.phase
-        // A status the last query could not read is not a check in progress: that query ended,
-        // and the card names the failure it is already showing rather than turning an error
-        // with its own recovery into an indefinite spinner nobody can end.
+        // An operation the status reports without a local counterpart (recovered after a
+        // relaunch or a dropped connection) gets the same progress and Cancel controls.
+        progress = if let operation {
+            OperationProgressPresentation(phase: operation.phase, request: operation.request, accepted: operation.acceptedID != nil)
+        } else if let recovered = status?.inFlightOperation {
+            OperationProgressPresentation(recoveredOperation: recovered)
+        } else {
+            nil
+        }
+        // The runtime reports an unresolved operation as an error on the status too; that is
+        // the same unknown state as a locally lost stream and is presented as one, rather than
+        // as a settled "Needs attention" beside a panel that says it is still checking.
+        let reportedUnknown: Bool = if case .operationOutcomeUnknown = attention { true } else { false }
+        let unknown = unknownOutcome != nil || reportedUnknown
+        outcomeUnknown = unknown
+        recovery = if let unknownOutcome {
+            // The outcome stays unknown, and the failure of the check that would settle it is
+            // shown with it: another bare Check button would hide why the last one failed.
+            RecoveryPresentation(unknownOutcomeOf: unknownOutcome, inspectionFailure: statusQueryFailure)
+        } else if let attention {
+            RecoveryPresentation(
+                error: attention,
+                retryAvailable: retryAvailable,
+                retryBlockedReason: retryBlockedReason,
+                dismissBlockedReason: Self.dismissBlock(attention: attention, statusAttention: statusAttention, statusQueryFailure: statusQueryFailure),
+                // The check's own failure is answered by another check. Its error may carry no
+                // action that does anything here — `.invalidRequest` and `.unauthorizedCaller`
+                // offer only Dismiss, which is disabled while the state is unread — and the
+                // card would then be a message with no control the user can press, its status
+                // nil and Start refused (AGENTS.md: every error carries a recovery that works).
+                inspectionOffered: attention == statusQueryFailure
+            )
+        } else {
+            nil
+        }
+        self.logs = logs
+        // A status still being read back after an operation is not a state to act on either:
+        // the model refuses everything until the answer lands, and the card says so. A status
+        // the last query could not read is different: that query ended, so the card names the
+        // failure it is already showing rather than spinning on a check nobody can end.
+        let checking = unknown || reconciling
         let unread = statusUnread || status == nil
-        isBusy = (unread && !statusCheckFailed) || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil
-        statusText = Self.statusText(for: status, operation: operation, checkFailed: statusCheckFailed)
+        isBusy = (unread && !statusCheckFailed) || status?.readiness == .checking || status?.inFlightOperation != nil || operation != nil || checking
+        statusText = checking ? "Checking environment…" : Self.statusText(for: status, operation: operation, checkFailed: statusCheckFailed)
         details = Self.details(for: environment, status: status, runtimeVersion: runtimeVersion)
         // A status nobody has read back yet is not a state to act on: Start stays disabled
         // until the environment answers again.
-        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, blockedElsewhere: startBlockedElsewhere)
+        availability = Self.availability(for: statusUnread ? nil : status, operation: operation, attention: attention, checking: checking, blockedElsewhere: startBlockedElsewhere)
     }
 
     func availability(of action: Action) -> Availability {
         availability[action] ?? .disabled(reason: "Not available")
     }
 
-    private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checkFailed: Bool) -> String {
+    /// Why the failure cannot be dismissed, when it cannot. A problem the status keeps
+    /// reporting would leave the identical panel in place; the check's own failure carries the
+    /// card's only way to ask again, and dismissing it would leave the card on "Checking
+    /// environment" with no action at all while the state is still unread.
+    private static func dismissBlock(attention: GuesthouseError, statusAttention: GuesthouseError?, statusQueryFailure: GuesthouseError?) -> String? {
+        if attention == statusAttention {
+            return "The runtime still reports this, so dismissing it would change nothing. It clears when the development Mac reports otherwise."
+        }
+        if attention == statusQueryFailure {
+            return "This is the check itself failing, and the development Mac's state is still unread. Check the environment again; the message clears once a check succeeds."
+        }
+        return nil
+    }
+
+    private static func statusText(for status: EnvironmentStatus?, operation: AppModel.OperationState?, checkFailed: Bool = false) -> String {
         if let operation {
             return operation.phase.map { describe($0) } ?? "Starting…"
         }
@@ -158,17 +237,20 @@ struct EnvironmentCardState: Equatable, Identifiable {
         ]
     }
 
-    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, blockedElsewhere: String?) -> [Action: Availability] {
+    private static func availability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?) -> [Action: Availability] {
         var table: [Action: Availability] = [:]
         for action in Action.allCases where action != .start {
             table[action] = .notImplemented(note: Self.notImplementedNote(for: action))
         }
-        table[.start] = startAvailability(for: status, operation: operation, attention: attention, blockedElsewhere: blockedElsewhere)
+        table[.start] = startAvailability(for: status, operation: operation, attention: attention, checking: checking, blockedElsewhere: blockedElsewhere)
         return table
     }
 
-    private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, blockedElsewhere: String?) -> Availability {
-        guard let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
+    /// - Parameter checking: the outcome of the last operation is unknown, or its status is
+    ///   still being read back. Either way the model refuses a start, so the card must not
+    ///   offer one that silently does nothing.
+    private static func startAvailability(for status: EnvironmentStatus?, operation: AppModel.OperationState?, attention: GuesthouseError?, checking: Bool, blockedElsewhere: String?) -> Availability {
+        guard !checking, let status, status.readiness != .checking else { return .disabled(reason: "Checking environment") }
         if operation != nil || status.inFlightOperation != nil { return .disabled(reason: "An operation is in progress") }
         // A failure the runtime says is not retryable is not answered by pressing Start again.
         if let attention, !attention.isRetryable { return .disabled(reason: attention.userMessage) }

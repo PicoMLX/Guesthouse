@@ -17,17 +17,43 @@ nonisolated final class ContinuationKey: Hashable, Sendable {
 nonisolated final class TrafficMeter: @unchecked Sendable {
     private let lock = NSLock()
     private var queued = 0
+    private var held: [RuntimeEvent] = []
     private let limit: Int
+    private let tailLimit: Int
 
-    init(limit: Int) { self.limit = limit }
+    init(limit: Int, tailLimit: Int) {
+        self.limit = limit
+        self.tailLimit = tailLimit
+    }
 
-    /// Takes a slot for one droppable event, or refuses it when the inbox already holds the
-    /// limit. The event is dropped at ingress rather than after it has cost memory.
-    func admit() -> Bool {
+    /// Takes a slot for one droppable event, or holds it as part of a bounded newest tail when
+    /// the inbox already holds the limit. Returns whether the caller may enqueue it now.
+    ///
+    /// Refusing outright threw away exactly the end of a log: a service that outruns the actor
+    /// for the rest of an operation had every event after saturation dropped here, so the
+    /// window handed over when the operation ended could only be chosen from the older
+    /// admitted prefix — the tail the whole reserve exists for was never in the client at all.
+    /// Once anything is held, everything droppable is, so what a consumer sees stays in the
+    /// order the service produced it.
+    func admit(_ event: RuntimeEvent) -> Bool {
         lock.withLock {
-            guard queued < limit else { return false }
+            guard held.isEmpty, queued < limit else {
+                hold(event)
+                return false
+            }
             queued += 1
             return true
+        }
+    }
+
+    /// Takes the whole backlog, counting each event as queued again: it is on its way to the
+    /// inbox and `release` balances it there like any other admitted event.
+    func takeHeld() -> [RuntimeEvent] {
+        lock.withLock {
+            let backlog = held
+            held.removeAll()
+            queued += backlog.count
+            return backlog
         }
     }
 
@@ -35,6 +61,18 @@ nonisolated final class TrafficMeter: @unchecked Sendable {
     func release() { lock.withLock { queued -= 1 } }
 
     var queuedCount: Int { lock.withLock { queued } }
+
+    /// How much of the newest tail is waiting for a control event to carry it in. Test seam.
+    var heldCount: Int { lock.withLock { held.count } }
+
+    /// Keeps the newest `tailLimit` refused events. A log line is what the tail is kept for,
+    /// so a progress or status report is given up before one is.
+    private func hold(_ event: RuntimeEvent) {
+        held.append(event)
+        guard held.count > tailLimit else { return }
+        let oldest = held.firstIndex { if case .log = $0 { false } else { true } } ?? held.startIndex
+        held.remove(at: oldest)
+    }
 }
 
 /// The GUI's `RuntimeBackend` over XPC.
@@ -104,6 +142,17 @@ actor RuntimeClient: RuntimeBackend {
     static let consumerBufferLimit = 1_024
     /// Slots of that buffer kept free for control events: droppable traffic stops here.
     static let consumerControlReserve = 64
+    /// Slots kept free on top of that for the newest events handed over when the operation
+    /// ends. A log is read for its tail, so the client stops delivering droppable traffic
+    /// early enough that the whole window a consumer keeps still fits at the end; without it
+    /// the tail is only whatever room the probes happened to leave, and the window a consumer
+    /// retains is a few dozen recent lines followed by much older ones.
+    static let consumerTailReserve = 512
+    /// The room below which droppable traffic is held instead of yielded.
+    static var trafficFloor: Int { consumerControlReserve + consumerTailReserve }
+    /// The room below which even the probes stop. A probe occupies a slot like any other
+    /// yield, so one that keeps going past this spends the tail it is measuring for.
+    static var probeFloor: Int { terminalReserve + consumerTailReserve }
     /// While traffic is being dropped, one event in this many is delivered anyway. A yield is
     /// the only report of how much room a consumer has left, so without this probe a consumer
     /// that fell behind once would never receive traffic again for the rest of the operation.
@@ -121,11 +170,17 @@ actor RuntimeClient: RuntimeBackend {
     /// Room left in each consumer's stream, as of its last yield.
     private var consumerRoom: [OperationID: Int] = [:]
     private var droppedSinceProbe: [OperationID: Int] = [:]
-    private let traffic = TrafficMeter(limit: RuntimeClient.inboxTrafficLimit)
+    /// Traffic held while there was no room, newest kept and handed over when the operation ends.
+    private var heldTraffic: [OperationID: [RuntimeEvent]] = [:]
+    private let traffic = TrafficMeter(limit: RuntimeClient.inboxTrafficLimit, tailLimit: RuntimeClient.consumerTailReserve)
 
     /// How much droppable traffic is waiting in the inbox. Test seam; readable without the
     /// actor, so it can be sampled while the actor is busy routing.
     nonisolated var inboxTrafficCount: Int { traffic.queuedCount }
+
+    /// How much traffic the ingress is holding past its bound, waiting for a control event to
+    /// carry it in ahead of itself. Test seam, readable for the same reason.
+    nonisolated var ingressTailCount: Int { traffic.heldCount }
 
     init(transport: any RuntimeTransport = XPCRuntimeTransport()) {
         self.transport = transport
@@ -193,10 +248,24 @@ actor RuntimeClient: RuntimeBackend {
             // instead of growing the inbox. Control events are always admitted, so acceptance,
             // the terminal event and an interruption keep their order.
             incoming: { event in
-                guard !event.isDroppableTraffic || traffic.admit() else { return }
+                if event.isDroppableTraffic {
+                    guard traffic.admit(event) else { return }
+                    inboxContinuation.yield(.incoming(event))
+                    return
+                }
+                // A control event never waits, but the traffic the ingress is holding is older
+                // than it and belongs in front of it: the tail of an operation's log goes in
+                // ahead of the terminal event that ends its stream, rather than being thrown
+                // away once that stream has finished.
+                for backlog in traffic.takeHeld() { inboxContinuation.yield(.incoming(backlog)) }
                 inboxContinuation.yield(.incoming(event))
             },
-            interrupted: { inboxContinuation.yield(.interrupted) }
+            // The lines written just before a connection was lost are the ones that explain
+            // it, so they are carried in ahead of the interruption for the same reason.
+            interrupted: {
+                for backlog in traffic.takeHeld() { inboxContinuation.yield(.incoming(backlog)) }
+                inboxContinuation.yield(.interrupted)
+            }
         )
         // The loop borrows `self` per item only, so a client nobody holds is released while
         // the loop waits, and `deinit` then ends the inbox.
@@ -310,6 +379,11 @@ actor RuntimeClient: RuntimeBackend {
         pendingEvents.removeValue(forKey: id)
         consumerRoom.removeValue(forKey: id)
         droppedSinceProbe.removeValue(forKey: id)
+        // Nobody is left to hand the backlog to. An operation whose consumer walked away, or
+        // whose stream this retirement is ending, would otherwise keep up to
+        // `consumerBufferLimit` events for the life of the client, and repeated canceled
+        // high-output operations would grow it without bound.
+        heldTraffic.removeValue(forKey: id)
     }
 
     /// Releases the consumer keys of an operation that has ended. They become settled rather
@@ -329,17 +403,115 @@ actor RuntimeClient: RuntimeBackend {
     /// what the stream reports, not a count of everything ever sent, so a consumer keeping up
     /// in real time is never cut off.
     private func deliver(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
-        if consumerRoom[id, default: Self.consumerBufferLimit] <= Self.consumerControlReserve {
+        if consumerRoom[id, default: Self.consumerBufferLimit] <= Self.trafficFloor {
+            hold(event, for: id)
             let dropped = droppedSinceProbe[id, default: 0] + 1
             guard dropped >= Self.trafficProbeInterval else {
                 droppedSinceProbe[id] = dropped
                 return
             }
-            // Probe: the stream refuses a yield it has no room for, so this measures the room
-            // again without displacing anything already queued.
             droppedSinceProbe[id] = 0
+            // Probe: the stream refuses a yield it has no room for, so this measures the room
+            // again without displacing anything already queued. It hands over the oldest held
+            // event rather than this one, so measuring can never put a newer line in front of
+            // one the consumer has not been given yet.
+            releaseOldestHeldTraffic(of: id, to: continuation)
+            return
+        }
+        // The consumer has room again, but a probe may have opened that room while most of
+        // the backlog is still held. Delivering this event directly would put a newer line in
+        // front of older ones the consumer has not been given, and the terminal flush would
+        // then append that older backlog behind it: the log would go backwards, and the
+        // newest-line window a reader keeps would no longer be the newest lines. So this
+        // event joins the queue and the queue is drained in order.
+        guard heldTraffic[id] == nil else {
+            hold(event, for: id)
+            drainHeldTraffic(of: id, to: continuation)
+            return
         }
         yieldNonTerminal(event, to: continuation, id: id)
+    }
+
+    /// Hands the backlog over oldest first while the consumer keeps room beyond the floor.
+    /// What does not fit stays held, so a consumer that only partly caught up falls back to
+    /// the same holding and probing as before rather than losing the rest of its backlog.
+    private func drainHeldTraffic(of id: OperationID, to continuation: Continuation) {
+        while consumerRoom[id, default: Self.consumerBufferLimit] > Self.trafficFloor,
+              var held = heldTraffic[id], !held.isEmpty {
+            let oldest = held.removeFirst()
+            heldTraffic[id] = held.isEmpty ? nil : held
+            yieldTracking(oldest, to: continuation, id: id)
+        }
+    }
+
+    /// Yields and records the room the stream reports it has left, which is how a consumer
+    /// that has caught up is noticed.
+    /// What was held back while the consumer had no room, newest kept. A log is read for its
+    /// tail, so an operation that outruns a slow reader still hands over its last events when
+    /// it ends rather than leaving the reader with only the beginning.
+    private func hold(_ event: RuntimeEvent, for id: OperationID) {
+        var held = heldTraffic[id] ?? []
+        held.append(event)
+        if held.count > Self.consumerBufferLimit { held.remove(at: Self.oldestDroppable(in: held)) }
+        heldTraffic[id] = held
+    }
+
+    /// Which held event to give up first: the oldest progress or status report, and only when
+    /// there is none, the oldest log line. What a consumer keeps is a count of *lines*, so
+    /// counting every event alike would let a busy operation's progress traffic push the
+    /// newest lines out of the window while the reserve still looked full.
+    private static func oldestDroppable(in held: [RuntimeEvent]) -> Int {
+        held.firstIndex { if case .log = $0 { false } else { true } } ?? held.startIndex
+    }
+
+    /// The newest `room` held events in arrival order, choosing log lines over the progress
+    /// and status reports interleaved with them. The tail reserve is sized for the window a
+    /// reader keeps, which is a count of lines, so trimming by raw event count would hand
+    /// over a window holding far fewer lines than that reserve was meant to guarantee.
+    private static func newestTail(of held: [RuntimeEvent], fitting room: Int) -> [RuntimeEvent] {
+        guard held.count > room else { return held }
+        var keep = [Bool](repeating: false, count: held.count)
+        var remaining = room
+        for index in held.indices.reversed() where remaining > 0 {
+            guard case .log = held[index] else { continue }
+            keep[index] = true
+            remaining -= 1
+        }
+        for index in held.indices.reversed() where remaining > 0 {
+            guard !keep[index] else { continue }
+            keep[index] = true
+            remaining -= 1
+        }
+        return held.indices.filter { keep[$0] }.map { held[$0] }
+    }
+
+    /// Hands over one held event, oldest first. Used as the probe, so the measurement carries
+    /// the log forward in order instead of jumping ahead of it.
+    private func releaseOldestHeldTraffic(of id: OperationID, to continuation: Continuation) {
+        // A probe is droppable traffic like every other yield, and it stops at the tail the
+        // operation's end has to fit through, not at the terminal event's own few slots.
+        // Probing all the way down spends the very window `consumerTailReserve` exists to
+        // guarantee: one probe per 64 dropped events walks the room from the floor to four,
+        // so after roughly 36,000 held events the newest-500 window a reader keeps becomes an
+        // old prefix with about three recent lines behind it.
+        guard consumerRoom[id, default: Self.consumerBufferLimit] > Self.probeFloor else { return }
+        guard var held = heldTraffic[id], !held.isEmpty else { return }
+        let oldest = held.removeFirst()
+        heldTraffic[id] = held.isEmpty ? nil : held
+        yieldTracking(oldest, to: continuation, id: id)
+    }
+
+    /// Hands over as much of the held tail as the stream can still take, newest first in order,
+    /// before the terminal event. The terminal event has to fit after this, or the consumer
+    /// would never learn the operation ended.
+    private func flushHeldTraffic(of id: OperationID, to continuation: Continuation) {
+        guard var held = heldTraffic.removeValue(forKey: id), !held.isEmpty else { return }
+        let room = max(consumerRoom[id, default: Self.consumerBufferLimit] - 1, 0)
+        held = Self.newestTail(of: held, fitting: room)
+        for event in held {
+            guard consumerRoom[id, default: Self.consumerBufferLimit] > 1 else { return }
+            yieldTracking(event, to: continuation, id: id)
+        }
     }
 
     /// Yields an event that does not end the stream, and only while the room left is beyond
@@ -356,8 +528,8 @@ actor RuntimeClient: RuntimeBackend {
         yieldTracking(event, to: continuation, id: id)
     }
 
-    /// Yields and records the room the stream reports it has left, which is how a consumer
-    /// that has caught up is noticed.
+
+
     private func yieldTracking(_ event: RuntimeEvent, to continuation: Continuation, id: OperationID) {
         if case .enqueued(let remaining) = continuation.yield(event) {
             consumerRoom[id] = remaining
@@ -377,6 +549,7 @@ actor RuntimeClient: RuntimeBackend {
         case .completed(let id), .failed(let id, _):
             if let continuation = operations.removeValue(forKey: id) {
                 retireConsumers(of: id)
+                flushHeldTraffic(of: id, to: continuation)
                 continuation.yield(event)
                 continuation.finish()
                 // The operation is over: anything that arrives for it afterwards is dropped
@@ -470,6 +643,10 @@ actor RuntimeClient: RuntimeBackend {
         pendingEvents.removeAll()
         consumerRoom.removeAll()
         droppedSinceProbe.removeAll()
+        // The streams these backlogs were being kept for are all about to be finished with an
+        // interruption, so nothing will ever hand them over; left here they would be one
+        // buffer per operation held for the rest of the app's life.
+        heldTraffic.removeAll()
         // Every id these hold belonged to the session that just ended, and the registry
         // already refuses that session's callbacks, so nothing can still arrive for them.
         // Keeping them would hold one id per operation for the rest of the app's life.

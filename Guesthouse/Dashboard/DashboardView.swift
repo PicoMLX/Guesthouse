@@ -19,8 +19,8 @@ struct DashboardView: View {
                             EnvironmentCardView(
                                 state: card,
                                 start: { model.start(card.id) },
-                                check: { Task { await model.refreshStatus(of: card.id) } },
-                                dismiss: { model.dismissError(card.id) }
+                                cancel: { model.cancel(card.id) },
+                                recover: { model.perform($0, for: card.id) }
                             )
                         }
                         SlotView(availability: model.createAvailability) { showingWizard = true }
@@ -78,23 +78,21 @@ struct SlotView: View {
 struct EnvironmentCardView: View {
     let state: EnvironmentCardState
     let start: () -> Void
-    /// Re-reads this environment's state; what the `inspectState` and `retry` recoveries do.
-    let check: () -> Void
-    /// Clears the failure the card is holding; what the `cancel` recovery does.
-    let dismiss: () -> Void
+    let cancel: () -> Void
+    let recover: (RecoveryAction) -> Void
     @State private var note: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if let attention = state.attention {
-                Label(attention.userMessage, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .accessibilityLabel("Needs attention: \(attention.userMessage)")
-                // The failure's own recovery, on the card that reports it: a card error is
-                // otherwise text with no way out once Start is disabled. A failure the status
-                // itself keeps reporting is not offered a dismissal, which would clear nothing.
-                RecoveryActionRow(actions: state.recoveryActions, check: check, dismiss: state.canDismiss ? dismiss : nil)
+            if let progress = state.progress {
+                OperationProgressView(presentation: progress, cancel: cancel)
+            }
+            if let recovery = state.recovery {
+                ErrorRecoveryView(presentation: recovery, perform: recover)
+            }
+            if !state.logs.isEmpty {
+                LogDisclosureView(lines: state.logs)
             }
             detailsGrid
             actionsRow
@@ -141,11 +139,9 @@ struct EnvironmentCardView: View {
     /// The actions wrap: at the adaptive grid's narrow column two cards leave roughly a third
     /// of the window for each, which is not enough for these labels on one line.
     private var actionsRow: some View {
-        // A real flow: at the adaptive grid's narrow column the buttons wrap onto as many
-        // lines as they need. `ViewThatFits` could only choose between whole layouts, so its
-        // fallback still had to fit every button on one line.
-        WrappingRow(spacing: 8) {
-            actionButtons
+        HStack(alignment: .top, spacing: 8) {
+            WrappingHStack(spacing: 8, lineSpacing: 8) { actionButtons }
+            Spacer(minLength: 8)
             overflowMenu
         }
     }
@@ -196,25 +192,28 @@ struct EnvironmentCardView: View {
 struct AvailabilityButton: View {
     let title: String
     let availability: EnvironmentCardState.Availability
+    /// `.destructive` for an action that removes work, so it never looks like a routine fix.
+    let role: ButtonRole?
     let action: () -> Void
 
-    init(_ title: String, availability: EnvironmentCardState.Availability, action: @escaping () -> Void) {
+    init(_ title: String, availability: EnvironmentCardState.Availability, role: ButtonRole? = nil, action: @escaping () -> Void) {
         self.title = title
         self.availability = availability
+        self.role = role
         self.action = action
     }
 
     var body: some View {
         switch availability {
         case .enabled:
-            Button(title, action: action)
+            Button(title, role: role, action: action)
         case .disabled(let reason):
-            Button(title, action: action)
+            Button(title, role: role, action: action)
                 .disabled(true)
                 .help(reason)
                 .accessibilityHint(reason)
         case .notImplemented(let note):
-            Button(title, action: action)
+            Button(title, role: role, action: action)
                 .help("Not implemented yet. \(note)")
                 .accessibilityHint("Not implemented yet")
         }
@@ -263,8 +262,7 @@ struct ScenarioPreview: View {
 #Preview("Both slots full") { ScenarioPreview { await PreviewScenarios.bothSlotsFull() } }
 #Preview("Operation in progress") { ScenarioPreview { await PreviewScenarios.operationInProgress() } }
 
-/// Lays its subviews out left to right, starting a new line when the next one does not fit.
-/// Each subview keeps its ideal width, so a label is never compressed or truncated.
+
 struct WrappingRow: Layout {
     var spacing: CGFloat = 8
 

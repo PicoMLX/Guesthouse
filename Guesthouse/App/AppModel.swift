@@ -44,8 +44,16 @@ final class AppModel {
 
     /// An operation this app started and is still listening to.
     struct OperationState: Equatable {
+        static let maximumLogLines = 500
+
+        /// The app's own label for the operation until the runtime accepts it.
         var id: OperationID
+        /// The runtime's id, known only after `accepted`; nothing is canceled by any other id.
+        var acceptedID: OperationID?
+        var request: RuntimeRequest
         var phase: ProgressPhase?
+        /// Redacted lines the runtime reported for this operation, newest last, bounded.
+        var logs: [RedactedLine] = []
     }
 
     static let gracefulStopDeadline: Duration = .seconds(60)
@@ -55,14 +63,25 @@ final class AppModel {
     private(set) var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private(set) var operations: [EnvironmentID: OperationState] = [:]
     /// The last failure per environment, cleared when an operation completes.
-    /// Environments whose last status query failed, so a later success can clear that
-    /// error without erasing what a failed operation reported.
-    private var statusQueryFailures: Set<EnvironmentID> = []
-    /// Orders the status inspections of one environment against each other: the next ticket to
-    /// hand out, and the newest one whose reply has been published.
-    private var statusQueryTickets: [EnvironmentID: UInt64] = [:]
-    private var publishedStatusTicket: [EnvironmentID: UInt64] = [:]
+    /// The failure of an environment's last status query, so a later success can clear that
+    /// error without erasing what a failed operation reported, and so the card can tell the
+    /// check's own failure from a problem the environment reported.
+    private var statusQueryFailures: [EnvironmentID: GuesthouseError] = [:]
     private(set) var lastErrors: [EnvironmentID: GuesthouseError] = [:]
+    /// Operations whose connection dropped before a result arrived. Cleared only by a
+    /// successful status query; Retry is never offered while an entry exists (MVP-PLAN.md §3).
+    private(set) var unknownOutcomes: [EnvironmentID: OperationID] = [:]
+    /// What Retry re-sends.
+    private(set) var lastRequests: [EnvironmentID: RuntimeRequest] = [:]
+    /// The generation of the last full reconciliation that succeeded. An operation stream cut
+    /// off before it ended asks this whether the state it would call unknown has in fact been
+    /// read back since (AGENTS.md: inspected, not assumed).
+    private var reconciledGeneration: UInt64 = 0
+    /// Environments whose post-operation status query is still outstanding: nothing is
+    /// replayed until the actual state has been read (MVP-PLAN.md §9).
+    private(set) var reconciling: Set<EnvironmentID> = []
+    /// The log of the last finished operation, for the disclosure after it ends.
+    private(set) var lastLogs: [EnvironmentID: [RedactedLine]] = [:]
     private(set) var quitFlow: QuitFlow = .idle
     /// The user canceled during a step that must run to its end; honored when it ends.
     private(set) var quitCancelRequested = false
@@ -104,6 +123,9 @@ final class AppModel {
     /// How long that poll waits between inspections. The runtime runs a Tart command for each
     /// status query, so inspections are seconds apart rather than several times a second.
     var recoveredOperationPollInterval: Duration = .seconds(2)
+    /// How long the quit waits between re-inspections of an operation it is blocked on. Same
+    /// reasoning as the poll above, and settable so a test never has to wait real seconds.
+    var quitWaitPollInterval: Duration = .seconds(2)
     /// How many of those polls are running. The model owns one at a time, so this is 0 or 1.
     private(set) var recoveredOperationPolls = 0
     /// What the service reports about itself and the Tart bundle it verified. The per-status
@@ -114,6 +136,25 @@ final class AppModel {
     /// is running from one that already ended in failure, so a query nobody is waiting for is
     /// never presented as one still in progress.
     private var statusQueriesInFlight: [EnvironmentID: Int] = [:]
+    /// The poll of operations only a status reports. Held so an inspection that discovers one
+    /// joins the loop already running instead of stacking a second one on it.
+    private var recoveredPollTask: Task<Void, Never>?
+    /// A cancellation the runtime refused, with the operation it was for. An answer that
+    /// arrives after that operation has ended is not news, and one that stands is cleared
+    /// when an inspection shows the operation is over.
+    private var cancellationFailures: [EnvironmentID: CancellationFailure] = [:]
+    /// Bumped by every inspection of an environment *and by every full reconciliation that
+    /// publishes*; an answer from a superseded inspection publishes nothing, so an older
+    /// status can never replace a newer one, whichever path read it.
+    private var statusGenerations: [EnvironmentID: UInt64] = [:]
+    /// The inspection currently reading each environment, so the one it replaces can be
+    /// cancelled rather than left suspended on a stream that may never answer.
+    private var statusRequests: [EnvironmentID: Task<Void, Never>] = [:]
+
+    private struct CancellationFailure {
+        let operation: OperationID
+        let error: GuesthouseError
+    }
 
     /// - Parameters:
     ///   - backend: the runtime, or a fake for previews and tests.
@@ -216,9 +257,32 @@ final class AppModel {
         if let loss = lossLeftToReconciliation, case .ready = outcome { settled = .interrupted(loss) }
         lossLeftToReconciliation = nil
         switch settled {
-        case .ready(let listed, let fresh, let version):
+        case .ready(let listed, let read, let version):
             environments = listed
-            statuses = fresh
+            // A full reconciliation reads every environment's status, so it is an inspection
+            // like any other and joins the same generation scheme — but per entry, claimed
+            // where each status was read rather than where the whole snapshot is published.
+            // The snapshot is assembled over several round trips: the listing, one status per
+            // environment, then the version. An inspection that answered while this one was
+            // still waiting on a later environment has read the state more recently than the
+            // entry collected here, and publishing the snapshot wholesale put its settled
+            // operation back in flight and blocked Start and Quit until someone checked again.
+            var published: [EnvironmentID: EnvironmentStatus] = [:]
+            for environment in listed {
+                let id = environment.id
+                if let entry = read[id], statusGenerations[id] == entry.generation {
+                    published[id] = entry.status
+                } else if let newer = statuses[id] {
+                    published[id] = newer
+                }
+            }
+            // An environment the listing no longer names is described by nothing, so an
+            // inspection still outstanding for it must not publish over that.
+            let listedIDs = Set(listed.map(\.id))
+            for id in Array(statusGenerations.keys) where !listedIDs.contains(id) {
+                _ = claimStatusGeneration(of: id)
+            }
+            statuses = published
             // Assigned whatever the supplementary request answered: a service that could not
             // describe itself this time has not confirmed the version it gave last time, and
             // the MVP-PLAN.md §2 tool-version row says Unknown rather than repeating a value
@@ -227,8 +291,17 @@ final class AppModel {
             // These environments answered, so a failure of an earlier *query* is history,
             // exactly as it is after a single successful status query. A failed operation's
             // error stays: it is what the card explains.
-            for id in fresh.keys where statusQueryFailures.remove(id) != nil { lastErrors[id] = nil }
+            for id in published.keys where statusQueryFailures.removeValue(forKey: id) != nil { lastErrors[id] = nil }
             launchState = .ready
+            // A full reconciliation read every listed environment's status, so it settles
+            // exactly what a per-card check settles: an unknown outcome, a reconciliation
+            // marker, and a refused cancellation whose operation has since ended. Anything
+            // these statuses did not answer for keeps its marker.
+            for (id, status) in published { settle(status, for: id) }
+            // The state every listed environment was in has now been read back. An operation
+            // stream that was cut off before this consults it rather than restoring an unknown
+            // outcome over an inspection that has already happened.
+            reconciledGeneration = generation
             startRecoveredOperationPoll()
         case .unavailable(let error):
             launchState = .unavailable(error)
@@ -244,8 +317,16 @@ final class AppModel {
         }
     }
 
+    /// One environment's status as a reconciliation read it, with the generation that read
+    /// claimed. How fresh an entry is belongs to the entry, not to the moment the snapshot
+    /// it is part of happens to be published.
+    private struct ReadStatus {
+        let status: EnvironmentStatus
+        let generation: UInt64
+    }
+
     private enum ReconcileOutcome {
-        case ready([DevelopmentEnvironment], [EnvironmentID: EnvironmentStatus], RuntimeVersionInfo?)
+        case ready([DevelopmentEnvironment], [EnvironmentID: ReadStatus], RuntimeVersionInfo?)
         case unavailable(GuesthouseError)
         case interrupted(RuntimeConnectionInterrupted)
     }
@@ -260,10 +341,13 @@ final class AppModel {
                 default: break
                 }
             }
-            var fresh: [EnvironmentID: EnvironmentStatus] = [:]
+            var fresh: [EnvironmentID: ReadStatus] = [:]
             for environment in listed {
+                let generation = claimStatusGeneration(of: environment.id)
                 for try await event in backend.send(.environmentStatus(environment.id)) {
-                    if case .status(let status) = event { fresh[environment.id] = status }
+                    if case .status(let status) = event {
+                        fresh[environment.id] = ReadStatus(status: status, generation: generation)
+                    }
                     if case .failed(_, let error) = event { return .unavailable(error) }
                 }
             }
@@ -419,6 +503,28 @@ final class AppModel {
            let name = environments.first(where: { $0.id == busy })?.name {
             return "An operation is in progress on \(name)."
         }
+        // An operation whose outcome was never established may already have started its VM,
+        // and an environment still being read back may be about to report one. Neither is a
+        // state to start a second development Mac over (AGENTS.md: an interrupted operation
+        // has an unknown outcome until the actual state is inspected).
+        if let unknown = environmentsWithUnknownOutcome.first {
+            // An environment the runtime has since stopped listing keeps its marker: the
+            // mutation may still be running, so the block stands with a name or without one.
+            guard let name = environments.first(where: { $0.id == unknown })?.name else {
+                return "Guesthouse does not know yet what its last operation did. Check the development Macs before starting another."
+            }
+            return "Guesthouse does not know yet what its last operation on \(name) did. Check that development Mac first."
+        }
+        if let checking = reconciling.first {
+            // An environment the runtime has since stopped listing keeps its entry, exactly as
+            // an unknown outcome does: its VM state was never established, so the block stands
+            // with a name or without one. Requiring the name here would let a start on a
+            // listed environment through while an unlisted one was still unaccounted for.
+            guard let name = environments.first(where: { $0.id == checking })?.name else {
+                return "Guesthouse is still checking a development Mac after its last operation."
+            }
+            return "\(name) is being checked after its last operation."
+        }
         // An environment that has not answered its last check says nothing about its VM or
         // about an operation on it. The runtime runs one VM and one operation at a time, so
         // nothing is started until it answers (MVP-PLAN.md §2).
@@ -436,6 +542,30 @@ final class AppModel {
         return nil
     }
 
+    /// Environments whose last mutation has no established outcome: one whose stream this app
+    /// lost, and one the runtime itself reports as unresolved. The runtime runs one VM and one
+    /// operation at a time, so neither is a state to start a second development Mac over
+    /// (AGENTS.md: an interrupted operation has an unknown outcome until the actual state is
+    /// inspected).
+    private var environmentsWithUnknownOutcome: [EnvironmentID] {
+        let reported = statuses.values.compactMap { status -> EnvironmentID? in
+            Self.reportedUnknownOutcome(of: status) != nil ? status.environmentID : nil
+        }
+        return Array(unknownOutcomes.keys) + reported.filter { unknownOutcomes[$0] == nil }
+    }
+
+    /// The operation a status itself reports as unresolved, if it does.
+    private static func reportedUnknownOutcome(of status: EnvironmentStatus?) -> OperationID? {
+        if case .needsAttention(.operationOutcomeUnknown(let operation))? = status?.readiness { return operation }
+        return nil
+    }
+
+    /// The mutation whose outcome is still open for `id`: the one this app lost the stream to,
+    /// or the one the runtime is reporting as unresolved on its own.
+    private func unresolvedOperation(of id: EnvironmentID) -> OperationID? {
+        unknownOutcomes[id] ?? Self.reportedUnknownOutcome(of: statuses[id])
+    }
+
     /// Statuses that name an operation this app did not start (one recovered after a
     /// relaunch) are re-queried until they become terminal, so a card never stays busy for
     /// an operation nobody observes.
@@ -449,7 +579,15 @@ final class AppModel {
             // The wait swallows its own cancellation, so a poll being replaced would
             // otherwise still run one more round of queries against the runtime.
             guard !Task.isCancelled else { return }
-            for id in recovered { await refreshStatus(of: id) }
+            // An inspection somebody else already has outstanding answers the same question
+            // this poll asks, so the poll waits for it rather than replacing it. A quit's own
+            // wait loop inspects the same environments on the same interval; two loops that
+            // each cancel the other's request would leave a query slower than the interval
+            // cancelled before it ever answered, and cancelling the consumer does not withdraw
+            // the request from the service, which holds one of its eight in-flight slots until
+            // it replies. An explicit check still supersedes, so a hung inspection is still
+            // replaceable.
+            for id in recovered where statusRequests[id] == nil { await refreshStatus(of: id) }
         }
     }
 
@@ -476,42 +614,72 @@ final class AppModel {
     /// Re-reads one environment's status after an operation, whatever its outcome. A status
     /// query the runtime answers with a failure leaves no cached state behind: the card shows
     /// the error and offers nothing until a later query succeeds.
+    /// Re-reads one environment's status after an operation, whatever its outcome. A
+    /// successful answer settles an unknown outcome; a failed one leaves no cached state
+    /// behind and keeps the outcome unknown: the card shows the error and offers nothing
+    /// until a later query succeeds.
     func refreshStatus(of id: EnvironmentID) async {
-        // The reconciliation this query started under. The client reports a dropped connection
-        // to its observers before it throws into the streams that connection cut off, so a
-        // reconciliation launched by that same loss can already have read the actual state by
-        // the time the loss lands here.
-        let generation = refreshGeneration
-        // Two inspections of one environment can be in flight at once — the recovered-operation
-        // poll and a Quit waiting on that same operation both ask for it — and the runtime runs
-        // its own Tart inventory read for each, so the older reply can arrive last. Both carry
-        // the same reconciliation generation, so only this ticket separates them: without it an
-        // inspection that began while the VM was still stopped could land over the running
-        // result that replaced it, and Quit would then find no target to stop and terminate
-        // with a VM it just started (MVP-PLAN.md §2).
-        let ticket = (statusQueryTickets[id] ?? 0) &+ 1
-        statusQueryTickets[id] = ticket
+        // Two activations of Check environment are two requests, and the runtime may answer
+        // them out of order: only the newest inspection may publish, so a stale status can
+        // never replace a newer one or re-block the dashboard behind it.
+        let generation = claimStatusGeneration(of: id)
+        let request = Task { [weak self] in
+            guard let self else { return }
+            await self.readStatus(of: id, generation: generation)
+        }
+        statusRequests[id] = request
+        // The caller's own cancellation still reaches the request: `waitForOperations` relies
+        // on a cancelled quit ending the inspection it is suspended on.
+        await withTaskCancellationHandler { await request.value } onCancel: { request.cancel() }
+        if statusRequests[id] == request { statusRequests[id] = nil }
+    }
+
+    /// Claims the next inspection generation for one environment and retires the inspection it
+    /// supersedes.
+    ///
+    /// The claim comes first, so the request being superseded already reads a newer generation
+    /// when its cancellation lands and cannot report an interruption over the one replacing it.
+    /// A generation check alone discards a late answer but does nothing about a request that
+    /// never answers: a hung `environmentStatus` stream stays suspended holding one of the
+    /// session's eight in-flight slots, its `statusRequests` entry stands for the life of the
+    /// session, and `pollRecoveredOperations` skips an environment whose inspection is already
+    /// outstanding — so an operation only the runtime reports would never be seen to end and
+    /// the card would stay busy with every action blocked.
+    private func claimStatusGeneration(of id: EnvironmentID) -> UInt64 {
+        let generation = (statusGenerations[id] ?? 0) &+ 1
+        statusGenerations[id] = generation
+        statusRequests[id]?.cancel()
+        return generation
+    }
+
+    private func readStatus(of id: EnvironmentID, generation: UInt64) async {
+        // The reconciliation this inspection started under. A full check reads every
+        // environment, so one that began later has newer state than this per-card query: its
+        // result stands, and this one publishes nothing over it.
+        let atRefresh = refreshGeneration
+        // Counted around the query itself, so a card can tell a check that is running from one
+        // that already ended in failure and never presents a finished query as one in progress.
         statusQueriesInFlight[id, default: 0] += 1
         defer {
             let outstanding = (statusQueriesInFlight[id] ?? 1) - 1
             statusQueriesInFlight[id] = outstanding > 0 ? outstanding : nil
         }
         do {
+            var received = false
             for try await event in backend.send(.environmentStatus(id)) {
-                // A reconciliation that began after this query did has read the actual state
-                // since, so its snapshot stands: an inspection that started while the VM was
-                // running must not publish that over a newer stopped result and leave Start
-                // blocked until someone checks again. The stream is drained rather than
-                // dropped so the request still ends on the service. The catch below makes the
-                // same check for a query that never answered.
-                guard generation == refreshGeneration, ticket >= publishedStatusTicket[id] ?? 0 else { continue }
-                publishedStatusTicket[id] = ticket
+                // A newer inspection has read the actual state since, so its snapshot stands: a
+                // query that started while the VM was running must not publish that over a newer
+                // stopped result and leave Start blocked until someone checks again. The stream
+                // is drained rather than dropped so the request still ends on the service. The
+                // catch below makes the same check for a query that never answered.
+                guard statusGenerations[id] == generation, atRefresh == refreshGeneration else { continue }
                 switch event {
                 case .status(let status):
                     statuses[id] = status
+                    received = true
                     // The environment answered, so a failure of an earlier *query* is history.
                     // A failed operation's error stays: it is what the card explains.
-                    if statusQueryFailures.remove(id) != nil { lastErrors[id] = nil }
+                    if statusQueryFailures.removeValue(forKey: id) != nil { lastErrors[id] = nil }
                     // A poll whose own inspection failed ended without anything to restart it,
                     // so this is where an operation only the runtime reports is picked up
                     // again: without it the card stays busy and blocks every start until the
@@ -521,22 +689,41 @@ final class AppModel {
                 case .failed(_, let error):
                     statuses[id] = nil
                     lastErrors[id] = error
-                    statusQueryFailures.insert(id)
+                    statusQueryFailures[id] = error
+                    cancellationFailures[id] = nil
                 default: break
                 }
             }
+            guard statusGenerations[id] == generation else { return }
+            // Only an actual status answer settles an unknown outcome; a failed or empty
+            // reply leaves it unknown. The same answer is what ends the post-operation guard:
+            // a query that established nothing leaves the environment unread, and the runtime
+            // runs one development Mac at a time.
+            if received, let status = statuses[id] {
+                settle(status, for: id)
+                // The runtime answered, so the connection that dropped during the operation is
+                // back — but one environment's status is not the environment listing, the other
+                // environments' states, or the runtime's own version, and all of those still
+                // predate the dropped session. Ready is what a full reconciliation establishes
+                // (MVP-PLAN.md §2), so the check is asked for here rather than declared: the
+                // app stays interrupted until that check succeeds. One at a time, since a poll
+                // inspecting a recovered operation reaches this every few seconds.
+                if case .interrupted = launchState, reconciliationsInFlight == 0 { startRefresh() }
+            }
+            // The answer may name an operation nobody is streaming (the original event stream
+            // was lost, or it was started before this launch). It is polled from here, so a
+            // card never stays busy for an operation that has since finished.
+            if statuses[id]?.inFlightOperation != nil, operations[id] == nil { startRecoveredOperationPoll() }
         } catch {
-            // A reconciliation that began after this query did has read the actual state
-            // since, so its result stands: replacing it here would delete the status it just
-            // established and put the app back on Interrupted over a Ready it disproved. A
-            // newer inspection of this environment stands for the same reason.
-            guard generation == refreshGeneration, ticket >= publishedStatusTicket[id] ?? 0 else { return }
-            publishedStatusTicket[id] = ticket
+            guard statusGenerations[id] == generation else { return }
             // The query never answered. What was cached says nothing about the VM now, and
             // Quit must not choose stop targets from it: the status is dropped and the
             // environment is marked as unanswered, exactly as a failed reply would.
             statuses[id] = nil
-            statusQueryFailures.insert(id)
+            // A lost answer names no failure of its own: the interrupted launch state is what
+            // reports it, and whatever the card already shows stays its own news.
+            statusQueryFailures[id] = nil
+            cancellationFailures[id] = nil
             launchState = .interrupted(RuntimeConnectionInterrupted())
         }
     }
@@ -548,8 +735,42 @@ final class AppModel {
     /// the app was relaunched (AGENTS.md: every error carries a recovery action that works).
     func dismissError(_ id: EnvironmentID) {
         lastErrors[id] = nil
-        statusQueryFailures.remove(id)
+        statusQueryFailures[id] = nil
         Task { await refreshStatus(of: id) }
+    }
+
+    /// Applies everything a fresh status settles for one environment. Every read of an actual
+    /// status goes through this — the per-card inspection and the full reconciliation alike —
+    /// so a card cannot be left showing a failure that the very snapshot it is published with
+    /// has already disproved.
+    ///
+    /// The operation error that reported an outcome unknown is settled by the answer that
+    /// resolved it: `EnvironmentCardState` derives its "Checking environment" presentation
+    /// from that retained error, so leaving it would keep the card busy and Start disabled
+    /// through every later successful check. A status that still reports an unresolved outcome
+    /// is its own news and stays.
+    private func settle(_ status: EnvironmentStatus, for id: EnvironmentID) {
+        // An environment the runtime no longer lists is not settled by an answer about it. The
+        // listing is what says the environment is there at all, and a marker on one that has
+        // vanished names exactly the state nothing has established: clearing it here would let
+        // a late answer — a poll's, or a check that crossed the listing — free a slot the
+        // runtime never confirmed was free (MVP-PLAN.md §3).
+        guard environments.contains(where: { $0.id == id }) else { return }
+        if case .operationOutcomeUnknown? = lastErrors[id], Self.reportedUnknownOutcome(of: status) == nil {
+            lastErrors[id] = nil
+        }
+        unknownOutcomes[id] = nil
+        reconciling.remove(id)
+        clearSettledCancellationFailure(of: id, against: status)
+    }
+
+    /// Drops a refused cancellation once an inspection shows its operation is no longer in
+    /// flight. Only while it is still the failure the card shows: a later problem is its own
+    /// news and is not cleared by this.
+    private func clearSettledCancellationFailure(of id: EnvironmentID, against status: EnvironmentStatus) {
+        guard let failure = cancellationFailures[id], status.inFlightOperation != failure.operation else { return }
+        cancellationFailures[id] = nil
+        if lastErrors[id] == failure.error { lastErrors[id] = nil }
     }
 
     // MARK: - Dashboard
@@ -564,10 +785,99 @@ final class AppModel {
                 operation: operations[environment.id],
                 lastError: lastErrors[environment.id],
                 statusUnread: statuses[environment.id] == nil,
-                statusCheckFailed: statusQueryFailures.contains(environment.id) && statusQueriesInFlight[environment.id] == nil,
+                statusCheckFailed: statusQueryFailures[environment.id] != nil && statusQueriesInFlight[environment.id] == nil,
+                unknownOutcome: unknownOutcomes[environment.id],
+                statusQueryFailure: statusQueryFailures[environment.id],
+                reconciling: reconciling.contains(environment.id),
+                logs: operations[environment.id]?.logs ?? lastLogs[environment.id] ?? [],
+                retryAvailable: lastRequests[environment.id] != nil && !reconciling.contains(environment.id),
+                retryBlockedReason: startRetryBlock(for: environment.id, block: block),
                 startBlockedElsewhere: (operations[environment.id] == nil && statuses[environment.id]?.vm != .running) ? block : nil,
                 runtimeVersion: runtimeVersion
             )
+        }
+    }
+
+    /// Why replaying the last request would be refused, or nil. Retry re-sends whatever
+    /// failed, so a replayed start answers to the same one-VM, one-operation guard as Start
+    /// itself, and the card names the environment that is in the way rather than sending a
+    /// request the runtime must reject.
+    private func startRetryBlock(for id: EnvironmentID, block: String?) -> String? {
+        guard case .startEnvironment? = lastRequests[id] else { return nil }
+        return block
+    }
+
+    /// Asks the runtime to cancel the environment's in-flight operation.
+    /// Asks the runtime to cancel the environment's in-flight operation: the one this app
+    /// started once the runtime has accepted it, or the one a status reported after a
+    /// relaunch. A cancellation the runtime refuses is shown like any other failure.
+    func cancel(_ id: EnvironmentID) {
+        guard let operation = operations[id]?.acceptedID ?? statuses[id]?.inFlightOperation else { return }
+        // The reconciliation this cancellation is sent under, so a disconnect reported after a
+        // newer one has already re-established the app's state does not put the whole dashboard
+        // back on the interrupted screen — and with no replacement check, since this path
+        // starts none. The operation stream applies the same rule to its own loss.
+        let generation = refreshGeneration
+        Task {
+            do {
+                for try await event in backend.send(.cancelOperation(operation)) {
+                    guard case .failed(_, let error) = event else { continue }
+                    // A refusal is only news while that operation is still the one in flight.
+                    // One that reached its own end meanwhile has already been reconciled, and
+                    // its card must not show a cancellation failure for work that is over.
+                    guard isInFlight(operation, for: id) else { return }
+                    // Recorded like any other operation result, so it supersedes a status
+                    // query that failed earlier while this operation ran. Left standing, that
+                    // marker would let the next successful inspection clear this refusal as if
+                    // it were the stale query failure, and the card would lose its error and
+                    // its recovery controls while the operation is still in flight.
+                    recordOperationError(error, for: id)
+                    cancellationFailures[id] = CancellationFailure(operation: operation, error: error)
+                }
+            } catch {
+                guard generation == refreshGeneration else { return }
+                launchState = .interrupted(RuntimeConnectionInterrupted())
+            }
+        }
+    }
+
+    /// Whether that operation is still the one the environment is running, by either name.
+    private func isInFlight(_ operation: OperationID, for id: EnvironmentID) -> Bool {
+        operations[id]?.acceptedID == operation || statuses[id]?.inFlightOperation == operation
+    }
+
+    /// The recovery actions the GUI wires: retry re-sends the last request (never while the
+    /// outcome is unknown), inspect re-reads the status, cancel dismisses the failure. The
+    /// rest are shown as not implemented by the view.
+    func perform(_ action: RecoveryAction, for id: EnvironmentID) {
+        switch action {
+        case .retry:
+            // A retry answers the failure the card is showing. When that failure is the
+            // inspection itself, another inspection is what it asks for: replaying a mutation
+            // would act before the VM's actual state had been read back, and the failed query
+            // is exactly what removed that state.
+            if let shown = lastErrors[id], shown == statusQueryFailures[id] {
+                Task { await refreshStatus(of: id) }
+                return
+            }
+            guard unknownOutcomes[id] == nil, operations[id] == nil, !reconciling.contains(id), let request = lastRequests[id] else { return }
+            // A replayed start is one more start: the runtime still runs one operation and one
+            // VM at a time, and sending past that would replace the useful original error.
+            if case .startEnvironment = request, globalStartBlock != nil { return }
+            // Reserved before the first suspension, so two rapid activations of Try again —
+            // or a Start pressed straight after it — cannot both pass this guard.
+            operations[id] = OperationState(id: OperationID(), request: request)
+            Task { await run(request, for: id) }
+        case .inspectState:
+            Task { await refreshStatus(of: id) }
+        case .cancel:
+            // The check's own failure carries the card's only way to ask again while the
+            // state is unread: dismissing it would leave the card on "Checking environment"
+            // with nothing to press. The presentation disables the option for the same reason.
+            guard let shown = lastErrors[id], shown != statusQueryFailures[id] else { return }
+            lastErrors[id] = nil
+        default:
+            break
         }
     }
 
@@ -589,9 +899,10 @@ final class AppModel {
         // over state nothing has re-established. Nothing is started until reconciliation has
         // (AGENTS.md: never retry a mutating operation blindly).
         guard launchState == .ready else { return }
-        guard environments.contains(where: { $0.id == id }), operations[id] == nil, globalStartBlock == nil else { return }
+        guard environments.contains(where: { $0.id == id }), operations[id] == nil,
+              !reconciling.contains(id), globalStartBlock == nil else { return }
         // Reserved before the first suspension, so two rapid starts cannot both pass the guard.
-        operations[id] = OperationState(id: OperationID(), phase: nil)
+        operations[id] = OperationState(id: OperationID(), request: .startEnvironment(id, StartOptions()))
         Task { await run(.startEnvironment(id, StartOptions()), for: id) }
     }
 
@@ -601,7 +912,7 @@ final class AppModel {
     /// operation's own failure prescribes.
     private func recordOperationError(_ error: GuesthouseError?, for id: EnvironmentID) {
         lastErrors[id] = error
-        statusQueryFailures.remove(id)
+        statusQueryFailures[id] = nil
     }
 
     private func run(_ request: RuntimeRequest, for id: EnvironmentID) async {
@@ -611,21 +922,41 @@ final class AppModel {
         // off, so a reconciliation launched by that same loss can already have read the
         // actual state by the time this stream ends.
         let generation = refreshGeneration
-        if operations[id] == nil { operations[id] = OperationState(id: OperationID(), phase: nil) }
+        lastRequests[id] = request
+        if operations[id] == nil { operations[id] = OperationState(id: OperationID(), request: request) }
         var completed = false
+        // Whether the runtime described this environment while the operation ran. The courtesy
+        // status refresh after a start or a stop is bounded and can time out, so an operation
+        // that completed may still have said nothing about the VM.
         var described = false
+        /// Set when a reconciliation that began after this stream has already read this
+        /// environment's state back, so the loss has nothing left to establish.
+        var answeredByReconciliation = false
         do {
             for try await event in backend.send(request) {
                 switch event {
-                case .accepted(let operation): operations[id] = OperationState(id: operation, phase: nil)
+                case .accepted(let operation): operations[id]?.acceptedID = operation
                 case .progress(_, let phase): operations[id]?.phase = phase
+                case .log(_, let line):
+                    operations[id]?.logs.append(line)
+                    if let count = operations[id]?.logs.count, count > OperationState.maximumLogLines {
+                        operations[id]?.logs.removeFirst(count - OperationState.maximumLogLines)
+                    }
                 case .status(let status):
                     statuses[status.environmentID] = status
                     if status.environmentID == id { described = true }
-                case .failed(_, let error): recordOperationError(error, for: id)
+                case .failed(_, let error):
+                    recordOperationError(error, for: id)
+                    // The runtime reports an unresolved mutation as a normal terminal failure
+                    // when it cannot persist the result. That is the same unknown state as a
+                    // stream this app lost, and is remembered as one until a status answers.
+                    if case .operationOutcomeUnknown(let unresolved) = error { unknownOutcomes[id] = unresolved }
                 case .completed:
                     recordOperationError(nil, for: id)
                     completed = true
+                    // The request succeeded, so it is no longer what Try again would replay: a
+                    // problem a later status reports on its own must not re-send this one.
+                    lastRequests[id] = nil
                 default: break
                 }
             }
@@ -634,17 +965,37 @@ final class AppModel {
             // reconciliation that began after this stream did has looked at the actual state
             // since, so its result stands rather than being overwritten by this loss.
             if generation == refreshGeneration { launchState = .interrupted(RuntimeConnectionInterrupted()) }
+            // …and when that reconciliation has also finished, this environment's actual state
+            // has been read back: that is the inspection an interrupted operation calls for,
+            // so recreating an unknown marker over it, dropping the status it published and
+            // asking again would undo it. The check that followed could then fail or hang and
+            // leave Start and Quit blocked behind an outcome that had in fact been settled.
+            if reconciledSinceStreamBegan(generation, of: id) {
+                answeredByReconciliation = true
+            } else {
+                // The outcome is unknown until the runtime answers a status query; never
+                // replay. Before acceptance the app's own label stands in: the runtime may or
+                // may not have received the request.
+                unknownOutcomes[id] = operations[id]?.acceptedID ?? operations[id]?.id
+            }
         }
         // A start that failed or was lost may already have launched the VM, so what was cached
-        // before it says nothing about the state now. Nor does it after one that completed
-        // without describing the environment: the runtime's own status refresh after a stop or
-        // a start is a bounded courtesy and can time out, leaving the pre-start `.stopped`
-        // behind. Either way the status is dropped before the reservation is released, because
-        // an actionable `.stopped` would re-enable Start here and on every other card for the
-        // seconds the inspection below takes, and let a second mutation go out over a VM that
-        // is already running (AGENTS.md: never retry a mutating operation blindly).
-        if !completed || !described { statuses[id] = nil }
-        operations[id] = nil
+        // before it says nothing about the state now. The status is dropped before the
+        // reservation is released: a cached `.stopped` would otherwise re-enable Start for the
+        // seconds the inspection takes and let a second mutation go out over an outcome nobody
+        // has established (AGENTS.md: never retry a mutating operation blindly).
+        // Nor after one that completed without describing the environment: the courtesy status
+        // refresh is bounded and can time out, leaving the pre-start reading behind.
+        if !completed || !described, !answeredByReconciliation { statuses[id] = nil }
+        lastLogs[id] = operations.removeValue(forKey: id)?.logs
+        guard !answeredByReconciliation else {
+            followRecoveredOperation(of: id)
+            return
+        }
+        reconciling.insert(id)
+        // A status that still names an operation (the connection dropped while the runtime
+        // kept working) is polled until it settles; `refreshStatus` starts that itself, and
+        // it is what ends the guard, so an inspection that failed leaves it standing.
         await refreshStatus(of: id)
         // The runtime may still be running the operation this app stopped listening to. A
         // reconciliation that ran while the operation was still local started a poll that found
@@ -652,6 +1003,13 @@ final class AppModel {
         // owned to one only the runtime reports — is where that poll has to be started again.
         // Without it the card stays busy and every start stays blocked until the user checks.
         followRecoveredOperation(of: id)
+    }
+
+    /// Whether a full reconciliation that began after `generation` has completed and published
+    /// a status for this environment. That reading is newer than anything the interrupted
+    /// stream knows, and it is what an unknown outcome is waiting for.
+    private func reconciledSinceStreamBegan(_ generation: UInt64, of id: EnvironmentID) -> Bool {
+        reconciledGeneration > generation && statuses[id] != nil
     }
 
     /// A model over a preview scenario's environments and scripted backend, already refreshed.
@@ -867,12 +1225,32 @@ final class AppModel {
                     return false
                 }
             }
+            // An operation the app never saw finish may have started a VM this quit would
+            // then leave running. The status queries above settle every outcome they can
+            // answer; one that is still open stops the quit and asks for a check instead.
+            // The runtime's own verdict counts here as it does in `globalStartBlock`: a
+            // successful refresh clears this app's marker, so a status still reporting
+            // `operationOutcomeUnknown` would otherwise let a stopped VM quit over a mutation
+            // the runtime says it cannot account for.
+            if let unknown = environmentsWithUnknownOutcome.first {
+                quitFlow = .stopFailed(.operationOutcomeUnknown(unresolvedOperation(of: unknown) ?? OperationID()))
+                return false
+            }
+            // A reconciliation marker still standing means an operation's state was never read
+            // back: the check that would have settled it failed, and it is kept for exactly
+            // that reason. An environment the listing has since dropped is not inspected by the
+            // loop above at all, so an ordinary failure there — no unknown-outcome marker of
+            // its own — would let the quit terminate over a VM that may still be running (§2).
+            if let unread = reconciling.first {
+                quitFlow = .stopFailed(lastErrors[unread] ?? .operationOutcomeUnknown(unresolvedOperation(of: unread) ?? OperationID()))
+                return false
+            }
             let busy = operations.keys.first ?? statuses.values.first(where: { $0.inFlightOperation != nil })?.environmentID
             guard let busy else { return true }
             quitFlow = .waitingForOperations(busy)
             // The runtime runs a Tart command for every status query, so this waits in
             // seconds rather than polling several times a second.
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: quitWaitPollInterval)
         }
         return false
     }

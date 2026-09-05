@@ -7,11 +7,9 @@ import Testing
 @Suite struct DashboardStateTests {
     typealias Availability = EnvironmentCardState.Availability
 
-    /// Waits for a condition, and fails the test if it never holds. A wait that gave up in
-    /// silence let every assertion after it run against a model that had not settled, which
-    /// reads as a flaky test rather than as the timeout it is.
-    func waitUntil(_ condition: @MainActor () -> Bool, _ description: String = "condition",
-                   sourceLocation: SourceLocation = #_sourceLocation) async {
+    /// Waits for a condition, and reports when it never became true: a wait that silently
+    /// times out leaves the assertions after it testing something else.
+    func waitUntil(_ condition: @MainActor () -> Bool, _ description: String = "condition", sourceLocation: SourceLocation = #_sourceLocation) async {
         for _ in 0..<1200 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
         if !condition() { Issue.record("timed out waiting for \(description)", sourceLocation: sourceLocation) }
     }
@@ -138,11 +136,11 @@ import Testing
         await model.refresh()
         #expect(try #require(model.cardStates().first).availability(of: .start) == .enabled)
         model.start(environment.id)
-        // The status the operation returned still names the operation until the check that
-        // follows it answers; the card reads "Running" only once nothing is in flight on it.
+        // The card reads "Checking environment…" until the check that follows the operation
+        // has landed, and the status it returned names the operation until then.
         await waitUntil({
             model.statuses[environment.id]?.vm == .running && model.operations.isEmpty
-                && model.statuses[environment.id]?.inFlightOperation == nil
+                && model.reconciling.isEmpty && model.statuses[environment.id]?.inFlightOperation == nil
         }, "the check that follows the start")
         let card = try #require(model.cardStates().first)
         #expect(card.statusText == "Running")
@@ -170,13 +168,138 @@ import Testing
         await model.refresh()
         #expect(model.cardStates()[1].availability(of: .start) == .enabled)
         model.start(first.id)
-        await waitUntil { model.operations[first.id] != nil }
+        await waitUntil({ model.operations[first.id]?.acceptedID != nil }, "the operation to be accepted")
         guard case .disabled(let busy) = model.cardStates()[1].availability(of: .start) else { Issue.record("expected Start blocked during the operation"); return }
         #expect(busy.contains("in progress on First"))
-        // The hung start is left running: this window's model has no name for the operation the
-        // runtime accepted until the acceptance is tracked (issue #29), so a cancellation from
-        // here would name the local label and match nothing. What this test asserts is already
-        // made above, and the fake's task ends with the test.
+        // Only the runtime's own id ends the operation; the provisional one cancels nothing.
+        if let accepted = model.operations[first.id]?.acceptedID { for try await _ in backend.send(.cancelOperation(accepted)) {} }
+        await waitUntil({ model.operations.isEmpty }, "the canceled operation to end")
+    }
+
+    @Test func startIsRefusedEverywhereWhileAnOutcomeIsUnknown() async throws {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "First", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Second", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        for environment in [first, second] {
+            await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        }
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // The start disconnects and the status check that follows fails, so nobody knows
+        // whether First's VM came up.
+        await backend.script("startEnvironment", .disconnect())
+        await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
+        model.start(first.id)
+        await waitUntil({ model.unknownOutcomes[first.id] != nil && model.operations.isEmpty }, "the outcome to be unknown")
+        let other = try #require(model.cardStates().first { $0.id == second.id })
+        guard case .disabled(let reason) = other.availability(of: .start) else { Issue.record("expected Start blocked on the other card"); return }
+        #expect(reason.contains("does not know yet"))
+        model.start(second.id)
+        let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }
+        #expect(starts.count == 1, "no second development Mac is started over an unknown one")
+    }
+
+    @Test func theCardSaysItIsCheckingWhileTheStatusAfterAFailureIsRead() async throws {
+        // A slow status reply keeps the reconciliation window open long enough to observe it.
+        let backend = FakeRuntimeBackend(delay: .milliseconds(150))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(environment.id)))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil({ model.reconciling.contains(environment.id) }, "the status check after the failure")
+        let card = try #require(model.cardStates().first)
+        #expect(card.isBusy, "the cached stopped status is not a settled state to act on")
+        #expect(card.statusText == "Checking environment…")
+        #expect(card.availability(of: .start) == .disabled(reason: "Checking environment"), "Start would be refused, so it is not offered")
+        await waitUntil({ model.reconciling.isEmpty }, "the status check to answer")
+    }
+
+    @Test func aRetryHonorsTheOneVMGuardLikeStart() async throws {
+        let backend = FakeRuntimeBackend()
+        let first = DevelopmentEnvironment(name: "First", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let second = DevelopmentEnvironment(name: "Second", createdAt: Date(timeIntervalSince1970: 1_800_000_001))
+        await backend.setEnvironments([first, second])
+        await backend.setStatus(EnvironmentStatus(environmentID: first.id, vm: .stopped, readiness: .ready))
+        await backend.setStatus(EnvironmentStatus(environmentID: second.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(first.id)))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(first.id)
+        await waitUntil({ model.lastErrors[first.id] != nil && model.operations.isEmpty && model.reconciling.isEmpty }, "the failed start to settle")
+        #expect(model.cardStates().first?.recovery?.options.first { $0.action == .retry }?.availability == .enabled)
+        // The other development Mac starts running in the meantime.
+        await backend.setStatus(EnvironmentStatus(environmentID: second.id, vm: .running, readiness: .ready))
+        await model.refreshStatus(of: second.id)
+        let retry = try #require(model.cardStates().first?.recovery?.options.first { $0.action == .retry })
+        guard case .disabled(let reason) = retry.availability else { Issue.record("expected Try again blocked"); return }
+        #expect(reason.contains("Second is running"))
+        model.perform(.retry, for: first.id)
+        let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }
+        #expect(starts.count == 1, "the replayed start the runtime would refuse is never sent")
+        #expect(model.lastErrors[first.id] == .guestNotReachable(first.id), "the original error is kept")
+    }
+
+    @Test func aSuccessfulOperationLeavesNothingForRetryToReplay() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .succeed(status: EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready)))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil({ model.statuses[environment.id]?.vm == .running && model.operations.isEmpty }, "the start to complete")
+        #expect(model.lastRequests[environment.id] == nil, "a completed request is not what a later problem retries")
+        // A problem the runtime reports on its own afterwards must not replay that start.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .needsAttention(.guestNotReachable(environment.id))))
+        await model.refreshStatus(of: environment.id)
+        let retry = try #require(model.cardStates().first?.recovery?.options.first { $0.action == .retry })
+        guard case .disabled = retry.availability else { Issue.record("expected Try again disabled"); return }
+        model.perform(.retry, for: environment.id)
+        let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }
+        #expect(starts.count == 1, "the successful start is never re-sent for an unrelated problem")
+    }
+
+    @Test func twoRapidRetriesSendOneRequest() async throws {
+        let backend = FakeRuntimeBackend(delay: .milliseconds(20))
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await backend.script("startEnvironment", .fail(error: .guestNotReachable(environment.id)))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        model.start(environment.id)
+        await waitUntil({ model.lastErrors[environment.id] != nil && model.operations.isEmpty && model.reconciling.isEmpty }, "the failed start to settle")
+        model.perform(.retry, for: environment.id)
+        #expect(model.operations[environment.id] != nil, "the reservation is visible before the task runs")
+        model.perform(.retry, for: environment.id)
+        model.start(environment.id)
+        await waitUntil({ model.operations.isEmpty && model.reconciling.isEmpty }, "the replayed start to settle")
+        let starts = await backend.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }
+        #expect(starts.count == 2, "the first start and one replay, never two concurrent operations")
+    }
+
+    @Test func anInspectionThatFindsAnOperationKeepsPolling() async throws {
+        let backend = FakeRuntimeBackend()
+        let environment = DevelopmentEnvironment(name: "Dev Mac", createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        await backend.setEnvironments([environment])
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        let model = AppModel(backend: backend) { _ in }
+        await model.refresh()
+        // The full reconciliation found nothing running, so no poll is under way. The user's
+        // own check is what discovers the operation.
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready, inFlightOperation: OperationID()))
+        model.perform(.inspectState, for: environment.id)
+        await waitUntil({ model.statuses[environment.id]?.inFlightOperation != nil }, "the inspection to find the operation")
+        #expect(model.cardStates().first?.isBusy == true)
+        await backend.setStatus(EnvironmentStatus(environmentID: environment.id, vm: .running, readiness: .ready))
+        for _ in 0..<600 where model.statuses[environment.id]?.inFlightOperation != nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(model.statuses[environment.id]?.inFlightOperation == nil, "the card does not stay busy for an operation nobody polls")
+        #expect(model.cardStates().first?.statusText == "Running")
     }
 
     @Test func recoveredInFlightOperationsArePolledUntilTerminal() async throws {
@@ -221,9 +344,13 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        // The check that follows the failure has to answer first: the status the start began
-        // from is dropped, so Start is offered again only from what the runtime just reported.
-        await waitUntil { model.lastErrors[environment.id] != nil && model.operations.isEmpty && model.statuses[environment.id] != nil }
+        // Start is offered again only once the check that follows the failure has answered:
+        // the status the start began from is dropped, so what the runtime just reported is the
+        // only thing Start can be offered from.
+        await waitUntil {
+            model.lastErrors[environment.id] != nil && model.operations.isEmpty
+                && model.statuses[environment.id] != nil && !model.reconciling.contains(environment.id)
+        }
         let card = try #require(model.cardStates().first)
         #expect(card.attention == .guestNotReachable(environment.id))
         #expect(card.availability(of: .start) == .enabled, "a stopped, ready VM can be started again after a failed start")
@@ -378,11 +505,18 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.operations.isEmpty && model.launchState != .ready }
-        guard case .interrupted = model.launchState else { Issue.record("expected interrupted"); return }
+        await waitUntil { model.lastRequests[environment.id] != nil && model.operations.isEmpty && model.unknownOutcomes.isEmpty }
         let requests = await backend.receivedRequests
         #expect(requests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1, "never replayed")
-        #expect(requests.last == .environmentStatus(environment.id), "re-checked after the interruption")
+        guard let start = requests.firstIndex(where: { if case .startEnvironment = $0 { true } else { false } }) else {
+            Issue.record("expected the start to have been sent"); return
+        }
+        #expect(requests[requests.index(after: start)] == .environmentStatus(environment.id), "re-checked after the interruption")
+        // The environment answered, so the outcome is settled — but one status is not the
+        // listing or the other environments, and Ready is what the reconciliation that answer
+        // asks for establishes.
+        await waitUntil { model.launchState == .ready }
+        #expect(model.launchState == .ready)
     }
 
     @Test func aCheckThatFailedIsNotShownAsOneStillRunning() async throws {
@@ -429,19 +563,21 @@ import Testing
         let model = AppModel(backend: backend) { _ in }
         await model.refresh()
         model.start(environment.id)
-        await waitUntil { model.operations[environment.id] != nil }
+        // The runtime's own id for the operation, which is what a cancellation names: the
+        // model's local label stands in only until the runtime accepts the request.
+        await waitUntil { model.operations[environment.id]?.acceptedID != nil }
         // A check fails while the start is still running, so the environment carries a
         // query-failure marker when the start reports its own outcome.
         await backend.script("environmentStatus", .fail(error: .runtimeStateUnavailable(reason: SanitizedText("inventory unreadable"))))
         await model.refreshStatus(of: environment.id)
         await backend.script("environmentStatus", .succeed())
-        let operation = try #require(model.operations[environment.id]?.id)
+        let operation = try #require(model.operations[environment.id]?.acceptedID)
         for try await _ in backend.send(.cancelOperation(operation)) {}
         await waitUntil { model.operations.isEmpty && model.statuses[environment.id] != nil }
         #expect(model.lastErrors[environment.id] == .canceled, "the operation's own result is not cleared as if it were the stale query failure")
         let card = try #require(model.cardStates().first)
         #expect(card.attention == .canceled)
-        #expect(card.canDismiss, "and the failure the app is holding can be cleared")
+        #expect(offersDismissal(card), "and the failure the app is holding can be cleared")
         model.dismissError(environment.id)
         #expect(model.lastErrors[environment.id] == nil)
     }
@@ -541,8 +677,16 @@ import Testing
         let error = GuesthouseError.anotherEnvironmentRunning(EnvironmentID())
         #expect(error.recoveryActions == [.cancel], "an error the card can only dismiss needs a control that dismisses it")
         let held = EnvironmentCardState(environment: environment, status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .ready), operation: nil, lastError: error)
-        #expect(held.canDismiss)
+        #expect(offersDismissal(held))
         let reported = EnvironmentCardState(environment: environment, status: EnvironmentStatus(environmentID: environment.id, vm: .stopped, readiness: .needsAttention(error)), operation: nil, lastError: nil)
-        #expect(!reported.canDismiss)
+        #expect(!offersDismissal(reported))
     }
+}
+
+/// Whether the card's recovery panel offers a dismissal that would actually do something: the
+/// `cancel` option is the Dismiss control, and it is disabled when dismissing would change
+/// nothing (the card's own reason travels in the option's availability).
+@MainActor private func offersDismissal(_ card: EnvironmentCardState) -> Bool {
+    guard let option = card.recovery?.options.first(where: { $0.action == .cancel }) else { return false }
+    return option.availability == .enabled
 }
