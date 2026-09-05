@@ -2,7 +2,7 @@ import Foundation
 
 /// The Tart release Guesthouse is tested against (MVP-PLAN.md §3: "Pin command versions and
 /// test output adapters"). Every parser in this directory targets this release's output.
-public enum TartPin {
+public enum TartPin: Sendable {
     public static let version = TartVersion(SemanticVersion([2, 36, 0]))
     public static let releaseTag = "2.36.0"
     public static let repository = "https://github.com/openai/tart"
@@ -10,24 +10,34 @@ public enum TartPin {
 
 /// A Tart version as printed by `tart --version`.
 public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomStringConvertible {
-    /// Always exactly three components, so the encoded string and the strict decoder agree.
-    public let semantic: SemanticVersion
+    /// Always exactly three components, as Tart prints them: `2.36.0` is `[2, 36, 0]`.
+    public let components: [Int]
+
+    /// The comparable form. `SemanticVersion` treats a missing trailing component as zero and
+    /// stores `2.36.0` as `2.36`, so this is the value to compare and `description` is the
+    /// three-component spelling that the strict parse and the pin agree on.
+    public var semantic: SemanticVersion { SemanticVersion(components) }
 
     /// - Precondition: at most three components; fewer are padded with zeros.
     public init(_ semantic: SemanticVersion) {
         precondition(semantic.components.count <= 3, "a Tart version has at most three components")
-        let padded = semantic.components + Array(repeating: 0, count: max(0, 3 - semantic.components.count))
-        self.semantic = SemanticVersion(padded)
+        components = semantic.components + Array(repeating: 0, count: max(0, 3 - semantic.components.count))
     }
 
-    /// Parses the output of `tart --version`. Accepts exactly one non-empty line of the form
-    /// `2.36.0`, `v2.36.0`, or `tart 2.36.0`, with all three numeric components present in their
-    /// canonical decimal spelling (no leading zeros) and at most one prefix. Anything else (extra lines, a two-component version, `tart v2.36.0`,
-    /// trailing text) is not a version and must be treated as unknown, never as matching the pin.
+    /// Parses the output of `tart --version`. Accepts the single line of the form `2.36.0`,
+    /// `v2.36.0`, or `tart 2.36.0`, with all three numeric components present in their
+    /// canonical decimal spelling (no leading zeros) and at most one prefix, ending in at most
+    /// the one line terminator Tart prints. Anything else (extra or blank lines, a
+    /// two-component version, `tart v2.36.0`, surrounding whitespace, trailing text) is not a
+    /// version and must be treated as unknown, never as matching the pin.
     public init?(parsing output: String) {
-        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        guard lines.count == 1,
-              let match = lines[0].wholeMatch(of: #/(?:[Tt][Aa][Rr][Tt] |v)?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))/#),
+        // Only the single expected terminator is removed, and the rest has to be the version
+        // in full. Splitting on newlines would drop empty lines as well, so `\n2.36.0` and
+        // `2.36.0\n\n` would reach the pin as the pinned spelling rather than as the drifted
+        // output they are.
+        var line = output[...]
+        if line.last?.isNewline == true { line = line.dropLast() }
+        guard let match = line.wholeMatch(of: #/(?:[Tt][Aa][Rr][Tt] |v)?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))/#),
               let semantic = SemanticVersion(String(match.1))
         else { return nil }
         self.init(semantic)
@@ -56,7 +66,6 @@ public struct TartVersion: Hashable, Sendable, Comparable, Codable, CustomString
 
     /// Always three components (`2.36.0`, never `2.36`), the form the strict parse accepts.
     public var description: String {
-        let padded = semantic.components + Array(repeating: 0, count: max(0, 3 - semantic.components.count))
-        return padded.map(String.init).joined(separator: ".")
+        components.map(String.init).joined(separator: ".")
     }
 }

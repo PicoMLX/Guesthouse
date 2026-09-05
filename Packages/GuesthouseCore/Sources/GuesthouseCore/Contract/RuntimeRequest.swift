@@ -23,6 +23,20 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
         case .cancelOperation: "cancelOperation"
         }
     }
+
+    /// Whether the service changes host state for this request.
+    ///
+    /// A request that is interrupted before it is accepted carries no operation id, but it may
+    /// still have reached the service and been journaled or started. A mutating one therefore
+    /// has an unknown outcome and is never offered a blind retry; a read-only query changed
+    /// nothing and may simply be asked again. Cancelling counts as read-only because asking
+    /// twice cannot leave the host anywhere asking once would not.
+    public var mutatesHost: Bool {
+        switch self {
+        case .runtimeVersion, .environmentStatus, .cancelOperation: false
+        case .startEnvironment, .stopEnvironment, .importXcode: true
+        }
+    }
 }
 
 /// Every message from the GUI carries the protocol version it speaks.
@@ -52,6 +66,17 @@ public struct RuntimeRequestEnvelope: Codable, Hashable, Sendable {
     public struct ProtocolMismatch: Error, Hashable, Sendable {
         public let client: RuntimeProtocolVersion
         public var error: GuesthouseError { .protocolMismatch(client: client.rawValue, service: RuntimeProtocolVersion.current.rawValue) }
+    }
+
+    /// The version header on its own. Decoding this reads one integer and never looks at the
+    /// request, so a peer that is being refused before its payload is decoded can still be
+    /// answered with an error its own protocol version knows how to read.
+    public struct Header: Decodable, Hashable, Sendable {
+        public let protocolVersion: RuntimeProtocolVersion
+
+        public init(protocolVersion: RuntimeProtocolVersion) {
+            self.protocolVersion = protocolVersion
+        }
     }
 }
 

@@ -50,9 +50,27 @@ public enum CompatibilityEvaluator: Sendable {
             return .incompatible(reason: rule.reason, recoveryActions: rule.recoveryActions)
         }
 
+        // No probe can see fewer than zero executables, so a count that says so is corrupt
+        // rather than a report of the single unambiguous installation a handoff needs.
+        if let installations = observed.codexCLIInstallations, installations < 0 {
+            return .needsValidation(.unknownFields([.codexCLIInstallations]))
+        }
+
+        // No protocol version is below zero either, and a corrupt one must not become part of
+        // an exact tuple that a later, equally corrupt observation could match as verified.
+        if let protocolVersion = observed.runtimeProtocolVersion, protocolVersion < 0 {
+            return .needsValidation(.unknownFields([.runtimeProtocolVersion]))
+        }
+
         // A probe that found no executable is decisive on its own, whatever else is unknown.
         if observed.codexCLIInstallations == 0 {
             return .needsValidation(.codexCLIMissing)
+        }
+
+        // So is a probe that found several: refusing to name one of them is why the version and
+        // path are unknown, and reporting that as missing fields hides the actual problem.
+        if let installations = observed.codexCLIInstallations, installations > 1 {
+            return .needsValidation(.competingInstallations(count: installations))
         }
 
         let unknown = observed.unknownFields
@@ -60,18 +78,16 @@ public enum CompatibilityEvaluator: Sendable {
             return .needsValidation(.unknownFields(unknown))
         }
 
-        if exact.codexCLIInstallations > 1 {
-            return .needsValidation(.competingInstallations(count: exact.codexCLIInstallations))
-        }
-
         if let record = history.filter({ $0.tuple == exact }).max(by: { $0.verifiedAt < $1.verifiedAt }) {
             return .verified(recordedAt: record.verifiedAt)
         }
 
         // Official evidence for this exact combination counts regardless of what else the user
-        // connected before; only then does unrelated history mean drift.
-        let tested = manifest.tested.first(where: { $0.matches(exact) })
-        if let verification = tested?.verification, verification.covers(exact) {
+        // connected before; only then does unrelated history mean drift. Host ranges may
+        // overlap, so every matching entry is asked, not only the first: one entry per tested
+        // host build is the natural way to record two verifications of one combination.
+        let matching = manifest.tested.filter { $0.matches(exact) }
+        if let verification = matching.compactMap(\.verification).first(where: { $0.covers(exact) }) {
             return .verified(recordedAt: verification.verifiedAt)
         }
 
@@ -79,10 +95,10 @@ public enum CompatibilityEvaluator: Sendable {
             return .needsValidation(.changedSinceLastVerified(exact.differences(from: latest.tuple)))
         }
 
-        guard let tested else {
+        guard !matching.isEmpty else {
             return .needsValidation(.untestedCombination)
         }
-        guard tested.verification != nil else {
+        guard matching.contains(where: \.isVerified) else {
             return .needsValidation(.neverConnected)
         }
         return .needsValidation(.verifiedOnDifferentHost)

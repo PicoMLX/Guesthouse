@@ -48,10 +48,48 @@ public struct SystemHostProbe: HostProbe {
 
     /// Whether `url` is that directory, compared by filesystem identity rather than by
     /// spelling: on a case-insensitive volume `/volumes` names the same directory.
-    static func isMountContainer(_ url: URL) -> Bool {
-        var candidate = stat(), container = stat()
-        guard stat(url.path, &candidate) == 0, stat(mountContainerPath, &container) == 0 else { return false }
-        return candidate.st_dev == container.st_dev && candidate.st_ino == container.st_ino
+    static func isMountContainer(_ url: URL, container: String = mountContainerPath) -> Bool {
+        var candidate = stat(), holder = stat()
+        guard stat(url.path, &candidate) == 0, stat(container, &holder) == 0 else { return false }
+        return candidate.st_dev == holder.st_dev && candidate.st_ino == holder.st_ino
+    }
+
+    /// The folder on `url`'s path where a volume mounts, `/Volumes/External` for
+    /// `/Volumes/External/Guesthouse`, or `nil` for a path that names no mount point.
+    ///
+    /// A mount point is always one component below the folder that holds them, so the walk
+    /// is a fixed depth rather than a climb to the root: `deletingLastPathComponent` answers
+    /// `/..` for the root and would never end.
+    static func volumeMountPoint(of url: URL, container: String = mountContainerPath) -> URL? {
+        let depth = URL(fileURLWithPath: container).standardizedFileURL.pathComponents.count
+        var candidate = url.standardizedFileURL
+        guard candidate.pathComponents.count > depth else { return nil }
+        while candidate.pathComponents.count > depth + 1 {
+            candidate = candidate.deletingLastPathComponent()
+        }
+        guard isMountContainer(candidate.deletingLastPathComponent(), container: container) else { return nil }
+        return candidate
+    }
+
+    /// Whether that mount point is a leftover folder rather than a mounted volume: a real
+    /// directory on the same filesystem as the folder that holds mount points is where a
+    /// volume *would* mount, so its capacity is the startup disk's and not the selected
+    /// volume's. A link is left alone; it names a location that resolves on its own.
+    static func isUnmountedVolumePoint(_ url: URL, container: String = mountContainerPath) -> Bool {
+        var point = stat(), holder = stat()
+        guard lstat(url.path, &point) == 0, (point.st_mode & S_IFMT) == S_IFDIR else { return false }
+        guard stat(container, &holder) == 0 else { return false }
+        return point.st_dev == holder.st_dev
+    }
+
+    /// Whether a failed `access` check rules the destination out.
+    ///
+    /// `access` answers for the calling process. The sandboxed app is refused with `EPERM`
+    /// for a folder the runtime service — the process that actually creates the VM — can
+    /// write, so that denial says nothing about the destination. A filesystem permission
+    /// denial and a read-only volume do rule it out, whatever process asks.
+    static func rulesOutDestination(_ denial: Int32) -> Bool {
+        denial == EACCES || denial == EROFS
     }
 
     public init() {}
@@ -109,6 +147,12 @@ public struct SystemHostProbe: HostProbe {
     /// that holds mount points: an unmounted external volume must not be answered with the
     /// startup disk's free space.
     public func freeBytes(at url: URL) throws -> UInt64 {
+        try freeBytes(at: url, mountContainer: Self.mountContainerPath)
+    }
+
+    /// The folder that holds mount points is a parameter so a test can stand one up; the
+    /// product always asks about `/Volumes`.
+    func freeBytes(at url: URL, mountContainer: String) throws -> UInt64 {
         var existing = url.standardizedFileURL
         while !FileManager.default.fileExists(atPath: existing.path) {
             // A component that exists as a link but does not resolve names a destination on a
@@ -119,16 +163,41 @@ public struct SystemHostProbe: HostProbe {
             }
             let parent = existing.deletingLastPathComponent()
             if parent.path == existing.path { break }
-            if Self.isMountContainer(parent) {
+            if Self.isMountContainer(parent, container: mountContainer) {
                 throw HostProbeError.volumeUnavailable(path: existing.path)
             }
             existing = parent
+        }
+        // A destination under a mount point that holds no mounted volume is a leftover folder
+        // on the startup disk: its capacity would answer a question about a volume that is
+        // not there, which is exactly what the walk above refuses to do.
+        if let mountPoint = Self.volumeMountPoint(of: existing, container: mountContainer),
+           Self.isUnmountedVolumePoint(mountPoint, container: mountContainer) {
+            throw HostProbeError.volumeUnavailable(path: mountPoint.path)
+        }
+        // The same question asked of where the destination really leads. A link outside the
+        // folder that holds mount points may point inside one — `~/Development Macs` at
+        // `/Volumes/External` — and the spelled path then names no mount point at all, while
+        // everything below follows the link and reads the leftover folder's startup-disk
+        // capacity. The container is resolved too, so the mount point is counted at the same
+        // depth in both paths.
+        let resolvedContainer = URL(fileURLWithPath: mountContainer).resolvingSymlinksInPath().path
+        if let mountPoint = Self.volumeMountPoint(of: existing.resolvingSymlinksInPath(), container: resolvedContainer),
+           Self.isUnmountedVolumePoint(mountPoint, container: resolvedContainer) {
+            throw HostProbeError.volumeUnavailable(path: mountPoint.path)
         }
         // The destination has to be a directory: a regular file where a folder is expected is
         // not a place a development Mac can be created.
         var found = stat()
         guard stat(existing.path, &found) == 0, (found.st_mode & S_IFMT) == S_IFDIR else {
             throw HostProbeError.notADirectory(path: existing.path)
+        }
+        // Capacity in a directory nothing can be created in is not space a development Mac
+        // can use: creating the VM folder needs write *and* search permission, whether the
+        // folder's permissions changed or the volume is mounted read-only. Asked before the
+        // capacity, so an unusable destination is never reported as free space.
+        if access(existing.path, W_OK | X_OK) != 0, Self.rulesOutDestination(errno) {
+            throw HostProbeError.destinationNotWritable(path: existing.path)
         }
         let values = try existing.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         guard let capacity = values.volumeAvailableCapacityForImportantUsage else {
@@ -155,6 +224,8 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
     case volumeUnavailable(path: String)
     /// Something that is not a directory occupies the destination path.
     case notADirectory(path: String)
+    /// The destination is a directory this user cannot write, so nothing can be created in it.
+    case destinationNotWritable(path: String)
 
     public var userMessage: String {
         switch self {
@@ -162,6 +233,8 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
             "The volume that holds \(GuesthouseError.sanitize(path, limit: 200)) is not available, so Guesthouse cannot tell how much space it has. Connect the volume, or choose a storage location on this Mac."
         case .notADirectory(let path):
             "\(GuesthouseError.sanitize(path, limit: 200)) is not a folder, so Guesthouse cannot store a development Mac there. Choose another storage location."
+        case .destinationNotWritable(let path):
+            "Guesthouse cannot write to \(GuesthouseError.sanitize(path, limit: 200)), so it cannot create a development Mac there. Choose another storage location, or give yourself write access to that folder."
         }
     }
 
@@ -170,6 +243,7 @@ public enum HostProbeError: Error, Hashable, Sendable, LocalizedError {
         switch self {
         case .volumeUnavailable: [.retry, .openSettings, .cancel]
         case .notADirectory: [.openSettings, .cancel]
+        case .destinationNotWritable: [.openSettings, .retry, .cancel]
         }
     }
 

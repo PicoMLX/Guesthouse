@@ -21,7 +21,9 @@ import Testing
         #expect(events.map(\.caseName) == ["accepted", "progress", "progress", "status", "completed"])
         guard case .accepted(let id) = events[0] else { Issue.record("no accepted"); return }
         #expect(events[1] == .progress(id, phases[0]))
-        #expect(events[3] == .status(status))
+        var inFlight = status
+        inFlight.inFlightOperation = id
+        #expect(events[3] == .status(inFlight), "the emitted status names the operation that has not completed yet")
         #expect(events[4] == .completed(id))
         #expect(await backend.status(of: environment) == status)
         #expect(await backend.receivedRequests == [.startEnvironment(environment, StartOptions())])
@@ -139,6 +141,39 @@ import Testing
         #expect(error.errorDescription?.isEmpty == false)
         #expect(error.guesthouseError?.caseName == "operationOutcomeUnknown")
         #expect(RuntimeConnectionInterrupted().guesthouseError == nil)
+    }
+
+    @Test func aQueryInterruptionOffersRetryRatherThanAnUnknownOutcome() async throws {
+        let backend = FakeRuntimeBackend()
+        await backend.script("runtimeVersion", .disconnect())
+        do {
+            for try await _ in backend.send(.runtimeVersion) {}
+            Issue.record("expected an interruption")
+        } catch let error as RuntimeConnectionInterrupted {
+            #expect(error.operationID == nil)
+            #expect(error.recoveryActions == [.retry], "a read-only query has nothing to inspect or cancel")
+            #expect(!error.userMessage.contains("may or may not"))
+            #expect(error.recoveryMessage.isEmpty == false)
+        }
+        #expect(RuntimeConnectionInterrupted(operationID: OperationID()).recoveryActions == [.inspectState, .cancel])
+    }
+
+    @Test func aMutationInterruptedBeforeAcceptanceIsAnUnknownOutcome() {
+        let mutation = RuntimeConnectionInterrupted(mayHaveMutated: true)
+        #expect(mutation.operationID == nil, "it was never accepted, so it has no id")
+        #expect(mutation.recoveryActions == [.inspectState, .cancel], "the service may already have started it")
+        #expect(mutation.userMessage.contains("may or may not"))
+        #expect(RuntimeConnectionInterrupted().recoveryActions == [.retry])
+    }
+
+    @Test func onlyHostChangingRequestsCountAsMutations() {
+        let environment = EnvironmentID()
+        #expect(RuntimeRequest.startEnvironment(environment, StartOptions()).mutatesHost)
+        #expect(RuntimeRequest.stopEnvironment(environment, .force).mutatesHost)
+        #expect(RuntimeRequest.importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")).mutatesHost)
+        #expect(!RuntimeRequest.runtimeVersion.mutatesHost)
+        #expect(!RuntimeRequest.environmentStatus(environment).mutatesHost)
+        #expect(!RuntimeRequest.cancelOperation(OperationID()).mutatesHost)
     }
 
     @Test func queriesReplyWithoutOperationIDs() async throws {
