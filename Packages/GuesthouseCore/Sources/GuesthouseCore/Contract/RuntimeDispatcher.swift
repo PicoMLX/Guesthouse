@@ -118,6 +118,8 @@ public enum RuntimeDispatcher: Sendable {
     /// applied to the decision immediately before it is acted on, rather than trusted from the
     /// moment the message arrived. Only dispatch is withdrawn: a decision that runs nothing is
     /// already an answer the peer should have.
+    /// This is only a pure transformation: a refusal snapshot can still become stale.
+    /// Concurrent dispatch must use `RuntimeSessionGate.commit` for atomic registration.
     public static func honoring(_ refusal: RuntimeEvent?, _ decision: Decision) -> Decision {
         guard let refusal, case .dispatch = decision else { return decision }
         return refused(refusal)

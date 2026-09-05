@@ -34,6 +34,8 @@ final class RuntimeService: Sendable {
     static let peerRequirement = XPCPeerRequirement.isFromSameTeam(andMatchesSigningIdentifier: clientSigningIdentifier)
 
     private let log = ServiceLog(category: "service")
+    // Bundle access happens outside session registration's critical section.
+    private let runtimeVersion = RuntimeService.versionInfo
 
     /// A diagnostic that carries a value, as a line the sink accepts.
     ///
@@ -55,7 +57,13 @@ final class RuntimeService: Sendable {
     ///
     /// `refusal` is read rather than passed in, because another request on the same session can
     /// refuse it while this one is still being decoded.
-    func handle(_ message: XPCReceivedMessage, inFlight: Int, refusal: () -> RuntimeEvent?, refuse: (RuntimeEvent) -> Void = { _ in }) -> RuntimeEvent? {
+    func handle(
+        _ message: XPCReceivedMessage,
+        inFlight: Int,
+        refusal: () -> RuntimeEvent?,
+        refuse: (RuntimeEvent) -> Void,
+        commit: (RuntimeRequest) -> RuntimeEvent
+    ) -> RuntimeEvent? {
         // A message that asks for no reply is never decoded or dispatched. An operation whose
         // ID, acceptance, and terminal event have nowhere to go is a host mutation the client
         // could neither follow nor cancel, and the client would have no record that it ran.
@@ -76,18 +84,18 @@ final class RuntimeService: Sendable {
         // request pipelined behind the refusal still gets an actionable answer. The session is
         // closed by its lifetime once every reply it owes has been handed over.
         if let refused = refusal() {
-            return reply(RuntimeDispatcher.refused(refused), reason: "session refused")
+            return reply(RuntimeDispatcher.refused(refused), reason: "session refused", refuse: refuse, commit: commit)
         }
         guard message.senderSatisfies(Self.peerRequirement) else {
             log.error(RedactedLine(literal: "message from a peer that does not satisfy the requirement; closing session"))
-            return reply(.replyAndClose(.failed(OperationID(), .unauthorizedCaller)), reason: "unauthorized caller", refuse: refuse)
+            return reply(.replyAndClose(.failed(OperationID(), .unauthorizedCaller)), reason: "unauthorized caller", refuse: refuse, commit: commit)
         }
         // The concurrency cap is applied before the request is decoded, so a peer over the cap
         // costs nothing to refuse. Only its version header is read, and only at the cap, so
         // that the refusal is one the peer's own protocol version can decode.
         let clientVersion = { try? message.decode(as: RuntimeRequestEnvelope.Header.self).protocolVersion }
         if let refused = RuntimeDispatcher.admit(inFlight: inFlight, clientVersion: clientVersion) {
-            return reply(refused, reason: "protocol mismatch over the request cap", refuse: refuse)
+            return reply(refused, reason: "protocol mismatch over the request cap", refuse: refuse, commit: commit)
         }
         let envelope: RuntimeRequestEnvelope
         do {
@@ -96,21 +104,24 @@ final class RuntimeService: Sendable {
             // A version-skewed installation is not corrupt input: the client gets the
             // protocol-mismatch error and its reinstall recovery, and the session closes.
             log.error(Self.line("protocol mismatch: client", "\(mismatch.client.rawValue)"))
-            return reply(RuntimeDispatcher.mismatch(mismatch.error), refuse: refuse)
+            return reply(RuntimeDispatcher.mismatch(mismatch.error), refuse: refuse, commit: commit)
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error(RedactedLine(literal: "undecodable request rejected"))
-            return reply(RuntimeDispatcher.undecodable())
+            return reply(RuntimeDispatcher.undecodable(), refuse: refuse, commit: commit)
         }
-        // Nothing runs on a refused session. Deciding first and reading the refusal after is
-        // deliberate: validating the envelope is the longest step, and one expression would
-        // evaluate the refusal before it, honoring an answer that is already stale by the time
-        // the decision is acted on.
+        // Validation runs outside the gate. Dispatch must check refusal and register under
+        // the same lock: even a snapshot taken after validation can become stale before use.
         let decision = RuntimeDispatcher.decide(envelope, inFlight: inFlight)
-        return reply(RuntimeDispatcher.honoring(refusal(), decision))
+        return reply(decision, refuse: refuse, commit: commit)
     }
 
-    private func reply(_ decision: RuntimeDispatcher.Decision, reason: String = "protocol mismatch", refuse: (RuntimeEvent) -> Void = { _ in }) -> RuntimeEvent? {
+    private func reply(
+        _ decision: RuntimeDispatcher.Decision,
+        reason: String = "protocol mismatch",
+        refuse: (RuntimeEvent) -> Void,
+        commit: (RuntimeRequest) -> RuntimeEvent
+    ) -> RuntimeEvent? {
         switch decision {
         case .reply(let event):
             log.error(Self.line("rejected request:", event.caseName))
@@ -123,17 +134,23 @@ final class RuntimeService: Sendable {
             refuse(event)
             return event
         case .dispatch(let request):
-            return perform(request)
+            let event = commit(request)
+            // Logging is outside registration's critical section, as is transport I/O below.
+            if case .failed(_, .invalidRequest(.unsupportedOperation)) = event {
+                log.notice(Self.line("operation not implemented yet:", request.caseName))
+            }
+            return event
         }
     }
 
-    private func perform(_ request: RuntimeRequest) -> RuntimeEvent {
+    /// Today registration only computes a terminal answer from immutable in-memory data.
+    /// Later async operations must register identity/cancellation here, not run under the gate.
+    private func perform(_ request: RuntimeRequest, operationID: OperationID) -> RuntimeEvent {
         switch request {
         case .runtimeVersion:
-            return .runtimeVersion(Self.versionInfo)
+            return .runtimeVersion(runtimeVersion)
         case .environmentStatus, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation:
-            log.notice(Self.line("operation not implemented yet:", request.caseName))
-            return .failed(OperationID(), .invalidRequest(.unsupportedOperation))
+            return .failed(operationID, .invalidRequest(.unsupportedOperation))
         }
     }
 
@@ -148,13 +165,12 @@ final class RuntimeService: Sendable {
     }
 
     /// Per-session state: what the session still owes its peer, and the rejection it was
-    /// answered with. The rules live in `RuntimeDispatcher.SessionLifetime`, which is unit
-    /// tested; this class only holds them under a lock and applies the outcome.
-    final class SessionHandler: XPCPeerHandler, @unchecked Sendable {
+    /// answered with. The tested gate atomically commits dispatch against those same rules;
+    /// this adapter hands replies over before releasing their obligations.
+    final class SessionHandler: XPCPeerHandler, Sendable {
         private let service: RuntimeService
         private let session: XPCSession
-        private let lock = NSLock()
-        private var lifetime = RuntimeDispatcher.SessionLifetime()
+        private let gate = RuntimeSessionGate()
 
         init(service: RuntimeService, session: XPCSession) {
             self.service = service
@@ -166,10 +182,19 @@ final class RuntimeService: Sendable {
             // session still owes an answer for. A session whose close has already been taken
             // admits nothing: answering here would race that cancel and hand the peer a
             // connection interruption in place of the rejection it is owed.
-            guard let others = lock.withLock({ lifetime.began() }) else { return nil }
-            let answer = service.handle(message, inFlight: others, refusal: { self.refusalEvent }) { [weak self] event in
-                self?.markRefused(with: event)
-            }
+            guard let others = gate.began() else { return nil }
+            let answer = service.handle(
+                message,
+                inFlight: others,
+                refusal: { self.refusalEvent },
+                refuse: { self.gate.refuse($0) },
+                commit: { request in
+                    let operationID = OperationID()
+                    return self.gate.commit(request) {
+                        self.service.perform($0, operationID: operationID)
+                    }
+                }
+            )
             // The reply is handed to the transport here rather than by returning it: a
             // returned value is only sent once this method has returned, by which time this
             // request no longer counts as outstanding and a concurrent message could already
@@ -179,18 +204,14 @@ final class RuntimeService: Sendable {
             // A refused session closes as soon as it owes nothing further. Waiting instead for
             // another message would keep an incompatible connection open for as long as the
             // app runs, because a client that has been told to stop sends nothing more.
-            if lock.withLock({ lifetime.finished() }) {
+            if gate.finished() {
                 session.cancel(reason: "session refused")
             }
             return nil
         }
 
         /// The rejection this session was answered with, if any. Also a test seam.
-        var refusalEvent: RuntimeEvent? { lock.withLock { lifetime.refusal } }
-
-        private func markRefused(with event: RuntimeEvent) {
-            lock.withLock { lifetime.refuse(event) }
-        }
+        var refusalEvent: RuntimeEvent? { gate.refusal }
 
         func handleCancellation(error: XPCRichError) {
             service.sessionEnded(error)
