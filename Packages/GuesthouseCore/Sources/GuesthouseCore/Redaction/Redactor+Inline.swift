@@ -14,9 +14,7 @@ extension Redactor {
 
     /// A completed quoted field owns only its value, so indented structured siblings cannot
     /// belong to its fold. Encoded diagnostic quotes follow the same closure rules as streams.
-    static func isClosedQuotedValue(_ value: Substring) -> Bool {
-        closedQuotedValueTail(value) != nil
-    }
+    static func isClosedQuotedValue(_ value: Substring) -> Bool { closedQuotedValueTail(value) != nil }
 
     static func closedQuotedValueTail(_ value: Substring) -> Substring? {
         let start = value.drop(while: { $0.isWhitespace })
@@ -123,9 +121,6 @@ extension Redactor {
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretValue = labelAwaitsValue
-        if text.contains(p.mentionsCode) || codeExpected {
-            text = applyDeviceCodePattern(to: text)
-        }
         // "Your one-time code is:" with the value on the next line. Only a line that asks for a
         // code arms the next one: arming on any mention of the word would replace the failure
         // that follows `process exited with code 1` with a device-code marker.
@@ -133,6 +128,9 @@ extension Redactor {
             state.expectingDeviceCode = true
         }
         for tail in tails.reversed() { text = text.replacingOccurrences(of: tail.key, with: tail.value) }
+        if text.contains(p.mentionsCode) || codeExpected {
+            text = applyDeviceCodePattern(to: text)
+        }
         return text
     }
 
