@@ -152,7 +152,8 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
             ["run", "--detach", "--help"],
             ["attach", "--help"],
         ])
-        #expect(invocations.allSatisfy { $0.environment == storage.environmentForLume() })
+        let expectedEnvironment = try storage.environmentForLume()
+        #expect(invocations.allSatisfy { $0.environment == expectedEnvironment })
         #expect(invocations.allSatisfy { $0.currentDirectory == storage.url(for: .staging) && $0.standardInput == .none })
         #expect(invocations.allSatisfy { $0.maximumOutputBytes == 1 << 20 })
         #expect(invocations.allSatisfy { $0.timeout == .seconds(5) })
