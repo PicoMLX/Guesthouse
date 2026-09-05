@@ -77,12 +77,18 @@ public actor StateStore {
 
     /// Replaces the snapshot atomically. Stale temp files from an earlier crash are removed.
     public func saveSnapshot(_ snapshot: EnvironmentsSnapshot) throws {
+        // A decoded value may already have lost fields this build does not understand. Never
+        // turn it into current state by replacing its version discriminator (MVP-PLAN.md §3).
+        if snapshot.schemaVersion > migrator.current {
+            throw StateStoreError.newerSchemaVersion(found: snapshot.schemaVersion, current: migrator.current)
+        }
+        guard snapshot.schemaVersion == migrator.current else {
+            throw StateStoreError.inconsistentSnapshot(reason: "snapshot must be migrated to the current schema version before saving")
+        }
         try snapshot.validate()
-        var stamped = snapshot
-        stamped.schemaVersion = migrator.current
         let data: Data
         do {
-            data = try encoder.encode(stamped)
+            data = try encoder.encode(snapshot)
         } catch {
             // A value the encoder refuses (a non-finite date, say) is an inconsistent snapshot
             // with a recovery path, never a raw `EncodingError`.
@@ -548,7 +554,7 @@ public actor StateStore {
         try fullySynchronize(descriptor, name: url.lastPathComponent)
     }
 
-    private static func prepareDirectory(_ url: URL) throws -> Int32 {
+    static func prepareDirectory(_ url: URL, synchronize: (URL) throws -> Void = synchronizeDirectory(at:)) throws -> Int32 {
         var info = stat()
         if lstat(url.path, &info) == 0 {
             guard (info.st_mode & S_IFMT) != S_IFLNK else { throw StateStoreError.insecureDirectory(reason: "symbolic link") }
@@ -563,6 +569,30 @@ public actor StateStore {
                 throw StateStoreError.insecureDirectory(reason: "cannot be made private")
             }
             try removeExtendedACL(descriptor, name: url.lastPathComponent)
+            // Visible ancestors can be leftovers from a process killed after mkdir, before
+            // any barrier or rollback. Their existence is not proof of durability. Resync on
+            // every initialization, including a new leaf under existing unfinished ancestors.
+            // Include the supplied path and its physical target: a symlinked ancestor needs
+            // its own entry persisted as well as the directories reached through it.
+            guard let physicalPath = realpath(url.path, nil) else {
+                throw StateStoreError.insecureDirectory(reason: "cannot resolve directory ancestry")
+            }
+            defer { free(physicalPath) }
+            let physicalURL = URL(fileURLWithPath: String(cString: physicalPath), isDirectory: true)
+            var synchronized: Set<String> = []
+            for location in [physicalURL, url] {
+                var parents: [URL] = []
+                var child = URL(fileURLWithPath: location.path, isDirectory: true)
+                while child.path != "/" {
+                    let parent = child.deletingLastPathComponent()
+                    guard parent.path != child.path else { break }
+                    parents.append(parent)
+                    child = parent
+                }
+                for parent in parents.reversed() where synchronized.insert(parent.path).inserted {
+                    try synchronize(parent)
+                }
+            }
         } catch {
             close(descriptor)
             throw error
