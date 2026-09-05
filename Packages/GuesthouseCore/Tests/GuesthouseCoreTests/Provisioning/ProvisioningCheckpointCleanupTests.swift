@@ -29,7 +29,7 @@ import Testing
     }
 
     /// A failed journal write settles the write, not the operation that reached its checkpoint.
-    /// Its identity must survive either recovery route and any replacement checkpoint write.
+    /// Its identity survives either recovery route until inspection establishes quiescence.
     @Test(arguments: [ProvisioningEvent.userRetried, .inspectionRequested])
     func checkpointWriteFailurePreservesItsWriterDuringRecovery(recovery: ProvisioningEvent) throws {
         let error = GuesthouseError.insufficientDisk(requiredBytes: 2, availableBytes: 1, volumePath: "/")
@@ -55,7 +55,7 @@ import Testing
             let completed: ProvisioningEvent = writer.map { .operationReconciled(inspection, $0, .quiescent(.completed(checkpoint))) } ?? .reconciled(inspection, .completed(checkpoint))
             let rewritten = try ProvisioningReducer.reduce(inspected.state, completed)
             let replacement = try token(of: rewritten.effects)
-            #expect(rewritten.state.status == .persistingCheckpoint(checkpoint, operation: writer, write: replacement))
+            #expect(rewritten.state.status == .persistingCheckpoint(checkpoint, operation: nil, write: replacement))
             #expect(throws: ProvisioningTransitionError.staleEffect(expected: replacement, actual: outstanding)) {
                 try ProvisioningReducer.reduce(rewritten.state, .checkpointPersistenceFailed(outstanding, .canceled))
             }
