@@ -6,24 +6,24 @@ import Testing
     let fixture = FileManager.default.temporaryDirectory
         .appending(path: "StateStoreJournalReattachment-\(UUID().uuidString)")
 
-    @Test func reattachedJournalIsSynchronizedAgainAndUnchangedAppendsStayCached() async throws {
+    @Test func reattachedJournalIsSynchronizedAgainAndUnchangedBytesStayCached() async throws {
         defer { try? FileManager.default.removeItem(at: fixture) }
         let root = fixture.appending(path: "state")
         let store = try StateStore(rootURL: root)
         _ = try await store.begin(.startEnvironment, for: EnvironmentID())
         #expect(await store.directorySynchronizations == 1)
 
-        try reattachJournalWithoutSynchronizing(in: root)
+        try Self.reattachJournalWithoutSynchronizing(in: root)
 
         let accepted = try await store.begin(.stopEnvironment, for: EnvironmentID())
         #expect(await store.directorySynchronizations == 2)
         let bytesRead = await store.journalBytesRead
         #expect(bytesRead > 0)
 
-        // The store remembers the version produced by its own append, so another ordinary
-        // append needs neither a new directory barrier nor another read of the same history.
+        // Every append barriers the entry, but the store remembers its own write's version
+        // and does not reread unchanged history.
         _ = try await store.begin(.exportWork, for: EnvironmentID())
-        #expect(await store.directorySynchronizations == 2)
+        #expect(await store.directorySynchronizations == 3)
         #expect(await store.journalBytesRead == bytesRead)
         #expect(try await store.replay().inFlight[accepted]?.operation == .stopEnvironment)
     }
@@ -39,7 +39,7 @@ import Testing
         })
         _ = try await store.begin(.startEnvironment, for: EnvironmentID())
         #expect(await store.directorySynchronizations == 1)
-        try reattachJournalWithoutSynchronizing(in: root)
+        try Self.reattachJournalWithoutSynchronizing(in: root)
         let journalURL = root.appending(path: StateStore.journalFileName)
         let priorEvidence = try Data(contentsOf: journalURL)
         try Data().write(to: failBarrier)
@@ -77,7 +77,43 @@ import Testing
         #expect((try Data(contentsOf: journalURL)).starts(with: retainedEvidence))
     }
 
-    private func reattachJournalWithoutSynchronizing(in root: URL) throws {
+    @Test func reattachmentDuringFinalBarrierRefusesAuthorizationAndPreservesEvidence() async throws {
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let root = fixture.appending(path: "state")
+        let store = try StateStore(rootURL: root, directoryBarrier: { descriptor, name in
+            try StateStore.fullySynchronize(descriptor, name: name)
+            try Self.reattachJournalWithoutSynchronizing(in: root)
+        })
+        let environment = EnvironmentID()
+        var authorizedID: OperationID?
+        do {
+            authorizedID = try await store.begin(.startEnvironment, for: environment)
+        } catch let failure as StateStoreError {
+            #expect(failure == .journalWriteUncertain(cause: .fileUnwritable(name: StateStore.journalFileName)))
+            #expect(failure.recoveryActions.first == .inspectState)
+        }
+        #expect(authorizedID == nil)
+        #expect(await store.directorySynchronizations == 1)
+
+        // The same inode returned with its record intact, but its name was reattached after
+        // the completed directory barrier. The record is inspection evidence, not permission
+        // to begin the mutation or to retry it blindly.
+        let journalURL = root.appending(path: StateStore.journalFileName)
+        let evidence = try Data(contentsOf: journalURL)
+        let replay = try await store.replay()
+        let uncertain = try #require(replay.inFlight.values.first)
+        #expect(replay.records.count == 1)
+        #expect(uncertain.environmentID == environment)
+        #expect(uncertain.operation == .startEnvironment)
+        #expect(uncertain.outcome == .started)
+        #expect(!replay.truncatedTail)
+        await #expect(throws: StateStoreError.operationUnresolved(uncertain.id)) {
+            try await store.begin(.startEnvironment, for: environment)
+        }
+        #expect(try Data(contentsOf: journalURL) == evidence)
+    }
+
+    private static func reattachJournalWithoutSynchronizing(in root: URL) throws {
         let journal = root.appending(path: StateStore.journalFileName)
         let detached = root.appending(path: "detached-journal")
         let evidence = try Data(contentsOf: journal)

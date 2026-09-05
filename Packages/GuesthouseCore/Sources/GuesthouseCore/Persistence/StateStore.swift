@@ -37,10 +37,6 @@ public actor StateStore {
 
     /// What replay has already learned, and how far into the journal it is valid.
     private var journal = JournalState()
-    /// Whether this process has made the journal's directory entry durable. An earlier process
-    /// may have created the file and then died before synchronizing it, so the file already
-    /// existing is not proof that its entry survives a power loss.
-    private var journalEntryIsDurable = false
 
     /// Journal bytes actually read from disk. The tests use it to hold the store to reading
     /// only what is new on an append instead of the whole history.
@@ -161,9 +157,15 @@ public actor StateStore {
             unlinkat(directory, tempName, 0)
             throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
         }
+        let publishedVersion = try Self.fileVersion(descriptor, name: Self.snapshotFileName)
+        let directoryVersion = try Self.fileVersion(directory, name: rootURL.lastPathComponent)
         try synchronizeDirectory()
         try requireAnchoredDirectoryIsCurrent()
         try Self.requireEntryStillNames(descriptor, in: directory, name: Self.snapshotFileName)
+        guard try Self.fileVersion(descriptor, name: Self.snapshotFileName) == publishedVersion else {
+            throw StateStoreError.fileUnwritable(name: Self.snapshotFileName)
+        }
+        try requireAnchoredDirectoryIsCurrent(version: directoryVersion)
     }
 
     // MARK: - Journal
@@ -206,6 +208,7 @@ public actor StateStore {
             line.insert(0x0A, at: line.startIndex)
         }
         var writeAttempted = false
+        let writtenVersion: FileVersion
         do {
             if state.truncatedTail {
                 guard ftruncate(descriptor, off_t(state.byteCount)) == 0 else {
@@ -217,23 +220,27 @@ public actor StateStore {
             }
             writeAttempted = true
             try Self.writeAll(descriptor, line, name: Self.journalFileName)
+            writtenVersion = try Self.fileVersion(descriptor, name: Self.journalFileName)
+            let directoryVersion = try Self.fileVersion(directory, name: rootURL.lastPathComponent)
             try Self.fullySynchronize(descriptor, name: Self.journalFileName)
             // Durable, but only in the file this descriptor names. If the entry now names some
             // other file, the next launch reads that one and never sees this operation, which is
             // exactly the blind retry the journal exists to prevent.
             try Self.requireEntryStillNames(descriptor, in: directory, name: Self.journalFileName)
-            if !journalEntryIsDurable {
-                try synchronizeDirectory()
-            }
+            // A repair can reattach the same inode between refresh and our write, whose own
+            // ctime change hides the rename. Every record therefore needs an entry barrier.
+            try synchronizeDirectory()
             // The directory barrier can outlive a concurrent restore or rename. Recheck both
             // names after the final barrier, before reporting that this operation can start.
             try requireAnchoredDirectoryIsCurrent()
             try Self.requireEntryStillNames(descriptor, in: directory, name: Self.journalFileName)
-            journalEntryIsDurable = true
+            guard try Self.fileVersion(descriptor, name: Self.journalFileName) == writtenVersion else {
+                throw StateStoreError.fileUnwritable(name: Self.journalFileName)
+            }
+            try requireAnchoredDirectoryIsCurrent(version: directoryVersion)
         } catch {
             // The file no longer matches what was read, so nothing about it is remembered.
             journal = JournalState()
-            journalEntryIsDurable = false
             if writeAttempted {
                 // Some or all of this record may already be on disk. Storage recovery alone
                 // cannot establish the mutation's outcome (AGENTS.md: inspect before retrying).
@@ -246,11 +253,9 @@ public actor StateStore {
         journal.adopt(record, bytes: line.count)
         journal.truncatedTail = false
         journal.unterminatedRecord = false
-        // The write moved the file's timestamps, so the remembered version is taken again:
-        // otherwise the next refresh would read the whole journal back as if someone else had
-        // rewritten it.
-        var written = stat()
-        journal.file = fstat(descriptor, &written) == 0 ? FileVersion(written) : nil
+        // Retain the version validated across the barriers, not a new sample that could hide
+        // an external change after validation. Our own write still does not require a reread.
+        journal.file = writtenVersion
     }
 
     /// Reads every record and lists the operations that never reached a terminal outcome.
@@ -275,10 +280,6 @@ public actor StateStore {
         // A different file, one rewritten in place, or one that lost bytes, invalidates
         // everything read before it.
         if state.file != version || off_t(state.byteCount) > info.st_size {
-            // A repair can rename this same inode away, synchronize that absence, then put
-            // it back without a barrier. Its changed version invalidates entry durability
-            // too: identity alone does not prove the current name was synchronized.
-            journalEntryIsDurable = false
             state = JournalState()
             state.file = version
         }
@@ -444,13 +445,14 @@ public actor StateStore {
     /// was renamed, removed, or replaced, every write below the cached descriptor lands in a
     /// directory nobody will look in again: `begin` would report a `started` record durable while
     /// the next launch, opening the directory now at `rootURL`, finds no record of the mutation.
-    private func requireAnchoredDirectoryIsCurrent() throws {
+    private func requireAnchoredDirectoryIsCurrent(version: FileVersion? = nil) throws {
         var anchored = stat()
         var current = stat()
         guard fstat(directory, &anchored) == 0 else {
             throw StateStoreError.insecureDirectory(reason: "cannot be read")
         }
-        guard lstat(rootURL.path, &current) == 0, FileIdentity(current) == FileIdentity(anchored) else {
+        guard lstat(rootURL.path, &current) == 0, FileIdentity(current) == FileIdentity(anchored),
+              version == nil || version == FileVersion(anchored) else {
             throw StateStoreError.insecureDirectory(reason: "the folder was renamed, removed, or replaced while Guesthouse was using it")
         }
     }
@@ -471,6 +473,13 @@ public actor StateStore {
         guard let descriptor = try openStateFile(name, creating: false) else { return nil }
         defer { close(descriptor) }
         return try Self.readAll(descriptor, from: 0, name: name)
+    }
+
+    /// Inode identity alone cannot detect an entry renamed away and back during a barrier.
+    private static func fileVersion(_ descriptor: Int32, name: String) throws -> FileVersion {
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else { throw StateStoreError.fileUnwritable(name: name) }
+        return FileVersion(info)
     }
 
     static func requirePrivateRegularFile(

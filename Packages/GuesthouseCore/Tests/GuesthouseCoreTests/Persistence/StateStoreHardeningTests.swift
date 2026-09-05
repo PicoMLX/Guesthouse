@@ -259,8 +259,8 @@ import Testing
         let first = try StateStore(rootURL: root)
         _ = try await first.begin(.startEnvironment, for: EnvironmentID())
         _ = try await first.begin(.stopEnvironment, for: EnvironmentID())
-        // Once per process, not once per record.
-        #expect(await first.directorySynchronizations == 1)
+        // Every record: the same inode can have been reattached through a new directory entry.
+        #expect(await first.directorySynchronizations == 2)
 
         // A journal left by an earlier process may never have had its entry synchronized, so
         // its existence is not proof and the next process synchronizes it again.
