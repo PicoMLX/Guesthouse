@@ -2,6 +2,18 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
+    /// A named JOSE parameter identifies an unfinished token at a physical boundary. Ordinary
+    /// JSON claims do not arm continuation, nor does a header already inside a complete JWT.
+    static func incompleteJWTStartAtLineEnd(in text: String) -> String.Index? {
+        guard let candidate = text.firstMatch(of: #/(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*\.?$/#),
+              let start = joseHeaderStart(candidate.2),
+              let header = decodedJOSEHeader(candidate.2[start...]),
+              header["alg"] != nil || header["enc"] != nil else { return nil }
+        let covered = text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2) }
+        guard !covered.contains(where: { $0.lowerBound < start && $0.upperBound == text.endIndex }) else { return nil }
+        return start
+    }
+
     /// Replaces all three JWS or five JWE segments inside a run of dot-separated segments. A dot is
     /// not a word boundary, so the run can begin with a label such as `session.` and can hold two
     /// adjacent tokens; every segment with at least two following it is tried as a JOSE header, and the
