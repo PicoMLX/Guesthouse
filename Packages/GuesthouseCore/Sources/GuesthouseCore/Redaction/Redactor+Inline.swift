@@ -33,6 +33,12 @@ extension Redactor {
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text
+        // Scan DSNs before introducing colon-bearing redaction markers. Scheme URLs use
+        // their dedicated authority rule below, not the schemeless DSN grammar.
+        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
+            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
+            text = String(prefix) + text[end...]
+        }
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -68,11 +74,6 @@ extension Redactor {
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
-        // Do not repeatedly search credential-field suffixes that cannot contain a DSN.
-        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
-            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
-            text = String(prefix) + text[end...]
-        }
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
