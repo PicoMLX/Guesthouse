@@ -3,20 +3,21 @@ import RegexBuilder
 
 extension Redactor {
     /// Redacts a complete text that may contain multiple lines.
-    func redact(_ text: String) -> String {
+    public func redact(_ text: String) -> String {
         redact(text, codesAlwaysRedacted: false)
     }
 
     /// Redacts text that reached the app from somewhere else — decoded from JSON, received over
     /// XPC — where the surrounding context that makes a bare device code recognizable is gone.
     /// Device codes are therefore removed unconditionally, as in `redact(fieldValue:)`.
-    func redact(untrusted text: String) -> String {
+    public func redact(untrusted text: String) -> String {
         redact(text, codesAlwaysRedacted: true)
     }
 
-    /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
-    func redact(line: String, state: inout StreamState) -> RedactedLine {
-        redact(line: line, state: &state, isPhysicalLine: true)
+    /// Redacts a record from a stream. Retained or embedded CR/LF terminators are preserved,
+    /// with state advanced once per physical line. Pass the same `state` for the whole stream.
+    public func redact(line: String, state: inout StreamState) -> RedactedLine {
+        RedactedLine(redact(line, codesAlwaysRedacted: false, state: &state))
     }
 
     private func redact(line: String, state: inout StreamState, isPhysicalLine: Bool,
@@ -292,12 +293,12 @@ extension Redactor {
     /// Redacts a single value that came from outside the app (a version string, a path, a
     /// component name) rather than a log line. Context is absent, so the device-code pattern
     /// applies unconditionally instead of only on lines that mention a code.
-    func redact(fieldValue: String) -> String {
+    public func redact(fieldValue: String) -> String {
         redact(untrusted: fieldValue)
     }
 
     /// Convenience for a batch of lines from one stream.
-    func redact(lines: [String]) -> [RedactedLine] {
+    public func redact(lines: [String]) -> [RedactedLine] {
         var state = StreamState()
         return lines.map { redact(line: $0, state: &state) }
     }
@@ -313,6 +314,10 @@ extension Redactor {
 
     private func redact(_ text: String, codesAlwaysRedacted: Bool) -> String {
         var state = StreamState()
+        return redact(text, codesAlwaysRedacted: codesAlwaysRedacted, state: &state)
+    }
+
+    private func redact(_ text: String, codesAlwaysRedacted: Bool, state: inout StreamState) -> String {
         var result = ""
         var lineStart = text.startIndex
         func appendRedacted(_ line: Substring) {
@@ -328,7 +333,9 @@ extension Redactor {
             result += separator.0
             lineStart = separator.range.upperBound
         }
-        appendRedacted(text[lineStart...])
+        // A retained terminator ends its record; it does not create an additional empty
+        // physical record (which would advance counted private-key framing a second time).
+        if lineStart < text.endIndex || text.isEmpty { appendRedacted(text[lineStart...]) }
         return result
     }
 }
@@ -338,19 +345,19 @@ extension Redactor {
 /// Log sinks, the XPC event stream, and diagnostics exports accept only this type, so an
 /// unredacted `String` cannot reach them by accident. Construction goes through `Redactor`,
 /// a compile-time literal, or the sanitizing decoding boundaries below.
-struct RedactedLine: Hashable, Sendable, CustomStringConvertible {
-    let text: String
+public struct RedactedLine: Hashable, Sendable, CustomStringConvertible {
+    public let text: String
 
     fileprivate init(_ text: String) {
         self.text = text
     }
 
     /// For fixed messages that contain nothing to redact, such as `"Started"`.
-    init(literal: StaticString) {
+    public init(literal: StaticString) {
         text = literal.description
     }
 
-    var description: String { text }
+    public var description: String { text }
 }
 
 extension RedactedLine: Codable {
@@ -359,7 +366,7 @@ extension RedactedLine: Codable {
     /// context did not survive serialization, so codes are redacted unconditionally here.
     /// Independent records do not share stream state. Decode a physical-line transcript as
     /// `RedactedLines`; direct array-element decoding is rejected rather than losing framing.
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         guard !decoder.codingPath.contains(where: { $0.intValue != nil }) else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
                 debugDescription: "Decode physical-line batches as RedactedLines to preserve shared redaction state."))
@@ -367,7 +374,7 @@ extension RedactedLine: Codable {
         text = Redactor().redact(untrusted: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(text)
     }
@@ -375,20 +382,31 @@ extension RedactedLine: Codable {
 
 /// An encoded batch of physical lines from one stream, sanitized before typed lines escape.
 /// Decode transcripts through this type, not by independently decoding each RedactedLine.
-struct RedactedLines: Hashable, Sendable, Codable {
-    let lines: [RedactedLine]
+public struct RedactedLines: Hashable, Sendable, Codable {
+    public let lines: [RedactedLine]
 
-    init(from decoder: any Decoder) throws {
+    public enum ValidationError: Error, Sendable { case embeddedLineTerminator }
+
+    /// Constructs an outgoing transcript using one shared stream state. Each entry must be
+    /// one physical record; context-free device codes are concealed as on the decoding path.
+    public init(redacting raw: [String]) throws {
+        guard !raw.contains(where: { $0.contains(Redactor.patterns.lineSeparator) }) else {
+            throw ValidationError.embeddedLineTerminator
+        }
+        lines = Redactor().redact(untrustedLines: raw)
+    }
+
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode([String].self)
         guard !raw.contains(where: { $0.contains(Redactor.patterns.lineSeparator) }) else {
             throw DecodingError.dataCorruptedError(in: container,
                 debugDescription: "A physical-line batch cannot contain embedded line terminators.")
         }
-        lines = Redactor().redact(untrustedLines: raw)
+        try self.init(redacting: raw)
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(lines)
     }
