@@ -94,6 +94,13 @@ import Testing
         #expect(out == ["Your one-time code is:", "", "", "[redacted:device-code]", "AB12-CD34"])
     }
 
+    @Test func anUnquotedLabeledSecretIsRemovedPastItsFirstWord() {
+        #expect(redactor.redact("password: correct horse battery staple") == "password: [redacted:secret]")
+        #expect(redactor.redact("passphrase = my ssh key phrase") == "passphrase: [redacted:secret]")
+        #expect(redactor.redact(fieldValue: "token=a b c") == "token: [redacted:secret]")
+        #expect(redactor.redact(#"{"token":"abc123","x":1}"#) == #"{token: [redacted:secret],"x":1}"#, "a quoted value still ends at its quote")
+    }
+
     @Test func decodedRedactedLinesAreRedactedAgain() throws {
         let line = try JSONDecoder().decode(RedactedLine.self, from: Data(#""password: hunter2""#.utf8))
         #expect(line.text == "password: [redacted:secret]")
