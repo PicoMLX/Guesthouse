@@ -40,11 +40,10 @@ import Testing
 
     @Test func disconnectScenarioThrowsInterruptionSoOutcomeIsUnknown() async throws {
         let backend = FakeRuntimeBackend()
-        await backend.script("importXcode", .disconnect(after: [ProgressPhase(kind: .copying)]))
-        let handoff = FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")
+        await backend.script("stopEnvironment", .disconnect(after: [ProgressPhase(kind: .copying)]))
         var seen: [String] = []
         await #expect(throws: RuntimeConnectionInterrupted.self) {
-            for try await event in backend.send(.importXcode(environment, handoff)) {
+            for try await event in backend.send(.stopEnvironment(EnvironmentID(), .force)) {
                 seen.append(event.caseName)
             }
         }
@@ -170,7 +169,9 @@ import Testing
         let environment = EnvironmentID()
         #expect(RuntimeRequest.startEnvironment(environment, StartOptions()).mutatesHost)
         #expect(RuntimeRequest.stopEnvironment(environment, .force).mutatesHost)
-        #expect(RuntimeRequest.importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")).mutatesHost)
+        // Validation resolves a handoff, reads metadata and measures a bundle. Nothing on the
+        // host changes, so an interrupted one leaves nothing to inspect and may be asked again.
+        #expect(!RuntimeRequest.importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")).mutatesHost)
         #expect(!RuntimeRequest.runtimeVersion.mutatesHost)
         #expect(!RuntimeRequest.environmentStatus(environment).mutatesHost)
         #expect(!RuntimeRequest.cancelOperation(OperationID()).mutatesHost)

@@ -14,8 +14,10 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
     /// error, so an older peer would fail to decode a reply instead of being told what
     /// happened, and would read `verified` with the wrong meaning; 4 added the
     /// `listEnvironments` request, the `environments` event, `EnvironmentStatus.guestAddress`,
-    /// and the lifecycle's own error cases, none of which a version-3 peer can decode.
-    public static let current = RuntimeProtocolVersion(4)
+    /// and the lifecycle's own error cases, none of which a version-3 peer can decode; 5 added
+    /// the `xcodeCandidate` reply, which a version-4 peer cannot decode and would report as a
+    /// dropped connection rather than as a version it can act on.
+    public static let current = RuntimeProtocolVersion(5)
 
     public static func < (lhs: RuntimeProtocolVersion, rhs: RuntimeProtocolVersion) -> Bool {
         lhs.rawValue < rhs.rawValue

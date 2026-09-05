@@ -21,7 +21,7 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-                .accessibilityLabel("Runtime version result")
+                .accessibilityLabel("Debug probe result")
             #endif
         }
         .padding()

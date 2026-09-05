@@ -23,6 +23,9 @@ struct GuesthouseApp: App {
                     debugProbe.requestRuntimeVersion()
                 }
                 .keyboardShortcut("r", modifiers: [.command, .option])
+                Button("Validate Xcode for Import…") {
+                    debugProbe.importXcodeCandidate()
+                }
             }
         }
         #endif

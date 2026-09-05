@@ -35,10 +35,15 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     /// has an unknown outcome and is never offered a blind retry; a read-only query changed
     /// nothing and may simply be asked again. Cancelling counts as read-only because asking
     /// twice cannot leave the host anywhere asking once would not.
+    /// `importXcode` is read-only for as long as it is validation: it resolves the handoff,
+    /// reads the bundle's metadata, and measures it. Nothing on the host changes, so there is
+    /// no state for an interrupted one to have left behind and nothing to inspect — asking
+    /// again is safe. The copy this request grows into (gate #37, Phase 2) does change the
+    /// host, and must move back to `true` or become a request of its own when it lands.
     public var mutatesHost: Bool {
         switch self {
-        case .runtimeVersion, .listEnvironments, .environmentStatus, .cancelOperation: false
-        case .startEnvironment, .stopEnvironment, .importXcode: true
+        case .runtimeVersion, .listEnvironments, .environmentStatus, .cancelOperation, .importXcode: false
+        case .startEnvironment, .stopEnvironment: true
         }
     }
 }

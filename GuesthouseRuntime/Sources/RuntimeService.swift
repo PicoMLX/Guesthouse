@@ -87,8 +87,9 @@ final class RuntimeService: Sendable {
     /// `refusal` is read rather than passed in, because another request on the same session can
     /// refuse it while this one is still being decoded. `finished` is called exactly once, by
     /// whoever hands the reply to the transport: the caller for a synchronous answer, the
-    /// operation's own reply box for one that is sent later.
-    func handle(_ message: XPCReceivedMessage, session: XPCSession, inFlight: Int, refusal: () -> RuntimeEvent?, finished: @escaping @Sendable () -> Void = {}, refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
+    /// operation's own reply box for one that is sent later. `track` takes ownership of work
+    /// the request starts, so it cannot outlive the session that asked for it.
+    func handle(_ message: XPCReceivedMessage, session: XPCSession, inFlight: Int, refusal: () -> RuntimeEvent?, finished: @escaping @Sendable () -> Void = {}, refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }, track: @escaping @Sendable (Task<Void, Never>) -> Void = { _ in }) -> (any Encodable)? {
         // A message that asks for no reply is never decoded or dispatched. An operation whose
         // ID, acceptance, and terminal event have nowhere to go is a host mutation the client
         // could neither follow nor cancel, and the client would have no record that it ran.
@@ -141,10 +142,10 @@ final class RuntimeService: Sendable {
         // evaluate the refusal before it, honoring an answer that is already stale by the time
         // the decision is acted on.
         let decision = RuntimeDispatcher.decide(envelope, inFlight: inFlight)
-        return reply(RuntimeDispatcher.honoring(refusal(), decision), session: session, message: message, finished: finished)
+        return reply(RuntimeDispatcher.honoring(refusal(), decision), session: session, message: message, finished: finished, track: track)
     }
 
-    private func reply(_ decision: RuntimeDispatcher.Decision, session: XPCSession, message: XPCReceivedMessage, finished: @escaping @Sendable () -> Void, reason: String = "protocol mismatch", refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }) -> (any Encodable)? {
+    private func reply(_ decision: RuntimeDispatcher.Decision, session: XPCSession, message: XPCReceivedMessage, finished: @escaping @Sendable () -> Void, reason: String = "protocol mismatch", refuse: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }, track: @escaping @Sendable (Task<Void, Never>) -> Void = { _ in }) -> (any Encodable)? {
         switch decision {
         case .reply(let event):
             log.error(Self.line("rejected request:", event.caseName))
@@ -157,11 +158,11 @@ final class RuntimeService: Sendable {
             refuse(event)
             return event
         case .dispatch(let request):
-            return perform(request, message: message, session: session, finished: finished)
+            return perform(request, message: message, session: session, finished: finished, track: track)
         }
     }
 
-    private func perform(_ request: RuntimeRequest, message: XPCReceivedMessage, session: XPCSession, finished: @escaping @Sendable () -> Void) -> (any Encodable)? {
+    private func perform(_ request: RuntimeRequest, message: XPCReceivedMessage, session: XPCSession, finished: @escaping @Sendable () -> Void, track: @escaping @Sendable (Task<Void, Never>) -> Void) -> (any Encodable)? {
         switch request {
         case .runtimeVersion:
             // Discovery ran once at launch. A problem the user was told they could retry —
@@ -193,9 +194,26 @@ final class RuntimeService: Sendable {
             let sink = SessionSink(session: session, log: log)
             Task { await self.performAsync(request, lifecycle: lifecycle, reply: reply, events: sink) }
             return nil
-        case .importXcode:
-            log.notice(Self.line("operation not implemented yet:", request.caseName))
-            return RuntimeEvent.failed(OperationID(), .invalidRequest(.unsupportedOperation))
+        case .importXcode(_, let handoff):
+            // Validation only: the transport benchmark and the copy are gate #37 and Phase 2.
+            // The request stays counted against the session's cap until the reply is sent.
+            let reply = ReplyBox(message, onReply: finished)
+            // The scan walks an untrusted tree and holds the selection's security scope open.
+            // It belongs to the session that asked for it: once nobody can receive the answer,
+            // the reading stops rather than running on for whoever reconnects next.
+            track(Task.detached {
+                do {
+                    let location = try XcodeImportValidator.resolve(handoff, requireSecurityScope: true)
+                    let candidate = try XcodeImportValidator.candidate(at: location.url, expectedBundleIdentifier: handoff.expectedBundleIdentifier)
+                    withExtendedLifetime(location) {}
+                    reply.send(RuntimeEvent.xcodeCandidate(candidate))
+                } catch let error as GuesthouseError {
+                    reply.send(RuntimeEvent.failed(OperationID(), error))
+                } catch {
+                    reply.send(RuntimeEvent.failed(OperationID(), .xcodeSelectionRejected(.unresolvable)))
+                }
+            })
+            return nil
         }
     }
 
@@ -446,6 +464,11 @@ final class RuntimeService: Sendable {
         private let session: XPCSession
         private let lock = NSLock()
         private var lifetime = RuntimeDispatcher.SessionLifetime()
+        /// Work started for this session's requests, by an id that lets a finished one be
+        /// dropped so a long-lived session does not accumulate handles it already answered.
+        private var tasks: [Int: Task<Void, Never>] = [:]
+        private var nextTaskID = 0
+        private var ended = false
 
         init(service: RuntimeService, session: XPCSession) {
             self.service = service
@@ -464,9 +487,15 @@ final class RuntimeService: Sendable {
                 guard let self else { return }
                 if self.lock.withLock({ self.lifetime.finished() }) { self.session.cancel(reason: "session refused") }
             }
-            let answer = service.handle(message, session: session, inFlight: others, refusal: { self.refusalEvent }, finished: finished) { [weak self] event in
+            let answer = service.handle(message, session: session, inFlight: others, refusal: { self.refusalEvent }, finished: finished, refuse: { [weak self] event in
                 self?.markRefused(with: event)
-            }
+            }, track: { [weak self] task in
+                guard let self else {
+                    task.cancel()
+                    return
+                }
+                self.track(task)
+            })
             // The reply is handed to the transport here rather than by returning it: a
             // returned value is only sent once this method has returned, by which time this
             // request no longer counts as outstanding and a concurrent message could already
@@ -481,14 +510,46 @@ final class RuntimeService: Sendable {
             return nil
         }
 
-        /// The rejection this session was answered with, if any. Also a test seam.
+        /// Takes ownership of a request's work for as long as the session lasts. A session that
+        /// has already ended cancels it at once: nobody is left to receive its answer, and work
+        /// on untrusted input must not outlive the caller that asked for it.
+        func track(_ task: Task<Void, Never>) {
+            let id = lock.withLock { () -> Int? in
+                guard !ended else { return nil }
+                nextTaskID += 1
+                tasks[nextTaskID] = task
+                return nextTaskID
+            }
+            guard let id else {
+                task.cancel()
+                return
+            }
+            Task { [weak self] in
+                await task.value
+                guard let self else { return }
+                self.lock.withLock { self.tasks[id] = nil }
+            }
+        }
+
+        /// Test seams: the rejection this session was answered with, and how much work it
+        /// still owns.
         var refusalEvent: RuntimeEvent? { lock.withLock { lifetime.refusal } }
+        var trackedTaskCount: Int { lock.withLock { tasks.count } }
 
         private func markRefused(with event: RuntimeEvent) {
             lock.withLock { lifetime.refuse(event) }
         }
 
         func handleCancellation(error: XPCRichError) {
+            // Nothing this session started has a recipient any more, so it all stops here
+            // rather than reading an untrusted tree for an answer nobody will collect.
+            let outstanding = lock.withLock { () -> [Task<Void, Never>] in
+                ended = true
+                let running = Array(tasks.values)
+                tasks.removeAll()
+                return running
+            }
+            for task in outstanding { task.cancel() }
             service.sessionEnded(error)
         }
     }

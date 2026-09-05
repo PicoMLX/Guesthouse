@@ -50,6 +50,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var environments: [DevelopmentEnvironment] = []
     private var versionInfo: RuntimeVersionInfo
+    /// What `importXcode` reports, or `nil` for a rejected selection.
+    private var xcodeCandidate: XcodeCandidate?
     private var canceledOperations: Set<OperationID> = []
     /// Where a recorded request falls in the order the requests were *made*, which is the order
     /// their turn tickets were taken in rather than the order they reached `receivedRequests`.
@@ -109,6 +111,11 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         versionInfo = info
     }
 
+    /// The candidate `importXcode` replies with; `nil` makes it reply `xcodeSelectionRejected`.
+    public func setXcodeCandidate(_ candidate: XcodeCandidate?) {
+        xcodeCandidate = candidate
+    }
+
     public func status(of id: EnvironmentID) -> EnvironmentStatus? {
         statuses[id]
     }
@@ -144,7 +151,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         let scenario = binding.scenario
 
         switch request {
-        case .runtimeVersion, .environmentStatus, .listEnvironments:
+        case .runtimeVersion, .environmentStatus, .listEnvironments, .importXcode:
             advanceTurn()
             await pause()
             switch scenario {
@@ -162,6 +169,13 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                     continuation.yield(.status(statuses[id] ?? EnvironmentStatus(environmentID: id, vm: .notFound, readiness: .checking)))
                 case .listEnvironments:
                     continuation.yield(.environments(environments))
+                case .importXcode:
+                    // One-shot validation: the service answers a candidate or a selection error.
+                    if let xcodeCandidate {
+                        continuation.yield(.xcodeCandidate(xcodeCandidate))
+                    } else {
+                        continuation.yield(.failed(OperationID(), .xcodeSelectionRejected(.notXcode)))
+                    }
                 default:
                     continuation.yield(.runtimeVersion(versionInfo))
                 }
@@ -200,7 +214,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             }
             return
 
-        case .startEnvironment, .stopEnvironment, .importXcode:
+        case .startEnvironment, .stopEnvironment:
             break
         }
 

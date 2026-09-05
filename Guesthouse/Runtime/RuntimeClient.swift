@@ -253,7 +253,7 @@ actor RuntimeClient: RuntimeBackend {
                 for buffered in pendingEvents.removeValue(forKey: id) ?? [] {
                     route(buffered)
                 }
-            case .runtimeVersion, .environments, .status, .completed, .failed, .progress, .log:
+            case .runtimeVersion, .environments, .xcodeCandidate, .status, .completed, .failed, .progress, .log:
                 settle(key)
                 continuation.finish()
             }
@@ -404,7 +404,7 @@ actor RuntimeClient: RuntimeBackend {
             } else {
                 for (id, continuation) in operations { deliver(event, to: continuation, id: id) }
             }
-        case .runtimeVersion, .environments, .accepted:
+        case .runtimeVersion, .environments, .xcodeCandidate, .accepted:
             for (id, continuation) in operations { yieldNonTerminal(event, to: continuation, id: id) }
         case .log(nil, _):
             // Unscoped guest output is droppable traffic for every operation, not a control
@@ -471,7 +471,7 @@ nonisolated extension RuntimeEvent {
     fileprivate var endsOperation: Bool {
         switch self {
         case .completed, .failed: true
-        case .runtimeVersion, .environments, .accepted, .progress, .log, .status: false
+        case .runtimeVersion, .environments, .xcodeCandidate, .accepted, .progress, .log, .status: false
         }
     }
 
@@ -484,7 +484,7 @@ nonisolated extension RuntimeEvent {
     fileprivate var isDroppableTraffic: Bool {
         switch self {
         case .progress, .log, .status: true
-        case .runtimeVersion, .environments, .accepted, .completed, .failed: false
+        case .runtimeVersion, .environments, .xcodeCandidate, .accepted, .completed, .failed: false
         }
     }
 }

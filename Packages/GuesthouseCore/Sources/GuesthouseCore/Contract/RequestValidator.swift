@@ -47,6 +47,11 @@ public enum RequestValidator: Sendable {
                 throw .oversized(bytes: data.count, limit: maximumBookmarkSize)
             }
         }
+        if let expected = handoff.expectedBundleIdentifier {
+            guard !expected.isEmpty, expected.count <= maximumDisplayNameLength,
+                  expected.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") })
+            else { throw .invalidDisplayName }
+        }
         guard !handoff.displayName.isEmpty,
               handoff.displayName.unicodeScalars.count <= maximumDisplayNameLength,
               handoff.displayName.utf8.count <= maximumDisplayNameLength * 4,
