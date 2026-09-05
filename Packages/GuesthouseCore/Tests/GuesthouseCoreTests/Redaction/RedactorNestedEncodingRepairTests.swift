@@ -3,6 +3,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorNestedEncodingRepairTests {
+    @Test(arguments: 2...5, ["Bearer\tSYNTHETICVALUE", "--password\tSYNTHETICVALUE", "Enter the code\tSYNTHETICVALUE",
+                           "--password\nSYNTHETICVALUE", "--password\rSYNTHETICVALUE"])
+    func escapedWhitespaceRetainsScanOnlyCredentialBoundaries(layers: Int, credential: String) throws {
+        var input = credential
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("SYNTHETICVALUE"))
+        #expect(output[1] == "Finished")
+        #expect(!output[0].contains("\n") && !output[0].contains("\r"))
+    }
+
     @Test func aRawWrapperClosedInsideAnEncodedValueCannotCloseAgainAfterIt() {
         let input = #"prefix=' password: \"first'stuff\"', syntheticTail"#
         #expect(!Redactor().redact(input).contains("syntheticTail"))
@@ -42,7 +53,7 @@ import Testing
     }
 
     @Test func layerDecodingDoesNotCreatePhysicalLineTerminators() {
-        #expect(Redactor.removingQuotedEncodingLayer(#"a\nb\rc\td"#) == #"a\nb\rc\td"#)
+        #expect(Redactor.removingQuotedEncodingLayer(#"a\nb\rc\td"#) == "a b c d")
     }
 
     @Test func manyNestedSiblingsStayIndependent() throws {

@@ -3,21 +3,20 @@ import RegexBuilder
 
 extension Redactor {
     /// A named JOSE parameter identifies an unfinished token at a physical boundary. Ordinary
-    /// JSON claims do not arm continuation, nor does a header already inside a complete JWT.
+    /// JSON claims do not arm continuation; named competing headers remain sensitive even
+    /// inside a completed token's coverage, as in jwtRedactionRanges.
     static func incompleteJWTStartAtLineEnd(in text: String) -> String.Index? {
         guard let run = text.firstMatch(of: #/(?:^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]+)$/#),
               run.1.contains(".") else { return nil }
         let segments = run.1.split(separator: ".", omittingEmptySubsequences: false)
-        var coveredThrough = 0
         for index in segments.indices {
-            guard index >= coveredThrough, let start = joseHeaderStart(segments[index]),
+            guard let start = joseHeaderStart(segments[index]),
                   let header = decodedJOSEHeader(segments[index][start...]),
                   header["alg"] != nil || header["enc"] != nil else { continue }
             let required = header["enc"] == nil ? 3 : 5
             let emptySignature = required == 3 && header["alg"] as? String == "none"
             let available = segments.count - index - (segments.last?.isEmpty == true && !emptySignature ? 1 : 0)
             if available < required { return start }
-            coveredThrough = index + required
         }
         return nil
     }

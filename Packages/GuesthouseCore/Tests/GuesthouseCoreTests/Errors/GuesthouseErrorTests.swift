@@ -83,8 +83,8 @@ import Testing
         #expect(error.userMessage.contains("50 GB"))
         #expect(error.userMessage.contains("150 GB short"))
         let close = GuesthouseError.insufficientDisk(requiredBytes: 200_000_000_000, availableBytes: 199_999_999_999, volumePath: "/")
-        #expect(close.userMessage.contains("200,000,000,000 bytes"))
-        #expect(close.userMessage.contains("199,999,999,999 bytes"))
+        #expect(close.userMessage.contains("\(UInt64(200_000_000_000).formatted()) bytes"))
+        #expect(close.userMessage.contains("\(UInt64(199_999_999_999).formatted()) bytes"))
         #expect(close.userMessage.contains("1 bytes short"))
     }
 
