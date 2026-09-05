@@ -37,7 +37,7 @@ final class RuntimeService: Sendable {
     }
 
     /// One reply per request. Streaming events for long operations arrive with #25.
-    func handle(_ message: XPCReceivedMessage) -> (any Encodable)? {
+    func handle(_ message: XPCReceivedMessage) -> RuntimeEvent {
         let envelope: RuntimeRequestEnvelope
         do {
             envelope = try message.decode(as: RuntimeRequestEnvelope.self)

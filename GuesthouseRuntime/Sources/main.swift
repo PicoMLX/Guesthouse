@@ -15,7 +15,7 @@ let listener: XPCListener
 do {
     listener = try XPCListener(service: RuntimeService.serviceName) { request in
         request.accept { (message: XPCReceivedMessage) -> (any Encodable)? in
-            service.handle(message)
+            RuntimeEventEnvelope(event: service.handle(message))
         } cancellationHandler: { error in
             service.sessionEnded(error)
         }

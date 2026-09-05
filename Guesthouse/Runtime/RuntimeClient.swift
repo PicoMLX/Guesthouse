@@ -55,7 +55,7 @@ actor RuntimeClient: RuntimeBackend {
         /// interruption before acceptance may offer the user.
         case reply(Result<RuntimeEvent, any Error>, Continuation, ContinuationKey, mutating: Bool)
         case incoming(RuntimeEvent)
-        case interrupted
+        case interrupted(RuntimeSessionFailure?)
         case consumerGone(ContinuationKey)
         case streamFinished(ContinuationKey)
     }
@@ -195,7 +195,7 @@ actor RuntimeClient: RuntimeBackend {
                 guard !event.isDroppableTraffic || traffic.admit() else { return }
                 inboxContinuation.yield(.incoming(event))
             },
-            interrupted: { inboxContinuation.yield(.interrupted) }
+            interrupted: { inboxContinuation.yield(.interrupted($0)) }
         )
         // The loop borrows `self` per item only, so a client nobody holds is released while
         // the loop waits, and `deinit` then ends the inbox.
@@ -222,7 +222,7 @@ actor RuntimeClient: RuntimeBackend {
             // The slot this event took at ingress is returned once it has been routed, so the
             // bound tracks what the client is actually holding.
             if event.isDroppableTraffic { traffic.release() }
-        case .interrupted: connectionDropped()
+        case .interrupted(let failure): connectionDropped(failure)
         case .consumerGone(let key): consumerGone(key)
         case .streamFinished(let key): streamFinished(key)
         }
@@ -257,13 +257,14 @@ actor RuntimeClient: RuntimeBackend {
                 settle(key)
                 continuation.finish()
             }
-        case .failure:
+        case .failure(let error):
             settle(key)
             // No operation id: the request was never accepted. A read-only query changed
             // nothing and may simply be asked again, but a mutating request may already have
             // reached the service and been journaled or started, so its outcome is unknown
             // and the user is sent to inspect state rather than offered a retry.
-            continuation.finish(throwing: RuntimeConnectionInterrupted(mayHaveMutated: mutating))
+            let failure = RuntimeSessionFailure(decoding: error)?.contextualized(mayHaveMutated: mutating)
+            continuation.finish(throwing: (failure as (any Error)?) ?? RuntimeConnectionInterrupted(mayHaveMutated: mutating))
         }
     }
 
@@ -448,7 +449,7 @@ actor RuntimeClient: RuntimeBackend {
         try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
     }
 
-    private func connectionDropped() {
+    private func connectionDropped(_ failure: RuntimeSessionFailure?) {
         let pending = operations
         operations.removeAll()
         pendingEvents.removeAll()
@@ -460,7 +461,7 @@ actor RuntimeClient: RuntimeBackend {
         retired.removeAll()
         for (id, continuation) in pending {
             retireConsumers(of: id)
-            continuation.finish(throwing: RuntimeConnectionInterrupted(operationID: id))
+            continuation.finish(throwing: (failure?.contextualized(operationID: id) as (any Error)?) ?? RuntimeConnectionInterrupted(operationID: id))
         }
     }
 }
