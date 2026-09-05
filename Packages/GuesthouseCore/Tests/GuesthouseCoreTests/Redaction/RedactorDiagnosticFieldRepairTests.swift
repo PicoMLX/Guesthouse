@@ -16,7 +16,8 @@ import Testing
         #expect(Redactor().redact(input) == input)
     }
 
-    @Test(arguments: ["tcp(db:3306)", "tcp6([::1]:3306)", "unix(/tmp/mysql.sock)", "tcp", ""],
+    @Test(arguments: ["tcp(db:3306)", "tcp6([::1]:3306)", "unix(/tmp/mysql.sock)", "tcp", "",
+                      "cloudsql(project:region:instance)", "custom+net(address)", "registered_transport"],
           ["syntheticPassword", "synthetic@part/with: spaces", "synthetic\"quoted'value"])
     func conventionalSchemelessDSNsConcealAllUserinfo(protocolAndAddress: String, password: String) {
         let input = "dsn=alice:" + password + "@" + protocolAndAddress + "/app"

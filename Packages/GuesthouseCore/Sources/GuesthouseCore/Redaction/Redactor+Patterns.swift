@@ -119,8 +119,8 @@ extension Redactor {
         /// spaces, slashes and at-signs. Bound the credential with its transport/database suffix,
         /// not a first-word or URL-authority rule. The documented default transport may be empty.
         /// https://github.com/go-sql-driver/mysql#dsn-data-source-name
-        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])[A-Za-z0-9_.-]*:[^\r\n]*(@(?:(?:tcp[46]?|unix)(?:\([^()\r\n]*\))?)?\/)/#
-        let mysqlTransport = #/@(?:(?:tcp[46]?|unix)(?:\([^()\r\n]*\))?)?\//#
+        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])[A-Za-z0-9_.-]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\/)/#
+        let mysqlTransport = #/@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\//#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names
