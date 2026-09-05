@@ -6,7 +6,7 @@ import Testing
     func genericEscapeFinalsCannotHideCredentialLabels(escape: String, label: String) {
         let input = label.prefix(1) + escape + label.dropFirst() + ": syntheticPassword"
         let result = Redactor.renderings(of: String(input))
-        #expect(!result.spliced.contains("syntheticPassword"))
+        #expect(result.contexts.contains(label + ": syntheticPassword"))
         #expect(result.joined == label.prefix(1) + label.dropFirst(2) + ": syntheticPassword")
     }
 
