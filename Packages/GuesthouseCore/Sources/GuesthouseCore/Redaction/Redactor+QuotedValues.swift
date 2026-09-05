@@ -2,15 +2,18 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
-    /// Decode quoting/backslash/solidus escapes, not controls such as `\n`: physical
-    /// line framing belongs to the stream parser. Each call strictly reduces escape depth.
+    /// Decode one scan-only quoting layer. Escaped whitespace becomes a space, never a
+    /// physical record separator; original encoded output is restored or concealed whole.
     static func removingQuotedEncodingLayer(_ value: String) -> String {
         var result = ""
         var cursor = value.startIndex
         while cursor < value.endIndex {
             let character = value[cursor]
             value.formIndex(after: &cursor)
-            if character == "\\", cursor < value.endIndex, "\\\"'/".contains(value[cursor]) {
+            if character == "\\", cursor < value.endIndex, "nrtfv".contains(value[cursor]) {
+                result.append(" ")
+                value.formIndex(after: &cursor)
+            } else if character == "\\", cursor < value.endIndex, "\\\"'/".contains(value[cursor]) {
                 result.append(value[cursor])
                 value.formIndex(after: &cursor)
             } else { result.append(character) }
