@@ -33,6 +33,17 @@ import Testing
         #expect(decoded.lines[2].text == "Finished")
     }
 
+    @Test(arguments: ["AB12-\u{1B}[DC34", "AB12-\u{1B}[CD34", "AB12-\u{1B}[0CD34", "AB12-\u{9B}CD34",
+                      "AB12-x\u{8}CD34", "AB12-xxxx\u{1B}[4DCD34"])
+    func decodedCodesRetainTerminalConsumedCredentialCharacters(input: String) throws {
+        let decoded = try JSONDecoder().decode(RedactedLines.self, from: JSONEncoder().encode([input, "Finished"]))
+        #expect(!decoded.lines[0].text.contains("AB12"))
+        #expect(!decoded.lines[0].text.contains("34"))
+        #expect(decoded.lines[1].text == "Finished")
+        #expect(!Redactor().redact(untrusted: input).contains("AB12"))
+        #expect(!Redactor().redact(fieldValue: input).contains("AB12"))
+    }
+
     @Test(arguments: ["\n", "\r", "\r\n"])
     func batchesRejectAmbiguousEmbeddedPhysicalFraming(separator: String) throws {
         let encoded = try JSONEncoder().encode(["before" + separator + "after"])

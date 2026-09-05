@@ -3,6 +3,23 @@ import Testing
 @testable import GuesthouseCore
 
 struct SanitizedTextPolicyTests {
+    @Test(arguments: ["//user:", "url=//user:", "(//user:", #"url=\/\/user:"#])
+    func networkPathCredentialsBeyondTheInspectionWindowStayPrivate(prefix: String) {
+        let input = prefix + String(repeating: "syntheticSecret", count: 150) + "@host/path"
+        #expect(!SanitizedText(input).value.contains("synthetic"))
+    }
+
+    @Test(arguments: ["\t", "\n", "\r", "\r\n", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}"], ["--password", "Bearer"])
+    func controlWhitespaceRemainsACredentialBoundary(separator: String, label: String) {
+        let output = SanitizedText(label + separator + "syntheticValue").value
+        #expect(!output.contains("synthetic"))
+    }
+
+    @Test(arguments: ["passx\u{08}word: ", "passx\u{1B}[Dword: ", "passx\u{9B}Dword: "])
+    func cursorCorrectionsRetainTheirFollowingCredential(label: String) {
+        #expect(!SanitizedText(label + "syntheticValue").value.contains("synthetic"))
+    }
+
     @Test func standaloneValueClampsAndSanitizesBeforeEncoding() throws {
         let value = SanitizedText("password: opaqueValue", limit: .max)
         #expect(!value.value.contains("opaqueValue"))

@@ -15,7 +15,8 @@ extension Redactor {
     /// payload here also keeps the terminator from joining the words on either side of it.
     static func stripTerminalEscapes(
         _ line: String,
-        openControlString: inout StreamState.ControlString?
+        openControlString: inout StreamState.ControlString?,
+        codesAlwaysRedacted: Bool = false
     ) -> (joined: String, spliced: String, contexts: [String]) {
         var text = line
         if let open = openControlString {
@@ -25,7 +26,7 @@ extension Redactor {
         }
         openControlString = text.firstMatch(of: patterns.unterminatedControlString)
             .map { $0.1 == nil ? .other : .osc }
-        return renderings(of: text)
+        return renderings(of: text, codesAlwaysRedacted: codesAlwaysRedacted)
     }
 
     /// Stands where an escape did, in the `spliced` reading only. It has to be a boundary to
@@ -35,6 +36,57 @@ extension Redactor {
     static let splicedBoundary = "\u{001F}"
 
     private typealias RecoveredCredential = (range: Range<Int>, kind: String)
+
+    /// Inspect a conservative left-erasure reading for BS/CUB corrections. This is not a
+    /// terminal emulator: recovered text is evidence only, never returned as visible output.
+    /// Counts are clamped to the existing line and control-string payloads stay opaque.
+    private static func leftCorrectedContext(in text: String, joined: String, codesAlwaysRedacted: Bool) -> String? {
+        var corrected: [(character: Character, bytes: Range<Int>)] = []
+        var joinedCount = 0
+        var cursor = text.startIndex
+        var changed = false
+        func appendLiteral(_ literal: Substring) {
+            for character in literal {
+                let end = joinedCount + character.utf8.count
+                corrected.append((character, joinedCount..<end))
+                joinedCount = end
+            }
+        }
+        for escape in text.matches(of: patterns.terminalEscape) {
+            appendLiteral(text[cursor..<escape.range.lowerBound])
+            let count: Int?
+            if escape.0 == "\u{8}" { count = 1 }
+            else if let left = escape.0.wholeMatch(of: #/(?:\u{001B}\[|\u{009B})([0-9]*)D/#) {
+                count = left.1.isEmpty ? 1 : max(1, Int(left.1) ?? Int.max)
+            } else { count = nil }
+            if let count {
+                corrected.removeLast(min(count, corrected.count))
+                changed = true
+            }
+            cursor = escape.range.upperBound
+        }
+        guard changed else { return nil }
+        appendLiteral(text[cursor...])
+        let reading = String(corrected.map(\.character))
+        if !terminalContextSpans(in: reading).isEmpty { return reading }
+        // Do not replace the whole line when the ordinary reading already covers this token.
+        // Position-aware coverage prevents an unrelated token from suppressing new evidence.
+        var offsets = corrected.flatMap { Array($0.bytes) }
+        offsets.append(corrected.last?.bytes.upperBound ?? 0)
+        let ordinary = terminalCredentialSpans(in: joined, codesAlwaysRedacted: codesAlwaysRedacted).map { span in
+            let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
+            let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
+            return (range: lower..<upper, kind: span.kind)
+        }
+        for span in terminalCredentialSpans(in: reading, codesAlwaysRedacted: codesAlwaysRedacted) {
+            let lower = offsets[reading.utf8.distance(from: reading.utf8.startIndex, to: span.range.lowerBound)]
+            let upper = offsets[reading.utf8.distance(from: reading.utf8.startIndex, to: span.range.upperBound)]
+            if !ordinary.contains(where: { $0.kind == span.kind && $0.range.lowerBound <= lower && $0.range.upperBound >= upper }) {
+                return reading
+            }
+        }
+        return nil
+    }
 
     /// Context openers, excluding their values. Only an opener intersecting a restored CSI
     /// byte supplies new evidence; ordinary styling inside an already-known value does not.
@@ -60,7 +112,7 @@ extension Redactor {
 
     /// Boundary-free spans protect token interiors; recognition still requires each rule's
     /// usual leading boundary unless an actual removed control supplied one at that position.
-    private static func terminalCredentialSpans(in text: String) -> [(range: Range<String.Index>, kind: String, needsBoundary: Bool)] {
+    private static func terminalCredentialSpans(in text: String, codesAlwaysRedacted: Bool = false) -> [(range: Range<String.Index>, kind: String, needsBoundary: Bool)] {
         var spans = text.matches(of: patterns.githubToken).map { ($0.range, "github-token", false) }
         spans += text.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map { ($0.range, "api-key", true) }
         spans += text.matches(of: patterns.distinctiveAPIKey).map { ($0.range, "api-key", false) }
@@ -71,6 +123,9 @@ extension Redactor {
         spans += text.matches(of: patterns.digestCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.specializedCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2).map { ($0, "jwt", false) } }
+        if codesAlwaysRedacted {
+            spans += text.matches(of: patterns.deviceCode).map { ($0.2.startIndex..<$0.2.endIndex, "device-code", false) }
+        }
         return spans
     }
 
@@ -80,10 +135,11 @@ extension Redactor {
     /// immediately before a credential character that happens to be a valid CSI command.
     /// Control-string payloads remain suppressed in both. Only recognized credential spans are mapped
     /// back; none of the retained command bytes themselves can reappear in the rendered output.
-    private static func terminalRecovery(in text: String, joined: String) -> (ranges: [RecoveredCredential], contexts: [String]) {
+    private static func terminalRecovery(in text: String, joined: String, codesAlwaysRedacted: Bool) -> (ranges: [RecoveredCredential], contexts: [String]) {
         var recovered: [RecoveredCredential] = []
         var contexts: [String] = []
-        let ordinary = terminalCredentialSpans(in: joined).map { span -> RecoveredCredential in
+        if let corrected = leftCorrectedContext(in: text, joined: joined, codesAlwaysRedacted: codesAlwaysRedacted) { contexts.append(corrected) }
+        let ordinary = terminalCredentialSpans(in: joined, codesAlwaysRedacted: codesAlwaysRedacted).map { span -> RecoveredCredential in
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
             return (lower..<upper, span.kind)
@@ -138,7 +194,7 @@ extension Redactor {
             var retainedIndex = 0
             var ordinaryIndex = 0
             var coveredEnds: [String: Int] = [:]
-            for span in terminalCredentialSpans(in: alternate).sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+            for span in terminalCredentialSpans(in: alternate, codesAlwaysRedacted: codesAlwaysRedacted).sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
                 let lower = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.lowerBound)
                 let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.upperBound)
                 guard !span.needsBoundary || boundaries.contains(lower) || recognizedStarts.contains(span.range.lowerBound) else { continue }
@@ -187,7 +243,7 @@ extension Redactor {
     /// a label that styling interrupted spelled correctly. `spliced` is `joined` when no escape
     /// stood in such a place, which is every ordinary line. The spliced reading also masks credential
     /// spans recovered before a CSI final byte could destroy their recognizable header.
-    static func renderings(of text: String) -> (joined: String, spliced: String, contexts: [String]) {
+    static func renderings(of text: String, codesAlwaysRedacted: Bool = false) -> (joined: String, spliced: String, contexts: [String]) {
         func isTokenCharacter(_ character: Character) -> Bool {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
         }
@@ -212,7 +268,7 @@ extension Redactor {
             return joined[..<boundary].last.map(isTokenCharacter) == true
                 && joined[boundary...].first.map({ !$0.isWhitespace }) == true
         }
-        let recovery = terminalRecovery(in: text, joined: joined)
+        let recovery = terminalRecovery(in: text, joined: joined, codesAlwaysRedacted: codesAlwaysRedacted)
         var recovered = recovery.ranges
         guard !boundaryOffsets.isEmpty || !recovered.isEmpty else { return (joined, joined, recovery.contexts) }
 
@@ -220,7 +276,7 @@ extension Redactor {
         // prefix. Closing the boundary afterwards cannot recover the remaining suffix. Keep
         // recognized tokens whole in both readings, while retaining boundaries before tokens
         // that need them, such as `filename<control>sk-...`.
-        let tokenRanges = terminalCredentialSpans(in: joined).map(\.range)
+        let tokenRanges = terminalCredentialSpans(in: joined, codesAlwaysRedacted: codesAlwaysRedacted).map(\.range)
         func byteRange(_ range: Range<String.Index>) -> Range<Int> {
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: range.upperBound)

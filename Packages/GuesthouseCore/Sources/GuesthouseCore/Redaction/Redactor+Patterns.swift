@@ -122,7 +122,7 @@ extension Redactor {
         /// Common URL schemes retain their URI interpretation when the spellings overlap.
         /// Do not exempt arbitrary passwords starting `//`: those are valid unescaped DSNs.
         /// Skip an already-concealed userinfo marker without consuming a later DSN.
-        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])(?!redacted:userinfo\]@)(?!(?i:https?|ssh|git|s?ftp|ftps|file):(?:\\?\/){2})[A-Za-z0-9_.-]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\/)/#
+        let mysqlUserInfo = #/((?:^|[\s\u{001F}"'=<\[{(])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?)(?!\[?redacted:userinfo\]@)(?!(?:(?i:https?|wss?|ssh|git|s?ftp|ftps|file):)?(?:\\?\/){2})[^\s:=]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\/)/#
         let mysqlTransport = #/@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\//#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,

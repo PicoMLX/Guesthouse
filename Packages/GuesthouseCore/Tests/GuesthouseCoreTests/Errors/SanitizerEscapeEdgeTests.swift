@@ -3,6 +3,13 @@ import Testing
 
 /// Synthetic fragments exercise the sanitizer's inspection of bytes consumed by terminal escapes.
 struct SanitizerEscapeEdgeTests {
+    @Test(arguments: [("\u{1B}]", "\u{07}"), ("\u{1B}P", "\u{1B}\\"), ("\u{9D}", "\u{9C}"), ("\u{90}", "\u{9C}")],
+          ["\u{1B}[31m", "\u{9B}31m", "\u{1B}(B"])
+    func nestedPayloadControlsCannotHideARecoveredPrefix(control: (String, String), nested: String) {
+        let output = SanitizedText.sanitize(control.0 + "g" + nested + control.1 + "hp_syntheticCredential")
+        #expect(!output.contains("synthetic"))
+    }
+
     @Test(arguments: ["(", ")", "*", "+"], ["B", "0"])
     func charsetDesignationsCannotConsumeTheFirstCredentialCharacter(designation: String, final: String) {
         #expect(SanitizedText.sanitize("\u{1B}" + designation + final + "123-C456") == "[redacted:spliced-escape]")
