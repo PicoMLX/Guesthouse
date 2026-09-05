@@ -19,7 +19,22 @@ import Testing
     ]
 
     static let events: [RuntimeEvent] = [
-        .runtimeVersion(RuntimeVersionInfo(serviceVersion: "0.1.0", serviceBuild: "12", tart: .init(version: "2.36.0", verified: true))),
+        .runtimeVersion(RuntimeVersionInfo(
+            serviceVersion: "0.1.0",
+            serviceBuild: "12",
+            tart: .init(version: "2.36.0", verified: true),
+            lume: .init(
+                version: "0.5.3",
+                verified: true,
+                capabilities: .init(
+                    unattendedTahoe: true,
+                    createRunAttachStorage: true,
+                    detachedRun: true,
+                    nativeAttach: true,
+                    vncCanBeDisabled: false
+                )
+            )
+        )),
         .accepted(operation),
         .progress(operation, ProgressPhase(kind: .waitingForNetwork, fraction: 0.5)),
         .progress(operation, ProgressPhase(kind: .copying, fraction: nil, cancelable: false)),
@@ -54,6 +69,17 @@ import Testing
                 #expect(!json.contains(forbidden), "\(request.caseName) contains \(forbidden)")
             }
         }
+    }
+
+    @Test func versionInfoRemainsBackwardCompatibleAndCarriesNoLumeInventory() throws {
+        let legacy = #"{"serviceVersion":"0.1.0","serviceBuild":"12","protocolVersion":1,"tart":{"version":"2.36.0","verified":true}}"#
+        let decoded = try JSONDecoder().decode(RuntimeVersionInfo.self, from: Data(legacy.utf8))
+        #expect(decoded.lume == nil, "the additive optional field does not require a protocol bump")
+
+        let event = Self.events[0]
+        let json = String(decoding: try JSONEncoder().encode(event), as: UTF8.self).lowercased()
+        #expect(!json.contains("vncurl"))
+        #expect(!json.contains("inventory"))
     }
 
     @Test func wrongProtocolVersionIsRejected() {
