@@ -20,7 +20,7 @@ extension Redactor {
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
-        var text = protected.text
+        var text = redactURLContinuations(protected.text, state: &state)
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -115,6 +115,26 @@ extension Redactor {
             text = applyDeviceCodePattern(to: text)
         }
         return text
+    }
+
+    /// Stream output cannot retract an earlier fragment after a later @ proves it sensitive.
+    /// Ambiguous bare host:port authorities at EOL therefore take the conservative path too.
+    /// A visible path/query/fragment boundary proves the authority complete (RFC 3986 §3.2).
+    private static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
+        var text = input
+        if state.expectingURLUserInfo {
+            let value = text.drop(while: \.isWhitespace)
+            guard !value.isEmpty else { return text }
+            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
+            let at = text[value.startIndex..<end].lastIndex(of: "@")
+            state.expectingURLUserInfo = at == nil && end == text.endIndex
+            let stop = at ?? end
+            text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+        }
+        return text.replacing(patterns.incompleteURLUserInfo) { match in
+            state.expectingURLUserInfo = true
+            return String(match.1) + marker("userinfo")
+        }
     }
 
     static func applyDeviceCodePattern(to input: String, preserveAlgorithms: Bool = false) -> String {

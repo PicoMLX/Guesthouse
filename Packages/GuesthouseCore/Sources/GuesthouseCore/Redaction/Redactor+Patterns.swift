@@ -112,7 +112,17 @@ extension Redactor {
         /// delimiter must start a value, so doubled slashes inside a path or URL query do not
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
-        let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
+            #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})/#
+        }
+        let urlUserInfo = Regex {
+            urlAuthorityPrefix
+            #/[^\s\/?#]+@/#
+        }
+        let incompleteURLUserInfo = Regex {
+            urlAuthorityPrefix
+            #/(?!\[)[^\s\/?#@]*:[^\s\/?#@]*$/#
+        }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Those need a name in front of the label word, and the names come from
