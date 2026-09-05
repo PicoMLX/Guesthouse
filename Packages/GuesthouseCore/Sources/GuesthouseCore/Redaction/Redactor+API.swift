@@ -32,18 +32,25 @@ extension Redactor {
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
-        // Only the physical pass advances PPK framing. Alternate readings and suffix scans
-        // must neither count a body twice nor change the contexts enclosing the private key.
-        let ppkLine = state.ppkPhase == .inactive
-            ? stripped.contexts.first(where: { $0.contains(Self.patterns.ppkBegin) }) ?? stripped.joined : stripped.joined
-        if isPhysicalLine, Self.consumePPKLine(ppkLine, phase: &state.ppkPhase) {
-            return RedactedLine(Self.marker("private-key"))
-        }
         var recoveredContexts = StreamState()
         for reading in stripped.contexts {
             var scanned = StreamState()
             _ = redact(line: reading, state: &scanned, isPhysicalLine: false)
             Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
+        }
+        // Only the physical pass advances PPK framing. On its opening line, preserve any
+        // enclosing quote/PEM context in both readings before the private-key early return.
+        let wasReadingPPK = state.ppkPhase != .inactive
+        let ppkLine = !wasReadingPPK
+            ? stripped.contexts.first(where: { $0.contains(Self.patterns.ppkBegin) }) ?? stripped.joined : stripped.joined
+        if isPhysicalLine, Self.consumePPKLine(ppkLine, phase: &state.ppkPhase) {
+            if !wasReadingPPK {
+                var joinedContext = StreamState()
+                _ = redact(line: stripped.joined, state: &joinedContext, isPhysicalLine: false)
+                Self.mergePendingContexts(from: joinedContext, into: &recoveredContexts)
+            }
+            Self.mergePendingContexts(from: recoveredContexts, into: &state)
+            return RedactedLine(Self.marker("private-key"))
         }
         defer { Self.mergePendingContexts(from: recoveredContexts, into: &state) }
         // A restored label can refer to an opaque value with no recognizable token shape.
