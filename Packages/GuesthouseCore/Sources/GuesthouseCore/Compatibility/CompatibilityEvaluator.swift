@@ -85,9 +85,12 @@ public enum CompatibilityEvaluator: Sendable {
         // Official evidence for this exact combination counts regardless of what else the user
         // connected before; only then does unrelated history mean drift. Host ranges may
         // overlap, so every matching entry is asked, not only the first: one entry per tested
-        // host build is the natural way to record two verifications of one combination.
+        // host build is the natural way to record two verifications of one combination. When
+        // several cover this exact host, report its last successful connection (§5).
         let matching = manifest.tested.filter { $0.matches(exact) }
-        if let verification = matching.compactMap(\.verification).first(where: { $0.covers(exact) }) {
+        if let verification = matching.compactMap(\.verification)
+            .filter({ $0.covers(exact) })
+            .max(by: { $0.verifiedAt < $1.verifiedAt }) {
             return .verified(recordedAt: verification.verifiedAt)
         }
 

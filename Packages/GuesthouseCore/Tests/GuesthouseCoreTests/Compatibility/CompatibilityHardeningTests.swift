@@ -320,6 +320,25 @@ import Testing
         #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Fixtures.tuple()), manifest: unverifiedFirst, history: []) == .verified(recordedAt: day))
     }
 
+    @Test(arguments: [false, true])
+    func newestCoveringManifestVerificationWinsRegardlessOfOrder(reverseEntries: Bool) {
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        let older = CompatibilityManifest.Verification(verifiedAt: day, hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
+        let newestCovering = CompatibilityManifest.Verification(verifiedAt: day.addingTimeInterval(3600), hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
+        let otherHost = CompatibilityManifest.Verification(verifiedAt: day.addingTimeInterval(7200), hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F99", evidence: "docs/phase0/compat.md")
+        let otherCLI = CompatibilityManifest.Verification(verifiedAt: day.addingTimeInterval(10800), hostMacOSVersion: SemanticVersion("26.5.2")!, hostMacOSBuild: "25F84", evidence: "docs/phase0/compat.md")
+        let entries = [
+            Fixtures.tested(),
+            Fixtures.tested(verification: older),
+            Fixtures.tested(verification: newestCovering),
+            Fixtures.tested(verification: otherHost),
+            Fixtures.tested(codexCLI: "0.40.0", verification: otherCLI),
+        ]
+        let manifest = CompatibilityManifest(manifestVersion: 1, tested: reverseEntries ? Array(entries.reversed()) : entries)
+
+        #expect(CompatibilityEvaluator.evaluate(observed: ObservedTuple(Fixtures.tuple()), manifest: manifest, history: []) == .verified(recordedAt: Date(timeIntervalSince1970: 1_800_003_600)))
+    }
+
     @Test func negativeProtocolVersionsAreNeverVerified() throws {
         let manifest = CompatibilityManifest(manifestVersion: 1, tested: [Fixtures.tested()])
         var impossible = Fixtures.tuple()
