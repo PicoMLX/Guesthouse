@@ -15,6 +15,17 @@ import Testing
         #expect(Redactor().redact(lines.joined(separator: "\n")) == output.joined(separator: "\n"))
     }
 
+    @Test(arguments: ["Authorization", "password", "device_code"], ["Authorization", "password", "device_code"])
+    func completedEncodedSiblingsDoNotStartNewFolds(first: String, next: String) {
+        let q = "\\\""
+        let lines = [q + first + q + ": " + q + "syntheticFirst" + q + ", " + q + next + q + ": " + q + "syntheticSecond" + q + ", note: \u{E001}0\u{E002}",
+                     "  \"status\": \"ready \u{E001}0\u{E002}\"", "done"]
+        let output = Redactor().redact(lines: lines).map(\.text)
+        #expect(!output[0].contains("synthetic"))
+        #expect(output[0].contains("note: \u{E001}0\u{E002}"))
+        #expect(Array(output.dropFirst()) == Array(lines.dropFirst()))
+    }
+
     @Test(arguments: ["Authorization", "password"], ["\"syntheticValue\",", "\\\"synthetic value\\\",", "\"\",", "''"])
     func nextLineQuotedValuesReleaseIndentedSiblings(field: String, value: String) {
         let lines = ["  \"\(field)\":", "    " + value, "  \"status\": \"ready\""]

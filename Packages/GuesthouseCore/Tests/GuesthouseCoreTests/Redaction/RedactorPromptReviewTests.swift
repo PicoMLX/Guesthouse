@@ -2,6 +2,16 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPromptReviewTests {
+    @Test(arguments: ["Enter the code:", "Your code is:"], ["Authorization", "password", "device_code"])
+    func encodedPromptValuesPreserveFollowingPendingFields(prompt: String, next: String) {
+        let q = "\\\""
+        let lines = [prompt + " " + q + "syntheticFirst" + q + ", " + q + next + q + ":", "syntheticSecond", "done"]
+        let output = Redactor().redact(lines: lines).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[0].contains(next))
+        #expect(output[2] == "done")
+    }
+
     @Test(arguments: ["device_code:", "user_code:", "Enter the code:", "Your code is:"], ["", "first"])
     func explicitCodeContinuationsKeepOpaqueValuesSecret(prompt: String, prefix: String) {
         let lines = [prompt + " " + prefix + "\\", "", "syntheticOpaqueCode", "done"]
