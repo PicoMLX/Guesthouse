@@ -2,7 +2,7 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
-    @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}31", "3\u{0}1", "31\u{7}", "31\u{8}", "31\u{9}", "31 \u{0}"])
+    @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}31", "3\u{0}1", "31\u{7}", "31\u{8}", "31\u{9}", "31 \u{0}", " 31", "1 2", "? 3"])
     func embeddedControlsDoNotSplitCSI(introducer: String, body: String) {
         let result = Redactor.renderings(of: "pass" + introducer + body + "mword: syntheticPassword")
         #expect(result.joined == "password: syntheticPassword")
@@ -39,20 +39,28 @@ import Testing
         #expect(result.joined == prefix + field)
     }
 
+    @Test(arguments: ["ghp_syntheticFirst", "sk-syntheticFirst", "Bearer syntheticFirst"],
+          ["Enter the code: syntheticSecond", "Enter the code ABCD1234", "Your code is syntheticSecond", "Enter the code"])
+    func swallowedPromptsKeepTheirCredentialBoundary(prefix: String, prompt: String) {
+        #expect(Redactor.renderings(of: prefix + "\u{0}" + prompt).spliced
+                == "[redacted:secret]" + Redactor.splicedBoundary + prompt)
+    }
+
     @Test(arguments: ["sk-synthetic", "Bearer syntheticFirst"], ["--password syntheticSecond", "--password"])
     func swallowedSecretOptionsRetainTheirBoundary(prefix: String, option: String) {
         #expect(Redactor.renderings(of: prefix + "\u{0}" + option).spliced
             == "[redacted:secret]" + Redactor.splicedBoundary + option)
     }
 
-    @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}[", "\u{9B}"])
-    func recoveredAtSignsConcealURLUserinfo(escape: String) {
-        let result = Redactor.renderings(of: "https://sample:syntheticPassword" + escape + "@example.com")
+    @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}[", "\u{9B}"],
+          [("https://sample:syntheticPassword", "@example.com"), ("https", "://sample:syntheticPassword@example.com")])
+    func recoveredURLDelimitersConcealUserinfo(escape: String, fragments: (String, String)) {
+        let result = Redactor.renderings(of: fragments.0 + escape + fragments.1)
         #expect(!result.spliced.contains("syntheticPassword"))
         #expect(result.spliced.hasSuffix("example.com"))
     }
 
-    @Test(arguments: ["\u{1B}]", "\u{1B}P", "\u{1B}_", "\u{1B}^", "\u{1B}X", "\u{9D}", "\u{90}", "\u{9F}", "\u{9E}", "\u{98}"], ["\u{18}", "\u{1A}"])
+    @Test(arguments: ["\u{1B}]", "\u{1B}P", "\u{1B}_", "\u{1B}^", "\u{1B}X", "\u{9D}", "\u{90}", "\u{9F}", "\u{9E}", "\u{98}"], ["\u{18}", "\u{1A}", "\u{1B}c", "\u{1B}[m"])
     func cancelledControlStringsReleaseVisibleDiagnostics(opener: String, cancel: String) {
         var open: Redactor.StreamState.ControlString?
         #expect(Redactor.stripTerminalEscapes("before" + opener + "payload" + cancel + "after", openControlString: &open).joined == "beforeafter")
