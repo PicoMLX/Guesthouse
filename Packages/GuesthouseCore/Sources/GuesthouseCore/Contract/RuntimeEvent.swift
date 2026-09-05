@@ -265,7 +265,11 @@ extension ObservedTuple {
         // redact a run the first pass retained, so its provenance is a separate gate too.
         let display = GuesthouseError.sanitizeReporting(escaped, limit: room)
         guard !display.redacted else { return nil }
-        return "\(display.value) \(identityMarker)\(digest(of: escaped))]"
+        // A display cut can manufacture a credential-shaped boundary (for example shortening
+        // a long identifier to ABCD-EFGH). The sender must not emit an identity its own wire
+        // decoder would change; such a value is unknown at both ends.
+        let identity = "\(display.value) \(identityMarker)\(digest(of: escaped))]"
+        return decodedIdentity(identity, limit: limit)
     }
 
     /// `" [exact:" + 64 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.

@@ -37,4 +37,15 @@ struct ObservationIdentityReviewTests {
         let roundTrip = try JSONDecoder().decode(ObservedTuple.self, from: JSONEncoder().encode(sanitized))
         #expect(roundTrip == sanitized, "the sender's safe exact identity survives unchanged")
     }
+
+    @Test func aDisplayCutCannotCreateASecretShapedWireIdentity() throws {
+        let capability = String(repeating: "a", count: 44) + " ABCD-EFGH" + String(repeating: "Z", count: 100)
+        let path = String(repeating: "a", count: 172) + " ABCD-EFGH" + String(repeating: "Z", count: 100)
+        let raw = ObservedTuple(codexCLIPath: path, codexCLICapabilities: [capability])
+        let sent = raw.sanitizedForWire()
+        #expect(sent.codexCLIPath == nil)
+        #expect(sent.codexCLICapabilities == nil)
+        let received = try JSONDecoder().decode(ObservedTuple.self, from: JSONEncoder().encode(sent))
+        #expect(received == sent)
+    }
 }
