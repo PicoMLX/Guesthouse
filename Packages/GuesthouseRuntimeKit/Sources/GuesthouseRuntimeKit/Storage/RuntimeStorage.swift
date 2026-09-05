@@ -117,8 +117,8 @@ public struct RuntimeStorage: Sendable {
         ]
     }
 
-    /// Physical identity captured by verification and reused by runtime coordination. Paths alone
-    /// are insufficient on macOS because distinct spellings can reach the same filesystem item.
+    /// Stable identity for coordinating aliases that reach the same physical directory.
+    /// Paths alone are insufficient on macOS (`/tmp` and `/private/tmp` are one example).
     struct CoordinationIdentity: Hashable, Sendable {
         let device: dev_t
         let inode: ino_t
@@ -135,6 +135,14 @@ public struct RuntimeStorage: Sendable {
         let modificationNanoseconds: Int64
         let statusChangeSeconds: Int64
         let statusChangeNanoseconds: Int64
+    }
+
+    func coordinationIdentity() throws -> CoordinationIdentity {
+        try Self.verify(root)
+        guard let identity = Self.fileIdentity(of: root) else {
+            throw RuntimeStorageError.insecureDirectory(path: root.path, reason: "cannot be inspected")
+        }
+        return identity
     }
 
     static func fileIdentity(of url: URL) -> CoordinationIdentity? {
