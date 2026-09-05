@@ -9,8 +9,13 @@ extension Redactor {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         switch value {
         case "", "\"", "'", "\\\"", "\\'": return true
-        default: return !value.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
+        default: return valueExplicitlyContinues(value[...])
         }
+    }
+
+    static func valueExplicitlyContinues(_ value: Substring) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
     }
 
     static func isBasicCredential(_ value: Substring) -> Bool {
@@ -70,6 +75,7 @@ extension Redactor {
             let argument = secretArgument(in: text, from: match.range.upperBound)
             state.quotedValue = state.quotedValue ?? argument.quoted
             state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
+            state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || argument.continuesLine
             // Canonicalize equals to a space so the generic field rule cannot treat the
             // replacement and later arguments as a single unquoted passphrase.
             let separator = match.3 == "=" ? " " : String(match.3)
