@@ -36,13 +36,14 @@ extension Redactor {
         /// The label is matched lazily and has to end on an alphanumeric, so it can never eat
         /// the closing dashes and a second block on the same line stays its own match.
         let pemBegin = #/-----BEGIN ([A-Za-z0-9](?:[A-Za-z0-9 ._+-]*?[A-Za-z0-9])?)-----/#
+        let ppkBegin = #/PuTTY-User-Key-File-([0-9]+):/#
         /// The whole header value, quoted or to the end of the line, so multi-parameter schemes
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name. Cookie
         /// headers share this state: opaque session identifiers convey authority (RFC 6265 §8.4).
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:set-)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookie)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -113,7 +114,13 @@ extension Redactor {
         /// delimiter must start a value, so doubled slashes inside a path or URL query do not
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
-        let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        let urlUserInfo = #/((?::|^|[\s\u{001F}"'(<\[{]|(?:^|[\s\u{001F}"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        /// Go MySQL-style DSNs omit the URL scheme; passwords are not escaped and may include
+        /// spaces, slashes and at-signs. Bound the credential with its transport/database suffix,
+        /// not a first-word or URL-authority rule. The documented default transport may be empty.
+        /// https://github.com/go-sql-driver/mysql#dsn-data-source-name
+        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])[A-Za-z0-9_.-]*:[^\r\n]*(@(?:(?:tcp[46]?|unix)(?:\([^()\r\n]*\))?)?\/)/#
+        let mysqlTransport = #/@(?:(?:tcp[46]?|unix)(?:\([^()\r\n]*\))?)?\//#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names
@@ -156,7 +163,7 @@ extension Redactor {
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
         let secretOption = Regex {
-            #/(^|[\s\u{009F}])/#
+            #/(^|[\s\u{001F}])/#
             Capture {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
@@ -164,7 +171,7 @@ extension Redactor {
             #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|[\s\u{009F}])--?[A-Za-z0-9_-]*/#
+            #/(^|[\s\u{001F}])--?[A-Za-z0-9_-]*/#
             secretName
             #/[ \t]*(?:=[ \t]*)?$/#
         }.ignoresCase()
