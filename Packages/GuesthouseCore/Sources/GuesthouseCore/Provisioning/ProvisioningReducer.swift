@@ -58,7 +58,8 @@ enum ProvisioningReducer: Sendable {
                 // the saved stage would offer a start for a step the runtime already ran.
                 guard checkpoint.stage >= stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
                 let write = mint()
-                let status = StageStatus.persistingCheckpoint(checkpoint, operation: interrupted, write: write)
+                // Inspection settled the operation; delayed callbacks cannot abandon this write.
+                let status = StageStatus.persistingCheckpoint(checkpoint, operation: nil, write: write)
                 return (ProvisioningState(stage: checkpoint.stage, status: status, issuedEffects: issued), [.persistCheckpoint(checkpoint, write)])
             case .stillRunning(let id):
                 if let interrupted { try requireSame(interrupted, id) }
