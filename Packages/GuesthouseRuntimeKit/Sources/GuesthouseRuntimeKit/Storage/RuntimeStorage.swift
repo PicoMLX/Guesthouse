@@ -83,13 +83,17 @@ public struct RuntimeStorage: Sendable {
         root.appending(path: subdirectory.rawValue)
     }
 
-    /// The VM store, for `TART_HOME`.
+    /// The VM store's location. Use `environmentForTart()` before a Tart operation so the
+    /// directory's current protection is checked before it becomes `TART_HOME`.
     public var tartHome: URL { url(for: .vms) }
 
     /// The explicit environment for every Tart invocation: only `TART_HOME`. `PATH` and the
-    /// rest of the service's environment are deliberately absent.
-    public func environmentForTart() -> [String: String] {
-        ["TART_HOME": tartHome.path]
+    /// rest of the service's environment are deliberately absent. Revalidate on every call:
+    /// this value may outlive the private directories that initialization prepared.
+    public func environmentForTart() throws -> [String: String] {
+        try Self.verify(root)
+        try Self.verify(tartHome)
+        return ["TART_HOME": tartHome.path]
     }
 
     // MARK: - Verification
@@ -116,7 +120,7 @@ public struct RuntimeStorage: Sendable {
                 // object that now exists before translating the creation failure, so a
                 // dangling link can never acquire writable-storage recovery actions.
                 if lstat(url.path, &info) == 0 {
-                    try verify(url)
+                    _ = try verifyStructure(url)
                 } else {
                     let retryInspectionError = errno
                     if isPathTraversalFailure(retryInspectionError) {
@@ -129,7 +133,7 @@ public struct RuntimeStorage: Sendable {
         // Unlike FileManager.fileExists, lstat observes a symbolic link even when its target
         // is absent. Verify before changing permissions or backup metadata so every link is
         // refused with preservation-first guidance.
-        try verify(url)
+        _ = try verifyStructure(url)
         do {
             try manager.setAttributes([.posixPermissions: directoryPermissions], ofItemAtPath: url.path)
         } catch {
@@ -145,6 +149,9 @@ public struct RuntimeStorage: Sendable {
         } catch {
             throw RuntimeStorageError.unwritable(path: url.path, reason: SanitizedText(error.localizedDescription, limit: 120))
         }
+        // Do not assume the filesystem honored the requested protection. Re-read the final mode
+        // and ACL state after every mutation and fail closed if either is still permissive.
+        try verify(url)
     }
 
     /// If a missing suffix sits below a path component that cannot resolve to a directory,
@@ -190,9 +197,22 @@ public struct RuntimeStorage: Sendable {
         code == ENOENT || code == ENOTDIR || code == ELOOP
     }
 
-    /// A real directory owned by the current user, not a link. Read with `lstat`, so a missing
-    /// or unrepresentable owner is a refusal, never a pass.
+    /// A private directory owned by the current user, not a link. This is the strict check used
+    /// after initialization and whenever runtime code re-enters the storage tree.
     static func verify(_ url: URL) throws {
+        let info = try verifyStructure(url)
+        guard info.st_mode & mode_t(0o7777) == mode_t(directoryPermissions) else {
+            throw RuntimeStorageError.protectionDrift(path: url.path, reason: "permissions are not 0700")
+        }
+        guard try !hasAccessControlEntries(url) else {
+            throw RuntimeStorageError.protectionDrift(path: url.path, reason: "carries access control entries")
+        }
+    }
+
+    /// Structural preflight used only while preparing storage. Existing directories may start
+    /// with repairable permissions or ACLs, but links, foreign-owned objects, and unsafe
+    /// ancestors are refused before any change is made.
+    private static func verifyStructure(_ url: URL) throws -> stat {
         var info = stat()
         guard lstat(url.path, &info) == 0 else {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "cannot be inspected")
@@ -206,6 +226,7 @@ public struct RuntimeStorage: Sendable {
             throw RuntimeStorageError.insecureDirectory(path: url.path, reason: "owned by another user")
         }
         try verifyAncestors(of: url)
+        return info
     }
 
     /// A `0700` directory is only as private as the directories above it: another local
@@ -434,13 +455,16 @@ public struct RuntimeStorage: Sendable {
 /// Storage failures block every runtime operation, so each names what happened and what the
 /// user can do (AGENTS.md: every error carries a message and a recovery action).
 public enum RuntimeStorageError: Error, Hashable, Sendable, LocalizedError {
+    case protectionDrift(path: String, reason: String)
     case insecureDirectory(path: String, reason: String)
     case unwritable(path: String, reason: SanitizedText)
 
     public var userMessage: String {
         switch self {
+        case .protectionDrift(let path, let reason):
+            "Guesthouse stopped because its storage folder \(GuesthouseError.sanitize(path, limit: 200)) is no longer private (\(GuesthouseError.sanitize(reason, limit: 120))). Leave the folder and its contents in place—they may include unpublished work. Quit and reopen Guesthouse so it can restore the required protection, then try again."
         case .insecureDirectory(let path, let reason):
-            "Guesthouse cannot safely use the item at its storage path \(GuesthouseError.sanitize(path, limit: 200)) (\(reason)). Preserve the item and any linked destination exactly as they are; they may contain unpublished work. Cancel and inspect the path before changing anything."
+            "Guesthouse cannot safely use the item at its storage path \(GuesthouseError.sanitize(path, limit: 200)) (\(GuesthouseError.sanitize(reason, limit: 120))). Preserve the item and any linked destination exactly as they are; they may contain unpublished work. Cancel and inspect the path before changing anything."
         case .unwritable(let path, let reason):
             "Guesthouse cannot write to its storage folder \(GuesthouseError.sanitize(path, limit: 200)) (\(reason.value)). Leave the folder and its contents in place because they may contain unpublished work. Free disk space or restore write access, then try again."
         }
@@ -449,7 +473,7 @@ public enum RuntimeStorageError: Error, Hashable, Sendable, LocalizedError {
     /// In preference order. Never empty.
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .insecureDirectory: [.cancel]
+        case .protectionDrift, .insecureDirectory: [.cancel]
         case .unwritable: [.freeDiskSpace, .retry, .cancel]
         }
     }

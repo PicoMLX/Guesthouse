@@ -48,17 +48,67 @@ import Testing
     @Test func accessControlEntriesAreRemoved() throws {
         _ = try RuntimeStorage(root: root)
         let target = root.appending(path: RuntimeStorage.Subdirectory.sshMaintenance.rawValue)
-        let chmod = Process()
-        chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmod.arguments = ["+a", "everyone allow read,list", target.path]
-        chmod.environment = [:]
-        try chmod.run()
-        chmod.waitUntilExit()
-        try #require(chmod.terminationStatus == 0)
+        try #require(try addAccessControlEntry("everyone allow read,list", to: target))
         #expect(try RuntimeStorage.hasAccessControlEntries(target))
         _ = try RuntimeStorage(root: root)
         #expect(try !RuntimeStorage.hasAccessControlEntries(target))
         #expect(throws: RuntimeStorageError.self) { try RuntimeStorage.hasAccessControlEntries(root.appending(path: "missing")) }
+    }
+
+    @Test(arguments: [false, true])
+    func tartEnvironmentRejectsPermissionDriftAfterInitialization(atRoot: Bool) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "mode-drift"))
+        let target = atRoot ? storage.root : storage.tartHome
+        let unpublishedWork = storage.tartHome.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "permissions are not 0700")) {
+            try storage.environmentForTart()
+        }
+
+        _ = try RuntimeStorage(root: storage.root)
+        #expect(try storage.environmentForTart() == ["TART_HOME": storage.tartHome.path])
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
+    }
+
+    @Test(arguments: [false, true])
+    func tartEnvironmentRejectsACLDriftAfterInitialization(atRoot: Bool) throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "acl-drift"))
+        let target = atRoot ? storage.root : storage.tartHome
+        let unpublishedWork = storage.tartHome.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
+        try #require(try addAccessControlEntry("everyone allow read,list", to: target))
+
+        #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "carries access control entries")) {
+            try storage.environmentForTart()
+        }
+
+        _ = try RuntimeStorage(root: storage.root)
+        #expect(try storage.environmentForTart() == ["TART_HOME": storage.tartHome.path])
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
+    }
+
+    @Test func anUnsafeAncestorIsRefusedBeforeProtectionDriftIsRepaired() throws {
+        let storage = try RuntimeStorage(root: root.appending(path: "storage"))
+        let unpublishedWork = storage.tartHome.appending(path: "unpublished-work.txt")
+        try Data("keep me".utf8).write(to: unpublishedWork)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: storage.root.path)
+        try #require(try addAccessControlEntry("everyone allow read,list", to: storage.root))
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: root.path)
+
+        let error = #expect(throws: RuntimeStorageError.self) { _ = try RuntimeStorage(root: storage.root) }
+        if case .insecureDirectory(let path, let reason)? = error {
+            #expect(path == root.path)
+            #expect(reason.contains("other users"))
+        } else {
+            Issue.record("expected an unsafe-ancestor refusal, got \(String(describing: error))")
+        }
+
+        let mode = try FileManager.default.attributesOfItem(atPath: storage.root.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.int16Value == 0o755)
+        #expect(try RuntimeStorage.hasAccessControlEntries(storage.root))
+        #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
     @Test func aWorldWritableContainingFolderIsRefused() throws {
@@ -131,12 +181,13 @@ import Testing
     }
 
     @Test func errorsAreActionable() {
+        let drift = RuntimeStorageError.protectionDrift(path: "/private/vms", reason: "permissions are not 0700")
         let insecure = RuntimeStorageError.insecureDirectory(path: "/x", reason: "symbolic link")
         let unwritable = RuntimeStorageError.unwritable(
             path: "/x",
             reason: SanitizedText("No space left on device")
         )
-        let errors = [insecure, unwritable]
+        let errors = [drift, insecure, unwritable]
         for error in errors {
             #expect(!error.userMessage.isEmpty)
             #expect(!error.recoveryActions.isEmpty)
@@ -144,10 +195,21 @@ import Testing
             #expect(!error.userMessage.contains("Settings"))
             #expect(error.userMessage.contains("unpublished work"))
         }
+        #expect(drift.recoveryActions == [.cancel])
+        #expect(drift.userMessage.contains("Leave the folder and its contents in place"))
+        #expect(drift.userMessage.contains("Quit and reopen Guesthouse"))
         #expect(insecure.recoveryActions == [.cancel])
         #expect(insecure.userMessage.contains("Preserve"))
-        #expect(!insecure.userMessage.contains("move or remove"))
-        #expect(!insecure.userMessage.contains("delete"))
+        for reason in ["symbolic link", "not a directory", "owned by another user"] {
+            let unsafe = RuntimeStorageError.insecureDirectory(path: "/private/vms", reason: reason)
+            #expect(unsafe.recoveryActions == [.cancel])
+            #expect(unsafe.userMessage.contains("Preserve"))
+            #expect(unsafe.userMessage.contains("unpublished work"))
+            #expect(!unsafe.userMessage.contains("move or remove"))
+            #expect(!unsafe.userMessage.contains("delete"))
+            #expect(!unsafe.userMessage.contains("replace"))
+            #expect(!unsafe.userMessage.contains("chown"))
+        }
         #expect(unwritable.recoveryActions == [.freeDiskSpace, .retry, .cancel])
     }
 
