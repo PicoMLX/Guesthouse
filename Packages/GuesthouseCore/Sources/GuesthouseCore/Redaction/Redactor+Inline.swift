@@ -123,9 +123,6 @@ extension Redactor {
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretValue = labelAwaitsValue
-        if text.contains(p.mentionsCode) || codeExpected {
-            text = applyDeviceCodePattern(to: text)
-        }
         // "Your one-time code is:" with the value on the next line. Only a line that asks for a
         // code arms the next one: arming on any mention of the word would replace the failure
         // that follows `process exited with code 1` with a device-code marker.
@@ -133,6 +130,9 @@ extension Redactor {
             state.expectingDeviceCode = true
         }
         for tail in tails.reversed() { text = text.replacingOccurrences(of: tail.key, with: tail.value) }
+        if text.contains(p.mentionsCode) || codeExpected {
+            text = applyDeviceCodePattern(to: text)
+        }
         return text
     }
 
