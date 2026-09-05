@@ -37,6 +37,57 @@ extension Redactor {
 
     private typealias RecoveredCredential = (range: Range<Int>, kind: String)
 
+    /// Inspect a conservative left-erasure reading for BS/CUB corrections. This is not a
+    /// terminal emulator: recovered text is evidence only, never returned as visible output.
+    /// Counts are clamped to the existing line and control-string payloads stay opaque.
+    private static func leftCorrectedContext(in text: String, joined: String, codesAlwaysRedacted: Bool) -> String? {
+        var corrected: [(character: Character, bytes: Range<Int>)] = []
+        var joinedCount = 0
+        var cursor = text.startIndex
+        var changed = false
+        func appendLiteral(_ literal: Substring) {
+            for character in literal {
+                let end = joinedCount + character.utf8.count
+                corrected.append((character, joinedCount..<end))
+                joinedCount = end
+            }
+        }
+        for escape in text.matches(of: patterns.terminalEscape) {
+            appendLiteral(text[cursor..<escape.range.lowerBound])
+            let count: Int?
+            if escape.0 == "\u{8}" { count = 1 }
+            else if let left = escape.0.wholeMatch(of: #/(?:\u{001B}\[|\u{009B})([0-9]*)D/#) {
+                count = left.1.isEmpty ? 1 : max(1, Int(left.1) ?? Int.max)
+            } else { count = nil }
+            if let count {
+                corrected.removeLast(min(count, corrected.count))
+                changed = true
+            }
+            cursor = escape.range.upperBound
+        }
+        guard changed else { return nil }
+        appendLiteral(text[cursor...])
+        let reading = String(corrected.map(\.character))
+        if !terminalContextSpans(in: reading).isEmpty { return reading }
+        // Do not replace the whole line when the ordinary reading already covers this token.
+        // Position-aware coverage prevents an unrelated token from suppressing new evidence.
+        var offsets = corrected.flatMap { Array($0.bytes) }
+        offsets.append(corrected.last?.bytes.upperBound ?? 0)
+        let ordinary = terminalCredentialSpans(in: joined, codesAlwaysRedacted: codesAlwaysRedacted).map { span in
+            let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
+            let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
+            return (range: lower..<upper, kind: span.kind)
+        }
+        for span in terminalCredentialSpans(in: reading, codesAlwaysRedacted: codesAlwaysRedacted) {
+            let lower = offsets[reading.utf8.distance(from: reading.utf8.startIndex, to: span.range.lowerBound)]
+            let upper = offsets[reading.utf8.distance(from: reading.utf8.startIndex, to: span.range.upperBound)]
+            if !ordinary.contains(where: { $0.kind == span.kind && $0.range.lowerBound <= lower && $0.range.upperBound >= upper }) {
+                return reading
+            }
+        }
+        return nil
+    }
+
     /// Context openers, excluding their values. Only an opener intersecting a restored CSI
     /// byte supplies new evidence; ordinary styling inside an already-known value does not.
     private static func terminalContextSpans(in text: String) -> [Range<String.Index>] {
@@ -87,6 +138,7 @@ extension Redactor {
     private static func terminalRecovery(in text: String, joined: String, codesAlwaysRedacted: Bool) -> (ranges: [RecoveredCredential], contexts: [String]) {
         var recovered: [RecoveredCredential] = []
         var contexts: [String] = []
+        if let corrected = leftCorrectedContext(in: text, joined: joined, codesAlwaysRedacted: codesAlwaysRedacted) { contexts.append(corrected) }
         let ordinary = terminalCredentialSpans(in: joined, codesAlwaysRedacted: codesAlwaysRedacted).map { span -> RecoveredCredential in
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)

@@ -3,6 +3,30 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalContextRepairTests {
+    @Test(arguments: ["\u{8}", "\u{1B}[D", "\u{1B}[1D", "\u{1B}[0D", "\u{9B}1D"])
+    func cursorCorrectionsCannotHideCredentialLabels(control: String) {
+        #expect(!Redactor().redact("passwordX" + control + ": syntheticPassword").contains("syntheticPassword"))
+        let output = Redactor().redact(lines: ["passwordX" + control + ":", "syntheticValue", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticValue"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: ["passwordXYZ\u{1B}[3D", "discarded\u{1B}[999999999999999999999Dpassword"])
+    func cursorCorrectionCountsAreBoundedAndRetainCredentialEvidence(prefix: String) {
+        #expect(!Redactor().redact(prefix + ": syntheticPassword").contains("syntheticPassword"))
+    }
+
+    @Test func cursorPayloadsStayOpaqueAndOrdinaryDiagnosticsKeepTheirRendering() {
+        let input = "passwordX\u{1B}]\u{8}\u{7}: ordinaryDiagnostic"
+        #expect(Redactor().redact(input) == "passwordX: ordinaryDiagnostic")
+        #expect(Redactor().redact("buildX\u{8} completed") == "buildX completed")
+    }
+
+    @Test(arguments: ["", "ghp_abcdefghijklmnopqrst "])
+    func correctedTokenEvidenceIsNotHiddenByAnotherToken(prefix: String) {
+        #expect(!Redactor().redact(prefix + "ghx\u{8}p_syntheticOpaqueTokenValue").contains("syntheticOpaqueTokenValue"))
+    }
+
     @Test(arguments: ["\u{1B}[31", "\u{009B}31", "\u{1B}[1;31"])
     func parameterizedCSIRequiresAFinalByteOnlyReading(introducer: String) {
         let input = "eyJhbGciOiJIUzI1NiIsI" + introducer + "mtpZCI6Im5hYmMifQ.payload.syntheticSignature"
