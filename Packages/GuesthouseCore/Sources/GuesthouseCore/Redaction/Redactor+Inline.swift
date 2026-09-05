@@ -21,7 +21,7 @@ extension Redactor {
             guard encodingDepth < 8 else { return (marker("secret"), StreamState()) }
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
-            let normalized = removingQuotedEncodingLayer(value)
+            let normalized = unwrappingCompleteDecodedString(removingQuotedEncodingLayer(value))
             var nestedState = StreamState()
             let nested = applyPatterns(to: normalized, codeExpected: false, state: &nestedState,
                                        encodingDepth: encodingDepth + 1)

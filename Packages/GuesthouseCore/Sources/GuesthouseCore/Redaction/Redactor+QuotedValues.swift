@@ -18,6 +18,16 @@ extension Redactor {
         return result
     }
 
+    /// A completely decoded string has its own argument boundary. Only remove a wrapper
+    /// whose first matching closing quote is the end, never a quote plus sibling suffix.
+    static func unwrappingCompleteDecodedString(_ value: String) -> String {
+        guard let quote = value.first, quote == "\"" || quote == "'",
+              closingQuoteEnd(in: value.dropFirst(),
+                  for: .init(delimiter: quote, escapeDepth: 0, kind: "secret")) == value.endIndex
+        else { return value }
+        return String(value.dropFirst().dropLast())
+    }
+
     struct ProtectedQuotedValues {
         var text: String
         var values: [String: String] = [:]
