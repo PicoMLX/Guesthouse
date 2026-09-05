@@ -27,7 +27,15 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
 
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
         case notAppleSilicon
+        /// The Mac's processor is not the one the configured policy requires. `notAppleSilicon`
+        /// is the default-policy spelling of this; this case carries both sides. Both are
+        /// `SanitizedText`, so what a decoded payload put in either is bounded and redacted
+        /// where the value is built rather than where it is shown, and re-encoding the error
+        /// cannot carry the original through.
+        case wrongArchitecture(found: SanitizedText, required: SanitizedText)
         case macOSTooOld(found: SanitizedText, minimum: SanitizedText)
+        /// The processor architecture could not be determined; the check can be run again.
+        case architectureUnknown
         case insufficientMemory(foundBytes: UInt64, minimumBytes: UInt64)
     }
 
@@ -70,8 +78,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// what it means; the recovery actions say what to do.
     public var userMessage: String {
         switch self {
+        case .unsupportedHost(.wrongArchitecture(let found, let required)):
+            "This Mac has \(found.value); Guesthouse needs \(required.value). Development Macs cannot run here."
         case .unsupportedHost(.notAppleSilicon):
             "This Mac has an Intel processor. Guesthouse needs an Apple silicon Mac to run a macOS virtual machine."
+        case .unsupportedHost(.architectureUnknown):
+            "Guesthouse could not determine this Mac's processor type. Check this Mac again; if it keeps failing, export diagnostics."
         case .unsupportedHost(.macOSTooOld(let found, let minimum)):
             "This Mac runs macOS \(found.value). Guesthouse needs macOS \(minimum.value) or later."
         case .unsupportedHost(.insufficientMemory(let found, let minimum)):
@@ -117,6 +129,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     public var recoveryActions: [RecoveryAction] {
         switch self {
         case .unsupportedHost(.macOSTooOld): [.openSettings, .cancel]
+        case .unsupportedHost(.architectureUnknown): [.retry, .cancel]
         case .unsupportedHost: [.cancel]
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
@@ -307,12 +320,17 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         return "This step needs \(requiredText) free on \(sanitize(volume)), but only \(availableText) is available, \(shortfallText) short."
     }
 
+    /// `ByteCountFormatter` takes an `Int64`, so an amount above that range would be shown as
+    /// half of itself. An amount that large is named exactly instead, so a requirement no
+    /// disk could satisfy is not reported as a plausible one.
     private static func formatBytes(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
+        guard let representable = Int64(exactly: bytes) else { return "\(bytes.formatted()) bytes" }
+        return ByteCountFormatter.string(fromByteCount: representable, countStyle: .file)
     }
 
     private static func formatMemory(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .memory)
+        guard let representable = Int64(exactly: bytes) else { return "\(bytes.formatted()) bytes" }
+        return ByteCountFormatter.string(fromByteCount: representable, countStyle: .memory)
     }
 }
 
