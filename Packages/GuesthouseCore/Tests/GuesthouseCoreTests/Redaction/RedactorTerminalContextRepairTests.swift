@@ -89,4 +89,15 @@ import Testing
         let input = "before\u{1B}]password: syntheticValue\u{7} after"
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == ["before after", "Finished"])
     }
+
+    @Test(arguments: ["password: \"", "pass\u{1B}[word: \""], [false, true])
+    func aPPKOpenerPreservesItsEnclosingCredential(prefix: String, insidePEM: Bool) {
+        let output = Redactor().redact(lines: [
+            prefix + (insidePEM ? "-----BEGIN PRIVATE KEY----- " : "") + "PuTTY-User-Key-File-3: ssh-rsa",
+            "Private-Lines: 1", "c3ludGhldGlj", "Private-MAC: " + String(repeating: "a", count: 64),
+            "syntheticContinuation" + (insidePEM ? "-----END PRIVATE KEY-----" : "") + "\"", "Finished",
+        ]).map(\.text)
+        #expect(!output.joined().contains("syntheticContinuation"))
+        #expect(output[5] == "Finished")
+    }
 }
