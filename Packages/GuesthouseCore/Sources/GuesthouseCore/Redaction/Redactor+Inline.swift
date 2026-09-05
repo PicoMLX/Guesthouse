@@ -36,7 +36,9 @@ extension Redactor {
         // Scan DSNs before introducing colon-bearing redaction markers. Scheme URLs use
         // their dedicated authority rule below, not the schemeless DSN grammar.
         if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
-            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
+            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in
+                return "\(match.1)\(marker("userinfo"))\(match.2)"
+            }
             text = String(prefix) + text[end...]
         }
         // Recognition and continuation state use the original field, never its replacement

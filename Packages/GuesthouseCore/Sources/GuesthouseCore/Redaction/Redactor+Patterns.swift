@@ -121,7 +121,8 @@ extension Redactor {
         /// https://github.com/go-sql-driver/mysql#dsn-data-source-name
         /// Common URL schemes retain their URI interpretation when the spellings overlap.
         /// Do not exempt arbitrary passwords starting `//`: those are valid unescaped DSNs.
-        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])(?!(?i:https?|ssh|git|s?ftp|ftps|file):\/\/)[A-Za-z0-9_.-]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\/)/#
+        /// Skip an already-concealed userinfo marker without consuming a later DSN.
+        let mysqlUserInfo = #/(^|[\s\u{001F}"'=<\[{(])(?!redacted:userinfo\]@)(?!(?i:https?|ssh|git|s?ftp|ftps|file):(?:\\?\/){2})[A-Za-z0-9_.-]*:[^\r\n]*(@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\/)/#
         let mysqlTransport = #/@(?:[A-Za-z][A-Za-z0-9_.+-]*(?:\([^()\r\n]*\))?)?\//#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
