@@ -42,22 +42,33 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
     }
 
     public struct TartRuntimeInfo: Codable, Hashable, Sendable {
-        /// Parsed from the runtime's own `--version` output: redacted and bounded before it
-        /// is stored, so CLI text cannot reach the GUI or diagnostics unchanged.
-        public private(set) var version: String
-        /// Signature and digest checks passed against the pinned expectations.
+        /// The version claimed by the bundle's metadata, or the version the verified bundle
+        /// reported; `nil` when it could not be read. Redacted and bounded before it is
+        /// stored, so CLI text cannot reach the GUI or diagnostics unchanged.
+        public private(set) var version: String?
+        /// The bundle's Developer ID signature, identity, and entitlements passed the pinned
+        /// checks. Digest verification of the downloaded archive happens at acquisition, not
+        /// here; a bundle placed by hand is trusted by signature only.
         public var verified: Bool
+        /// Why the runtime cannot be used, when it cannot; carries the message and recovery
+        /// actions the GUI shows.
+        public var problem: GuesthouseError?
 
-        public init(version: String, verified: Bool) {
-            self.version = GuesthouseError.sanitize(version, limit: 64)
+        public init(version: String?, verified: Bool, problem: GuesthouseError? = nil) {
+            self.version = version.map { GuesthouseError.sanitize($0, limit: 64) }
             self.verified = verified
+            self.problem = problem
         }
 
-        private enum CodingKeys: String, CodingKey { case version, verified }
+        private enum CodingKeys: String, CodingKey { case version, verified, problem }
 
         public init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            self.init(version: try c.decode(String.self, forKey: .version), verified: try c.decode(Bool.self, forKey: .verified))
+            self.init(
+                version: try c.decodeIfPresent(String.self, forKey: .version),
+                verified: try c.decode(Bool.self, forKey: .verified),
+                problem: try c.decodeIfPresent(GuesthouseError.self, forKey: .problem)
+            )
         }
     }
 }

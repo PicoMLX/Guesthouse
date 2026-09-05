@@ -9,9 +9,11 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
         self.rawValue = rawValue
     }
 
-    /// Version 2 adds `InvalidRequestReason.tooManyInFlight`, which a version 1 peer cannot
-    /// decode, so the two must not talk to each other.
-    public static let current = RuntimeProtocolVersion(2)
+    /// History: 1 was the initial contract; 2 added `InvalidRequestReason.tooManyInFlight`;
+    /// 3 made `TartRuntimeInfo.version` optional, added its `problem`, and added the storage
+    /// error, so an older peer would fail to decode a reply instead of being told what
+    /// happened, and would read `verified` with the wrong meaning.
+    public static let current = RuntimeProtocolVersion(3)
 
     public static func < (lhs: RuntimeProtocolVersion, rhs: RuntimeProtocolVersion) -> Bool {
         lhs.rawValue < rhs.rawValue

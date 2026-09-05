@@ -1,6 +1,8 @@
 import Foundation
 import GuesthouseCore
+import GuesthouseRuntimeKit
 import OSLog
+import Synchronization
 import XPC
 
 /// The service's only log sink.
@@ -44,6 +46,16 @@ final class RuntimeService: Sendable {
         var state = Redactor.StreamState()
         return Redactor().redact(line: "\(message) \(value)", state: &state)
     }
+
+    /// What is known about the Tart runtime, filled in by `discoverTart()` after launch.
+    private let tartInfo = Mutex<RuntimeVersionInfo.TartRuntimeInfo?>(nil)
+    /// The discovery attempt under way, so a burst of requests waits on one rather than
+    /// starting one each.
+    private let rediscovery = Mutex<DispatchGroup?>(nil)
+    /// How long a request waits for a rediscovery before answering with what is known. The
+    /// attempt keeps running; this only stops a wedged host from holding the session's message
+    /// queue. `version()` carries its own 15-second timeout, so this is the backstop.
+    static let rediscoveryWait: DispatchTimeInterval = .seconds(25)
 
     /// Accepts a session and returns a per-session handler that tracks in-flight requests.
     func acceptSession(_ session: XPCSession) -> SessionHandler {
@@ -130,23 +142,155 @@ final class RuntimeService: Sendable {
     private func perform(_ request: RuntimeRequest) -> RuntimeEvent {
         switch request {
         case .runtimeVersion:
-            return .runtimeVersion(Self.versionInfo)
+            // Discovery ran once at launch. A problem the user was told they could retry —
+            // storage that was full or unwritable — changes once they act on it, so asking
+            // again re-runs discovery, and this reply carries its result: the client's query
+            // ends on this one answer, so a cache only a restart could change would make the
+            // Retry the user was offered need a second press.
+            rediscoverIfRetryable()
+            return .runtimeVersion(versionInfo)
         case .environmentStatus, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation:
             log.notice(Self.line("operation not implemented yet:", request.caseName))
             return .failed(OperationID(), .invalidRequest(.unsupportedOperation))
         }
     }
 
-    static var versionInfo: RuntimeVersionInfo {
+    var versionInfo: RuntimeVersionInfo {
         let info = Bundle.main.infoDictionary ?? [:]
         return RuntimeVersionInfo(
             serviceVersion: info["CFBundleShortVersionString"] as? String ?? "0",
             serviceBuild: info["CFBundleVersion"] as? String ?? "0",
             protocolVersion: .current,
-            tart: nil
+            tart: tartInfo.withLock { $0 }
         )
     }
 
+    /// Runs discovery again when what is known names a problem the user was told they could
+    /// retry, and waits for the attempt before the caller is answered.
+    ///
+    /// Waiting is the point: the reply to a `runtimeVersion` request is the only answer that
+    /// request ever gets, so returning the cached failure would leave the Retry the user was
+    /// offered needing a second press to show what changed. A burst of requests joins the one
+    /// attempt rather than starting one each.
+    func rediscoverIfRetryable() {
+        let attempt: (group: DispatchGroup, isMine: Bool)? = rediscovery.withLock { running in
+            if let running { return (running, false) }
+            guard tartInfo.withLock({ $0?.problem?.recoveryActions.contains(.retry) ?? false }) else { return nil }
+            let group = DispatchGroup()
+            group.enter()
+            running = group
+            return (group, true)
+        }
+        guard let attempt else { return }
+        if attempt.isMine {
+            // Detached, so the discovery does not inherit this handler's context, and off this
+            // thread, which is the one waiting below.
+            Task.detached { [self] in
+                await discoverTart()
+                rediscovery.withLock { $0 = nil }
+                attempt.group.leave()
+            }
+        }
+        _ = attempt.group.wait(timeout: .now() + Self.rediscoveryWait)
+    }
+
+    /// Locates the pinned Tart bundle under runtime storage, verifies its signature and
+    /// entitlements, and asks it for its version. Runs once after launch; until it finishes,
+    /// `runtimeVersion` reports the runtime as not located. A bundle that fails verification
+    /// is reported with `verified: false` and its claimed version, never treated as usable.
+    func discoverTart() async {
+        let storage: RuntimeStorage
+        do {
+            storage = try RuntimeStorage(root: try RuntimeStorage.defaultRoot())
+        } catch {
+            // A storage problem is not a missing runtime: reinstalling Tart cannot fix an
+            // unwritable or unsafe storage directory, so the storage error is reported as it
+            // is, with its own recovery actions.
+            log.error(Self.line("runtime storage unavailable:", Self.describe(error)))
+            // The storage error keeps its own recovery: freeing space and retrying discovery
+            // are what help, and neither is what a missing runtime would offer.
+            let problem: GuesthouseError = switch error as? RuntimeStorageError {
+            case .unwritable(_, _)?: .runtimeStorageUnavailable(reason: SanitizedText((error as? RuntimeStorageError)?.userMessage ?? "", limit: 200), problem: .unwritable)
+            case .insecureDirectory(_, _)?: .runtimeStorageUnavailable(reason: SanitizedText((error as? RuntimeStorageError)?.userMessage ?? "", limit: 200), problem: .unsafeLocation)
+            case nil: .runtimeMissing
+            }
+            tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: problem) }
+            return
+        }
+        guard let bundle = TartBundle.locate(in: storage) else {
+            log.notice(RedactedLine(literal: "no Tart bundle at the pinned location"))
+            tartInfo.withLock { $0 = .init(version: nil, verified: false, problem: .runtimeMissing) }
+            return
+        }
+        // Never execute a bundle that failed verification: only its metadata is reported.
+        let verification: TartVerification
+        do {
+            verification = try bundle.verify()
+        } catch {
+            log.error(Self.line("Tart bundle failed verification:", Self.describe(error)))
+            let claimed = bundle.claimedVersion?.description
+            // A version mismatch is an incompatibility; anything else is a failed check on the
+            // bundle itself and is named as such.
+            let problem: GuesthouseError = if case .versionMismatch = error {
+                .runtimeIncompatible(found: claimed.map { SanitizedText($0) }, required: SanitizedText(TartPin.releaseTag))
+            } else {
+                .runtimeVerificationFailed(check: Self.check(for: error))
+            }
+            tartInfo.withLock { $0 = .init(version: claimed, verified: false, problem: problem) }
+            return
+        }
+        // The identity verification recorded, so a replacement before launch is refused. It is
+        // not read again here: a second read could find a link where the verified bundle was,
+        // and an identity that cannot be read would disable the check rather than fail it.
+        let backend = TartBackend(bundle: bundle, storage: storage, runner: ProcessRunner(), verifiedBundle: verification.bundle)
+        let version: TartVersion
+        do {
+            version = try await backend.version()
+        } catch TartInvocationError.runtimeReplaced {
+            log.error(RedactedLine(literal: "the Tart bundle was replaced after it was verified"))
+            // An integrity failure, not an unknown version: reporting `verified: true` would
+            // tell the user the bundle now on disk passed its checks, when the check is exactly
+            // what refused it.
+            tartInfo.withLock { $0 = .init(version: bundle.claimedVersion?.description, verified: false, problem: .runtimeVerificationFailed(check: .identity)) }
+            return
+        } catch {
+            log.error(Self.line("verified Tart bundle could not report its version:", Self.describe(error)))
+            // A host-runtime failure: the bundle verified but did not answer, so its version is
+            // unknown and repair reinstalls it. Never a guest tool problem.
+            tartInfo.withLock { $0 = .init(version: bundle.claimedVersion?.description, verified: true, problem: .runtimeIncompatible(found: nil, required: SanitizedText(TartPin.releaseTag))) }
+            return
+        }
+        guard version == TartPin.version else {
+            log.error(Self.line("pinned Tart not found; located instead:", "\(version.description) rather than \(TartPin.releaseTag)"))
+            tartInfo.withLock { $0 = .init(version: version.description, verified: true, problem: .runtimeIncompatible(found: SanitizedText(version.description), required: SanitizedText(TartPin.releaseTag))) }
+            return
+        }
+        tartInfo.withLock { $0 = .init(version: version.description, verified: true) }
+        log.notice(Self.line("Tart located and verified:", version.description))
+    }
+
+    /// Which bundle check a verification error names, for the user-facing error.
+    static func check(for error: any Error) -> GuesthouseError.RuntimeVerificationCheck {
+        switch error as? TartVerificationError {
+        case .bundleMissing, .infoPlistUnreadable, .executableMissing: .layout
+        // A bundle swapped while it was being checked is an identity failure, not a layout
+        // one: it is complete, it is just not the one that passed.
+        case .bundleIdentifierMismatch, .bundleReplaced: .identity
+        case .signatureInvalid, .requirementNotMet: .signature
+        case .entitlementMissing: .entitlements
+        case .digestMismatch, .archiveUnreadable: .digest
+        case .versionMismatch, .none: .signature
+        }
+    }
+
+    /// Error text for the log: the error's case name only, never its payload, which can hold
+    /// paths or process output.
+    static func describe(_ error: any Error) -> String {
+        let text = String(describing: error)
+        return String(text.prefix { $0 != "(" && $0 != ":" })
+    }
+
+    /// Per-session state: the in-flight request count used for the concurrency cap.
     /// Per-session state: what the session still owes its peer, and the rejection it was
     /// answered with. The rules live in `RuntimeDispatcher.SessionLifetime`, which is unit
     /// tested; this class only holds them under a lock and applies the outcome.

@@ -20,7 +20,7 @@ final class DebugRuntimeProbe {
                 var text = "No reply"
                 for try await event in backend.send(.runtimeVersion) {
                     if case .runtimeVersion(let info) = event {
-                        text = "Service \(info.serviceVersion) (\(info.serviceBuild)), \(info.protocolVersion), Tart: \(info.tart.map { "\($0.version)\($0.verified ? " verified" : " unverified")" } ?? "not located")"
+                        text = "Service \(info.serviceVersion) (\(info.serviceBuild)), \(info.protocolVersion), Tart: \(info.tart.map { "\($0.version ?? "unknown version")\($0.verified ? " verified" : " unverified")\($0.problem.map { " (\($0.userMessage))" } ?? "")" } ?? "not located")"
                     } else {
                         text = "Unexpected reply: \(event.caseName)"
                     }
