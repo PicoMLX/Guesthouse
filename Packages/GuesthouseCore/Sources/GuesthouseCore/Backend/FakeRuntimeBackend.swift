@@ -318,12 +318,15 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         }
     }
 
-    /// Names the operation in the environment's stored status, when one is stored. A fake with
-    /// no status for that environment stays silent rather than inventing VM and readiness state.
+    /// Records every accepted operation, including when no status was scripted. Its baseline
+    /// remains uncertain/checking until an observation establishes the VM's actual state.
     private func markInFlight(_ id: OperationID, for request: RuntimeRequest) {
         switch request {
         case .startEnvironment(let environment, _), .stopEnvironment(let environment, _), .importXcode(let environment, _):
-            statuses[environment]?.inFlightOperation = id
+            statuses[environment, default: EnvironmentStatus(
+                environmentID: environment,
+                vm: .uncertain(reason: "No status has been observed."), readiness: .checking
+            )].inFlightOperation = id
         case .runtimeVersion, .environmentStatus, .cancelOperation:
             break
         }

@@ -143,6 +143,16 @@ import Testing
         #expect(RuntimeConnectionInterrupted().guesthouseError == nil)
     }
 
+    @Test func aPreAcceptanceMutationRequiresInspectionWithoutInventingAnOperationID() {
+        let error = RuntimeConnectionInterrupted(mayHaveMutated: true)
+        #expect(error.operationID == nil)
+        #expect(error.mayHaveMutated)
+        #expect(error.recoveryActions == [.inspectState, .cancel])
+        #expect(error.userMessage.contains("may or may not have completed"))
+        #expect(error.recoveryMessage == "Check the environment before doing anything else.")
+        #expect(error.guesthouseError == nil)
+    }
+
     @Test func aQueryInterruptionOffersRetryRatherThanAnUnknownOutcome() async throws {
         let backend = FakeRuntimeBackend()
         await backend.script("runtimeVersion", .disconnect())
@@ -151,6 +161,7 @@ import Testing
             Issue.record("expected an interruption")
         } catch let error as RuntimeConnectionInterrupted {
             #expect(error.operationID == nil)
+            #expect(!error.mayHaveMutated)
             #expect(error.recoveryActions == [.retry], "a read-only query has nothing to inspect or cancel")
             #expect(!error.userMessage.contains("may or may not"))
             #expect(error.recoveryMessage.isEmpty == false)
