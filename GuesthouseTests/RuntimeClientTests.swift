@@ -5,7 +5,7 @@ import Testing
 
 /// A transport that answers from a script and can simulate a dropped connection.
 final class FakeTransport: RuntimeTransport, @unchecked Sendable {
-    enum Behavior { case reply(RuntimeEvent), fail, throwOnSend, acceptThenStream([RuntimeEvent]), acceptThenDrop, acceptLater }
+    enum Behavior { case reply(RuntimeEvent), fail, throwOnSend, acceptThenStream([RuntimeEvent]), acceptThenDrop, acceptThenContractFailure(RuntimeSessionFailure), acceptLater }
     private var pendingReply: (@Sendable (Result<RuntimeEvent, any Error>) -> Void)?
     private(set) var lastAcceptedID: OperationID?
 
@@ -25,7 +25,7 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
     let lock = NSLock()
     var behavior: Behavior
     var incoming: (@Sendable (RuntimeEvent) -> Void)?
-    var interrupted: (@Sendable () -> Void)?
+    var interrupted: (@Sendable (RuntimeSessionFailure?) -> Void)?
     /// Run at the start of the next send, while the client is inside the transport and so
     /// cannot drain its inbox. Lets a test enqueue callbacks in a known order, and observe
     /// what an undrained inbox holds. Consumed by the send that runs it.
@@ -38,7 +38,7 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
 
     init(_ behavior: Behavior) { self.behavior = behavior }
 
-    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable () -> Void) {
+    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable (RuntimeSessionFailure?) -> Void) {
         lock.withLock { self.incoming = incoming; self.interrupted = interrupted }
     }
 
@@ -76,7 +76,10 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
             }
         case .acceptThenDrop:
             reply(.success(.accepted(OperationID())))
-            lock.withLock { self.interrupted }?()
+            lock.withLock { self.interrupted }?(nil)
+        case .acceptThenContractFailure(let failure):
+            reply(.success(.accepted(preparedID)))
+            lock.withLock { self.interrupted }?(failure)
         case .acceptLater:
             if case .cancelOperation = envelope.request {
                 reply(.success(.completed(OperationID())))
@@ -540,7 +543,7 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
             return
         }
         #expect(await client.isRetired(id))
-        transport.lock.withLock { transport.interrupted }?()
+        transport.lock.withLock { transport.interrupted }?(nil)
         for _ in 0..<400 where await client.isRetired(id) { try await Task.sleep(for: .milliseconds(5)) }
         #expect(await client.isRetired(id) == false, "a new session does not carry the previous session's ids")
     }
@@ -572,7 +575,7 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
 final class RefusingSession: RuntimeSessionHandle, @unchecked Sendable {
     /// How the send is refused: synchronously, or through the reply an interrupted connection
     /// or an undecodable answer would deliver.
-    enum Refusal { case throwOnSend, failTheReply }
+    enum Refusal { case throwOnSend, failTheReply, contractFailure(RuntimeSessionFailure) }
     struct Refused: Error {}
     private let lock = NSLock()
     private var reasons: [String] = []
@@ -585,6 +588,7 @@ final class RefusingSession: RuntimeSessionHandle, @unchecked Sendable {
         switch refusal {
         case .throwOnSend: throw Refused()
         case .failTheReply: reply(.failure(CocoaError(.xpcConnectionInterrupted)))
+        case .contractFailure(let failure): reply(.failure(failure))
         }
     }
 
@@ -609,7 +613,7 @@ final class OpenedSessions: @unchecked Sendable {
         let sessions = OpenedSessions()
         let transport = XPCRuntimeTransport(connect: { _, _ in sessions.open() })
         let interruptions = Counter()
-        transport.setHandlers(incoming: { _ in }, interrupted: { interruptions.increment() })
+        transport.setHandlers(incoming: { _ in }, interrupted: { _ in interruptions.increment() })
         for _ in 0..<2 {
             #expect(throws: RefusingSession.Refused.self) {
                 try transport.send(RuntimeRequestEnvelope(request: .runtimeVersion)) { _ in }
@@ -627,7 +631,7 @@ final class OpenedSessions: @unchecked Sendable {
         let transport = XPCRuntimeTransport(connect: { _, _ in sessions.open(.failTheReply) })
         let interruptions = Counter()
         let failures = Counter()
-        transport.setHandlers(incoming: { _ in }, interrupted: { interruptions.increment() })
+        transport.setHandlers(incoming: { _ in }, interrupted: { _ in interruptions.increment() })
         for _ in 0..<2 {
             #expect(throws: Never.self) {
                 try transport.send(RuntimeRequestEnvelope(request: .runtimeVersion)) { result in
@@ -645,7 +649,7 @@ final class OpenedSessions: @unchecked Sendable {
 /// The transport's session rules, exercised without a live XPC connection.
 @Suite struct SessionRegistryTests {
     /// Collects a `Result` handed to a reply callback.
-    private func delivered(_ registry: SessionRegistry<NSObject>, _ result: Result<RuntimeEvent, any Error>, from generation: Int) -> Result<RuntimeEvent, any Error>? {
+    private func delivered(_ registry: SessionRegistry<NSObject>, _ result: Result<RuntimeEvent, any Error>, from generation: SessionGeneration) -> Result<RuntimeEvent, any Error>? {
         let box = Box<Result<RuntimeEvent, any Error>>()
         registry.deliverReply(result, from: generation) { box.value = $0 }
         return box.value
@@ -670,7 +674,7 @@ final class OpenedSessions: @unchecked Sendable {
         let registry = SessionRegistry<NSObject>()
         let (_, generation) = registry.session { _ in NSObject() }
         let reports = Counter()
-        registry.setHandlers(incoming: { _ in }, interrupted: { reports.increment() })
+        registry.setHandlers(incoming: { _ in }, interrupted: { _ in reports.increment() })
         _ = registry.retire(generation)
         #expect(reports.value == 1)
         _ = registry.retire(generation)
@@ -683,7 +687,7 @@ final class OpenedSessions: @unchecked Sendable {
         let order = Order()
         registry.setHandlers(
             incoming: { _ in },
-            interrupted: {
+            interrupted: { _ in
                 // A replacement is only made by taking the registry's lock, so a request
                 // racing this report has to wait for it. Without that ordering the
                 // replacement's operations are failed by an interruption that predates them.
@@ -704,7 +708,7 @@ final class OpenedSessions: @unchecked Sendable {
         let registry = SessionRegistry<NSObject>()
         let (_, generation) = registry.session { _ in NSObject() }
         let retired = DispatchSemaphore(value: 0)
-        registry.setHandlers(incoming: { _ in }, interrupted: {})
+        registry.setHandlers(incoming: { _ in }, interrupted: { _ in })
         registry.deliverReply(.success(.accepted(OperationID())), from: generation) { _ in
             DispatchQueue.global().async {
                 _ = registry.retire(generation)
@@ -733,7 +737,7 @@ final class OpenedSessions: @unchecked Sendable {
                 // behind the operations of a replacement session.
                 #expect(retired.wait(timeout: .now() + .milliseconds(300)) == .timedOut)
             },
-            interrupted: {}
+            interrupted: { _ in }
         )
         registry.deliverIncoming(.progress(OperationID(), ProgressPhase(kind: .copying)), from: generation)
         #expect(retired.wait(timeout: .now() + .seconds(5)) == .success, "the retirement completed once delivery was done")
@@ -743,7 +747,7 @@ final class OpenedSessions: @unchecked Sendable {
         let registry = SessionRegistry<NSObject>()
         let (_, generation) = registry.session { _ in NSObject() }
         let delivered = DispatchSemaphore(value: 0)
-        registry.setHandlers(incoming: { _ in delivered.signal() }, interrupted: {})
+        registry.setHandlers(incoming: { _ in delivered.signal() }, interrupted: { _ in })
         _ = registry.retire(generation)
         registry.deliverIncoming(.progress(OperationID(), ProgressPhase(kind: .copying)), from: generation)
         #expect(delivered.wait(timeout: .now()) == .timedOut)

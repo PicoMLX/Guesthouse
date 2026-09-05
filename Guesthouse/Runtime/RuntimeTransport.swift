@@ -1,5 +1,6 @@
 import Foundation
 import GuesthouseCore
+import Synchronization
 import XPC
 
 /// The thin seam between `RuntimeClient` and XPC, so the client's decoding and interruption
@@ -9,8 +10,9 @@ nonisolated protocol RuntimeTransport: Sendable {
     func send(_ envelope: RuntimeRequestEnvelope, reply: @escaping @Sendable (Result<RuntimeEvent, any Error>) -> Void) throws
     /// Pushed events (progress, log, status) arrive through `incoming`; `interrupted` is called
     /// when the connection drops or when a pushed message cannot be decoded, which means the
-    /// peer speaks a different contract and every in-flight outcome is unknown.
-    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable () -> Void)
+    /// peer's response cannot be trusted and every in-flight outcome is unknown. The optional
+    /// failure preserves contract diagnostics; nil denotes an ordinary connection loss.
+    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable (RuntimeSessionFailure?) -> Void)
 }
 
 /// What the transport needs of one connection to the service, so the rules around it — lazy
@@ -23,21 +25,33 @@ nonisolated protocol RuntimeSessionHandle: AnyObject, Sendable {
 
 nonisolated extension XPCSession: RuntimeSessionHandle {
     func sendEnvelope(_ envelope: RuntimeRequestEnvelope, reply: @escaping @Sendable (Result<RuntimeEvent, any Error>) -> Void) throws {
-        try send(envelope, replyHandler: reply)
+        try send(envelope) { (result: Result<RuntimeEventEnvelope, any Error>) in
+            reply(result.map(\.event))
+        }
+    }
+}
+
+/// Identity and retirement cause for one connection. The registry publishes retirement
+/// under its lock; callbacks retain only their own generation, not an unbounded history.
+nonisolated final class SessionGeneration: Sendable {
+    private let storage = Mutex<RuntimeSessionFailure?>(nil)
+    fileprivate var failure: RuntimeSessionFailure? {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
     }
 }
 
 /// Which session the transport is talking to and what its callbacks may reach. Sessions are
-/// numbered, so a callback of a session that has been retired never touches its replacement.
+/// identified by tokens, so a retired session's callback never touches its replacement.
 /// Generic over the session type, so those rules can be tested without a live XPC connection.
 nonisolated final class SessionRegistry<Session>: @unchecked Sendable {
     private let lock = NSLock()
     private var session: Session?
-    private var generation = 0
+    private var generation = SessionGeneration()
     private var incoming: (@Sendable (RuntimeEvent) -> Void)?
-    private var interrupted: (@Sendable () -> Void)?
+    private var interrupted: (@Sendable (RuntimeSessionFailure?) -> Void)?
 
-    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable () -> Void) {
+    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable (RuntimeSessionFailure?) -> Void) {
         lock.withLock {
             self.incoming = incoming
             self.interrupted = interrupted
@@ -47,10 +61,10 @@ nonisolated final class SessionRegistry<Session>: @unchecked Sendable {
     /// The live session and its generation, creating one with `make` when there is none.
     /// `make` is given the generation, because a session's callbacks are written before the
     /// session exists and each one has to name the session it belongs to.
-    func session(_ make: (Int) throws -> Session) rethrows -> (session: Session, generation: Int) {
+    func session(_ make: (SessionGeneration) throws -> Session) rethrows -> (session: Session, generation: SessionGeneration) {
         try lock.withLock {
             if let session { return (session, generation) }
-            generation += 1
+            generation = SessionGeneration()
             let created = try make(generation)
             session = created
             return (created, generation)
@@ -68,11 +82,20 @@ nonisolated final class SessionRegistry<Session>: @unchecked Sendable {
     /// client's unbounded inbox, so nothing waits while the lock is held.
     func deliverReply(
         _ result: Result<RuntimeEvent, any Error>,
-        from generation: Int,
+        from generation: SessionGeneration,
         to reply: @Sendable (Result<RuntimeEvent, any Error>) -> Void
     ) {
         lock.withLock {
-            reply(self.generation == generation ? result : .failure(RuntimeConnectionInterrupted()))
+            // A contract failure also belongs to unanswered requests on the retired session.
+            // Retaining it on that generation avoids both erasing it and blaming a new peer.
+            if self.generation !== generation, generation.failure == nil,
+               case .failure(let error) = result, let failure = RuntimeSessionFailure(decoding: error) {
+                // Ordinary cancellation may have won the race with this reply's decoder.
+                // Preserve its known cause for this request only, never the replacement.
+                reply(.failure(failure))
+                return
+            }
+            reply(self.generation === generation ? result : .failure((generation.failure as (any Error)?) ?? RuntimeConnectionInterrupted()))
         }
     }
 
@@ -81,9 +104,9 @@ nonisolated final class SessionRegistry<Session>: @unchecked Sendable {
     /// happens entirely before it, and the event is dropped, or entirely after the event is
     /// queued behind the operations it belongs to. The handler only enqueues on the client's
     /// unbounded inbox, so nothing waits while the lock is held.
-    func deliverIncoming(_ event: RuntimeEvent, from generation: Int) {
+    func deliverIncoming(_ event: RuntimeEvent, from generation: SessionGeneration) {
         lock.withLock {
-            guard self.generation == generation else { return }
+            guard self.generation === generation else { return }
             incoming?(event)
         }
     }
@@ -96,13 +119,14 @@ nonisolated final class SessionRegistry<Session>: @unchecked Sendable {
     /// the replacement carries, and can never fail an operation that belongs to it. Nothing
     /// is reported and no session is returned when that generation was already retired, so a
     /// failure and the cancellation that follows it are reported once.
-    func retire(_ generation: Int) -> Session? {
+    func retire(_ generation: SessionGeneration, failure: RuntimeSessionFailure? = nil) -> Session? {
         lock.withLock {
-            guard self.generation == generation else { return nil }
-            self.generation += 1
+            guard self.generation === generation else { return nil }
+            generation.failure = failure
+            self.generation = SessionGeneration()
             let doomed = session
             session = nil
-            interrupted?()
+            interrupted?(failure)
             return doomed
         }
     }
@@ -117,7 +141,7 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
     /// already been cancelled. Injected so the transport's rules can be tested without XPC.
     typealias Connect = @Sendable (
         _ incoming: @escaping @Sendable (RuntimeEvent) -> Void,
-        _ dropped: @escaping @Sendable (String?) -> Void
+        _ dropped: @escaping @Sendable (String?, RuntimeSessionFailure?) -> Void
     ) throws -> any RuntimeSessionHandle
 
     private let registry = SessionRegistry<any RuntimeSessionHandle>()
@@ -127,7 +151,7 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
         self.connect = connect
     }
 
-    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable () -> Void) {
+    func setHandlers(incoming: @escaping @Sendable (RuntimeEvent) -> Void, interrupted: @escaping @Sendable (RuntimeSessionFailure?) -> Void) {
         registry.setHandlers(incoming: incoming, interrupted: interrupted)
     }
 
@@ -148,7 +172,9 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
                 // being handed the same dead session. Retiring first also orders the
                 // interruption ahead of this reply, so the operations that shared the session
                 // are told their outcome is unknown before it is delivered.
-                if case .failure = result { self.dropSession(generation: generation, reason: "reply failed") }
+                if case .failure(let error) = result {
+                    self.dropSession(generation: generation, reason: "reply failed", failure: RuntimeSessionFailure(decoding: error))
+                }
                 self.registry.deliverReply(result, from: generation, to: reply)
             }
         } catch {
@@ -156,16 +182,16 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
             // waiting for its cancellation handler, so the next request performs the
             // documented lazy reconnect rather than being handed the same dead session.
             // Retirement reports the interruption once, so a handler that follows adds nothing.
-            dropSession(generation: generation, reason: "send failed")
+            dropSession(generation: generation, reason: "send failed", failure: RuntimeSessionFailure(decoding: error))
             throw error
         }
     }
 
-    private func activeSession() throws -> (session: any RuntimeSessionHandle, generation: Int) {
+    private func activeSession() throws -> (session: any RuntimeSessionHandle, generation: SessionGeneration) {
         try registry.session { generation in
             try connect(
                 { [weak self] event in self?.registry.deliverIncoming(event, from: generation) },
-                { [weak self] reason in self?.dropSession(generation: generation, reason: reason) }
+                { [weak self] reason, failure in self?.dropSession(generation: generation, reason: reason, failure: failure) }
             )
         }
     }
@@ -173,7 +199,7 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
     /// The real connection to the embedded service.
     static func connectToService(
         incoming: @escaping @Sendable (RuntimeEvent) -> Void,
-        dropped: @escaping @Sendable (String?) -> Void
+        dropped: @escaping @Sendable (String?, RuntimeSessionFailure?) -> Void
     ) throws -> any RuntimeSessionHandle {
         // Created inactive: the session is activated once below. Creating it active and
         // activating again is an XPC API misuse that traps on first use.
@@ -181,28 +207,36 @@ nonisolated final class XPCRuntimeTransport: RuntimeTransport, @unchecked Sendab
             xpcService: serviceName,
             options: .inactive,
             incomingMessageHandler: { (message: XPCReceivedMessage) -> (any Encodable)? in
-                if let event = try? message.decode(as: RuntimeEvent.self) {
-                    incoming(event)
-                } else {
-                    // An undecodable push means a contract mismatch: treat it as a lost
-                    // connection so waiting operations report an unknown outcome.
-                    dropped("undecodable event")
-                }
+                handleIncoming(message, incoming: incoming, dropped: dropped)
                 return nil
             },
-            cancellationHandler: { _ in dropped(nil) }
+            cancellationHandler: { _ in dropped(nil, nil) }
         )
         try created.activate()
         return created
     }
 
+    /// Native Codable boundary shared by the live connection and anonymous-XPC tests.
+    static func handleIncoming(
+        _ message: XPCReceivedMessage,
+        incoming: @escaping @Sendable (RuntimeEvent) -> Void,
+        dropped: @escaping @Sendable (String?, RuntimeSessionFailure?) -> Void
+    ) {
+        do {
+            incoming(try message.decode(as: RuntimeEventEnvelope.self).event)
+        } catch {
+            // Do not log decoder text: it can quote an untrusted payload.
+            dropped("undecodable event", RuntimeSessionFailure(decoding: error) ?? RuntimeSessionFailure(cause: .malformedResponse))
+        }
+    }
+
     /// Clears the session and reports an interruption only if the session that failed is
     /// still the current one.
-    private func dropSession(generation: Int, reason: String?) {
+    private func dropSession(generation: SessionGeneration, reason: String?, failure: RuntimeSessionFailure? = nil) {
         // The generation is retired and the interruption reported while the registry is
         // locked, so no replacement session can carry a request past that report. The
         // cancellation runs afterwards, outside the lock, because it calls this method back.
-        let doomed = registry.retire(generation)
+        let doomed = registry.retire(generation, failure: failure)
         if let doomed, let reason { doomed.cancel(reason: reason) }
     }
 }
