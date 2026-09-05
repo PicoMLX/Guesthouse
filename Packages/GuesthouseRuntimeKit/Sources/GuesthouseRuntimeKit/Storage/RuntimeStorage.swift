@@ -105,6 +105,7 @@ public struct RuntimeStorage: Sendable {
     /// Revalidate each writable path and its managed parent before returning the environment.
     public func environmentForLume() throws -> [String: String] {
         try Self.verify(root)
+        try Self.verify(url(for: .vms))
         try Self.verify(url(for: .state))
         try Self.verify(url(for: .lumeConfiguration))
         try Self.verify(url(for: .staging))
