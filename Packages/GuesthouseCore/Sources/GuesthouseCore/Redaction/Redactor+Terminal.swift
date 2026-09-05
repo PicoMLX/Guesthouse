@@ -123,6 +123,15 @@ extension Redactor {
             var retainedIndex = 0
             var ordinaryIndex = 0
             var coveredEnds: [String: Int] = [:]
+            // A restored scheme delimiter proves userinfo too; redact only its value range.
+            for match in alternate.matches(of: patterns.urlUserInfo) {
+                let start = alternate.utf8.distance(from: alternate.startIndex, to: match.range.lowerBound)
+                let value = alternate.utf8.distance(from: alternate.startIndex, to: match.1.endIndex)
+                let end = alternate.utf8.distance(from: alternate.startIndex, to: match.range.upperBound)
+                if retained.contains(where: { $0.overlaps(start..<value) }), offsets[value] < offsets[end] {
+                    recovered.append((offsets[value]..<offsets[end], "userinfo"))
+                }
+            }
             for span in terminalCredentialSpans(in: alternate).sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
                 let lower = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.lowerBound)
                 let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.upperBound)
@@ -248,6 +257,10 @@ extension Redactor {
                     || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
                     || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
                     || suffix.prefixMatch(of: patterns.codeField) != nil
+                    || suffix.prefixMatch(of: patterns.codePrompt) != nil
+                    || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
+                    || suffix.prefixMatch(of: patterns.declarativeCodePrompt) != nil
+                    || suffix.prefixMatch(of: patterns.codePromptOnly) != nil
                     || suffix.prefixMatch(of: patterns.secretOption) != nil
                     || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil else { continue }
                 // The token may have swallowed a separate label. Keep that label available
