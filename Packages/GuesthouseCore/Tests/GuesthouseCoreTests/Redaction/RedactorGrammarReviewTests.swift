@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorGrammarReviewTests {
+    @Test(arguments: ["--password", "--token", "--api-key", "--github-token"])
+    func terminalSplicesRemainOptionBoundaries(option: String) {
+        #expect(("filename\u{009F}" + option + " synthetic").contains(Redactor.patterns.secretOption))
+        #expect(("filename\u{009F}" + option).contains(Redactor.patterns.secretOptionOnly))
+    }
+
     @Test(arguments: ["remote=//sample:synthetic@example.com", "remote = //sample:synthetic@example.com"])
     func assignedNetworkPathsRecognizeTheirUserinfo(input: String) throws {
         let match = try #require(input.firstMatch(of: Redactor.patterns.urlUserInfo))
