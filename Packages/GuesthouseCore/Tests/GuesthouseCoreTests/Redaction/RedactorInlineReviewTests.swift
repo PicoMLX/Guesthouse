@@ -2,6 +2,43 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineReviewTests {
+    @Test(arguments: ["Basic dXNl\\", "Digest username=sample, response=first\\", "Negotiate abcdefgh\\"])
+    func partialAuthorizationValuesKeepTheirExplicitContinuation(_ input: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output.contains("[redacted:"))
+        #expect(!output.contains("dXNl") && !output.contains("first") && !output.contains("abcdefgh"))
+        #expect(state.authorizationValueIsOnTheNextLine)
+        #expect(state.authorizationValueExplicitlyContinues)
+    }
+
+    @Test(arguments: [#"["--password", ""\"#, #"["--password", "first" \"#])
+    func serializedQuotedFragmentsRetainTheirContinuationTail(_ input: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(state.expectingSecretValue && state.secretValueExplicitlyContinues)
+    }
+
+    @Test(arguments: [#"["--password", "", "--verbose"]"#, #"["--password", ""\\"#])
+    func serializedSiblingAndEvenBackslashBoundariesStayClosed(_ input: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
+    }
+
+    @Test(arguments: [#"[\"--password\", \"opaqueCredential\"]"#, #"[\'--password\', \'opaqueCredential\']"#])
+    func encodedOptionLabelsRetainTheirAdjacentCredential(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("opaqueCredential"))
+    }
+
+    @Test(arguments: ["Enter the code ABCD EFGH", "Paste the code 1234 5678"])
+    func groupedImperativeCodesDoNotReleaseTheirFinalGroup(_ input: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(!output.contains("EFGH") && !output.contains("5678"))
+    }
+
     @Test(arguments: ["Basic", "Basic \\", " basic \t\\ "])
     func valueLessBasicArmsTheNextRecord(_ input: String) {
         var state = Redactor.StreamState()

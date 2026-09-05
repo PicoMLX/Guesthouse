@@ -2,6 +2,22 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLContinuationTests {
+    @Test func anUnclosedNestedFrameCannotReleaseUserInfo() {
+        var state = Redactor.StreamState()
+        let first = Redactor.applyPatterns(to: "URL (https://user:first(partial)", codeExpected: false, state: &state)
+        #expect(!first.contains("first(partial"))
+        #expect(Redactor.applyPatterns(to: "opaque@example.com", codeExpected: false, state: &state)
+                == "[redacted:userinfo]@example.com")
+    }
+
+    @Test(arguments: [("\"", "\""), ("'", "'"), ("(", ")"), ("<", ">")], ["https://", "//", #"https:\/\/"#])
+    func aCompleteOuterFrameProvesTheURLCannotContinue(frame: (String, String), prefix: String) {
+        var state = Redactor.StreamState()
+        let input = "URL " + frame.0 + prefix + "example.com:443" + frame.1
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
     @Test func ambiguousBarePortsCannotReleaseAPossibleNumericPassword() {
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: "https://example.com:443", codeExpected: false, state: &state)

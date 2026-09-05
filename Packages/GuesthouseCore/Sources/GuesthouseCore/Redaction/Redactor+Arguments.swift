@@ -155,7 +155,7 @@ extension Redactor {
             } else {
                 cursor = value.firstIndex(where: { $0 == "," || $0 == "]" }) ?? text.endIndex
             }
-            if cursor == text.endIndex, valueExplicitlyContinues(value) {
+            if fieldExplicitlyContinues(value[..<cursor], tail: text[cursor...]) {
                 state.expectingSecretValue = true
                 state.secretValueExplicitlyContinues = true
             }

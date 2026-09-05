@@ -40,17 +40,23 @@ extension Redactor {
             state.authorizationValueIsOnTheNextLine = true
             state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
         }
-        text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
+        text = text.replacing(p.bearer) { match in
+            _ = retainExplicitAuthorization(match.2, tail: text[match.range.upperBound...], state: &state)
+            return "\(match.1)Bearer \(marker("bearer-token"))"
+        }
         text = text.replacing(p.basicAuthorization) { match in
-            guard isBasicCredential(match.3) else { return String(match.0) }
+            let explicit = retainExplicitAuthorization(match.3, tail: text[match.range.upperBound...], state: &state)
+            guard isBasicCredential(match.3) || explicit else { return String(match.0) }
             state.expectingAuthorizationValue = true
             return "\(match.1)Basic \(marker("authorization"))"
         }
         text = text.replacing(p.digestAuthorization) { match in
+            _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)Digest \(marker("authorization"))"
         }
         text = text.replacing(p.specializedAuthorization) { match in
+            _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)\(marker("authorization"))"
         }
@@ -117,6 +123,17 @@ extension Redactor {
         return text
     }
 
+    private static func retainExplicitAuthorization(_ value: Substring, tail: Substring, state: inout StreamState) -> Bool {
+        let explicit = valueExplicitlyContinues(value)
+            || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
+        if explicit {
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            state.authorizationValueExplicitlyContinues = true
+        }
+        return explicit
+    }
+
     /// Stream output cannot retract an earlier fragment after a later @ proves it sensitive.
     /// Ambiguous bare host:port authorities at EOL therefore take the conservative path too.
     /// A visible path/query/fragment boundary proves the authority complete (RFC 3986 §3.2).
@@ -132,9 +149,29 @@ extension Redactor {
             text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
         }
         return text.replacing(patterns.incompleteURLUserInfo) { match in
+            if hasCompleteURLFrame(in: text, prefixEnd: match.1.endIndex) { return String(match.0) }
             state.expectingURLUserInfo = true
             return String(match.1) + marker("userinfo")
         }
+    }
+
+    /// Only a matching, same-record outer frame proves closure. Parentheses/apostrophes
+    /// can be real URI userinfo characters, so an arbitrary trailing delimiter is not enough.
+    private static func hasCompleteURLFrame(in text: String, prefixEnd: String.Index) -> Bool {
+        var start = prefixEnd
+        while start > text.startIndex, text[..<start].last.map({ "/\\".contains($0) }) == true {
+            text.formIndex(before: &start)
+        }
+        if text[..<start].last == ":" {
+            text.formIndex(before: &start)
+            while start > text.startIndex, text[..<start].last.map({
+                $0.isASCII && ($0.isLetter || $0.isNumber || "+-.".contains($0))
+            }) == true { text.formIndex(before: &start) }
+        }
+        let closers: [Character: Character] = ["(": ")", "<": ">", "\"": "\"", "'": "'"]
+        guard let opener = text[..<start].last, let closer = closers[opener], text.last == closer else { return false }
+        let content = text[start..<text.index(before: text.endIndex)]
+        return !content.contains(opener) && !content.contains(closer)
     }
 
     static func applyDeviceCodePattern(to input: String, preserveAlgorithms: Bool = false) -> String {
