@@ -106,8 +106,9 @@ public enum ReconciledOutcome: Hashable, Sendable {
 
 /// What an inspection established about one identified operation, wherever it is running.
 public enum OperationInspectionOutcome: Hashable, Sendable {
-    case stillRunning
-    case stillNeedsUserAction(GuesthouseError)
+    /// The operation is active at this inspected stage, which may differ from the reservation.
+    case stillRunning(stage: ProvisioningStage)
+    case stillNeedsUserAction(GuesthouseError, stage: ProvisioningStage)
     /// The named operation can no longer mutate anything. Only after establishing that fact
     /// may inspection report the reserved stage's actual state here. An active operation
     /// outcome is contradictory and rejected; an independently tracked cleanup is permitted
@@ -290,8 +291,8 @@ public enum ProvisioningReducer: Sendable {
         case (.startRequested(let request, _), .operationStarted(let id, let requested, let token)):
             try requireRequest(request, token)
             // This request has answered, so its reservation is no longer live. An acceptance
-            // at the wrong stage may already be mutating; keep its operation identified and
-            // inspect the reserved stage instead of leaving an unresolvable live reservation.
+            // at the wrong stage may already be mutating. Inspect its identity across all stages
+            // before reconciling the reserved stage; only that inspection can establish its stage.
             guard requested == stage else { return inspect(operation: id) }
             return at(.inProgress(id))
 
@@ -445,10 +446,12 @@ public enum ProvisioningReducer: Sendable {
             try requireOutstanding(inspection, token)
             try requireSame(interrupted, operation)
             switch outcome {
-            case .stillRunning:
-                return at(.inProgress(operation))
-            case .stillNeedsUserAction(let error):
-                return at(.needsUserAction(operation, error))
+            case .stillRunning(let actualStage):
+                // Identity checks above make this inspection authoritative about where the
+                // operation is working, so its next checkpoint must be checked at that stage.
+                return (ProvisioningState(stage: actualStage, status: .inProgress(operation), issuedEffects: issued), [])
+            case .stillNeedsUserAction(let error, let actualStage):
+                return (ProvisioningState(stage: actualStage, status: .needsUserAction(operation, error), issuedEffects: issued), [])
             case .quiescent(.stillRunning), .quiescent(.stillNeedsUserAction):
                 throw .illegalTransition(status: state.status.caseName, event: event.caseName)
             case .quiescent(let reconciled):
