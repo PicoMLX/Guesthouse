@@ -279,36 +279,6 @@ public struct Redactor: Sendable {
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
     }
 
-    /// Replaces every whitespace-delimited run holding an escape sequence that may have taken a
-    /// character of the value with it.
-    ///
-    /// An escape sequence ends on its final byte, so an introducer planted directly in front of
-    /// a secret makes that secret's own character the terminator, and it disappears with the
-    /// sequence: `AB12-ESC[CD34`, `AB12-ESC[0CD34`, and `AB12-ESC(CD34` all strip to
-    /// `AB12-D34`, a near-complete device code no pattern below recognizes. Parameters and
-    /// intermediate bytes are no evidence either way, so they do not exempt a sequence. The run
-    /// is dropped whole rather than repaired, since nothing tells us which characters were the
-    /// value's.
-    ///
-    /// What does exempt a sequence is being one a terminal actually writes around a value —
-    /// `sgr0` emits `ESC[m` and `ESC(B` against the value with no space between. Without that
-    /// exemption a version or path beside ordinary styling becomes a marker. But `m`, `B`, and
-    /// `0` are all characters a value is made of, so both exemptions hold only at the edge of a
-    /// run. Between two run characters the terminator may be the value's own: `AB12-ESC(BD34`
-    /// strips to the same near-complete `AB12-D34` as an unexempted splice, and a JWT whose JOSE
-    /// header loses one character to `ESC[` in front of its own `m` no longer decodes, so the
-    /// structural rule that would have removed the whole token stops recognizing it. At either
-    /// edge of a run the exemption still holds: the character a sequence could have taken there
-    /// is the run's first or last, and every rule whose match a lost character would defeat —
-    /// the JOSE header — is anchored on a `e` no SGR and no designation can end on.
-    ///
-    /// A control string is judged on its own evidence and has its own rule; the two are applied
-    /// one after the other because neither is a special case of the other.
-    static func redactEscapeSplicedRuns(_ text: String) -> String {
-        text.replacing(patterns.escapeSplicedRun, with: marker("spliced-escape"))
-            .replacing(patterns.controlStringSplicedRun, with: marker("spliced-escape"))
-    }
-
     // MARK: - Rules
 
     static func marker(_ kind: String) -> String { "[redacted:\(kind)]" }
@@ -333,34 +303,6 @@ public struct Redactor: Sendable {
         let controlStringEnd = #/\u{9C}|\u{1B}\\/#
         /// An OSC ends at either of those or at BEL.
         let oscEnd = #/\u{07}|\u{9C}|\u{1B}\\/#
-        /// Any CSI or other escape sequence, with the whole run of non-space characters around
-        /// it, unless it is an SGR or a charset designation: the final byte of everything else
-        /// may be a character of that run rather than the sequence's own. The second alternative
-        /// takes both exemptions back where they cannot hold: `m`, `B`, and `0` are characters a
-        /// device code and a Base64URL segment are made of, so one standing between two run
-        /// characters may be the value's, and the run goes. A sequence at either edge of a run —
-        /// where `sgr0` and a terminal's opening reset put one — keeps the exemption, because
-        /// what it could have taken there is the run's first or last character, and no rule a
-        /// lost character defeats begins on `m`, `B`, or `0`.
-        ///
-        let escapeSplicedRun = #/\S*(?!(?:\u{1B}\[|\u{9B})[0-9;:]*m|\u{1B}[()*+][B0])(?:(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}(?![\[\]P_^X])[ -\/]*[0-~])\S*|\S*[A-Za-z0-9_-](?:\u{1B}[()*+][B0]|(?:\u{1B}\[|\u{9B})[0-9;:]*m)[A-Za-z0-9_-]\S*/#
-        /// A control string spliced into a run, with the whole run around it.
-        ///
-        /// Its own rule rather than another alternative above, because it is judged on different
-        /// evidence. A control string cannot borrow its terminator from the value — BEL and ST
-        /// are characters no credential is made of — but its payload runs to a terminator the
-        /// *sender* chooses, so it swallows whatever span the sender points it at, and the rule
-        /// above deliberately steps around the introducers (`ESC ]`, `ESC P`, and their C1
-        /// spellings) that `terminalEscape` then consumes. That left this splice wide open:
-        /// `AB12<ESC>]<BEL>CD34` stripped to `AB12CD34`, a whole device code missing only its
-        /// separator, which no pattern below recognizes.
-        ///
-        /// The introducer has to stand between two characters of a run. At the edge of one it is
-        /// the window-title sequence a terminal really writes, and the payload can only have
-        /// taken text outside the run, so the version beside it is left alone. The payload is
-        /// matched atomically and its terminator is required, so the character after the
-        /// sequence is really the run's and cannot be found by giving payload back.
-        let controlStringSplicedRun = #/\S*[A-Za-z0-9_-](?:\u{1B}[\]P_^X]|[\u{9D}\u{90}\u{9F}\u{9E}\u{98}])(?>[^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\))[A-Za-z0-9_-]\S*/#
         /// A folded header: the label alone on a line, value on the next. Both delimiters the
         /// label rule below accepts count, since `Authorization=` on a line of its own leaves
         /// its value on the next line exactly as `Authorization:` does.
