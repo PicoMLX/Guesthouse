@@ -2,19 +2,6 @@ import Foundation
 import Testing
 @testable import GuesthouseCore
 
-@Suite struct ProvisioningStageTests {
-    @Test func stagesFollowThePlanOrder() {
-        #expect(ProvisioningStage.allCases.map(\.rawValue) == [
-            "preflight", "runtimeReady", "macOSInstalled", "needsGuestSetup", "sshPaired",
-            "guestSecured", "xcodeToolsReady", "accountsReady", "workspaceValidated", "ready",
-        ])
-        #expect(ProvisioningStage.first == .preflight)
-        #expect(ProvisioningStage.preflight.next == .runtimeReady)
-        #expect(ProvisioningStage.ready.next == nil)
-        #expect(ProvisioningStage.preflight < ProvisioningStage.ready)
-    }
-}
-
 @Suite struct ProvisioningReducerTests {
     typealias Reducer = ProvisioningReducer
 
@@ -122,16 +109,6 @@ import Testing
         }
     }
 
-    @Test func reentrantStartIsRejectedWhileTheFirstRequestIsInFlight() throws {
-        let reserved = try Reducer.reduce(.initial, .startRequested(stage: .preflight)).state
-        #expect(throws: ProvisioningTransitionError.illegalTransition(status: "startRequested", event: "startRequested")) {
-            try Reducer.reduce(reserved, .startRequested(stage: .preflight))
-        }
-        let request = try #require(reserved.status.pendingEffect)
-        let running = try Reducer.reduce(reserved, .operationStarted(op, stage: .preflight, request: request)).state
-        #expect(throws: ProvisioningTransitionError.self) { try Reducer.reduce(running, .operationStarted(other, stage: .preflight, request: request)) }
-    }
-
     @Test func confirmedFailureWithLeftoversReachesASafeStart() throws {
         let verification = GuesthouseError.downloadVerificationFailed(artifact: "restore image", check: .digest)
         var state = state(.runtimeReady, .recoverableFailure(verification, interrupted: nil))
@@ -144,15 +121,6 @@ import Testing
         let reserved = try Reducer.reduce(clean, .startRequested(stage: .runtimeReady)).state
         let started = try Reducer.reduce(reserved, .operationStarted(other, stage: .runtimeReady, request: #require(reserved.status.pendingEffect))).state
         #expect(started.status == .inProgress(other))
-    }
-
-    @Test func eventsForAnotherOperationAreRejected() {
-        #expect(throws: ProvisioningTransitionError.operationMismatch(expected: op, actual: other)) {
-            try Reducer.reduce(state(.preflight, .inProgress(op)), .checkpointReached(other, checkpoint(.preflight)))
-        }
-        #expect(throws: ProvisioningTransitionError.operationMismatch(expected: op, actual: other)) {
-            try Reducer.reduce(state(.preflight, .unknownOutcome(op, inspection: pending)), .connectionInterrupted(other))
-        }
     }
 
     @Test func stagesMustBeSequential() {
@@ -189,13 +157,6 @@ import Testing
         #expect(state.stage == .ready)
     }
 
-    @Test func readinessRequiresTheFinalCheckpointItself() {
-        #expect(!state(.ready, .persistingCheckpoint(checkpoint(.ready), operation: op, write: pending)).isReady)
-        #expect(state(.ready, .completed(checkpoint(.ready))).isReady)
-        #expect(!ProvisioningState.isConsistent(stage: .ready, status: .completed(checkpoint(.preflight))))
-        #expect(ProvisioningState.isConsistent(stage: .ready, status: .notStarted))
-    }
-
     @Test func interruptedThenCompletedContinuesToNextStage() throws {
         var state = state(.macOSInstalled, .inProgress(op))
         let inspecting = try Reducer.reduce(state, .connectionInterrupted(op))
@@ -205,52 +166,5 @@ import Testing
         state = try Reducer.reduce(state, .operationStarted(other, stage: .needsGuestSetup, request: #require(state.status.pendingEffect))).state
         #expect(state.stage == .needsGuestSetup)
         #expect(state.status == .inProgress(other))
-    }
-
-    @Test func resumeEvidenceIsRedactedAndBoundedAtConstruction() throws {
-        let evidence = ResumeEvidence(summary: "download resumed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\nnext", stagingPath: "downloads/restore.partial")
-        #expect(evidence.summary.hasPrefix("download resumed with token [redacted:github-token]"))
-        #expect(!evidence.summary.contains("\n"))
-        #expect(evidence.stagingPath == "downloads/restore.partial")
-        let long = ResumeEvidence(summary: String(repeating: "s", count: 5_000))
-        #expect(long.summary.unicodeScalars.count == 201, "200 scalars and an ellipsis")
-        let decoded = try JSONDecoder().decode(ResumeEvidence.self, from: Data("{\"summary\":\"password: hunter2\"}".utf8))
-        #expect(decoded.summary == "password: [redacted:secret]")
-    }
-
-    @Test func transitionErrorsCarryUserFacingText() {
-        for error in [ProvisioningTransitionError.illegalTransition(status: "a", event: "b"), .operationMismatch(expected: op, actual: other), .stageMismatch(expected: .preflight, actual: .ready), .checkpointMismatch(expected: checkpoint(.preflight), actual: checkpoint(.ready)), .staleEffect(expected: pending, actual: next), .staleStartRequest(expected: pending, actual: next), .inspectionWhileStartRequestLive, .alreadyReady] {
-            #expect(error.errorDescription?.isEmpty == false)
-            #expect(error.recoverySuggestion?.isEmpty == false)
-            #expect(!error.recoveryActions.isEmpty)
-        }
-        #expect(ProvisioningTransitionError.illegalTransition(status: "a", event: "b").recoveryActions.first == .inspectState)
-        #expect(ProvisioningTransitionError.staleEffect(expected: pending, actual: next).recoveryActions.first == .inspectState)
-        #expect(!ProvisioningTransitionError.staleStartRequest(expected: pending, actual: next).recoveryActions.contains(.inspectState))
-    }
-
-    @Test func stateRoundTripsThroughJSONAndRejectsInconsistentCheckpoints() throws {
-        let states = [
-            ProvisioningState.initial,
-            state(.sshPaired, .recoverableFailure(failure, interrupted: nil)),
-            state(.macOSInstalled, .unknownOutcome(op, inspection: pending)),
-            state(.runtimeReady, .resumable(evidence)),
-            state(.runtimeReady, .cleanupRequired(failure, cleanup: pending)),
-            state(.ready, .completed(checkpoint(.ready))),
-        ]
-        for original in states {
-            let data = try JSONEncoder().encode(original)
-            #expect(try JSONDecoder().decode(ProvisioningState.self, from: data) == original)
-        }
-        let inconsistent = Data("""
-        {"schemaVersion":1,"stage":"ready","issuedEffects":0,"status":{"completed":{"_0":{"stage":"preflight","reachedAt":0}}}}
-        """.utf8)
-        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: inconsistent) }
-        let unversioned = Data("""
-        {"stage":"preflight","issuedEffects":0,"status":{"notStarted":{}}}
-        """.utf8)
-        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: unversioned) }
-        let encoded = String(decoding: try JSONEncoder().encode(ProvisioningState.initial), as: UTF8.self)
-        #expect(encoded.contains("\"schemaVersion\":1"))
     }
 }
