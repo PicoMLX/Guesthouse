@@ -276,6 +276,43 @@ private actor LaunchFailingLumeRunner: ProcessRunning {
         #expect(await runner.invocations.isEmpty, "an ancestor swap is rejected before launch")
     }
 
+    @Test(arguments: [
+        RuntimeStorage.Subdirectory.state,
+        RuntimeStorage.Subdirectory.lumeConfiguration,
+        RuntimeStorage.Subdirectory.staging,
+    ])
+    func launchRevalidationRejectsAReplacedWritableDirectory(
+        _ subdirectory: RuntimeStorage.Subdirectory
+    ) async throws {
+        let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
+        let verified = try verifiedFixture(at: LumeBundle.expectedLocation(in: storage))
+        let runner = ScriptedLumeRunner(Self.successfulReplies)
+        let backend = try LumeBackend(bundle: verified, storage: storage, runner: runner)
+        let directory = storage.url(for: subdirectory)
+        let moved = storage.root.appending(path: "moved-\(UUID().uuidString)")
+        try FileManager.default.moveItem(at: directory, to: moved)
+        try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: moved)
+
+        await #expect(throws: RuntimeStorageError.insecureDirectory(path: directory.path, reason: "symbolic link")) {
+            try await backend.probe()
+        }
+        #expect(await runner.invocations.isEmpty, "unsafe writable storage is rejected before launch")
+    }
+
+    @Test func launchRevalidationRejectsWritableDirectoryModeDrift() async throws {
+        let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
+        let verified = try verifiedFixture(at: LumeBundle.expectedLocation(in: storage))
+        let runner = ScriptedLumeRunner(Self.successfulReplies)
+        let backend = try LumeBackend(bundle: verified, storage: storage, runner: runner)
+        let staging = storage.url(for: .staging)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staging.path)
+
+        await #expect(throws: RuntimeStorageError.protectionDrift(path: staging.path, reason: "permissions are not 0700")) {
+            try await backend.probe()
+        }
+        #expect(await runner.invocations.isEmpty, "permission drift is rejected before launch")
+    }
+
     @Test func launchRevalidationRejectsAReplacedExecutableInsideTheSameBundle() async throws {
         let storage = try RuntimeStorage(root: root.appending(path: UUID().uuidString))
         let bundleURL = LumeBundle.expectedLocation(in: storage)

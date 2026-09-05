@@ -92,15 +92,12 @@ final class RuntimeService: Sendable {
         let envelope: RuntimeRequestEnvelope
         do {
             envelope = try message.decode(as: RuntimeRequestEnvelope.self)
-        } catch let mismatch as RuntimeRequestEnvelope.ProtocolMismatch {
-            // A version-skewed installation is not corrupt input: the client gets the
-            // protocol-mismatch error and its reinstall recovery, and the session closes.
-            log.error(Self.line("protocol mismatch: client", "\(mismatch.client.rawValue)"))
-            return reply(RuntimeDispatcher.mismatch(mismatch.error), refuse: refuse)
         } catch {
             // Never log the decoding error text: it can quote the raw offending value.
             log.error(RedactedLine(literal: "undecodable request rejected"))
-            return reply(RuntimeDispatcher.undecodable())
+            // Typed protocol mismatches refuse this session; its lifetime still waits for
+            // every outstanding reply before cancellation.
+            return reply(RuntimeDispatcher.decodingFailure(error), refuse: refuse)
         }
         // Nothing runs on a refused session. Deciding first and reading the refusal after is
         // deliberate: validating the envelope is the longest step, and one expression would

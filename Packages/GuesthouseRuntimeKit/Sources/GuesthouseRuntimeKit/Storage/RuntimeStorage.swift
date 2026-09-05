@@ -117,6 +117,17 @@ public struct RuntimeStorage: Sendable {
         ]
     }
 
+    /// Revalidates every writable directory a Lume probe receives. Checking the `state` parent
+    /// separately prevents an apparently valid `lume-xdg` leaf from being reached through a
+    /// replaced intermediate link.
+    func verifyLumeInvocationDirectories() throws {
+        try Self.verify(root)
+        try Self.verify(url(for: .runtime))
+        try Self.verify(url(for: .state))
+        try Self.verify(url(for: .lumeConfiguration))
+        try Self.verify(url(for: .staging))
+    }
+
     /// Stable identity for coordinating aliases that reach the same physical directory.
     /// Paths alone are insufficient on macOS (`/tmp` and `/private/tmp` are one example).
     struct CoordinationIdentity: Hashable, Sendable {
