@@ -35,8 +35,13 @@ extension Redactor {
                                                codesAlwaysRedacted: codesAlwaysRedacted || state.expectingDeviceCode)
         var recoveredContexts = StreamState()
         for reading in stripped.contexts {
+            let contextText: String
+            if let quoted = state.quotedValue {
+                guard let end = Self.closingQuoteEnd(in: reading[...], for: quoted) else { continue }
+                contextText = String(reading[end...])
+            } else { contextText = reading }
             var scanned = StreamState()
-            _ = redact(line: reading, state: &scanned, isPhysicalLine: false)
+            _ = redact(line: contextText, state: &scanned, isPhysicalLine: false)
             Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
         }
         // Only the physical pass advances PPK framing. On its opening line, preserve any
@@ -44,6 +49,12 @@ extension Redactor {
         let wasReadingPPK = state.ppkPhase != .inactive
         let ppkLine = !wasReadingPPK
             ? stripped.contexts.first(where: { $0.contains(Self.patterns.ppkBegin) }) ?? stripped.joined : stripped.joined
+        if isPhysicalLine, !wasReadingPPK, let opener = ppkLine.firstMatch(of: Self.patterns.ppkBegin) {
+            // Contexts that end before this key do not enclose it. Reuse the ordinary closure
+            // transitions on that prefix without advancing physical PPK framing a second time.
+            _ = redact(line: String(ppkLine[..<opener.range.lowerBound]), state: &state,
+                       isPhysicalLine: false, codesAlwaysRedacted: codesAlwaysRedacted)
+        }
         if isPhysicalLine, Self.consumePPKLine(ppkLine, phase: &state.ppkPhase) {
             if !wasReadingPPK {
                 var joinedContext = StreamState()
@@ -359,6 +370,17 @@ extension RedactedLine: Codable {
 public struct RedactedLines: Hashable, Sendable, Codable {
     public let lines: [RedactedLine]
 
+    public enum ValidationError: Error, Sendable { case embeddedLineTerminator }
+
+    /// Constructs an outgoing transcript using one shared stream state. Each entry must be
+    /// one physical record; context-free device codes are concealed as on the decoding path.
+    public init(redacting raw: [String]) throws {
+        guard !raw.contains(where: { $0.contains(Redactor.patterns.lineSeparator) }) else {
+            throw ValidationError.embeddedLineTerminator
+        }
+        lines = Redactor().redact(untrustedLines: raw)
+    }
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode([String].self)
@@ -366,7 +388,7 @@ public struct RedactedLines: Hashable, Sendable, Codable {
             throw DecodingError.dataCorruptedError(in: container,
                 debugDescription: "A physical-line batch cannot contain embedded line terminators.")
         }
-        lines = Redactor().redact(untrustedLines: raw)
+        try self.init(redacting: raw)
     }
 
     public func encode(to encoder: any Encoder) throws {

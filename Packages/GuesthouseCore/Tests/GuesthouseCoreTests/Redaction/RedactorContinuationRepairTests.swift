@@ -35,6 +35,15 @@ import Testing
         #expect(output[2] == "Finished")
     }
 
+    @Test(arguments: [1, 2, 3, 4], ["", "artifact", "session."])
+    func everyIncompleteJWESegmentCountCarriesContinuation(count: Int, prefix: String) {
+        let segments = ["eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0", "wrappedKey", "iv", "syntheticCiphertext", "syntheticTag"]
+        let output = redactor.redact(lines: [prefix + segments.prefix(count).joined(separator: ".") + ".",
+            segments.dropFirst(count).joined(separator: "."), "[status] Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "[status] Finished")
+    }
+
     @Test(arguments: ["Bearer syntheticComplete", "Bearer syntheticComplete \\\\",
                       "eyJhbGciOiJIUzI1NiJ9.eyJhbGciOiJIUzI1NiJ9.syntheticSignature"])
     func completedCredentialsDoNotArmAnotherPhysicalRecord(input: String) {
