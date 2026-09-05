@@ -103,7 +103,7 @@ extension Redactor {
             var joinedScan = StreamState()
             _ = redact(line: stripped.joined, state: &joinedScan, isPhysicalLine: false)
             let boundaryText = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
-            text = (codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: boundaryText, preserveAlgorithms: true) : boundaryText)
+            text = (codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: boundaryText) : boundaryText)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
