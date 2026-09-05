@@ -6,6 +6,37 @@ import Testing
     private let redactor = Redactor()
 
     @Test(arguments: [2, 4, 6], ["\"", "'"])
+    func prefixedEvenSlashParametersCloseAtRawQuotes(depth: Int, quote: String) {
+        let output = redactor.redact(lines: ["password: prefix=" + String(repeating: "\\", count: depth)
+            + quote + "syntheticValue" + quote, "Finished"]).map(\.text)
+        #expect(!output[0].contains("syntheticValue"))
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: ["ghp_", "sk-proj-"])
+    func otherTokenMarkersDoNotDestroyIncompleteJOSEEvidence(prefix: String) {
+        let output = redactor.redact(lines: [prefix + "eyJhbGciOiJIUzI1NiJ9.syntheticPayload",
+            ".syntheticSignature", "[status] Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "[status] Finished")
+    }
+
+    @Test func namedCompetingHeadersRemainSensitiveAcrossPhysicalLines() {
+        let header = "eyJhbGciOiJIUzI1NiJ9"
+        let output = redactor.redact(lines: [header + "." + header + ".syntheticPayload",
+            ".syntheticSignature", "[status] Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "[status] Finished")
+    }
+
+    @Test func aFinalJWTSignatureSegmentCanItselfWrapAgain() {
+        let output = redactor.redact(lines: ["eyJhbGciOiJIUzI1NiJ9.payload", ".syntheticSignaturePartOne",
+            "syntheticSignaturePartTwo", "[status] Finished", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(Array(output.suffix(2)) == ["[status] Finished", "Finished"])
+    }
+
+    @Test(arguments: [2, 4, 6], ["\"", "'"])
     func evenSlashShellOpenersUseOrdinaryQuoteClosers(depth: Int, quote: String) {
         let input = "run --password " + String(repeating: "\\", count: depth) + quote + "synthetic value" + quote + " --verbose"
         let output = redactor.redact(lines: [input, "Finished"]).map(\.text)
@@ -45,7 +76,7 @@ import Testing
     }
 
     @Test(arguments: ["Bearer syntheticComplete", "Bearer syntheticComplete \\\\",
-                      "eyJhbGciOiJIUzI1NiJ9.eyJhbGciOiJIUzI1NiJ9.syntheticSignature"])
+                      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.syntheticSignature"])
     func completedCredentialsDoNotArmAnotherPhysicalRecord(input: String) {
         #expect(redactor.redact(lines: [input, "Finished"]).last?.text == "Finished")
     }
