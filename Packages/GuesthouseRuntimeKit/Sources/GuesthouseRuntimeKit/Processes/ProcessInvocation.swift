@@ -97,6 +97,14 @@ public struct ProcessExit: Hashable, Sendable {
     }
 }
 
+extension RedactedLine {
+    /// What a log says when the runner dropped output it could not hold. `ProcessExit` records
+    /// the fact, but only for whoever inspects the exit; a log that simply stops reads as a
+    /// complete one to the person reading the bundle, so every path that forwards a run's
+    /// output states it in the log itself (MVP-PLAN.md §2).
+    static let runnerTruncatedOutput = RedactedLine(literal: "[truncated] the runtime dropped output past its limit")
+}
+
 /// Why a program could not be started, with what the user can do about it.
 public enum ProcessLaunchError: Error, Hashable, Sendable, LocalizedError {
     case executableNotFound(String)

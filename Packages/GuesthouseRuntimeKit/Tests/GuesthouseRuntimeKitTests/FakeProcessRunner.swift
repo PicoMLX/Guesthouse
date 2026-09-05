@@ -83,6 +83,9 @@ actor FakeProcessRunner: ProcessRunning {
         let redactor = Redactor()
         for line in reply.stdout { continuation.yield(.stdout(redactor.redact(lines: [line])[0])) }
         for line in reply.stderr { continuation.yield(.stderr(redactor.redact(lines: [line])[0])) }
+        // `finish` builds the exit from the run's own state, so a scripted truncation has to
+        // be recorded on the run rather than carried by the reply's exit value.
+        if reply.exit.outputTruncated { run.markOutputTruncated() }
         run.finish(with: reply.exit.reason)
         return run
     }

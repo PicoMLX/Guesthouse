@@ -26,7 +26,7 @@ import Testing
 
     /// A lifecycle over storage the test already holds, so a snapshot or a journal record can
     /// be seeded before the service starts.
-    func makeLifecycle(runner: FakeProcessRunner, storage: RuntimeStorage, store: StateStore, recordedIdentities: [ProcessIdentity] = [], enumerator: LiveProcessEnumerator = LiveProcessEnumerator()) async throws -> EnvironmentLifecycle {
+    func makeLifecycle(runner: any ProcessRunning, storage: RuntimeStorage, store: StateStore, recordedIdentities: [ProcessIdentity] = [], enumerator: LiveProcessEnumerator = LiveProcessEnumerator()) async throws -> EnvironmentLifecycle {
         let bundle = TartBundle(url: storage.url(for: .runtime).appending(path: "tart.app"))
         // The fixture's executable is a link to the test helper: it accepts any arguments,
         // leaves them untouched, and runs until ended, so `run` looks like a live VM process
@@ -40,7 +40,7 @@ import Testing
         return EnvironmentLifecycle(dependencies: .init(backend: TartBackend(bundle: bundle, storage: storage, runner: runner), supervisor: supervisor, store: store))
     }
 
-    func makeLifecycle(runner: FakeProcessRunner, recordedIdentities: [ProcessIdentity] = [], enumerator: LiveProcessEnumerator = LiveProcessEnumerator()) async throws -> (EnvironmentLifecycle, StateStore, RuntimeStorage) {
+    func makeLifecycle(runner: any ProcessRunning, recordedIdentities: [ProcessIdentity] = [], enumerator: LiveProcessEnumerator = LiveProcessEnumerator()) async throws -> (EnvironmentLifecycle, StateStore, RuntimeStorage) {
         let (storage, store) = try makeStorage()
         let lifecycle = try await makeLifecycle(runner: runner, storage: storage, store: store, recordedIdentities: recordedIdentities, enumerator: enumerator)
         return (lifecycle, store, storage)
@@ -1204,12 +1204,138 @@ import Testing
         try repairJournal(in: storage, with: original)
     }
 
+    @Test func tartOutputDuringAnOperationReachesItsEventStream() async throws {
+        let runner = tartLikeRunner()
+        let tail = (0..<40).map { "line \($0)" }
+        await runner.set("run", .init(stdout: ["Booting virtual machine", "token=abcdef0123456789abcdef0123456789"] + tail, exit: ProcessExit(reason: .status(1))))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let events = EventCollector()
+        let start = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in events.add(event) }
+        let seen = await collect(events)
+        let logs = seen.compactMap { event -> (OperationID?, RedactedLine)? in if case .log(let id, let line) = event { return (id, line) } else { return nil } }
+        #expect(logs.contains { $0.1.text == "Booting virtual machine" }, "Tart's lines are forwarded as log events")
+        #expect(logs.allSatisfy { $0.0 == start })
+        #expect(!logs.contains { $0.1.text.contains("abcdef0123456789") }, "forwarded lines are the redacted ones")
+        #expect(logs.contains { $0.1.text == "line 39" }, "the last lines written before the exit are forwarded, not lost with the sink")
+    }
+
+    @Test func truncatedProcessOutputIsReportedRatherThanLeftLookingComplete() async throws {
+        let runner = tartLikeRunner()
+        await runner.set("run", .init(stdout: ["Booting virtual machine"], exit: ProcessExit(reason: .status(1), outputTruncated: true)))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let events = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in events.add(event) }
+        let seen = await collect(events)
+        let logs = seen.compactMap { event -> String? in if case .log(_, let line) = event { line.text } else { nil } }
+        #expect(logs.contains(EnvironmentLifecycle.truncationMarker.text), "a log the runner cut short says so: \(logs)")
+    }
+
+    @Test func theStopCommandsOwnOutputReachesTheOperationsLog() async throws {
+        let runner = tartLikeRunner()
+        await runner.set("stop", .init(stderr: ["the guest refused to shut down"], exit: ProcessExit(reason: .status(2))))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let startEvents = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in startEvents.add(event) }
+        _ = await collect(startEvents)
+        let stopEvents = EventCollector()
+        let stop = try await lifecycle.stop(environment, mode: .graceful(deadline: .seconds(20))) { event in stopEvents.add(event) }
+        let seen = await collect(stopEvents)
+        let logs = seen.compactMap { event -> (OperationID?, String)? in if case .log(let id, let line) = event { (id, line.text) } else { nil } }
+        #expect(logs.contains { $0 == (stop, "the guest refused to shut down") }, "the failing stop command explains itself: \(logs)")
+        await runner.finishHanging()
+    }
+
+    @Test func aStopWhoseOwnOutputWasCutShortSaysSo() async throws {
+        // The VM's drain reports its own truncation, but the stop command is a separate run
+        // whose output `capture` consumes; without a marker its failure explanation just ends.
+        let runner = tartLikeRunner()
+        await runner.set("stop", .init(stderr: ["the guest refused to shut down"], exit: ProcessExit(reason: .status(2), outputTruncated: true)))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: runner)
+        try await lifecycle.prepare()
+        let startEvents = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in startEvents.add(event) }
+        _ = await collect(startEvents)
+        let stopEvents = EventCollector()
+        let stop = try await lifecycle.stop(environment, mode: .graceful(deadline: .seconds(20))) { event in stopEvents.add(event) }
+        let seen = await collect(stopEvents)
+        let logs = seen.compactMap { event -> (OperationID?, String)? in if case .log(let id, let line) = event { (id, line.text) } else { nil } }
+        #expect(logs.contains { $0 == (stop, EnvironmentLifecycle.truncationMarker.text) }, "the stop's log names what it lost: \(logs)")
+        await runner.finishHanging()
+    }
+
+    @Test func outputFromAReleasedRunNeverReachesTheNextOperation() async throws {
+        let ghost = GhostPipeRunner(inner: tartLikeRunner())
+        await ghost.setInner("ip", .init(stdout: ["192.168.64.9"], delay: .milliseconds(200)))
+        let (lifecycle, _, _) = try await makeLifecycle(runner: ghost)
+        try await lifecycle.prepare()
+        let first = EventCollector()
+        _ = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in first.add(event) }
+        _ = await collect(first)
+
+        // The second start installs its own sink; only then can the abandoned pipe be seen
+        // writing into it.
+        let second = EventCollector()
+        let restart = try await lifecycle.start(environment, options: StartOptions(ipWait: .seconds(1))) { event in second.add(event) }
+        for _ in 0..<400 where second.events.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        await ghost.writeToAbandonedPipe("ghost line from the machine that exited")
+        let seen = await collect(second)
+        let logs = seen.compactMap { event -> String? in if case .log(_, let line) = event { line.text } else { nil } }
+        #expect(!logs.contains("ghost line from the machine that exited"), "the released run's pipe cannot speak for \(restart): \(logs)")
+        await ghost.finishAbandonedPipe()
+        await ghost.finishInnerHanging()
+    }
+
     @Test func unknownEnvironmentIsRefused() async throws {
         let (lifecycle, _, _) = try await makeLifecycle(runner: tartLikeRunner())
         try await lifecycle.prepare()
         let stranger = EnvironmentID()
         await #expect(throws: GuesthouseError.environmentNotFound(stranger)) { _ = try await lifecycle.status(of: stranger) }
         await #expect(throws: GuesthouseError.environmentNotFound(stranger)) { _ = try await lifecycle.start(stranger, options: StartOptions()) { _ in } }
+    }
+}
+
+/// A runner whose first `run` answers with a process that has already exited while its output
+/// pipe stays open, as it does when a child inherited it. The test writes into that abandoned
+/// pipe afterwards; every other command is answered by the wrapped fake.
+actor GhostPipeRunner: ProcessRunning {
+    private let inner: FakeProcessRunner
+    private var abandoned: AsyncStream<ProcessOutput>.Continuation?
+
+    init(inner: FakeProcessRunner) {
+        self.inner = inner
+    }
+
+    func setInner(_ command: String, _ reply: FakeProcessRunner.Reply) async {
+        await inner.set(command, reply)
+    }
+
+    func writeToAbandonedPipe(_ text: String) {
+        abandoned?.yield(.stdout(Redactor().redact(lines: [text])[0]))
+    }
+
+    func finishAbandonedPipe() {
+        abandoned?.finish()
+        abandoned = nil
+    }
+
+    func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
+        guard invocation.arguments.first == "run", abandoned == nil else { return try await inner.run(invocation) }
+        let (stream, continuation) = AsyncStream.makeStream(of: ProcessOutput.self, bufferingPolicy: .unbounded)
+        abandoned = continuation
+        // The run is given a second, throwaway continuation to close on exit, so recording the
+        // exit does not end the pipe the test still holds: that is what an inherited handle
+        // does to a real one.
+        let (_, closed) = AsyncStream.makeStream(of: ProcessOutput.self)
+        let run = ProcessRun(process: Process(), output: stream, continuation: closed)
+        run.finish(with: .status(1))
+        return run
+    }
+
+    func finishInnerHanging() async {
+        await inner.finishHanging()
     }
 }
 

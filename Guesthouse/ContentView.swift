@@ -11,6 +11,7 @@ import GuesthouseCore
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(DebugRuntimeProbe.self) private var debugProbe
+    @State private var showingDiagnostics = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -27,11 +28,17 @@ struct ContentView: View {
                 // repeated clicks replace the check in flight instead of piling concurrent
                 // request streams onto one session until the service refuses them, and a check
                 // the Quit sheet owns is not overtaken by one started here.
-                Button("Check Environment") { model.startRefresh() }
+                HStack {
+                    Button("Check Environment") { model.startRefresh() }
+                    Button("Diagnostics…") { showingDiagnostics = true }.accessibilityLabel("Open diagnostics")
+                }
             case .unavailable(let error):
                 Image(systemName: "exclamationmark.triangle").imageScale(.large)
                 Text(error.userMessage)
                 RecoveryActionRow(actions: error.recoveryActions) { model.startRefresh() }
+                // Diagnostics stay reachable exactly when the dashboard, and with it the
+                // card's own menu item, cannot be shown.
+                Button("Diagnostics…") { showingDiagnostics = true }.accessibilityLabel("Open diagnostics")
             }
             #if DEBUG
             Text(debugProbe.result)
@@ -42,6 +49,7 @@ struct ContentView: View {
             #endif
         }
         .frame(minWidth: 720, minHeight: 420)
+        .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model) }
     }
 }
 

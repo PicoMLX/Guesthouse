@@ -6,13 +6,17 @@ import GuesthouseCore
 struct DashboardView: View {
     @Environment(AppModel.self) private var model
     @State private var showingWizard = false
+    @State private var showingDiagnostics = false
+    /// Which environment the sheet is about, so Export writes the failing development Mac's
+    /// evidence rather than whichever environment was created first.
+    @State private var diagnosticsSubject: EnvironmentID?
 
     var body: some View {
         let cards = model.cardStates()
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if cards.isEmpty {
-                    EmptyDashboardView(availability: model.createAvailability) { showingWizard = true }
+                    EmptyDashboardView(availability: model.createAvailability, openDiagnostics: { diagnosticsSubject = nil; showingDiagnostics = true }) { showingWizard = true }
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16)], alignment: .leading, spacing: 16) {
                         ForEach(cards) { card in
@@ -20,7 +24,8 @@ struct DashboardView: View {
                                 state: card,
                                 start: { model.start(card.id) },
                                 cancel: { model.cancel(card.id) },
-                                recover: { model.perform($0, for: card.id) }
+                                recover: { model.perform($0, for: card.id) },
+                                openDiagnostics: { diagnosticsSubject = card.id; showingDiagnostics = true }
                             )
                         }
                         SlotView(availability: model.createAvailability) { showingWizard = true }
@@ -30,11 +35,13 @@ struct DashboardView: View {
             .padding(20)
         }
         .sheet(isPresented: $showingWizard) { WizardPlaceholderView() }
+        .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model, subject: diagnosticsSubject) }
     }
 }
 
 struct EmptyDashboardView: View {
     let availability: EnvironmentCardState.Availability
+    let openDiagnostics: () -> Void
     let create: () -> Void
 
     var body: some View {
@@ -46,6 +53,9 @@ struct EmptyDashboardView: View {
             AvailabilityButton("Create a development Mac", availability: availability, action: create)
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel("Create a development Mac")
+            // Diagnostics are reachable with no environment too: a fresh install that cannot
+            // get further still needs the screen that says what Guesthouse saw.
+            Button("Diagnostics…", action: openDiagnostics).accessibilityLabel("Open diagnostics")
         }
         .frame(maxWidth: .infinity, minHeight: 300)
     }
@@ -80,6 +90,7 @@ struct EnvironmentCardView: View {
     let start: () -> Void
     let cancel: () -> Void
     let recover: (RecoveryAction) -> Void
+    let openDiagnostics: () -> Void
     @State private var note: String?
 
     var body: some View {
@@ -165,6 +176,7 @@ struct EnvironmentCardView: View {
         Menu {
             Button(EnvironmentCardState.Action.repair.title) { perform(.repair) }
             Button(EnvironmentCardState.Action.exportWork.title) { perform(.exportWork) }
+            Button("Diagnostics…") { openDiagnostics() }
             Divider()
             Button(EnvironmentCardState.Action.delete.title, role: .destructive) { perform(.delete) }
         } label: {

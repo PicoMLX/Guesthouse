@@ -59,6 +59,25 @@ public actor EnvironmentLifecycle {
     /// client believing the work is still in flight (MVP-PLAN.md §2).
     static let statusRefreshBudget = Duration.seconds(2)
 
+    /// Where a VM process's output goes while an operation on its environment is in flight:
+    /// the operation's own event stream, as `log` events. Between operations nobody listens
+    /// and the lines are dropped, never buffered.
+    private var outputSinks: [EnvironmentID: (operation: OperationID, events: EventSink)] = [:]
+    /// The instant the operation in flight must answer by, while one has a deadline of its
+    /// own. Waiting for a process's last lines is worth a moment, but not a moment past what
+    /// the caller asked for: Quit budgets the whole graceful stop, drain included.
+    private var outputSettleDeadline: ContinuousClock.Instant?
+    /// The task forwarding each supervised process's output, so a failure can wait for the
+    /// tail of that output before the sink goes away.
+    private var drains: [EnvironmentID: Task<Void, Never>] = [:]
+    /// Which drain each environment is still waiting on, and which drain is allowed to speak
+    /// for it. A pipe an inherited child holds open keeps a drain alive after its VM is gone,
+    /// so both are keyed by generation: the stale drain neither ends the wait for the current
+    /// run's output nor forwards the old machine's lines into the next operation (§4).
+    private var draining: [EnvironmentID: UInt64] = [:]
+    private var currentDrain: [EnvironmentID: UInt64] = [:]
+    private var drainSequence: UInt64 = 0
+
     public init(dependencies: Dependencies) {
         deps = dependencies
     }
@@ -469,9 +488,12 @@ public actor EnvironmentLifecycle {
         }
     }
 
-    private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, inventory: [TartVMInfo], token: OperationSupervisor.Token, events: EventSink) async {
+    private func performStart(_ operation: OperationID, environment: DevelopmentEnvironment, options: StartOptions, inventory: [TartVMInfo], token: OperationSupervisor.Token, events: @escaping EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
+        retireReleasedDrain(of: id)
+        outputSinks[id] = (operation, events)
+        defer { token.end(); inFlight = nil; outputSinks[id] = nil; outputSettleDeadline = nil }
         let arguments = TartBackend.runArguments(vmName: environment.tartVMName, console: options.console)
         do {
             report(operation, ProgressPhase(kind: .startingVM, cancelable: false), events)
@@ -483,7 +505,7 @@ public actor EnvironmentLifecycle {
             // list` would let a hanging inventory hold up a launch it cannot inform.
             try await refuseIfAnySlotIsClaimed(startingFor: id, inventory: inventory)
             let run = try await deps.backend.run(vmName: environment.tartVMName, console: options.console)
-            drainOutput(of: run)
+            drainOutput(of: run, environment: id)
             let identity: ProcessIdentity
             do {
                 identity = try await deps.supervisor.recordLaunch(pid: run.processIdentifier, executable: deps.backend.bundle.executable, arguments: arguments, vmName: environment.tartVMName, environment: id)
@@ -598,9 +620,16 @@ public actor EnvironmentLifecycle {
         }
     }
 
-    private func performStop(_ operation: OperationID, environment: DevelopmentEnvironment, mode: StopMode, token: OperationSupervisor.Token, events: EventSink) async {
+    private func performStop(_ operation: OperationID, environment: DevelopmentEnvironment, mode: StopMode, token: OperationSupervisor.Token, events: @escaping EventSink) async {
         defer { token.end(); inFlight = nil }
         let id = environment.id
+        retireReleasedDrain(of: id)
+        outputSinks[id] = (operation, events)
+        // The deadline belongs to the operation that set it. A graceful stop that exhausted
+        // its own deadline would otherwise leave that past instant behind for the warned
+        // force-stop that follows, and `settleOutput` would clamp to it and return before the
+        // shutdown's last lines were forwarded (MVP-PLAN.md §2, Quit).
+        defer { token.end(); inFlight = nil; outputSinks[id] = nil; outputSettleDeadline = nil }
         do {
             // Ownership was proven before the journal write suspended, and that answer only
             // described the instant it was taken: the owned process can have exited since and
@@ -617,7 +646,8 @@ public actor EnvironmentLifecycle {
                     // the process hosting the VM share it, so a normal Quit never takes close
                     // to twice what the caller asked for (MVP-PLAN.md §2).
                     let end = ContinuousClock.now.advanced(by: deadline)
-                    try await gracefulStop(operation, environment: environment, deadline: deadline)
+                    outputSettleDeadline = end
+                    try await gracefulStop(operation, environment: environment, deadline: deadline, events: events)
                     // Tart's command has returned, but the process hosting the VM may still be
                     // unwinding, and Quit waits for both. The run itself was launched with a
                     // year-long timeout, so an unbounded wait here would never end.
@@ -635,10 +665,11 @@ public actor EnvironmentLifecycle {
                         // An adopted survivor has no run to end; its process is signaled directly.
                         try await terminateAdopted(live, operation: operation)
                     } else {
-                        try await endUnsupervisedVM(environment, operation: operation)
+                        try await endUnsupervisedVM(environment, operation: operation) { events(.log(operation, $0)) }
                     }
                 }
             }
+            await settleOutput(of: id)
             if let failure = await release(id) {
                 throw GuesthouseError.runtimeStateUnavailable(reason: SanitizedText(Self.describe(failure), limit: 200))
             }
@@ -670,9 +701,12 @@ public actor EnvironmentLifecycle {
     /// the timeout alone: a VM still running is the reported timeout, a VM that is gone is a
     /// stop that completed late, and a state that cannot be read leaves the outcome unknown
     /// rather than unblocking the environment for a retry or a force-stop (MVP-PLAN.md §3).
-    private func gracefulStop(_ operation: OperationID, environment: DevelopmentEnvironment, deadline: Duration) async throws {
+    private func gracefulStop(_ operation: OperationID, environment: DevelopmentEnvironment, deadline: Duration, events: @escaping EventSink) async throws {
         do {
-            try await deps.backend.stop(vmName: environment.tartVMName, deadline: deadline)
+            // The stop command's own output is forwarded: when a shutdown fails or times out,
+            // what it wrote is the explanation diagnostics need, and the VM's own stream says
+            // nothing about it (MVP-PLAN.md §2).
+            try await deps.backend.stop(vmName: environment.tartVMName, deadline: deadline) { events(.log(operation, $0)) }
         } catch TartInvocationError.timedOut {
             // The caller's whole budget is spent by definition on this branch, and when the
             // supervised process is already gone `observe` falls through to `tart list`, whose
@@ -722,10 +756,14 @@ public actor EnvironmentLifecycle {
     /// in which case the requested stopped state is already reached and no command is needed:
     /// `tart stop` would answer `notRunning`, and that would be reported as a failure for a
     /// stop that succeeded (MVP-PLAN.md §2, Quit).
-    func endUnsupervisedVM(_ environment: DevelopmentEnvironment, operation: OperationID) async throws {
+    func endUnsupervisedVM(
+        _ environment: DevelopmentEnvironment,
+        operation: OperationID,
+        onOutput: (@Sendable (RedactedLine) -> Void)? = nil
+    ) async throws {
         switch await observe(environment) {
         case .stopped: return
-        case .running: try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(10))
+        case .running: try await deps.backend.stop(vmName: environment.tartVMName, deadline: .seconds(10), onOutput: onOutput)
         case .unknown: throw GuesthouseError.operationOutcomeUnknown(operation)
         }
     }
@@ -848,11 +886,78 @@ public actor EnvironmentLifecycle {
         if case .uncertain? = verdicts[id] { throw GuesthouseError.vmOwnershipUncertain(id) }
     }
 
-    /// Tart's output over a VM's lifetime is already redacted and is not kept: the stream is
-    /// consumed so the bounded buffer never fills.
-    private func drainOutput(of run: ProcessRun) {
-        Task.detached {
-            for await _ in run.output {}
+    /// Tart's output over a VM's lifetime is already redacted. While an operation on the
+    /// environment is in flight each line is forwarded to it as a `log` event, so the GUI's
+    /// diagnostics see what Tart said; otherwise the stream is consumed so the bounded buffer
+    /// never fills.
+    private func drainOutput(of run: ProcessRun, environment id: EnvironmentID) {
+        drainSequence &+= 1
+        let generation = drainSequence
+        // A drain the previous run left behind can no longer reach an operation, so ending it
+        // here keeps one stuck pipe from holding a task for the life of the service.
+        drains[id]?.cancel()
+        draining[id] = generation
+        currentDrain[id] = generation
+        drains[id] = Task { [weak self] in
+            for await output in run.output {
+                await self?.forward(output, from: id, generation: generation)
+            }
+            // The runner drops output past its byte and line limits and says so on the exit.
+            // A log that simply stops reads as a complete one, so the omission is stated
+            // rather than left for the reader to infer (MVP-PLAN.md §2). The exit is only
+            // waited for when the stream ended on its own: a canceled drain leaves a process
+            // that may still be running, and `exit()` would never return.
+            if !Task.isCancelled, await run.exit().outputTruncated {
+                await self?.forward(.stderr(Self.truncationMarker), from: id, generation: generation)
+            }
+            await self?.finishedDraining(id, generation: generation)
+        }
+    }
+
+    private func finishedDraining(_ id: EnvironmentID, generation: UInt64) {
+        guard draining[id] == generation else { return }
+        draining[id] = nil
+    }
+
+    /// Retires the drain of a run that is no longer supervised, before the next operation
+    /// installs its sink.
+    ///
+    /// A released run's pipe can stay open in an inherited child, so its drain outlives the
+    /// machine it read. `drainOutput` advances the generation for the next run, but an
+    /// operation that starts no run — a stop whose preflight already found the VM stopped, or
+    /// a start that fails before it launches — installs a sink with the old generation still
+    /// current, and the dead machine's lines would be attributed to it (MVP-PLAN.md §4).
+    /// Nothing is waited on either: a drain that may no longer speak has no tail to settle.
+    private func retireReleasedDrain(of id: EnvironmentID) {
+        guard supervised[id] == nil else { return }
+        currentDrain[id] = nil
+        draining[id] = nil
+    }
+
+    /// Waits, briefly, for output already read from the process to reach the operation's
+    /// stream. A process that exits after writing its last lines resumes the exit waiters
+    /// before this task has forwarded them, and those lines are exactly the ones that explain
+    /// the failure. The wait is bounded: a pipe an inherited child still holds open must not
+    /// keep the operation from finishing.
+    private func settleOutput(of id: EnvironmentID, within limit: Duration = .milliseconds(500)) async {
+        guard draining[id] != nil else { return }
+        var deadline = ContinuousClock.now.advanced(by: limit)
+        if let bound = outputSettleDeadline, bound < deadline { deadline = bound }
+        while draining[id] != nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    /// What the log event says when the runner dropped output it could not hold.
+    static let truncationMarker = RedactedLine.runnerTruncatedOutput
+
+    private func forward(_ output: ProcessOutput, from id: EnvironmentID, generation: UInt64) {
+        // A drain outlives the run it reads when a child inherited the pipe. Its lines belong
+        // to the machine that is gone, never to whatever operation started since.
+        guard currentDrain[id] == generation, let sink = outputSinks[id] else { return }
+        switch output {
+        case .stdout(let line), .stderr(let line):
+            sink.events(.log(sink.operation, line))
         }
     }
 
@@ -900,6 +1005,10 @@ public actor EnvironmentLifecycle {
         if let live = supervised.removeValue(forKey: id) {
             live.token.end()
         }
+        // The drain is deliberately left alone. Ending supervision does not forward the lines
+        // already read from the process, and clearing the drain here would let `settleOutput`
+        // return while the tail that explains the failure is still queued. The drain clears
+        // itself when it runs out, and the next run replaces it.
         verdicts[id] = failure == nil ? nil : .uncertain(.identityNotForgotten)
         return failure
     }
@@ -907,6 +1016,7 @@ public actor EnvironmentLifecycle {
     /// Journals the failure under the operation's own kind (the journal refuses a record whose
     /// kind differs from its `started` record), then reports it.
     private func fail(_ operation: OperationID, kind: JournalOperation, environment: EnvironmentID, with error: GuesthouseError, events: EventSink) async {
+        await settleOutput(of: environment)
         do {
             try await deps.store.append(JournalRecord(id: operation, environmentID: environment, operation: kind, timestamp: Date(), outcome: .failed(error)))
             // A recorded outcome that is itself unknown settles nothing: the environment stays

@@ -22,6 +22,11 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
         }
         reply?(.success(.accepted(preparedID)))
     }
+    /// Set once an `.acceptThenStream` script has pushed everything it holds. A test that
+    /// measures what a full stream drops waits for this instead of sleeping: on a loaded
+    /// machine a fixed sleep ends mid-flood, and the consumer then reads a different log.
+    private var streamed = false
+    var hasStreamedEverything: Bool { lock.withLock { streamed } }
     let lock = NSLock()
     var behavior: Behavior
     var incoming: (@Sendable (RuntimeEvent) -> Void)?
@@ -77,6 +82,7 @@ final class FakeTransport: RuntimeTransport, @unchecked Sendable {
                 default: incoming?(event)
                 }
             }
+            lock.withLock { streamed = true }
         case .acceptThenDrop:
             reply(.success(.accepted(OperationID())))
             lock.withLock { self.interrupted }?()
@@ -153,6 +159,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<2000 where !transport.hasStreamedEverything { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.hasStreamedEverything, "the flood finished before the consumer began reading")
+        // Then long enough for the client to work through what it was handed: the bound is
+        // applied as the events are taken in, so a consumer that starts reading mid-flood
+        // measures the wrong thing.
         try await Task.sleep(for: .milliseconds(200))
         let events = try await collect(stream)
         #expect(events.first?.caseName == "accepted", "the operation id is learned before any traffic")
@@ -180,6 +191,11 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<2000 where !transport.hasStreamedEverything { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.hasStreamedEverything, "the flood finished before the consumer began reading")
+        // Then long enough for the client to work through what it was handed: the bound is
+        // applied as the events are taken in, so a consumer that starts reading mid-flood
+        // measures the wrong thing.
         try await Task.sleep(for: .milliseconds(200))
         let events = try await collect(stream)
         let numbers = events.compactMap { event -> Int? in
@@ -330,11 +346,56 @@ private func collected(from stream: AsyncThrowingStream<RuntimeEvent, any Error>
         let transport = FakeTransport(.acceptThenStream(flood))
         let client = RuntimeClient(transport: transport)
         let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        for _ in 0..<2000 where !transport.hasStreamedEverything { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.hasStreamedEverything, "the flood finished before the consumer began reading")
+        // Then long enough for the client to work through what it was handed: the bound is
+        // applied as the events are taken in, so a consumer that starts reading mid-flood
+        // measures the wrong thing.
         try await Task.sleep(for: .milliseconds(200))
         let events = try await collect(stream)
         #expect(events.contains { if case .accepted = $0 { true } else { false } })
         #expect(events.last?.caseName == "completed")
         #expect(events.count <= 2 * RuntimeClient.consumerBufferLimit + 2)
+    }
+
+    @Test func aConsumerThatKeepsUpIsNeverCutOff() async throws {
+        actor Sink {
+            private(set) var logs = 0
+            private(set) var operation: OperationID?
+            func tick() { logs += 1 }
+            func accept(_ id: OperationID) { operation = id }
+        }
+        let transport = FakeTransport(.acceptThenStream([]))
+        let client = RuntimeClient(transport: transport)
+        let stream = client.send(.startEnvironment(EnvironmentID(), StartOptions()))
+        let sink = Sink()
+        let consumer = Task {
+            for try await event in stream {
+                switch event {
+                case .accepted(let id): await sink.accept(id)
+                case .log: await sink.tick()
+                default: break
+                }
+            }
+        }
+        var accepted: OperationID?
+        for _ in 0..<100 where accepted == nil {
+            accepted = await sink.operation
+            if accepted == nil { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        guard let id = accepted else { Issue.record("the operation was never accepted"); return }
+        let incoming = transport.lock.withLock { transport.incoming }
+        let total = RuntimeClient.consumerBufferLimit * 2
+        // Paced like a real operation: the reader is given time to take what was sent, so the
+        // stream's queue never fills. A cap on lifetime traffic would silence the second half.
+        for index in 0..<total {
+            incoming?(.log(id, Redactor().redact(lines: ["line \(index)"])[0]))
+            if index % 32 == 31 { try await Task.sleep(for: .milliseconds(1)) }
+        }
+        incoming?(.completed(id))
+        try await consumer.value
+        let delivered = await sink.logs
+        #expect(delivered > RuntimeClient.consumerBufferLimit, "a consumer that keeps reading is never cut off (\(delivered) of \(total))")
     }
 
     @Test func aFailedSendDoesNotLeaveAnAbandonedMarker() async throws {
