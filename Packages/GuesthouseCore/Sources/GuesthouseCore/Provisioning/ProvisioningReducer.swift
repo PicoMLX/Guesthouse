@@ -328,7 +328,8 @@ public enum ProvisioningReducer: Sendable {
             try requireSame(writer, id)
             return inspect { .unknownOutcome(writer, inspection: $0) }
 
-        case (.persistingCheckpoint(_, let writer, _), .userRetried):
+        case (.persistingCheckpoint(_, let writer, _), .userRetried),
+             (.persistingCheckpoint(_, let writer, _), .inspectionRequested):
             // The operation that reached the checkpoint keeps its identity through the check,
             // for the same reason every other live operation does: it may still be mutating,
             // and an unscoped inspection would adopt a `stillRunning(B)` naming another one

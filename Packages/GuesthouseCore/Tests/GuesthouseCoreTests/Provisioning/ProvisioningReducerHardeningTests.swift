@@ -583,16 +583,17 @@ import Testing
     /// A checkpoint write restored after a relaunch has lost its effect but not the operation
     /// that reached the checkpoint. Retrying the check must keep that identity, or the reducer
     /// adopts whatever the inspection names and leaves the first operation unaccounted for.
-    @Test func aRestoredCheckpointWriteKeepsItsOperationThroughARetry() throws {
+    @Test(arguments: [ProvisioningEvent.userRetried, .inspectionRequested])
+    func aRestoredCheckpointWriteKeepsItsOperationThroughInspection(request: ProvisioningEvent) throws {
         let restored = state(.persistingCheckpoint(checkpoint, operation: operation, write: outstanding))
-        let retried = try ProvisioningReducer.reduce(restored, .userRetried)
+        let retried = try ProvisioningReducer.reduce(restored, request)
         #expect(retried.state.status == .unknownOutcome(operation, inspection: try token(of: retried.effects)))
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
             try ProvisioningReducer.reduce(retried.state, .reconciled(try token(of: retried.effects), .stillRunning(stranger)))
         }
         #expect(try ProvisioningReducer.reduce(retried.state, .reconciled(try token(of: retried.effects), .stillRunning(operation))).state.status == .inProgress(operation))
         // A write reconciliation started has no operation behind it, and still inspects unscoped.
-        let reconciled = try ProvisioningReducer.reduce(state(.persistingCheckpoint(checkpoint, operation: nil, write: outstanding)), .userRetried)
+        let reconciled = try ProvisioningReducer.reduce(state(.persistingCheckpoint(checkpoint, operation: nil, write: outstanding)), request)
         #expect(reconciled.state.status.caseName == "awaitingInspection")
     }
 }
