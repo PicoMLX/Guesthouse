@@ -32,6 +32,8 @@ public actor StateStore {
     private let encoder: JSONEncoder
     private let lineEncoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let directoryBarrier: @Sendable (Int32, String) throws -> Void
+    private let permissionBarrier: @Sendable (Int32, String) throws -> Void
 
     /// What replay has already learned, and how far into the journal it is valid.
     private var journal = JournalState()
@@ -47,8 +49,17 @@ public actor StateStore {
     private(set) var directorySynchronizations = 0
 
     public init(rootURL: URL, migrator: SnapshotMigrator = .standard) throws {
+        try self.init(rootURL: rootURL, migrator: migrator, directoryBarrier: Self.fullySynchronize)
+    }
+
+    /// Internal barriers let recovery tests replace files at the durability boundary.
+    init(rootURL: URL, migrator: SnapshotMigrator = .standard,
+         directoryBarrier: @escaping @Sendable (Int32, String) throws -> Void = StateStore.fullySynchronize,
+         permissionBarrier: @escaping @Sendable (Int32, String) throws -> Void = StateStore.fullySynchronize) throws {
         self.rootURL = rootURL
         self.migrator = migrator
+        self.directoryBarrier = directoryBarrier
+        self.permissionBarrier = permissionBarrier
         encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         lineEncoder = JSONEncoder()
@@ -132,7 +143,7 @@ public actor StateStore {
         // have handed the new file (MVP-PLAN.md §3, "Local storage"). It runs under the lock,
         // not in front of it, for the reason above.
         do {
-            try Self.requirePrivateRegularFile(descriptor, name: Self.snapshotFileName)
+            try Self.requirePrivateRegularFile(descriptor, name: Self.snapshotFileName, synchronize: permissionBarrier)
         } catch {
             close(descriptor)
             unlinkat(directory, tempName, 0)
@@ -207,14 +218,19 @@ public actor StateStore {
             // other file, the next launch reads that one and never sees this operation, which is
             // exactly the blind retry the journal exists to prevent.
             try Self.requireEntryStillNames(descriptor, in: directory, name: Self.journalFileName)
+            if !journalEntryIsDurable {
+                try synchronizeDirectory()
+            }
+            // The directory barrier can outlive a concurrent restore or rename. Recheck both
+            // names after the final barrier, before reporting that this operation can start.
+            try requireAnchoredDirectoryIsCurrent()
+            try Self.requireEntryStillNames(descriptor, in: directory, name: Self.journalFileName)
+            journalEntryIsDurable = true
         } catch {
             // The file no longer matches what was read, so nothing about it is remembered.
             journal = JournalState()
+            journalEntryIsDurable = false
             throw error
-        }
-        if !journalEntryIsDurable {
-            try synchronizeDirectory()
-            journalEntryIsDurable = true
         }
         // The record now ends the file; any torn tail was truncated above.
         journal.adopt(record, bytes: line.count)
@@ -399,7 +415,7 @@ public actor StateStore {
             }
         }
         do {
-            try Self.requirePrivateRegularFile(descriptor, name: name)
+            try Self.requirePrivateRegularFile(descriptor, name: name, synchronize: permissionBarrier)
         } catch {
             close(descriptor)
             throw error
@@ -440,7 +456,10 @@ public actor StateStore {
         return try Self.readAll(descriptor, from: 0, name: name)
     }
 
-    private static func requirePrivateRegularFile(_ descriptor: Int32, name: String) throws {
+    static func requirePrivateRegularFile(
+        _ descriptor: Int32, name: String,
+        synchronize: (Int32, String) throws -> Void = fullySynchronize
+    ) throws {
         var info = stat()
         guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
             throw StateStoreError.insecureDirectory(reason: "\(name) is not a regular file")
@@ -455,13 +474,16 @@ public actor StateStore {
                 throw StateStoreError.insecureDirectory(reason: "\(name) cannot be made private")
             }
         }
-        try removeExtendedACL(descriptor, name: name)
+        try removeExtendedACL(descriptor, name: name, synchronize: synchronize)
     }
 
     /// Removes an inherited or restored access control list. A mode of `0600` says nothing
     /// about an ACL, and `fchmod` does not clear one, so another principal could still read or
     /// write a file the store considers private.
-    static func removeExtendedACL(_ descriptor: Int32, name: String) throws {
+    static func removeExtendedACL(
+        _ descriptor: Int32, name: String,
+        synchronize: (Int32, String) throws -> Void = fullySynchronize
+    ) throws {
         errno = 0
         guard let existing = acl_get_fd(descriptor) else {
             // A file with no list at all is reported as a failure with `ENOENT`. Any other
@@ -471,6 +493,9 @@ public actor StateStore {
             guard errno == ENOENT else {
                 throw StateStoreError.insecureDirectory(reason: "\(name) access control cannot be read")
             }
+            // An earlier attempt may have repaired the mode or removed this list and then
+            // failed its barrier. Visible private metadata is not proof of durable privacy.
+            try synchronize(descriptor, name)
             return
         }
         // Whatever the list holds is replaced rather than inspected. Telling "this list has no
@@ -484,6 +509,9 @@ public actor StateStore {
         guard acl_set_fd(descriptor, empty) == 0 else {
             throw StateStoreError.insecureDirectory(reason: "\(name) cannot be made private")
         }
+        // Read-only snapshot loads and journal replays have no later write to flush these
+        // repairs. This also persists the mode that the file or directory caller set first.
+        try synchronize(descriptor, name)
     }
 
     private static func readAll(_ descriptor: Int32, from offset: off_t, name: String) throws -> Data {
@@ -543,7 +571,7 @@ public actor StateStore {
 
     /// Makes directory entries (a rename, a new file) durable.
     private func synchronizeDirectory() throws {
-        try Self.fullySynchronize(directory, name: rootURL.lastPathComponent)
+        try directoryBarrier(directory, rootURL.lastPathComponent)
         directorySynchronizations += 1
     }
 
