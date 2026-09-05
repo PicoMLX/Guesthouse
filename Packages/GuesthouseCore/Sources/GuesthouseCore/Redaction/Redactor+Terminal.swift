@@ -6,7 +6,7 @@ extension Redactor {
     /// with their payloads, escape sequences with or without intermediate bytes, and bare C0/C1
     /// controls. Tabs and line terminators retain their framing role; other controls are removed
     /// before secret matching so a backspace or styling sequence cannot interrupt a credential.
-    static func stripTerminalEscapes(_ text: String) -> String {
+    public static func stripTerminalEscapes(_ text: String) -> String {
         renderings(of: text).joined
     }
 

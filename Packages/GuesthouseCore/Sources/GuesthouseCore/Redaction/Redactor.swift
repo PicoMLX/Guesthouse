@@ -10,10 +10,10 @@ import RegexBuilder
 ///
 /// Each removed secret is replaced by `[redacted:<kind>]` so a reader can still see what was
 /// there and where.
-struct Redactor: Sendable {
+public struct Redactor: Sendable {
     /// Carried across `redact(line:state:)` calls so a secret split over many lines is
     /// removed in full.
-    struct StreamState: Hashable, Sendable {
+    public struct StreamState: Hashable, Sendable {
         /// Which kind of control string is open, because only an OSC also ends at BEL.
         enum ControlString: Hashable, Sendable {
             case osc
@@ -66,10 +66,10 @@ struct Redactor: Sendable {
         /// A terminal control string opened on an earlier line and has not been terminated yet.
         var openControlString: ControlString?
 
-        init() {}
+        public init() {}
     }
 
-    init() {}
+    public init() {}
 
     static func marker(_ kind: String) -> String { "[redacted:\(kind)]" }
 
