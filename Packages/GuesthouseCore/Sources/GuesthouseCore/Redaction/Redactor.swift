@@ -96,7 +96,8 @@ public struct Redactor: Sendable {
         // `Custom opaqueCredential` through in full. `Accept: */*` is still the next header and
         // still drops the context. Once the value has started, further lines belong to it only
         // by being indented, which is what folding means.
-        let unindentedValue = state.authorizationValueIsOnTheNextLine
+        let authorizationWasAwaitingValue = state.authorizationValueIsOnTheNextLine
+        let unindentedValue = authorizationWasAwaitingValue
             && text.firstMatch(of: Self.patterns.headerLabelStart) == nil
         let authorizationContinuation = state.expectingAuthorizationValue && !blankLine
             && (unindentedValue || text.wholeMatch(of: Self.patterns.foldedContinuation) != nil)
@@ -136,10 +137,16 @@ public struct Redactor: Sendable {
         // A secret label or a code prompt inside the fold opens a context the *next* line
         // completes, and only a scan arms that, so the rules run here for their state alone.
         if authorizationContinuation {
+            if authorizationWasAwaitingValue, Self.valueStartsOnNextLine(text[...]) {
+                state.authorizationValueIsOnTheNextLine = true
+            }
             Self.armPendingContexts(from: text, state: &state)
             return RedactedLine(Self.marker("authorization"))
         }
         if secretContinuation {
+            if state.expectingSecretValue, !Self.valueStartsOnNextLine(text[...]) {
+                state.expectingSecretValue = false
+            }
             Self.armPendingContexts(from: text, state: &state)
             return RedactedLine(Self.marker("secret"))
         }
@@ -155,9 +162,18 @@ public struct Redactor: Sendable {
         // `XXXX-XXXX` would otherwise be returned intact. The line is still scanned, because
         // one credential prompt often follows another and only the scan arms the next state.
         if state.expectingSecretValue || codeExpected {
-            let kind = state.expectingSecretValue ? "secret" : "device-code"
+            let secretExpected = state.expectingSecretValue
+            let kind = secretExpected ? "secret" : "device-code"
             state.expectingSecretValue = false
             _ = Self.applyPatterns(to: text, codeExpected: false, state: &state)
+            // The consumed value may fold onto further indented lines. A lone opening quote
+            // still introduces a value rather than satisfying the pending context.
+            if secretExpected {
+                state.expectingSecretValue = state.expectingSecretValue || Self.valueStartsOnNextLine(text[...])
+                state.expectingSecretContinuation = true
+            } else if Self.valueStartsOnNextLine(text[...]) {
+                state.expectingDeviceCode = true
+            }
             return RedactedLine(Self.marker(kind))
         }
         return RedactedLine(Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state))
@@ -197,9 +213,9 @@ public struct Redactor: Sendable {
     }
 
     /// Removes terminal control sequences: CSI in both encodings, OSC/DCS/APC/PM/SOS strings
-    /// with their payloads, escape sequences with or without intermediate bytes, and bare C1
-    /// controls. Applied before any secret pattern so styling can never split a token or sit on
-    /// a word boundary.
+    /// with their payloads, escape sequences with or without intermediate bytes, and bare C0/C1
+    /// controls. Tabs and line terminators retain their framing role; other controls are removed
+    /// before secret matching so a backspace or styling sequence cannot interrupt a credential.
     public static func stripTerminalEscapes(_ text: String) -> String {
         renderings(of: text).joined
     }
@@ -240,24 +256,65 @@ public struct Redactor: Sendable {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
         }
         var joined = ""
-        var spliced = ""
         var scanned = text.startIndex
-        var splicedAnything = false
+        var joinedByteCount = 0
+        var boundaryOffsets: [Int] = []
         for escape in text.matches(of: patterns.terminalEscape) {
             let literal = text[scanned..<escape.range.lowerBound]
             joined += literal
-            spliced += literal
+            joinedByteCount += literal.utf8.count
             if let before = text[..<escape.range.lowerBound].last, isTokenCharacter(before),
                let after = text[escape.range.upperBound...].first, isTokenCharacter(after) {
-                spliced += splicedBoundary
-                splicedAnything = true
+                boundaryOffsets.append(joinedByteCount)
             }
             scanned = escape.range.upperBound
         }
-        let tail = text[scanned...]
-        joined += tail
-        spliced += tail
-        return (joined, splicedAnything ? spliced : joined)
+        joined += text[scanned...]
+        guard !boundaryOffsets.isEmpty else { return (joined, joined) }
+
+        // A boundary inside a recognized token would let the first scan redact only a valid
+        // prefix. Closing the boundary afterwards cannot recover the remaining suffix. Keep
+        // recognized tokens whole in both readings, while retaining boundaries before tokens
+        // that need them, such as `filename<control>sk-...`.
+        var tokenRanges = joined.matches(of: patterns.githubToken).map(\.range)
+        // These structural spans intentionally omit the leading boundary: the boundary before
+        // a token may itself need restoring. They only protect its interior from splitting;
+        // the actual redaction rules still require their usual boundary.
+        tokenRanges += joined.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map(\.range)
+        tokenRanges += joined.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map(\.range)
+        tokenRanges += joined.matches(of: patterns.jwt).compactMap { match in
+            redactedJWT(match.2) == String(match.2) ? nil : match.range
+        }
+        let byteRanges = tokenRanges.map { range -> Range<Int> in
+            let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: range.lowerBound)
+            let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: range.upperBound)
+            return lower..<upper
+        }.sorted { $0.lowerBound < $1.lowerBound }
+        var mergedRanges: [Range<Int>] = []
+        for range in byteRanges {
+            if let last = mergedRanges.last, range.lowerBound < last.upperBound {
+                mergedRanges[mergedRanges.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                mergedRanges.append(range)
+            }
+        }
+        var spliced = ""
+        var rangeIndex = 0
+        scanned = joined.startIndex
+        for offset in boundaryOffsets {
+            while rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].upperBound <= offset {
+                rangeIndex += 1
+            }
+            if rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].lowerBound < offset {
+                continue
+            }
+            let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
+            spliced += joined[scanned..<boundary]
+            spliced += splicedBoundary
+            scanned = boundary
+        }
+        spliced += joined[scanned...]
+        return (joined, spliced)
     }
 
     /// Runs the rules over a line that is replaced whole, so a secret label or a code prompt
@@ -285,12 +342,13 @@ public struct Redactor: Sendable {
         let lineSeparator = #/\r\n|\n|\r/#
         /// Control strings up to their terminator or the end of the line, then CSI introduced by
         /// `ESC [` or U+009B; any other escape sequence, including the ones with intermediate
-        /// bytes such as `ESC ( B`; and bare C1 controls. OSC is the only control string that
+        /// bytes such as `ESC ( B`; and bare C0/C1 controls, except tabs and line terminators.
+        /// OSC is the only control string that
         /// BEL ends — ECMA-48 gives DCS, APC, PM, and SOS the ST terminator alone — so a BEL
         /// inside one of those is payload. Ending them at it would hand the rest of the payload
         /// to the secret rules as text, and the character in front of a token there defeats the
         /// token rules' word boundary.
-        let terminalEscape = #/(?:\u{1B}\]|\u{9D})[^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{9C}\u{1B}]*(?:\u{9C}|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[ -\/]*[0-~]|[\u{80}-\u{9F}]/#
+        let terminalEscape = #/(?:\u{1B}\]|\u{9D})[^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{9C}\u{1B}]*(?:\u{9C}|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[ -\/]*[0-~]|[\u{00}-\u{08}\u{0B}\u{0C}\u{0E}-\u{1F}\u{7F}-\u{9F}]/#
         /// A control string introducer whose payload reaches the end of the line unterminated.
         /// The first capture is present only for an OSC, whose payload a later BEL also ends.
         let unterminatedControlString = #/(?:(\u{1B}\]|\u{9D})[^\u{07}\u{9C}\u{1B}]*|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{9C}\u{1B}]*)$/#
@@ -347,7 +405,10 @@ public struct Redactor: Sendable {
         /// Nothing that is really userinfo is lost, because a `?` inside one has to be
         /// percent-encoded for the text to be a URL at all.
         /// A URL that reached a log through JSON keeps that encoding's escaped slashes.
-        let urlUserInfo = #/(:(?:\\?\/){2})[^\s\/?#]+@/#
+        /// A network-path reference can omit the scheme (`//user:secret@host`). Its leading
+        /// delimiter must start a value, so doubled slashes inside a path or URL query do not
+        /// turn an ordinary `@` later in that value into userinfo.
+        let urlUserInfo = #/((?::|^|[\s"'(<\[{])(?:\\?\/){2})[^\s\/?#]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Those need a name in front of the label word, and the names come from
@@ -360,7 +421,7 @@ public struct Redactor: Sendable {
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id)[ _-]?)?(?:password|passphrase|passwd|secret|token|api[ _-]?key|private[ _-]?key)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
@@ -393,7 +454,7 @@ public struct Redactor: Sendable {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
             }
-            #/(\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/#
+            #/([ \t]+)(?=\S)/#
         }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
@@ -481,7 +542,7 @@ public struct Redactor: Sendable {
         state.expectingSecretContinuation = labelCarriedAValue
         // The option keeps its name and the spacing that followed it, so an echoed command line
         // still reads as one: `--password [redacted:secret] --verbose`.
-        text = text.replacing(p.secretOption) { match in "\(match.1)\(match.2)\(match.3)\(marker("secret"))" }
+        text = redactSecretOptions(text)
         text = text.replacing(p.codeField) { match in "\(match.1)\(match.2): \(marker("device-code"))" }
         text = text.replacing(p.codePrompt) { match in "\(match.1) \(marker("device-code"))" }
         text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
@@ -511,6 +572,55 @@ public struct Redactor: Sendable {
         input.replacing(patterns.deviceCode) { match in "\(match.1)\(marker("device-code"))" }
     }
 
+    /// Scan argument boundaries before replacing them. Plain shell quotes, quotes escaped by
+    /// a surrounding diagnostic string, and escaped whitespace all belong to the same value.
+    private static func redactSecretOptions(_ text: String) -> String {
+        var result = ""
+        var cursor = text.startIndex
+        while let match = text[cursor...].firstMatch(of: patterns.secretOption) {
+            result += text[cursor..<match.range.lowerBound]
+            let end = secretArgumentEnd(in: text, from: match.range.upperBound)
+            result += "\(match.1)\(match.2)\(match.3)\(marker("secret"))"
+            cursor = end
+        }
+        return result + text[cursor...]
+    }
+
+    private static func secretArgumentEnd(in text: String, from start: String.Index) -> String.Index {
+        var cursor = start
+        var quote: Character?
+        var quoteEscapeDepth = 0
+        while cursor < text.endIndex {
+            if quote == nil, text[cursor].isWhitespace { return cursor }
+            let escapeStart = cursor
+            var escapeDepth = 0
+            while cursor < text.endIndex, text[cursor] == "\\" {
+                escapeDepth += 1
+                text.formIndex(after: &cursor)
+            }
+            guard cursor < text.endIndex else { break }
+            if let delimiter = quote {
+                let closesQuote = quoteEscapeDepth == 0
+                    ? escapeDepth.isMultiple(of: 2)
+                    : escapeDepth == quoteEscapeDepth
+                if text[cursor] == delimiter, closesQuote {
+                    quote = nil
+                }
+            } else if text[cursor] == "\"" || text[cursor] == "'" {
+                if escapeStart == start || escapeDepth.isMultiple(of: 2) {
+                    quote = text[cursor]
+                    // An encoded diagnostic quote can open at the beginning. Within a shell
+                    // word, an odd backslash count escapes the quote as a literal character.
+                    quoteEscapeDepth = escapeStart == start ? escapeDepth : 0
+                }
+            } else if text[cursor].isWhitespace, escapeDepth.isMultiple(of: 2) {
+                return cursor
+            }
+            text.formIndex(after: &cursor)
+        }
+        return text.endIndex
+    }
+
     /// Replaces all three JWS or five JWE segments inside a run of dot-separated segments. A dot is
     /// not a word boundary, so the run can begin with a label such as `session.` and can hold two
     /// adjacent tokens; every segment with at least two following it is tried as a JOSE header, and the
@@ -531,19 +641,65 @@ public struct Redactor: Sendable {
         return segments.joined(separator: ".")
     }
 
-    /// Where the JOSE header begins inside a segment. `_` and `-` are Base64URL characters, so
-    /// the rule above cannot treat them as boundaries without folding a token's own first
-    /// characters into the name in front of it; an untrusted file or cache name is glued on with
-    /// exactly those, as in `artifact_<jwt>`, so the header is looked for after each of them too.
-    /// The name is returned along with it and put back.
+    /// Where the JOSE header begins inside a segment, including a header concatenated directly
+    /// onto an alphanumeric filename. Every candidate suffix belongs to one of four Base64
+    /// alignments. Decode each alignment once and find its balanced JSON-object suffix, instead
+    /// of decoding successively shorter suffixes and doing quadratic work on a long filename.
+    /// A candidate may include JSON whitespace before the opening brace.
     static func joseHeaderStart(_ segment: Substring) -> Substring.Index? {
         if isJOSEHeader(segment) { return segment.startIndex }
-        var start = segment.startIndex
-        while let separator = segment[start...].firstIndex(where: { $0 == "_" || $0 == "-" }) {
-            start = segment.index(after: separator)
-            if start < segment.endIndex, isJOSEHeader(segment[start...]) { return start }
+        var earliestOffset: Int?
+        for alignment in 0..<min(4, segment.utf8.count) {
+            let start = segment.index(segment.startIndex, offsetBy: alignment)
+            guard let data = decodedBase64URL(segment[start...]) else { continue }
+            let bytes = Array(data)
+            guard let objectStart = jsonObjectSuffixStart(bytes) else { continue }
+            var whitespaceStart = objectStart
+            while whitespaceStart > 0, isJSONWhitespace(bytes[whitespaceStart - 1]) {
+                whitespaceStart -= 1
+            }
+            // Four encoded bytes produce three decoded bytes. Only these decoded offsets
+            // correspond to the beginning of a Base64-encoded suffix in this alignment.
+            let decodedStart = ((whitespaceStart + 2) / 3) * 3
+            guard decodedStart <= objectStart,
+                  (try? JSONSerialization.jsonObject(with: Data(bytes[objectStart...]))) is [String: Any]
+            else { continue }
+            let encodedOffset = alignment + (decodedStart / 3) * 4
+            earliestOffset = min(earliestOffset ?? encodedOffset, encodedOffset)
+        }
+        return earliestOffset.map { segment.index(segment.startIndex, offsetBy: $0) }
+    }
+
+    /// Finds the opening brace paired with the final non-whitespace closing brace. JSON parsing
+    /// then validates that suffix; braces inside strings do not participate in the pairing.
+    private static func jsonObjectSuffixStart(_ bytes: [UInt8]) -> Int? {
+        guard var end = bytes.indices.last else { return nil }
+        while isJSONWhitespace(bytes[end]) {
+            guard end > 0 else { return nil }
+            end -= 1
+        }
+        guard bytes[end] == 0x7D else { return nil }
+        var depth = 0
+        var insideString = false
+        for index in stride(from: end, through: 0, by: -1) {
+            let byte = bytes[index]
+            if byte == 0x22 {
+                var slashStart = index
+                while slashStart > 0, bytes[slashStart - 1] == 0x5C { slashStart -= 1 }
+                if (index - slashStart).isMultiple(of: 2) { insideString.toggle() }
+            } else if !insideString {
+                if byte == 0x7D { depth += 1 }
+                if byte == 0x7B {
+                    depth -= 1
+                    if depth == 0 { return index }
+                }
+            }
         }
         return nil
+    }
+
+    private static func isJSONWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
     }
 
     /// Whether a Base64URL segment decodes to a JOSE header object.
@@ -553,13 +709,17 @@ public struct Redactor: Sendable {
 
     /// The required JWE "enc" parameter distinguishes five-segment encrypted tokens from JWS.
     static func joseSegmentCount(_ segment: Substring) -> Int? {
+        guard let data = decodedBase64URL(segment),
+              let header = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return header["enc"] == nil ? 3 : 5
+    }
+
+    private static func decodedBase64URL(_ segment: Substring) -> Data? {
         var base64 = String(segment).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         let remainder = base64.count % 4
         if remainder == 1 { return nil }
         if remainder > 0 { base64 += String(repeating: "=", count: 4 - remainder) }
-        guard let data = Data(base64Encoded: base64),
-              let header = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return header["enc"] == nil ? 3 : 5
+        return Data(base64Encoded: base64)
     }
 }
