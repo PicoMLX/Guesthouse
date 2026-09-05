@@ -52,18 +52,59 @@ public enum LumeVerificationError: Error, Hashable, Sendable {
 
 extension LumeVerificationError: LocalizedError {}
 
+/// Files whose identity and change state must stay coherent across static verification. The
+/// outer app inode alone is insufficient because replacement or an in-place write below
+/// `Contents` does not change it.
+struct LumeBundleFileIdentity: Hashable, Sendable {
+    let bundle: RuntimeStorage.VerificationIdentity
+    let contents: RuntimeStorage.VerificationIdentity
+    let executables: RuntimeStorage.VerificationIdentity
+    let infoPlist: RuntimeStorage.VerificationIdentity
+    let executable: RuntimeStorage.VerificationIdentity
+}
+
 /// Snapshot returned after pinned static verification. This is deliberately not durable launch
 /// authorization: RuntimeKit must coordinate runtime replacement and reverify at the launch
 /// boundary. The executable URL stays internal so clients cannot treat this token as permission
 /// to launch it themselves.
 public struct VerifiedLumeBundle: Hashable, Sendable {
     let bundle: LumeBundle
+    let verifiedFileIdentity: LumeBundleFileIdentity
     public let version: SemanticVersion
     public let teamIdentifier: String
     public let signingIdentifier: String
 
-    init(bundle: LumeBundle, version: SemanticVersion, teamIdentifier: String, signingIdentifier: String) {
+    func matchesVerifiedFiles(in candidate: LumeBundle) -> Bool {
+        candidate.fileIdentity == verifiedFileIdentity
+    }
+
+    init(
+        bundle: LumeBundle,
+        version: SemanticVersion,
+        teamIdentifier: String,
+        signingIdentifier: String
+    ) throws(LumeVerificationError) {
+        guard let verifiedFileIdentity = bundle.fileIdentity else {
+            throw .insecureBundleLayout
+        }
+        self.init(
+            bundle: bundle,
+            verifiedFileIdentity: verifiedFileIdentity,
+            version: version,
+            teamIdentifier: teamIdentifier,
+            signingIdentifier: signingIdentifier
+        )
+    }
+
+    fileprivate init(
+        bundle: LumeBundle,
+        verifiedFileIdentity: LumeBundleFileIdentity,
+        version: SemanticVersion,
+        teamIdentifier: String,
+        signingIdentifier: String
+    ) {
         self.bundle = bundle
+        self.verifiedFileIdentity = verifiedFileIdentity
         self.version = version
         self.teamIdentifier = teamIdentifier
         self.signingIdentifier = signingIdentifier
@@ -81,8 +122,33 @@ public struct LumeBundle: Hashable, Sendable {
         self.url = url
     }
 
-    var executable: URL { url.appending(path: "Contents/MacOS/\(LumePin.executableName)") }
-    private var infoPlist: URL { url.appending(path: "Contents/Info.plist") }
+    private var contents: URL { url.appending(path: "Contents") }
+    private var executables: URL { contents.appending(path: "MacOS") }
+    var executable: URL { executables.appending(path: LumePin.executableName) }
+    private var infoPlist: URL { contents.appending(path: "Info.plist") }
+
+    /// Captures the critical metadata and launch path only when every item has its expected type
+    /// and none is a symbolic link. Full signature validation still runs before every launch.
+    var fileIdentity: LumeBundleFileIdentity? {
+        guard Self.isUnlinkedItem(url, kind: S_IFDIR),
+              Self.isUnlinkedItem(contents, kind: S_IFDIR),
+              Self.isUnlinkedItem(executables, kind: S_IFDIR),
+              Self.isUnlinkedItem(infoPlist, kind: S_IFREG),
+              Self.isUnlinkedItem(executable, kind: S_IFREG),
+              let bundleIdentity = RuntimeStorage.verificationIdentity(of: url),
+              let contentsIdentity = RuntimeStorage.verificationIdentity(of: contents),
+              let executablesIdentity = RuntimeStorage.verificationIdentity(of: executables),
+              let infoPlistIdentity = RuntimeStorage.verificationIdentity(of: infoPlist),
+              let executableIdentity = RuntimeStorage.verificationIdentity(of: executable)
+        else { return nil }
+        return LumeBundleFileIdentity(
+            bundle: bundleIdentity,
+            contents: contentsIdentity,
+            executables: executablesIdentity,
+            infoPlist: infoPlistIdentity,
+            executable: executableIdentity
+        )
+    }
 
     static func expectedLocation(in storage: RuntimeStorage) -> URL {
         storage.url(for: .runtime).appending(path: LumePin.releaseTag).appending(path: LumePin.bundleName)
@@ -131,12 +197,7 @@ public struct LumeBundle: Hashable, Sendable {
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw .bundleMissing(path: url.path)
         }
-        guard Self.isUnlinkedItem(url, kind: S_IFDIR),
-              Self.isUnlinkedItem(url.appending(path: "Contents"), kind: S_IFDIR),
-              Self.isUnlinkedItem(url.appending(path: "Contents/MacOS"), kind: S_IFDIR),
-              Self.isUnlinkedItem(infoPlist, kind: S_IFREG),
-              Self.isUnlinkedItem(executable, kind: S_IFREG)
-        else { throw .insecureBundleLayout }
+        guard let verifiedFileIdentity = fileIdentity else { throw .insecureBundleLayout }
         guard let values = infoDictionary else { throw .infoPlistUnreadable }
         let identifier = values["CFBundleIdentifier"] as? String ?? ""
         guard identifier == LumePin.bundleIdentifier else {
@@ -155,7 +216,11 @@ public struct LumeBundle: Hashable, Sendable {
         var staticCode: SecStaticCode?
         let created = SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode)
         guard created == errSecSuccess, let code = staticCode else { throw .signatureInvalid(status: created) }
-        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate)
+        // Validate signed helpers/frameworks as well as the outer app. The current pin has no
+        // nested executable, but a future corrected build must not silently weaken this gate.
+        let flags = SecCSFlags(
+            rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode
+        )
         let validity = SecStaticCodeCheckValidityWithErrors(code, flags, nil, nil)
         guard validity == errSecSuccess else { throw .signatureInvalid(status: validity) }
 
@@ -188,15 +253,29 @@ public struct LumeBundle: Hashable, Sendable {
         guard signingIdentifier == LumePin.bundleIdentifier else {
             throw .signingIdentifierMismatch(found: SanitizedText(signingIdentifier, limit: 80))
         }
+        // The Security and digest calls above inspect several paths. Reject a mixed snapshot if
+        // any critical directory, metadata file, or executable was replaced while they ran.
+        guard fileIdentity == verifiedFileIdentity else {
+            throw .insecureBundleLayout
+        }
         return VerifiedLumeBundle(
             bundle: self,
+            verifiedFileIdentity: verifiedFileIdentity,
             version: version,
             teamIdentifier: teamIdentifier,
             signingIdentifier: signingIdentifier
         )
     }
 
-    public static func verifyArchiveDigest(of file: URL, expected: String = LumePin.archiveSHA256) throws(LumeVerificationError) {
+    /// Verifies exactly the archive digest pinned by this RuntimeKit build. Production callers
+    /// cannot substitute another digest and accidentally turn the pin into caller-controlled data.
+    public static func verifyArchiveDigest(of file: URL) throws(LumeVerificationError) {
+        try verifyArchiveDigest(of: file, expected: LumePin.archiveSHA256)
+    }
+
+    /// Internal override used by tests that exercise the streaming digest implementation without
+    /// manufacturing a file whose contents match the release pin.
+    static func verifyArchiveDigest(of file: URL, expected: String) throws(LumeVerificationError) {
         let digest = try sha256(of: file, unreadable: .archiveUnreadable)
         guard digest == expected.lowercased() else { throw .digestMismatch }
     }

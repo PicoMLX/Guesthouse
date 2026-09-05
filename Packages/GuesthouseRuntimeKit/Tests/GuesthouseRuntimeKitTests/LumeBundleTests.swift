@@ -4,6 +4,17 @@ import Security
 import Testing
 @testable import GuesthouseRuntimeKit
 
+private func signAdHoc(_ bundle: URL, identifier: String) async throws {
+    let run = try await ProcessRunner().run(ProcessInvocation(
+        executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+        arguments: ["--force", "--sign", "-", "--identifier", identifier, bundle.path],
+        timeout: .seconds(30)
+    ))
+    for await _ in run.output {}
+    let exit = await run.exit()
+    precondition(exit.succeeded, "ad-hoc signing failed")
+}
+
 private struct DummyLumeBundle {
     let url: URL
 
@@ -34,14 +45,7 @@ private struct DummyLumeBundle {
             )
         }
         if sign {
-            let run = try await ProcessRunner().run(ProcessInvocation(
-                executable: URL(fileURLWithPath: "/usr/bin/codesign"),
-                arguments: ["--force", "--sign", "-", "--identifier", identifier, url.path],
-                timeout: .seconds(30)
-            ))
-            for await _ in run.output {}
-            let exit = await run.exit()
-            precondition(exit.succeeded, "ad-hoc signing failed")
+            try await signAdHoc(url, identifier: identifier)
         }
     }
 }
@@ -201,6 +205,58 @@ private struct DummyLumeBundle {
         }
     }
 
+    @Test func verifiedTokenTracksTheCriticalMetadataAndExecutableFiles() async throws {
+        let fixture = try await DummyLumeBundle(root: root.appending(path: "identity-snapshot"))
+        let bundle = LumeBundle(url: fixture.url)
+        let verified = try VerifiedLumeBundle(
+            bundle: bundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+        #expect(verified.matchesVerifiedFiles(in: bundle))
+
+        let originalExecutable = fixture.url.appending(path: "Contents/MacOS/lume-before-replacement")
+        try FileManager.default.moveItem(at: bundle.executable, to: originalExecutable)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: bundle.executable)
+
+        #expect(!verified.matchesVerifiedFiles(in: bundle))
+        #expect(RuntimeStorage.fileIdentity(of: fixture.url) == verified.verifiedFileIdentity.bundle.coordination)
+    }
+
+    @Test func verifiedTokenRejectsInPlaceWritesThatKeepTheSameInode() async throws {
+        let executableFixture = try await DummyLumeBundle(root: root.appending(path: "in-place-executable"))
+        let executableBundle = LumeBundle(url: executableFixture.url)
+        let executableToken = try VerifiedLumeBundle(
+            bundle: executableBundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+        let executableIdentity = RuntimeStorage.fileIdentity(of: executableBundle.executable)
+        let executableHandle = try FileHandle(forWritingTo: executableBundle.executable)
+        try executableHandle.write(contentsOf: Data([0]))
+        try executableHandle.close()
+        #expect(RuntimeStorage.fileIdentity(of: executableBundle.executable) == executableIdentity)
+        #expect(!executableToken.matchesVerifiedFiles(in: executableBundle))
+
+        let plistFixture = try await DummyLumeBundle(root: root.appending(path: "in-place-plist"))
+        let plistBundle = LumeBundle(url: plistFixture.url)
+        let plistToken = try VerifiedLumeBundle(
+            bundle: plistBundle,
+            version: LumePin.version,
+            teamIdentifier: LumePin.teamIdentifier,
+            signingIdentifier: LumePin.bundleIdentifier
+        )
+        let plistURL = plistFixture.url.appending(path: "Contents/Info.plist")
+        let plistIdentity = RuntimeStorage.fileIdentity(of: plistURL)
+        let plistHandle = try FileHandle(forWritingTo: plistURL)
+        try plistHandle.write(contentsOf: Data([0]))
+        try plistHandle.close()
+        #expect(RuntimeStorage.fileIdentity(of: plistURL) == plistIdentity)
+        #expect(!plistToken.matchesVerifiedFiles(in: plistBundle))
+    }
+
     @Test func adHocSignatureCannotSatisfyThePinnedDeveloperIDRequirement() async throws {
         let adHoc = try await DummyLumeBundle(root: root.appending(path: "adhoc"), sign: true)
         do {
@@ -213,6 +269,47 @@ private struct DummyLumeBundle {
         }
     }
 
+    @Test func invalidNestedCodeIsRejectedBeforeThePinnedRequirement() async throws {
+        let outer = try await DummyLumeBundle(root: root.appending(path: "invalid-nested-code"))
+        let helper = outer.url.appending(path: "Contents/Helpers/Helper.app")
+        let helperContents = helper.appending(path: "Contents")
+        let helperExecutable = helperContents.appending(path: "MacOS/Helper")
+        let sealedResource = helperContents.appending(path: "Resources/value.txt")
+        try FileManager.default.createDirectory(
+            at: helperExecutable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: sealedResource.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: helperExecutable)
+        try Data("before".utf8).write(to: sealedResource)
+        try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "com.guesthouse.fixture.helper",
+            "CFBundleExecutable": "Helper",
+            "CFBundlePackageType": "APPL",
+        ], format: .xml, options: 0).write(to: helperContents.appending(path: "Info.plist"))
+        try await signAdHoc(helper, identifier: "com.guesthouse.fixture.helper")
+        try await signAdHoc(outer.url, identifier: LumePin.bundleIdentifier)
+        try Data("after-tampering".utf8).write(to: sealedResource)
+
+        var staticCode: SecStaticCode?
+        #expect(SecStaticCodeCreateWithPath(outer.url as CFURL, [], &staticCode) == errSecSuccess)
+        let code = try #require(staticCode)
+        let shallowFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate)
+        #expect(SecStaticCodeCheckValidityWithErrors(code, shallowFlags, nil, nil) == errSecSuccess)
+
+        do {
+            _ = try LumeBundle(url: outer.url).verify()
+            Issue.record("tampered nested code must not verify")
+        } catch LumeVerificationError.signatureInvalid(let status) {
+            #expect(status != errSecSuccess)
+        } catch {
+            Issue.record("nested-code validation failed at the wrong gate: \(error)")
+        }
+    }
+
     @Test func archiveDigestIsStreamedAndCompared() throws {
         let archive = root.appending(path: "archive.bin")
         try Data("hello".utf8).write(to: archive)
@@ -222,6 +319,9 @@ private struct DummyLumeBundle {
         )
         #expect(throws: LumeVerificationError.digestMismatch) {
             try LumeBundle.verifyArchiveDigest(of: archive, expected: String(repeating: "0", count: 64))
+        }
+        #expect(throws: LumeVerificationError.digestMismatch) {
+            try LumeBundle.verifyArchiveDigest(of: archive)
         }
         #expect(throws: LumeVerificationError.archiveUnreadable) {
             try LumeBundle.verifyArchiveDigest(of: root.appending(path: "missing.bin"))
