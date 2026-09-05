@@ -332,6 +332,17 @@ import Testing
         #expect(redactor.redact("user code: WDJB.MJHT") == "user code: [redacted:device-code]")
     }
 
+    /// A prompt's value is as opaque as a `user_code` field's, so the tail a forced cut leaves
+    /// in the next record matches nothing on its own shape: the prompt has to go on removing
+    /// it the way the field rule does.
+    @Test func aCodePromptValueIsRemovedThroughAForcedCut() {
+        var state = Redactor.StreamState()
+        let first = redactor.redact(line: "verification code: opaque-value", continuesPreviousRecord: false, state: &state)
+        let second = redactor.redact(line: ",rest-of-the-value", continuesPreviousRecord: true, state: &state)
+        #expect(first.text == "verification code: [redacted:device-code]")
+        #expect(second.text == "[redacted:device-code]", "the rest of the code left the redaction layer verbatim")
+    }
+
     @Test func anOrdinaryMentionOfACodeDoesNotArmTheNextLine() {
         let out = redactor.redact(lines: ["process exited with code 1", "tart: could not find the VM"]).map(\.text)
         #expect(out == ["process exited with code 1", "tart: could not find the VM"])
