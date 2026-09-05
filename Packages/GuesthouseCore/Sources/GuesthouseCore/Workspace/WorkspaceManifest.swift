@@ -56,6 +56,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     public func validate(stage: ValidationStage = .supported, in environment: EnvironmentID? = nil) throws(WorkspaceValidationError) {
         guard schemaVersion == SchemaVersion.current else { throw .unsupportedSchemaVersion(schemaVersion.rawValue) }
         if let environment, environmentID != environment { throw .environmentMismatch }
+        guard !Self.looksLikeCredential(name.rawValue) else { throw .credentialInWorkspaceName }
         let apps = repositories.filter { $0.role == .app }
         guard apps.count == 1 else { throw .appRepositoryCount(apps.count) }
 
@@ -63,6 +64,12 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
         var seenRemotes: Set<String> = []
         var seenIdentities: Set<String> = []
         for repository in repositories {
+            // These identifiers are persisted in the §6 manifest just like branches and
+            // schemes. Check them before identity/collision errors can carry their raw names.
+            guard !Self.looksLikeCredential(repository.remote.owner),
+                  !Self.looksLikeCredential(repository.remote.name),
+                  !Self.looksLikeCredential(repository.checkoutName.rawValue)
+            else { throw .credentialInRepositoryIdentifier }
             // Package identity is settled before the checkout-name and remote checks, because
             // two packages that share a repository name also share their required checkout
             // name: reporting that as a duplicate folder would ask for a rename that the
@@ -146,9 +153,11 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
 
     /// Whether the redaction layer recognizes a credential in this value.
     ///
-    /// The bare device-code shape is excluded on purpose: without context it also matches a
-    /// plausible scheme name such as `PROD-2024`, and refusing that would reject a workspace
-    /// Xcode builds. Every other pattern names something no `.xcscheme` file is called.
+    /// A bare device-code shape is ambiguous with a configured identifier such as `PROD-2024`.
+    /// Section 6 requires the actual chosen scheme, ref, and path; another lexical rule cannot
+    /// establish authentication provenance. This exception does not weaken other shared
+    /// credential rules or log/export redaction. Authentication output must never populate
+    /// manifest identifier fields; validation cannot infer every arbitrary secret from text.
     static func looksLikeCredential(_ text: String) -> Bool {
         Redactor().redact(fieldValue: text) != Redactor.applyDeviceCodePattern(to: text)
     }
@@ -286,6 +295,9 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case duplicateRemote(String)
     case unsupportedHost(String)
     case taskBranchCollidesWithBaseBranch(String)
+    /// Refusals carry no untrusted identifier, including in their reflected description.
+    case credentialInWorkspaceName
+    case credentialInRepositoryIdentifier
     /// A branch name the redaction layer reads as a credential, named by its checkout.
     case credentialInBranchName(String)
     case missingBaseSHA(String)
@@ -319,6 +331,10 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "Repositories on \(GuesthouseError.sanitize(host)) are not supported yet; only github.com is."
         case .taskBranchCollidesWithBaseBranch(let name):
             "The task branch for \(GuesthouseError.sanitize(name)) cannot exist alongside its base branch. Choose a branch name that is not the base branch, its case variant, or a prefix of it."
+        case .credentialInWorkspaceName:
+            "The workspace name reads as a credential, which Guesthouse does not save into the workspace file. Choose a name that is not a secret."
+        case .credentialInRepositoryIdentifier:
+            "A repository address or checkout name reads as a credential, which Guesthouse does not save into the workspace file. Choose a repository and checkout name that do not contain secrets."
         case .credentialInBranchName(let name):
             "A branch chosen for \(GuesthouseError.sanitize(name)) reads as a token, and Guesthouse does not save credentials into the workspace file. Choose branches whose names are not secrets."
         case .missingBaseSHA(let name):
