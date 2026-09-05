@@ -36,4 +36,24 @@ import Testing
         let input = Array(repeating: "\"payload\": " + value, count: 200).joined(separator: ", ")
         #expect(!Redactor().redact(input).contains("syntheticValue"))
     }
+
+    @Test(arguments: [",", ";", "]", "}"])
+    func escapedDelimitersDoNotReleaseAnAmbiguousCredentialTail(delimiter: String) {
+        let input = #"password: \"first\" \"# + delimiter + " syntheticTail"
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test func aClosedEncodedValueCannotConsumeTheNextPhysicalRecord() throws {
+        var input = #"{"password":"#
+        for _ in 0..<2 { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        #expect(Redactor().redact(input + "\nFinished").hasSuffix("\nFinished"))
+    }
+
+    @Test(arguments: ["--password", "--token", "--api-key"])
+    func twiceRepresentedPythonArgvKeepsItsOptionValuePair(option: String) {
+        let input = "'\"[\\'" + option + "\\', \\'OpaqueSynthetic987\\', \\'--verbose\\']\"'"
+        let output = Redactor().redact(input)
+        #expect(!output.contains("OpaqueSynthetic987"))
+        #expect(output.contains("--verbose"))
+    }
 }

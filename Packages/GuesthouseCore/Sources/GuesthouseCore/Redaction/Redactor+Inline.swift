@@ -25,7 +25,8 @@ extension Redactor {
             var nestedState = StreamState()
             let nested = applyPatterns(to: normalized, codeExpected: false, state: &nestedState,
                                        encodingDepth: encodingDepth + 1)
-            mergePendingContexts(from: nestedState, into: &quotedState)
+            // The encoded value has already closed. Its decoded, possibly truncated contents
+            // cannot acquire a value from a later unrelated physical record.
             // Do not attempt to splice decoded offsets back into multiply escaped text.
             // Hide the containing value if the decoded reading adds credential evidence.
             if nested != normalized { return (marker("secret"), quotedState) }
