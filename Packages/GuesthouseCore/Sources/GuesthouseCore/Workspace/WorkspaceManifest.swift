@@ -128,6 +128,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
               sharedScheme.utf8.count <= Self.maximumSchemeBytes, !Self.looksLikeCredential(sharedScheme)
         else { throw .invalidScheme(sharedScheme) }
         guard testDestination.isValid else { throw .invalidTestDestination(testDestination.specifier) }
+        guard createdAt.timeIntervalSinceReferenceDate.isFinite, updatedAt.timeIntervalSinceReferenceDate.isFinite else { throw .invalidTimestamp }
         // Last, so a structural problem is reported before an incomplete clone is.
         if stage == .supported, let unclone = repositories.first(where: { $0.baseSHA == nil }) {
             throw .missingBaseSHA(unclone.checkoutName.rawValue)
@@ -165,13 +166,15 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
 
     /// Control, format, and separator characters cannot travel in an argument vector, and
     /// separators would let one value render as several lines in the GUI. Noncharacters are
-    /// reserved against interchange and would reach the confirmation UI as replacement glyphs.
+    /// reserved against interchange, reach the confirmation UI as replacement glyphs, and
+    /// cannot be serialized into the workspace file.
     static func containsControlCharacters(_ text: String) -> Bool {
         text.unicodeScalars.contains { scalar in
             switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator: true
-            default: scalar.properties.isNoncharacterCodePoint
+            case .control, .format, .lineSeparator, .paragraphSeparator: return true
+            default: break
             }
+            return scalar.properties.isNoncharacterCodePoint || scalar.value == 0xFFFE || scalar.value == 0xFFFF
         }
     }
 }
@@ -293,6 +296,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case invalidAppProjectPath(String)
     case invalidScheme(String)
     case invalidTestDestination(String)
+    /// A timestamp that cannot be encoded.
+    case invalidTimestamp
     case checkoutNameDoesNotMatchRepository(checkout: String, repository: String)
     /// A package repository whose own name cannot be a checkout directory, so the identity
     /// rule can never be satisfied by renaming anything.
@@ -302,6 +307,12 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
     case environmentMismatch
     /// The manifest names a workspace other than the directory that contained it.
     case nameDoesNotMatchDirectory(manifest: String, directory: String)
+    /// The app repository builds through a workspace of its own, which the wrapper would not
+    /// reproduce (MVP-PLAN.md §6).
+    case unsupportedAppWorkspace(String)
+    /// The workspace's own `workspace.json` would be larger than the reader accepts, so the
+    /// workspace could be created but never opened again.
+    case manifestTooLarge(bytes: Int)
     /// The file could not be read as a workspace at all.
     case malformed(reason: SanitizedText)
 
@@ -333,6 +344,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "\(GuesthouseError.sanitize(destination)) is not a valid test destination."
         case .malformed(let reason):
             "The workspace file in the development Mac could not be read (\(reason.value)). Guesthouse can rebuild it from the repositories you selected."
+        case .invalidTimestamp:
+            "The workspace carries a timestamp that cannot be saved. This is a bug in Guesthouse."
         case .checkoutNameDoesNotMatchRepository(let checkout, let repository):
             "The package repository \(GuesthouseError.sanitize(repository)) must be checked out as \(GuesthouseError.sanitize(repository)), not \(GuesthouseError.sanitize(checkout)), or Xcode will not use the local copy."
         case .unsupportedPackageName(let repository):
@@ -343,6 +356,10 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError 
             "This workspace file belongs to another development Mac, so Guesthouse will not open it here."
         case .nameDoesNotMatchDirectory(let manifest, let directory):
             "The workspace in the folder \(GuesthouseError.sanitize(directory)) calls itself \(GuesthouseError.sanitize(manifest)), so Guesthouse cannot tell which workspace it is."
+        case .unsupportedAppWorkspace(let workspace):
+            "The app repository builds through its own workspace \(GuesthouseError.sanitize(workspace)), whose other projects and schemes Guesthouse cannot reproduce yet. Choose an app that builds from a committed .xcodeproj and shared scheme."
+        case .manifestTooLarge(let bytes):
+            "This workspace describes more repositories, or longer branch names, than a workspace file can hold (\(bytes) bytes, and the limit is \(WorkspaceManifest.maximumEncodedSize)). Remove some repositories from the workspace, then try again."
         }
     }
 
