@@ -8,7 +8,8 @@ import Testing
     func encodedCodeValuesKeepTheirCompleteQuotedPayload(quote: String) throws {
         let value = quote + "synthetic secret value" + quote
         let match = try #require(("Your code is " + value).firstMatch(of: Redactor.patterns.declarativeCodePrompt))
-        #expect(match.2 == value)
+        let captured = try #require(match.2)
+        #expect(captured == value)
     }
 
     @Test(arguments: [
