@@ -61,18 +61,17 @@ public enum XcodeImportValidator {
 
     /// Validates the location as an Xcode bundle and describes it.
     public static func candidate(at location: URL, expectedBundleIdentifier: String? = nil) throws(GuesthouseError) -> XcodeCandidate {
-        guard location.isFileURL, !location.pathComponents.contains("..") else { throw .invalidRequest(.pathEscapesAllowedRoot) }
-        let resolved = location.standardizedFileURL.resolvingSymlinksInPath()
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory), isDirectory.boolValue,
-              resolved.pathExtension == "app"
-        else { throw .xcodeSelectionRejected(.notAnApplication) }
+        guard location.isFileURL, !location.pathComponents.contains(where: { $0 == ".." || $0.utf8.contains(0) }) else {
+            throw .invalidRequest(.pathEscapesAllowedRoot)
+        }
+        let canonicalPath = try canonicalBundlePath(at: location)
+        let resolved = URL(fileURLWithPath: canonicalPath)
+        guard resolved.pathExtension == "app" else { throw .xcodeSelectionRejected(.notAnApplication) }
 
         // The bundle is opened once and every metadata read goes through that descriptor. A
         // bundle in a user-writable place can be renamed or replaced between two reads, and
         // reopening its path would let validation read one bundle while reporting another.
-        let bundle = open(resolved.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard bundle >= 0 else { throw .xcodeSelectionRejected(.notAnApplication) }
+        let bundle = try openCanonicalBundle(at: canonicalPath)
         defer { close(bundle) }
 
         guard let info = try plist(["Contents", "Info.plist"], in: bundle) else { throw .xcodeSelectionRejected(.notAnApplication) }
@@ -112,6 +111,23 @@ public enum XcodeImportValidator {
         // the validation (MVP-PLAN.md §2 step 5).
         guard stillNames(bundle, at: resolved) else { throw .xcodeSelectionRejected(.unresolvable) }
         return XcodeCandidate(version: safeVersion, build: safeBuild, path: resolved.path, sizeEstimateBytes: measured)
+    }
+
+    /// Resolves existing aliases without Foundation's normalization of `/private/tmp` and
+    /// `/private/var` back to the symlinked `/tmp` and `/var` spellings.
+    static func canonicalBundlePath(at location: URL) throws(GuesthouseError) -> String {
+        guard let path = realpath(location.path, nil) else { throw .xcodeSelectionRejected(.notAnApplication) }
+        defer { free(path) }
+        return String(cString: path)
+    }
+
+    /// Opens an already-canonical path without following a symlink in any component. The
+    /// kernel enforces this during the open, including an ancestor replaced after `realpath`.
+    /// Unlike `O_NOFOLLOW`, `O_NOFOLLOW_ANY` also protects ancestors (MVP-PLAN.md §3).
+    static func openCanonicalBundle(at path: String) throws(GuesthouseError) -> Int32 {
+        let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
+        guard descriptor >= 0 else { throw .xcodeSelectionRejected(.notAnApplication) }
+        return descriptor
     }
 
     /// Whether `url` still names the very directory `descriptor` holds open.

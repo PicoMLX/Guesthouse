@@ -56,7 +56,7 @@ import Testing
         let candidate = try XcodeImportValidator.candidate(at: url, expectedBundleIdentifier: XcodeImportValidator.xcodeBundleIdentifier)
         #expect(candidate.version == "26.6")
         #expect(candidate.build == "17F113")
-        #expect(candidate.path == url.standardizedFileURL.resolvingSymlinksInPath().path)
+        #expect(URL(fileURLWithPath: candidate.path).resolvingSymlinksInPath() == url.standardizedFileURL.resolvingSymlinksInPath())
         #expect((candidate.sizeEstimateBytes ?? 0) >= 4096)
     }
 
@@ -282,12 +282,55 @@ import Testing
         #expect(await scan.value == nil, "a scan whose answer nobody will receive stops reading")
     }
 
+    @Test func aBundleAncestorReplacedAfterCanonicalizationIsRefused() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let selected = try bundle(name: "Selected/Xcode.app")
+        let elsewhere = try bundle(name: "Elsewhere/Xcode.app", version: "99.1")
+        let path = try XcodeImportValidator.canonicalBundlePath(at: selected)
+        try FileManager.default.moveItem(at: selected.deletingLastPathComponent(), to: root.appending(path: "Saved"))
+        try FileManager.default.createSymbolicLink(at: selected.deletingLastPathComponent(), withDestinationURL: elsewhere.deletingLastPathComponent())
+
+        // The old leaf-only flag follows the substituted ancestor, and the final identity
+        // check agrees with that wrong bundle because the redirected path still names it.
+        let legacy = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(legacy >= 0)
+        defer { close(legacy) }
+        #expect(XcodeImportValidator.stillNames(legacy, at: URL(fileURLWithPath: path)))
+        #expect(throws: GuesthouseError.xcodeSelectionRejected(.notAnApplication)) {
+            let descriptor = try XcodeImportValidator.openCanonicalBundle(at: path)
+            close(descriptor)
+        }
+    }
+
+    @Test(arguments: ["/tmp", "/var/tmp"])
+    func macOSAliasAncestorsRemainUsable(parent: String) throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let real = try bundle()
+        let directory = URL(fileURLWithPath: parent).appending(path: "XcodeAliasTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let alias = directory.appending(path: "Selected")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        let candidate = try XcodeImportValidator.candidate(at: alias.appending(path: "Xcode.app"))
+        #expect(candidate.version == "26.6")
+        #expect(URL(fileURLWithPath: candidate.path).resolvingSymlinksInPath() == real.resolvingSymlinksInPath())
+    }
+
+    @Test func aNULInTheSelectedLocationCannotValidateThePrefix() throws {
+        let real = try bundle()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let malformed = URL(fileURLWithPath: real.path + "\u{0}.app")
+        #expect(throws: GuesthouseError.invalidRequest(.pathEscapesAllowedRoot)) {
+            try XcodeImportValidator.candidate(at: malformed)
+        }
+    }
+
     @Test func symlinksAreResolvedToTheRealBundle() throws {
         let real = try bundle(name: "Real.app")
         let link = root.appending(path: "Link.app")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
         let candidate = try XcodeImportValidator.candidate(at: link)
-        #expect(candidate.path == real.standardizedFileURL.resolvingSymlinksInPath().path)
+        #expect(URL(fileURLWithPath: candidate.path).resolvingSymlinksInPath() == real.standardizedFileURL.resolvingSymlinksInPath())
         #expect(throws: GuesthouseError.invalidRequest(.pathEscapesAllowedRoot)) {
             try XcodeImportValidator.candidate(at: root.appending(path: "../Real.app"))
         }
