@@ -75,4 +75,13 @@ import Testing
         let input = parts.0 + #"password: \"first\""# + parts.1 + ", syntheticTail"
         #expect(!Redactor().redact(input).contains("syntheticTail"))
     }
+
+    @Test(arguments: [3, 7, 15])
+    func encodedSerializedArraysRetainOptionValuePairing(depth: Int) {
+        let quote = String(repeating: "\\", count: depth) + "\""
+        let input = "[" + quote + "--password" + quote + ", " + quote + "syntheticPassword" + quote + ", " + quote + "--verbose" + quote + "]"
+        let output = Redactor().redact(input)
+        #expect(!output.contains("syntheticPassword"))
+        #expect(output.contains("--verbose"))
+    }
 }
