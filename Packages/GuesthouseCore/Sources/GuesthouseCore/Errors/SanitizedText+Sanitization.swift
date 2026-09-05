@@ -31,11 +31,18 @@ extension SanitizedText {
         // would otherwise split it out of the redactor's reach.
         let spliceSafe = Redactor.redactEscapeSplicedRuns(bounded)
         let originalStripped = Redactor.stripTerminalEscapes(spliceSafe)
-        let normalizationShortened = originalStripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar).count
-            < limit + Self.sanitizeLookahead
+        let joined = String(String.UnicodeScalarView(originalStripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
+        let normalizationShortened = joined.unicodeScalars.count < limit + Self.sanitizeLookahead
         let credentialReading = spliceSafe.replacing(#/[\u{000B}\u{000C}\u{0085}\u{2028}\u{2029}]/#, with: "\n")
         let stripped = Redactor.stripTerminalEscapes(Redactor().redact(fieldValue: credentialReading))
-        var normalized = String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar)))
+        var normalized = Redactor().redact(fieldValue: String(String.UnicodeScalarView(stripped.unicodeScalars.filter(Redactor.sanitizationKeepsScalar))))
+        let joinedRedacted = Redactor().redact(fieldValue: joined)
+        // A raw scan may replace a prefix before normalization assembles its secret suffix.
+        // Neither transformed string retains offsets into the other. If the normalized reading
+        // finds credential evidence and disagrees, quarantine this bounded display value whole.
+        if joinedRedacted != joined, joinedRedacted != normalized {
+            normalized = Redactor.marker("normalized-value")
+        }
         if truncated {
             // Normalization drops scalars, so a window full of raw input can normalize to far
             // less: a run of combining marks between a device code's first and last character
