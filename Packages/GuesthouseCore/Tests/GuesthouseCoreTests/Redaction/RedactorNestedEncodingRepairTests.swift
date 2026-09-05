@@ -56,4 +56,11 @@ import Testing
         #expect(!output.contains("OpaqueSynthetic987"))
         #expect(output.contains("--verbose"))
     }
+
+    @Test(arguments: 2...5, ["--password", "--token", "--api-key"])
+    func aDecodedCompleteStringOwnsItsOptionBoundary(layers: Int, option: String) throws {
+        var input = option + " OpaqueSynthetic987"
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        #expect(!Redactor().redact(input).contains("OpaqueSynthetic987"))
+    }
 }

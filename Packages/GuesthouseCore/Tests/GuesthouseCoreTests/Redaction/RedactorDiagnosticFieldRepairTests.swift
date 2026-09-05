@@ -18,7 +18,7 @@ import Testing
 
     @Test(arguments: ["tcp(db:3306)", "tcp6([::1]:3306)", "unix(/tmp/mysql.sock)", "tcp", "",
                       "cloudsql(project:region:instance)", "custom+net(address)", "registered_transport"],
-          ["syntheticPassword", "synthetic@part/with: spaces", "synthetic\"quoted'value"])
+          ["syntheticPassword", "synthetic@part/with: spaces", "synthetic\"quoted'value", "//synthetic/part"])
     func conventionalSchemelessDSNsConcealAllUserinfo(protocolAndAddress: String, password: String) {
         let input = "dsn=alice:" + password + "@" + protocolAndAddress + "/app"
         let output = Redactor().redact(input)
@@ -26,7 +26,8 @@ import Testing
         #expect(output == "dsn=[redacted:userinfo]@" + protocolAndAddress + "/app")
     }
 
-    @Test(arguments: ["contact: alice@example.com", "tcp(db:3306)/app", "unix(/tmp/mysql.sock)/app", "https://example.com?email=alice@example.org"])
+    @Test(arguments: ["contact: alice@example.com", "tcp(db:3306)/app", "unix(/tmp/mysql.sock)/app",
+                      "https://example.com?email=alice@example.org", "HTTPS://example.com/a@b/c", "ssh://example.com/a@b/c"])
     func addressesAndEmailWithoutAPasswordDoNotBecomeDSNs(input: String) {
         #expect(Redactor().redact(input) == input)
     }
