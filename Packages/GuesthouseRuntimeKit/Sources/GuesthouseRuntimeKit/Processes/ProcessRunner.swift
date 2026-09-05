@@ -479,9 +479,6 @@ public actor ProcessRunner: ProcessRunning {
         let readers = OutputReaders(continuation: continuation, maximumBytes: invocation.maximumOutputBytes) { [weak run] in
             run?.markOutputTruncated()
         }
-        readers.attach(stdout.fileHandleForReading, kind: .stdout)
-        readers.attach(stderr.fileHandleForReading, kind: .stderr)
-
         // Registered before launch: a child that exits at once must still wait for the
         // delivery attempt before its exit is reported.
         let standardInputDelivery = DispatchGroup()
@@ -515,6 +512,8 @@ public actor ProcessRunner: ProcessRunning {
 
         run.retainWhileRunning()
         do {
+            try readers.attach(stdout.fileHandleForReading, kind: .stdout)
+            try readers.attach(stderr.fileHandleForReading, kind: .stderr)
             try process.run()
         } catch {
             if case .data = invocation.standardInput { standardInputDelivery.leave() }
@@ -574,7 +573,9 @@ public actor ProcessRunner: ProcessRunning {
 /// the bytes into records (`RecordSplitter`), and redacts each record before yielding it.
 ///
 /// Once `maximumBytes` have been emitted the rest is discarded while the pipes keep draining.
-private final class OutputReaders: @unchecked Sendable {
+// All mutable state and descriptor reads/closure are protected by `lock`. Reads are
+// nonblocking and bounded, so detaching never waits on a helper to produce output.
+final class OutputReaders: @unchecked Sendable {
     enum Kind { case stdout, stderr }
 
     static let maximumQueuedLines = 4_096
@@ -584,6 +585,7 @@ private final class OutputReaders: @unchecked Sendable {
     private let continuation: AsyncStream<ProcessOutput>.Continuation
     private let lock = NSLock()
     private let drained = DispatchGroup()
+    private var handles: [ObjectIdentifier: FileHandle] = [:]
     private var splitters: [ObjectIdentifier: RecordSplitter] = [:]
     private var states: [ObjectIdentifier: Redactor.StreamState] = [:]
     private var emittedBytes = 0
@@ -597,35 +599,40 @@ private final class OutputReaders: @unchecked Sendable {
         self.truncated = truncated
     }
 
-    func attach(_ handle: FileHandle, kind: Kind) {
-        drained.enter()
+    deinit { detach() }
+
+    func attach(_ handle: FileHandle, kind: Kind) throws {
+        let descriptor = handle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         let id = ObjectIdentifier(handle)
         lock.withLock {
+            drained.enter()
+            handles[id] = handle
             splitters[id] = RecordSplitter()
             states[id] = Redactor.StreamState()
-        }
-        handle.readabilityHandler = { [weak self] handle in
-            guard let self else { return }
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                self.flush(id, kind: kind)
-                self.drained.leave()
-                return
+            handle.readabilityHandler = { [weak self] _ in
+                self?.readAvailable(id, kind: kind)
             }
-            self.consume(data, id: id, kind: kind)
         }
     }
 
     func detach() {
-        // Launch failed: nothing will ever be read.
-        lock.withLock { splitters.removeAll() }
-        continuation.finish()
+        lock.withLock {
+            // EOF and shutdown claim each handle under this same lock. A callback already
+            // queued when the handler is removed sees no handle and cannot touch its old fd.
+            for id in Array(handles.keys) { closeLocked(id) }
+            continuation.finish()
+        }
     }
 
     @discardableResult
     func waitUntilDrained(by deadline: DispatchTime, abandonedWhen abandoned: () -> Bool = { false }) -> DispatchTimeoutResult {
-        Self.wait(drained, by: deadline, abandonedWhen: abandoned)
+        let result = Self.wait(drained, by: deadline, abandonedWhen: abandoned)
+        if result == .timedOut { detach() }
+        return result
     }
 
     /// Waits for a group in slices, so waiting can be given up before the deadline.
@@ -642,22 +649,41 @@ private final class OutputReaders: @unchecked Sendable {
         }
     }
 
-    private func consume(_ data: Data, id: ObjectIdentifier, kind: Kind) {
-        let records: [RecordSplitter.Record] = lock.withLock { splitters[id]?.consume(data) ?? [] }
-        for record in records { emit(record, id: id, kind: kind) }
-    }
-
-    private func flush(_ id: ObjectIdentifier, kind: Kind) {
-        let remainder: RecordSplitter.Record? = lock.withLock {
-            var splitter = splitters.removeValue(forKey: id)
-            return splitter?.flush()
+    private func readAvailable(_ id: ObjectIdentifier, kind: Kind) {
+        lock.withLock {
+            guard let handle = handles[id] else { return }
+            // Readiness may be stale by the time this callback acquires the lock. Using a
+            // nonblocking read avoids both a blocked drain and FileHandle's exception-based
+            // `availableData` failure path when shutdown races an already queued callback.
+            var bytes = [UInt8](repeating: 0, count: 16 << 10)
+            let count = Darwin.read(handle.fileDescriptor, &bytes, bytes.count)
+            if count > 0 {
+                for record in splitters[id]?.consume(Data(bytes.prefix(count))) ?? [] {
+                    emitLocked(record, id: id, kind: kind)
+                }
+            } else if count == 0 {
+                if let remainder = splitters[id]?.flush() { emitLocked(remainder, id: id, kind: kind) }
+                closeLocked(id)
+            } else if errno != EAGAIN, errno != EINTR {
+                truncated()
+                closeLocked(id)
+            }
         }
-        if let remainder { emit(remainder, id: id, kind: kind) }
     }
 
-    private func emit(_ record: RecordSplitter.Record, id: ObjectIdentifier, kind: Kind) {
+    /// Called only while holding `lock`, after any read or flush using the handle has ended.
+    private func closeLocked(_ id: ObjectIdentifier) {
+        guard let handle = handles.removeValue(forKey: id) else { return }
+        handle.readabilityHandler = nil
+        try? handle.close()
+        splitters.removeValue(forKey: id)
+        states.removeValue(forKey: id)
+        drained.leave()
+    }
+
+    private func emitLocked(_ record: RecordSplitter.Record, id: ObjectIdentifier, kind: Kind) {
         let lineData = record.bytes
-        let redacted: RedactedLine? = lock.withLock {
+        let redacted: RedactedLine? = {
             // Decode and redact before charging: replacement scalars and redaction markers
             // can be larger than the original bytes. State advances even for suppressed
             // records, preserving the context of credentials split across record boundaries.
@@ -680,7 +706,7 @@ private final class OutputReaders: @unchecked Sendable {
             }
             emittedBytes += cost
             return result
-        }
+        }()
         guard let redacted else {
             truncated()
             return
