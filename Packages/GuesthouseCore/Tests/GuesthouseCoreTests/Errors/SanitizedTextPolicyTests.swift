@@ -35,10 +35,11 @@ struct SanitizedTextPolicyTests {
         #expect(!SanitizedText(input).value.contains("synthetic"))
     }
 
-    @Test(arguments: ["\t", "\n", "\r", "\r\n", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}"], ["--password", "Bearer"])
+    @Test(arguments: ["\t", "\n", "\r", "\r\n", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}", "\u{00A0}", "\u{2007}"], ["--password", "Bearer", "Basic"])
     func controlWhitespaceRemainsACredentialBoundary(separator: String, label: String) {
-        let output = SanitizedText(label + separator + "syntheticValue").value
-        #expect(!output.contains("synthetic"))
+        let credential = label == "Basic" ? Data("user:syntheticValue".utf8).base64EncodedString() : "syntheticValue"
+        let output = SanitizedText(label + separator + credential).value
+        #expect(!output.contains(credential))
     }
 
     @Test(arguments: ["passx\u{08}word: ", "passx\u{1B}[Dword: ", "passx\u{9B}Dword: "])
