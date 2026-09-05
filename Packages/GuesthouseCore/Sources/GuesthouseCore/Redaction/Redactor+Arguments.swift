@@ -9,8 +9,13 @@ extension Redactor {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         switch value {
         case "", "\"", "'", "\\\"", "\\'": return true
-        default: return !value.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
+        default: return valueExplicitlyContinues(value[...])
         }
+    }
+
+    static func valueExplicitlyContinues(_ value: Substring) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
     }
 
     static func isBasicCredential(_ value: Substring) -> Bool {
