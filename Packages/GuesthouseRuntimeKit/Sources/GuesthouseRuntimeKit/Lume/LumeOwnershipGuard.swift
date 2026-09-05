@@ -4,6 +4,7 @@ import GuesthouseCore
 
 enum LumeOwnershipStorageFailure: Error, Equatable, Sendable, LocalizedError {
     case notEnrolled, invalidEnrollment, guardBusy, guardChanged, insecureFile, ioFailure
+    case invalidLedger, staleRecord, poisoned, writeUncertain
 
     var errorDescription: String? {
         "Guesthouse cannot safely read or preserve runtime ownership. Keep its storage unchanged and inspect the actual state before another operation."
