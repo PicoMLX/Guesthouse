@@ -50,6 +50,7 @@ extension Redactor {
         spans += text.matches(of: patterns.digestCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.specializedCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2).map { ($0, "jwt", false) } }
+        spans += text.matches(of: patterns.urlUserInfo).map { ($0.1.endIndex..<$0.range.upperBound, "userinfo", false) }
         return spans
     }
 
@@ -80,10 +81,16 @@ extension Redactor {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
                 boundaries.insert(offsets.count - 1)
                 let prefix = escape.0.hasPrefix("\u{1B}[") ? 2 : (escape.0.hasPrefix("\u{009B}") ? 1 : 0)
+                // CAN/SUB or a fresh ESC abort the old CSI; its parameters are not evidence.
+                if prefix > 0, let final = escape.0.unicodeScalars.last, !(0x40...0x7E).contains(final.value) {
+                    cursor = escape.range.upperBound
+                    continue
+                }
                 // Generic ESC commands can consume a label character too. Never interpret
                 // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
                 let generic = escape.0.wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
-                let body = generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix)
+                let body = String(generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix))
+                    .replacing(#/[\u{00}-\u{1F}\u{7F}]/#, with: "")
                 if prefix > 0 || generic, !body.isEmpty, retainParameters || body.count == 1 {
                     let start = offsets.count - 1
                     alternate += body
@@ -158,13 +165,9 @@ extension Redactor {
         return clusters.compactMap { span in span.kind.map { (span.range, $0) } }
     }
 
-    /// The two readings of a line whose terminal escapes have been removed: `joined`, where the
-    /// text on either side of an escape closes up, and `spliced`, where an escape that stood
-    /// between two characters a token can contain leaves a boundary behind. Only the second one
-    /// shows where a token begins when styling was put in front of it; only the first one keeps
-    /// a label that styling interrupted spelled correctly. `spliced` is `joined` when no escape
-    /// stood in such a place, which is every ordinary line. The spliced reading also masks credential
-    /// spans recovered before a CSI final byte could destroy their recognizable header.
+    /// Joined text repairs interrupted labels; spliced text preserves control-supplied token
+    /// boundaries and conceals recovered token spans. Scan-only contexts retain restored field
+    /// evidence for the state-aware caller. Ordinary lines have identical visible readings.
     static func renderings(of text: String) -> (joined: String, spliced: String, contexts: [String]) {
         func isTokenCharacter(_ character: Character) -> Bool {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
@@ -244,7 +247,9 @@ extension Redactor {
                 guard suffix.prefixMatch(of: patterns.labeledSecret) != nil
                     || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
                     || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
-                    || suffix.prefixMatch(of: patterns.codeField) != nil else { continue }
+                    || suffix.prefixMatch(of: patterns.codeField) != nil
+                    || suffix.prefixMatch(of: patterns.secretOption) != nil
+                    || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil else { continue }
                 // The token may have swallowed a separate label. Keep that label available
                 // to the stream scanner, but conceal even a now-short token prefix.
                 recovered.append((mergedRanges[rangeIndex].lowerBound..<offset, "secret"))

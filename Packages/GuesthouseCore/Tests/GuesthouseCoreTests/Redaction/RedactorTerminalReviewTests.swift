@@ -2,6 +2,27 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}31", "3\u{0}1", "31\u{7}", "31\u{8}", "31\u{9}", "31 \u{0}"])
+    func embeddedControlsDoNotSplitCSI(introducer: String, body: String) {
+        let result = Redactor.renderings(of: "pass" + introducer + body + "mword: syntheticPassword")
+        #expect(result.joined == "password: syntheticPassword")
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}", "\u{7}", "\u{8}", "\u{9}", "\u{7F}"])
+    func ignoredCSIBytesDoNotHideRecoveredFinals(introducer: String, ignored: String) {
+        let result = Redactor.renderings(of: "pass" + introducer + ignored + "word: syntheticPassword")
+        #expect(result.contexts.contains("password: syntheticPassword"))
+    }
+
+    @Test(arguments: ["\u{18}", "\u{1A}"])
+    func cancellationIsNotAnIgnoredCSIByte(cancel: String) {
+        #expect(Redactor.stripTerminalEscapes("pass\u{1B}[31" + cancel + "word: syntheticPassword") == "password: syntheticPassword")
+    }
+
+    @Test func aNewEscapeCancelsAnIncompleteCSI() {
+        #expect(Redactor.stripTerminalEscapes("pass\u{1B}[31\u{1B}[0mword: syntheticPassword") == "password: syntheticPassword")
+    }
+
     @Test(arguments: ["\u{1B}", "\u{1B}("], ["accessToken", "authorization", "user_code"])
     func genericEscapeFinalsCannotHideCredentialLabels(escape: String, label: String) {
         let input = label.prefix(1) + escape + label.dropFirst() + ": syntheticPassword"
@@ -16,6 +37,30 @@ import Testing
         let result = Redactor.renderings(of: prefix + "\u{0}" + field)
         #expect(result.spliced == "[redacted:secret]" + Redactor.splicedBoundary + field)
         #expect(result.joined == prefix + field)
+    }
+
+    @Test(arguments: ["sk-synthetic", "Bearer syntheticFirst"], ["--password syntheticSecond", "--password"])
+    func swallowedSecretOptionsRetainTheirBoundary(prefix: String, option: String) {
+        #expect(Redactor.renderings(of: prefix + "\u{0}" + option).spliced
+            == "[redacted:secret]" + Redactor.splicedBoundary + option)
+    }
+
+    @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}[", "\u{9B}"])
+    func recoveredAtSignsConcealURLUserinfo(escape: String) {
+        let result = Redactor.renderings(of: "https://sample:syntheticPassword" + escape + "@example.com")
+        #expect(!result.spliced.contains("syntheticPassword"))
+        #expect(result.spliced.hasSuffix("example.com"))
+    }
+
+    @Test(arguments: ["\u{1B}]", "\u{1B}P", "\u{1B}_", "\u{1B}^", "\u{1B}X", "\u{9D}", "\u{90}", "\u{9F}", "\u{9E}", "\u{98}"], ["\u{18}", "\u{1A}"])
+    func cancelledControlStringsReleaseVisibleDiagnostics(opener: String, cancel: String) {
+        var open: Redactor.StreamState.ControlString?
+        #expect(Redactor.stripTerminalEscapes("before" + opener + "payload" + cancel + "after", openControlString: &open).joined == "beforeafter")
+        #expect(open == nil)
+        _ = Redactor.stripTerminalEscapes(opener + "payload", openControlString: &open)
+        #expect(Redactor.stripTerminalEscapes(cancel + "after", openControlString: &open).joined == "after")
+        #expect(open == nil)
+        #expect(Redactor.stripTerminalEscapes("Finished", openControlString: &open).joined == "Finished")
     }
 
     @Test(arguments: ["\u{1B}[", "\u{009B}", "\u{1B}", "\u{1B}("], [Character("m"), "e", "1"])
