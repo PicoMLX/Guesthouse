@@ -45,6 +45,44 @@ import Testing
         }
     }
 
+    @Test func aQuotedNameNeverSpansTwoDiagnostics() {
+        for stderr in [
+            "Error: the specified VM \"\nregistry: mirror \" does not exist",
+            "Error: VM \"\nregistry: mirror \" is already running",
+            "Error: VM \"\nregistry: mirror \" is not running",
+            "Error: VM \"\nregistry: mirror \" is running",
+        ] {
+            guard case .unknown = TartErrorClassifier.classify(stderr: stderr, exitStatus: 1) else {
+                Issue.record(Comment(rawValue: "two diagnostics were stitched into one phrase: \(stderr)"))
+                continue
+            }
+        }
+    }
+
+    @Test func whitespaceAroundTheVersionIsNotThePinnedSpelling() {
+        #expect(TartVersion(parsing: " 2.36.0 ") == nil)
+        #expect(TartVersion(parsing: "\t2.36.0") == nil)
+        #expect(TartVersion(parsing: "2.36.0\n")?.matchesPin == true, "a trailing line terminator is still the pinned form")
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(TartVersion.self, from: Data(#"" 2.36.0 ""#.utf8)) }
+    }
+
+    /// An empty line is dropped by every line split, so it has to be refused explicitly or the
+    /// version keeps matching the pin through output Tart never printed.
+    @Test func aBlankLineAroundTheVersionIsNotThePinnedSpelling() {
+        #expect(TartVersion(parsing: "\n2.36.0") == nil)
+        #expect(TartVersion(parsing: "2.36.0\n\n") == nil)
+        #expect(TartVersion(parsing: "\n") == nil)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(TartVersion.self, from: Data(#""\n2.36.0""#.utf8)) }
+    }
+
+    @Test func aPaddedOrBlankIPLineIsNotAnAddress() throws {
+        for drifted in ["\n192.168.64.5", "192.168.64.5\n\n", " 192.168.64.5 ", "\t192.168.64.5", "192.168.64.5\n192.168.64.5"] {
+            #expect(throws: TartParseError.notAnIPAddress) { try TartIPParser.parse(drifted) }
+        }
+        #expect(try TartIPParser.parse("192.168.64.5\n").rawValue == "192.168.64.5", "the one terminator Tart prints is still an address")
+        #expect(try TartIPParser.parse("192.168.64.5").rawValue == "192.168.64.5")
+    }
+
     @Test func stateClassificationsAreAnchoredToTheVMPhrases() {
         #expect(TartErrorClassifier.classify(stderr: #"Error: VM "guesthouse-x" is not running"#, exitStatus: 1) == .notRunning)
         #expect(TartErrorClassifier.classify(stderr: #"Error: VM "guesthouse-x" is running"#, exitStatus: 1) == .requiresStoppedVM)
@@ -85,6 +123,56 @@ import Testing
         let decodingError = #expect(throws: DecodingError.self) { try JSONDecoder().decode(GuestIPAddress.self, from: Data(#""\#(token)""#.utf8)) }
         guard case .dataCorrupted(let context)? = decodingError else { Issue.record("expected dataCorrupted"); return }
         #expect(!context.debugDescription.contains(token))
+    }
+
+    @Test func fragmentsOfUnrelatedDiagnosticsStayUnknown() {
+        for stderr in ["Error: no IP address found in registry metadata", "failed to inspect the specified VM\nOCI manifest does not exist"] {
+            if case .unknown = TartErrorClassifier.classify(stderr: stderr, exitStatus: 1) {} else {
+                Issue.record("\(stderr) should stay unknown")
+            }
+        }
+        #expect(TartErrorClassifier.classify(stderr: "Error: no IP address found, is your VM running?", exitStatus: 1) == .noIPAddress)
+        #expect(TartErrorClassifier.classify(stderr: #"Error: the specified VM "guesthouse-x" does not exist"#, exitStatus: 1) == .vmNotFound)
+    }
+
+    @Test func anEntryWhoseRunningFlagContradictsItsStateIsRejected() throws {
+        func entry(_ running: String, _ state: String) -> Data {
+            Data(#"[{"Source":"local","Name":"x","Disk":1,"Size":1,"Accessed":"2026-01-01T00:00:00Z","Running":\#(running),"State":"\#(state)"}]"#.utf8)
+        }
+        #expect(throws: TartParseError.unknownValue(field: "Running", value: "true")) { try TartListParser.parse(entry("true", "stopped")) }
+        #expect(throws: TartParseError.unknownValue(field: "Running", value: "true")) { try TartListParser.parse(entry("true", "suspended")) }
+        #expect(throws: TartParseError.unknownValue(field: "Running", value: "false")) { try TartListParser.parse(entry("false", "running")) }
+        #expect(try TartListParser.parse(entry("false", "suspended")).first?.state == .suspended)
+        #expect(try TartListParser.parse(entry("true", "running")).first?.running == true)
+    }
+
+    @Test(arguments: [TartParseError.notJSON, .unexpectedShape("Accessed"), .unknownValue(field: "State", value: "hibernating"), .notAnIPAddress, .notAVersion])
+    func everyParseFailureBecomesAnActionableError(error: TartParseError) {
+        let surfaced = error.guesthouseError
+        #expect(!surfaced.userMessage.isEmpty)
+        #expect(surfaced.userMessage.contains(TartPin.releaseTag))
+        #expect(surfaced.recoveryActions.contains(.repair(.runtime)))
+    }
+
+    @Test func aParseFailureCarriesNoRawValueIntoItsMessage() {
+        let message = TartParseError.unknownValue(field: "Source", value: token).guesthouseError.userMessage
+        #expect(!message.contains(token))
+        #expect(message.contains("[redacted:github-token]"))
+    }
+
+    @Test func theVersionKeepsAllThreeComponents() {
+        #expect(TartPin.version.components == [2, 36, 0])
+        #expect(TartVersion(SemanticVersion([2, 36])).components == [2, 36, 0])
+        #expect(TartVersion(parsing: "2.36.0")?.components == [2, 36, 0])
+        #expect(TartPin.version.semantic == SemanticVersion([2, 36]), "the comparable form drops trailing zeros, and says so")
+    }
+
+    @Test func thePublicTartNamespacesAreSendable() {
+        func requiringSendable<T: Sendable>(_ type: T.Type) {}
+        requiringSendable(TartPin.self)
+        requiringSendable(TartListParser.self)
+        requiringSendable(TartIPParser.self)
+        requiringSendable(TartErrorClassifier.self)
     }
 
     @Test func accessedIsPartOfThePinnedShape() throws {

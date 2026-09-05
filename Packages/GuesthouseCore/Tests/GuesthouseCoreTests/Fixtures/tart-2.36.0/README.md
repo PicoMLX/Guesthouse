@@ -9,5 +9,10 @@ Team ID `9M2P8L4D89`, bundle identifier `com.github.cirruslabs.tart`) run on the
 - `list-empty.json`: `tart list --format json` with no VMs
 - `vm-does-not-exist.txt`: stderr of `tart ip does-not-exist` (exit status 2); `tart stop` prints the same text
 
-`list.json` is derived from `Sources/tart/Commands/List.swift` at tag 2.36.0 because capturing a
-populated inventory needs a created VM; gate #35 replaces it with a real capture.
+The rest are hand-authored from the 2.36.0 sources, because every one of them needs a created VM
+that an empty `TART_HOME` does not have. They are not compatibility evidence; gate #35 replaces
+them with real captures.
+
+- `list.json`: from `Sources/tart/Commands/List.swift`
+- `ip.txt`: a private address in the range Tart's NAT hands out, the shape `Commands/IP.swift` prints
+- `ip-error.txt`: the `noIPAddress` message in `Commands/IP.swift`

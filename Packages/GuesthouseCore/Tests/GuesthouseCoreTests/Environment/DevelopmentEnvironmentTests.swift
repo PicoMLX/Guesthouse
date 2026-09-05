@@ -32,8 +32,9 @@ import Testing
         #expect(environment.tartVMName == environment.id.tartVMName)
     }
 
-    @Test func schemaVersionsCompare() {
-        #expect(SchemaVersion(1) < SchemaVersion(2))
+    @Test func schemaVersionsCompare() throws {
+        let (first, second) = (try #require(SchemaVersion(1)), try #require(SchemaVersion(2)))
+        #expect(first < second)
         #expect(SchemaVersion.current.description == "v\(SchemaVersion.current.rawValue)")
     }
 }
