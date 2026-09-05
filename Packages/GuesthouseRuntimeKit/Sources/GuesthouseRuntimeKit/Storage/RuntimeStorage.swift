@@ -102,8 +102,13 @@ public struct RuntimeStorage: Sendable {
     /// Lume's configuration and temporary locations are explicit. Telemetry and update checks
     /// stay off during the spike, and no host `HOME` or `PATH` is inherited. VM lifecycle commands
     /// must separately pass `--storage` with `url(for: .vms)`; Lume has no VM-store environment key.
-    public func environmentForLume() -> [String: String] {
-        [
+    /// Revalidate each writable path and its managed parent before returning the environment.
+    public func environmentForLume() throws -> [String: String] {
+        try Self.verify(root)
+        try Self.verify(url(for: .state))
+        try Self.verify(url(for: .lumeConfiguration))
+        try Self.verify(url(for: .staging))
+        return [
             "LUME_TELEMETRY_ENABLED": "false",
             "LUME_UPDATE_CHECK": "false",
             "TMPDIR": url(for: .staging).path,
