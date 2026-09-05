@@ -103,7 +103,7 @@ extension Redactor {
             var joinedScan = StreamState()
             _ = redact(line: stripped.joined, state: &joinedScan, isPhysicalLine: false)
             let boundaryText = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
-            text = (codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: boundaryText, preserveAlgorithms: true) : boundaryText)
+            text = (codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: boundaryText) : boundaryText)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
@@ -291,7 +291,7 @@ extension Redactor {
         func appendRedacted(_ line: Substring) {
             let redacted = redact(line: String(line), state: &state, isPhysicalLine: true,
                                   codesAlwaysRedacted: codesAlwaysRedacted).text
-            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted, preserveAlgorithms: true) : redacted
+            result += codesAlwaysRedacted ? Self.applyDeviceCodePattern(to: redacted) : redacted
         }
         // `\r\n` is one `Character`, so splitting on the newline character would leave a CRLF
         // stream as a single line and never apply the streaming rules to it. Each terminator is
