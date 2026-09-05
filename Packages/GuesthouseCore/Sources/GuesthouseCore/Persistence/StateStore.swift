@@ -275,13 +275,10 @@ public actor StateStore {
         // A different file, one rewritten in place, or one that lost bytes, invalidates
         // everything read before it.
         if state.file != version || off_t(state.byteCount) > info.st_size {
-            if state.file?.identity != version.identity {
-                // A file this store never synchronized the entry of. An earlier one's entry
-                // says nothing about this one: the replacement may have arrived through an
-                // unsynchronized restore or rename, and a power loss would take it along with
-                // the `started` record `begin` has already reported.
-                journalEntryIsDurable = false
-            }
+            // A repair can rename this same inode away, synchronize that absence, then put
+            // it back without a barrier. Its changed version invalidates entry durability
+            // too: identity alone does not prove the current name was synchronized.
+            journalEntryIsDurable = false
             state = JournalState()
             state.file = version
         }
