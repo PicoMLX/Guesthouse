@@ -1,4 +1,5 @@
 import Foundation
+import GuesthouseCore
 import XPC
 
 // The embedded, non-sandboxed runtime service. It answers named operations from the
@@ -8,6 +9,7 @@ import XPC
 // identifier; the same requirement is re-checked per message in `RuntimeService`.
 
 let service = RuntimeService()
+let startupLog = ServiceLog(category: "startup")
 let listener: XPCListener
 do {
     listener = try XPCListener(service: RuntimeService.serviceName, requirement: RuntimeService.peerRequirement) { request in
@@ -17,13 +19,13 @@ do {
     }
 } catch {
     // A fixed message: the system error's text is opaque and could quote context.
-    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot create the XPC listener\n".utf8))
+    startupLog.error(RedactedLine(literal: "GuesthouseRuntime: cannot create the XPC listener"))
     exit(EXIT_FAILURE)
 }
 do {
     try listener.activate()
 } catch {
-    FileHandle.standardError.write(Data("GuesthouseRuntime: cannot activate the XPC listener\n".utf8))
+    startupLog.error(RedactedLine(literal: "GuesthouseRuntime: cannot activate the XPC listener"))
     exit(EXIT_FAILURE)
 }
 dispatchMain()

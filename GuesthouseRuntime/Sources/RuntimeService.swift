@@ -175,7 +175,7 @@ final class RuntimeService: Sendable {
             // request no longer counts as outstanding and a concurrent message could already
             // have closed the session with the rejection still unsent. A message that asked
             // for no reply was answered with nothing above.
-            if let answer { message.reply(answer) }
+            if let answer { message.reply(RuntimeEventEnvelope(event: answer)) }
             // A refused session closes as soon as it owes nothing further. Waiting instead for
             // another message would keep an incompatible connection open for as long as the
             // app runs, because a client that has been told to stop sends nothing more.

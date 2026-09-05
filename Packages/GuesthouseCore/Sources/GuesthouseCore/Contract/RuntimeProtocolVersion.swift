@@ -9,9 +9,9 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
         self.rawValue = rawValue
     }
 
-    /// Version 2 adds `InvalidRequestReason.tooManyInFlight`, which a version 1 peer cannot
-    /// decode, so the two must not talk to each other.
-    public static let current = RuntimeProtocolVersion(2)
+    /// Version 7 combines versioned native-XPC events (6) with `tooManyInFlight`, originally
+    /// introduced by pre-envelope version 2. Do not restore either older wire shape here.
+    public static let current = RuntimeProtocolVersion(7)
 
     public static func < (lhs: RuntimeProtocolVersion, rhs: RuntimeProtocolVersion) -> Bool {
         lhs.rawValue < rhs.rawValue
