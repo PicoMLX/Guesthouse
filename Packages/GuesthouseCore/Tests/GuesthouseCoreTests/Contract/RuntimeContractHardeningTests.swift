@@ -320,6 +320,7 @@ import Testing
         #expect(status.observed.codexCLICapabilities?.count == 64)
         #expect(status.observed.codexCLICapabilities?.allSatisfy { !$0.contains("\u{1B}") } == true)
         let decoded = try JSONDecoder().decode(ObservedTuple.self, from: Data(#"{"tartVersion":"\#(token)"}"#.utf8))
-        #expect(decoded.tartVersion == "[redacted:github-token]")
+        #expect(decoded.tartVersion == nil)
+        #expect(decoded.unknownFields.contains(.tartVersion))
     }
 }

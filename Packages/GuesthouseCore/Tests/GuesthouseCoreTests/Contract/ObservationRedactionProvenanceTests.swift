@@ -49,7 +49,7 @@ struct ObservationRedactionProvenanceTests {
     @Test func tighterIdentityDisplayBoundAlsoHonorsRedactionProvenance() {
         let input = String(repeating: "a", count: 400) + String(repeating: "\u{301}", count: 350)
         #expect(!GuesthouseError.sanitizeReporting(input, limit: 256).redacted)
-        #expect(GuesthouseError.sanitizeReporting(input, limit: 234).redacted)
+        #expect(GuesthouseError.sanitizeReporting(input, limit: 256 - ObservedTuple.identitySuffixLength).redacted)
         #expect(ObservedTuple.bounded(input, limit: 256) == nil)
     }
 }

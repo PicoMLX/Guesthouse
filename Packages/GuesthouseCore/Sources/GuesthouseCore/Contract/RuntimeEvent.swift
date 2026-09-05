@@ -179,11 +179,25 @@ extension ObservedTuple {
     /// every other field of the observation as well.
     func boundedForDecoding() -> ObservedTuple {
         mapped(
-            string: { GuesthouseError.sanitize($0, limit: 256) },
+            string: { Self.decodedIdentity($0, limit: 256) },
             capabilities: { values in
-                Self.canonicalCapabilities(values.prefix(Self.maximumCapabilities).map { GuesthouseError.sanitize($0, limit: 128) })
+                guard values.count <= Self.maximumCapabilities else { return nil }
+                let entries = values.compactMap { Self.decodedIdentity($0, limit: 128) }
+                guard entries.count == values.count else { return nil }
+                return Self.canonicalCapabilities(entries)
             }
         )
+    }
+
+    /// A wire identity must already be bounded and sanitized by its sender. Deriving a
+    /// different identity while decoding could collapse distinct raw paths or credentials
+    /// into the same value. Existing generated suffixes survive verbatim; raw unsafe or
+    /// lossy values become unknown instead of acquiring a new digest here.
+    private static func decodedIdentity(_ value: String, limit: Int) -> String? {
+        guard value.unicodeScalars.prefix(limit + 1).count <= limit else { return nil }
+        let result = GuesthouseError.sanitizeReporting(value, limit: limit)
+        guard !result.redacted, result.value == value else { return nil }
+        return value
     }
 
     /// `clean` returns `nil` for an observation that cannot serve as an identity, and the field
@@ -245,7 +259,8 @@ extension ObservedTuple {
         // A value the sanitizer left alone is its own identity. One it merely bounded or
         // normalized carries a digest of the inspected text, counted against the same limit.
         guard sanitized != escaped else { return sanitized }
-        let room = max(16, limit - identitySuffixLength)
+        let room = limit - identitySuffixLength
+        guard room > 0 else { return nil }
         // Making room for the suffix narrows the inspection window. That second pass can
         // redact a run the first pass retained, so its provenance is a separate gate too.
         let display = GuesthouseError.sanitizeReporting(escaped, limit: room)
@@ -253,8 +268,8 @@ extension ObservedTuple {
         return "\(display.value) \(identityMarker)\(digest(of: escaped))]"
     }
 
-    /// `" [exact:" + 12 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
-    static let identitySuffixLength = 22
+    /// `" [exact:" + 64 hex + "]"`, plus the one scalar the sanitizer adds when it truncates.
+    static let identitySuffixLength = 74
     static let identityMarker = "[exact:"
     static let identityEscape = "\u{FFFD}"
     static let maximumCapabilities = 64
@@ -321,10 +336,10 @@ extension ObservedTuple {
             withUnsafeBytes(of: UInt64(bytes.count).bigEndian) { data.append(contentsOf: $0) }
             data.append(bytes)
         }
-        return SHA256.hash(data: data).prefix(6).map { String(format: "%02x", $0) }.joined()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     static func digest(of value: String) -> String {
-        SHA256.hash(data: Data(value.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
