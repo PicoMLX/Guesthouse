@@ -5,6 +5,8 @@ import Foundation
 public enum RuntimeEvent: Codable, Hashable, Sendable {
     /// The reply to `runtimeVersion`.
     case runtimeVersion(RuntimeVersionInfo)
+    /// The reply to `listEnvironments`.
+    case environments([DevelopmentEnvironment])
     /// The request was journaled and is now in flight.
     case accepted(OperationID)
     case progress(OperationID, ProgressPhase)
@@ -17,6 +19,7 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .runtimeVersion: "runtimeVersion"
+        case .environments: "environments"
         case .accepted: "accepted"
         case .progress: "progress"
         case .log: "log"
@@ -152,6 +155,8 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
     /// Only this type sets it, and only through `sanitizedForWire()`: a raw probe value can
     /// never be assigned into a status and encoded unchanged.
     public private(set) var observed: ObservedTuple
+    /// The guest's current address, when it is running and reachable. Not persistent identity.
+    public var guestAddress: GuestIPAddress?
     public var reconciledAt: Date?
 
     public init(
@@ -160,6 +165,7 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
         readiness: Readiness,
         inFlightOperation: OperationID? = nil,
         observed: ObservedTuple = ObservedTuple(),
+        guestAddress: GuestIPAddress? = nil,
         reconciledAt: Date? = nil
     ) {
         self.environmentID = environmentID
@@ -169,6 +175,7 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
         // Observations come from guest and CLI probes: every string is bounded and redacted
         // before it crosses XPC, at construction and again when decoded.
         self.observed = observed.sanitizedForWire()
+        self.guestAddress = guestAddress
         self.reconciledAt = reconciledAt
     }
 }

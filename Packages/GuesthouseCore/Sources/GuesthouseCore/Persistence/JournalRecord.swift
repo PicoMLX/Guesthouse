@@ -32,7 +32,12 @@ public enum JournalOperation: Codable, Hashable, Sendable, CaseIterable {
 /// whole journal.
 public struct JournalRecord: Codable, Hashable, Sendable {
     /// The record format this build writes and the newest it can read.
-    public static let currentFormat = 1
+    ///
+    /// History: 1 was the initial format; 2 added the `reconciled` outcome and the lifecycle's
+    /// error cases inside `failed`, neither of which a format-1 reader can decode. A record
+    /// this build writes is therefore refused by name as a newer format rather than making the
+    /// previous build report the whole journal corrupt.
+    public static let currentFormat = 2
 
     public enum Outcome: Codable, Hashable, Sendable {
         /// The operation was accepted. It is in flight until a later record says otherwise.
@@ -48,6 +53,8 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         /// nothing: `completed` would claim it succeeded, and every "unknown" outcome leaves the
         /// environment blocked against the new operation recovery is there to allow.
         case notApplied
+        /// After a relaunch the coordinator inspected the actual state and closed the operation.
+        case reconciled
     }
 
     /// Whether this build can read a record written in `format`.
@@ -94,7 +101,7 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         switch outcome {
         case .started, .checkpoint, .unknown: true
         case .failed(.operationOutcomeUnknown), .failed(.canceled): true
-        case .completed, .notApplied, .failed: false
+        case .completed, .notApplied, .failed, .reconciled: false
         }
     }
 
@@ -111,7 +118,10 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)):
             reported == environmentID
         case .checkpoint(let reached):
-            operation == .provision(stage: reached)
+            // A provisioning record must name the stage it reached. Other operations reach
+            // checkpoints too — a start is journaled once the VM is supervised — and their
+            // kind says nothing about which stage that was.
+            if case .provision(let stage) = operation { stage == reached } else { true }
         default:
             true
         }

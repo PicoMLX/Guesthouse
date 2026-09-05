@@ -7,6 +7,9 @@ import Foundation
 /// (MVP-PLAN.md §3, "Sandbox and XPC boundary").
 public enum RuntimeRequest: Codable, Hashable, Sendable {
     case runtimeVersion
+    /// The environments the runtime knows about, from its own state. The GUI cannot read the
+    /// runtime's storage itself (MVP-PLAN.md §3, "Local storage").
+    case listEnvironments
     case environmentStatus(EnvironmentID)
     case startEnvironment(EnvironmentID, StartOptions)
     case stopEnvironment(EnvironmentID, StopMode)
@@ -16,6 +19,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .runtimeVersion: "runtimeVersion"
+        case .listEnvironments: "listEnvironments"
         case .environmentStatus: "environmentStatus"
         case .startEnvironment: "startEnvironment"
         case .stopEnvironment: "stopEnvironment"
@@ -33,7 +37,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     /// twice cannot leave the host anywhere asking once would not.
     public var mutatesHost: Bool {
         switch self {
-        case .runtimeVersion, .environmentStatus, .cancelOperation: false
+        case .runtimeVersion, .listEnvironments, .environmentStatus, .cancelOperation: false
         case .startEnvironment, .stopEnvironment, .importXcode: true
         }
     }

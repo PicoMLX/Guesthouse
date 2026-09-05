@@ -253,7 +253,7 @@ actor RuntimeClient: RuntimeBackend {
                 for buffered in pendingEvents.removeValue(forKey: id) ?? [] {
                     route(buffered)
                 }
-            case .runtimeVersion, .status, .completed, .failed, .progress, .log:
+            case .runtimeVersion, .environments, .status, .completed, .failed, .progress, .log:
                 settle(key)
                 continuation.finish()
             }
@@ -404,7 +404,7 @@ actor RuntimeClient: RuntimeBackend {
             } else {
                 for (id, continuation) in operations { deliver(event, to: continuation, id: id) }
             }
-        case .runtimeVersion, .accepted:
+        case .runtimeVersion, .environments, .accepted:
             for (id, continuation) in operations { yieldNonTerminal(event, to: continuation, id: id) }
         case .log(nil, _):
             // Unscoped guest output is droppable traffic for every operation, not a control
@@ -471,17 +471,20 @@ nonisolated extension RuntimeEvent {
     fileprivate var endsOperation: Bool {
         switch self {
         case .completed, .failed: true
-        case .runtimeVersion, .accepted, .progress, .log, .status: false
+        case .runtimeVersion, .environments, .accepted, .progress, .log, .status: false
         }
     }
 
-    /// Detail the client may drop. Only `accepted` and the terminal events say what happened
-    /// to an operation; progress, log lines and status snapshots are what a consumer that has
-    /// fallen behind loses first, so they are also what the inbox refuses when it is full.
+    /// Detail the client may drop. Only the replies to a query, `accepted` and the terminal
+    /// events say what happened to a request; progress, log lines and status snapshots are what
+    /// a consumer that has fallen behind loses first, so they are also what the inbox refuses
+    /// when it is full. `environments` answers `listEnvironments` exactly as `runtimeVersion`
+    /// answers its own request: dropping it would leave the caller waiting for a reply that
+    /// has already been thrown away.
     fileprivate var isDroppableTraffic: Bool {
         switch self {
         case .progress, .log, .status: true
-        case .runtimeVersion, .accepted, .completed, .failed: false
+        case .runtimeVersion, .environments, .accepted, .completed, .failed: false
         }
     }
 }

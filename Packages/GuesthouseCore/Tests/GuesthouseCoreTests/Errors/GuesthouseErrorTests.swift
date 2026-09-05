@@ -15,6 +15,8 @@ import Testing
         .runtimeStateUnavailable(reason: "the operation journal could not be opened"),
         .runtimeStorageUnavailable(reason: "the storage folder is full", problem: .unwritable),
         .runtimeStorageUnavailable(reason: "a containing folder can be changed by other users", problem: .unsafeLocation),
+        .runtimeStarting,
+        .runtimeStateUnavailable(reason: "disk full"),
         .runtimeVerificationFailed(check: .signature),
         .runtimeIncompatible(found: "2.30.0", required: "2.36.0"),
         .guestNotReachable(EnvironmentID()),
@@ -26,11 +28,15 @@ import Testing
         .toolMismatch(tool: "codex", found: nil, expected: "0.50.0"),
         .xcodeComponentsIncomplete(missing: ["iOS 26.4 Simulator"]),
         .vmSlotUnavailable(maximum: 2),
+        .environmentNotFound(EnvironmentID()),
+        .environmentAlreadyRunning(EnvironmentID()),
+        .operationInFlight(OperationID()),
         .operationOutcomeUnknown(OperationID()),
         .unauthorizedCaller,
         .protocolMismatch(client: 2, service: 1),
         .invalidRequest(.pathEscapesAllowedRoot),
         .canceled,
+        .anotherEnvironmentRunning(EnvironmentID()), .environmentPreserved(EnvironmentID()), .vmOwnershipUncertain(EnvironmentID()), .gracefulStopTimedOut(EnvironmentID()),
     ]
 
     static let expectedCaseNames: Set<String> = [
@@ -39,7 +45,8 @@ import Testing
         "runtimeVerificationFailed", "runtimeIncompatible", "guestNotReachable", "hostKeyChanged", "credentialsLocked",
         "loginExpired", "toolMismatch", "xcodeComponentsIncomplete", "vmSlotUnavailable",
         "operationOutcomeUnknown", "unauthorizedCaller", "protocolMismatch", "invalidRequest",
-        "canceled",
+        "canceled", "environmentNotFound", "environmentAlreadyRunning", "operationInFlight",
+        "runtimeStarting", "runtimeStateUnavailable", "anotherEnvironmentRunning", "environmentPreserved", "vmOwnershipUncertain", "gracefulStopTimedOut",
     ]
 
     @Test func samplesCoverEveryCase() {

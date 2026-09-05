@@ -111,10 +111,18 @@ import Testing
         let environment = EnvironmentID()
         let id = try await store.begin(.startEnvironment, for: environment)
         let record = JournalRecord(id: id, environmentID: environment, operation: .startEnvironment, timestamp: Date(), outcome: .completed)
+        let current = JournalRecord.currentFormat
         var json = String(decoding: try JSONEncoder().encode(record), as: UTF8.self)
-        #expect(json.contains("\"format\":1"))
-        json = json.replacingOccurrences(of: "\"format\":1", with: "\"format\":2")
+        #expect(json.contains("\"format\":\(current)"), "a record this build writes carries this build's format")
+        // A record from a later build is refused by name, so the journal is never reported as
+        // corrupt when the only problem is that it is newer.
+        json = json.replacingOccurrences(of: "\"format\":\(current)", with: "\"format\":\(current + 1)")
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(JournalRecord.self, from: Data(json.utf8)) }
+        // Every format this build claims to read still decodes.
+        for older in 1..<current {
+            let downgraded = json.replacingOccurrences(of: "\"format\":\(current + 1)", with: "\"format\":\(older)")
+            #expect(throws: Never.self) { try JSONDecoder().decode(JournalRecord.self, from: Data(downgraded.utf8)) }
+        }
     }
 
     @Test func migrationsMustAdvanceExactlyOneVersion() {
@@ -424,14 +432,17 @@ import Testing
         _ = try await store.begin(.startEnvironment, for: environment)
         let future = JournalRecord(id: OperationID(), environmentID: environment, operation: .stopEnvironment, timestamp: Date(), outcome: .started)
         var text = String(decoding: try JSONEncoder().encode(future), as: UTF8.self)
-        text = text.replacingOccurrences(of: "\"format\":1", with: "\"format\":2")
+        // One past what this build writes: a format from a newer Guesthouse, whatever the
+        // current number happens to be.
+        let unreadable = JournalRecord.currentFormat + 1
+        text = text.replacingOccurrences(of: "\"format\":\(JournalRecord.currentFormat)", with: "\"format\":\(unreadable)")
         let handle = try FileHandle(forWritingTo: await store.journalURL)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data((text + "\n").utf8))
         try handle.close()
         let reopened = try StateStore(rootURL: root)
-        await #expect(throws: StateStoreError.unsupportedJournalFormat(line: 2, format: 2)) { try await reopened.replay() }
-        #expect(StateStoreError.unsupportedJournalFormat(line: 2, format: 2).recoveryActions.contains(.reinstallApp))
+        await #expect(throws: StateStoreError.unsupportedJournalFormat(line: 2, format: unreadable)) { try await reopened.replay() }
+        #expect(StateStoreError.unsupportedJournalFormat(line: 2, format: unreadable).recoveryActions.contains(.reinstallApp))
     }
 
     /// Formats start at 1, so a record declaring zero or a negative one came from damage rather

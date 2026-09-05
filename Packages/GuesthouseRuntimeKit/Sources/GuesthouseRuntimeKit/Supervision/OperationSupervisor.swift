@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GuesthouseCore
 import Synchronization
@@ -66,7 +67,10 @@ public final class OperationSupervisor: Sendable {
         guard let live = enumerator.live(pid: pid) else {
             throw SupervisionError.processNotObservable(pid: pid)
         }
-        guard live.executablePath == executable.path, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
+        // The kernel reports the real path (`/private/var/…`, not `/var/…`); the recorded path
+        // is the same form, so the reconciler compares like with like.
+        let resolvedExecutable = Self.realPath(of: executable)
+        guard live.executablePath == resolvedExecutable, live.argumentsDigest == LiveProcessEnumerator.digest(of: arguments) else {
             throw SupervisionError.processMismatch(pid: pid)
         }
         // The process must name the VM the caller says it launched, and that VM must be the
@@ -81,7 +85,7 @@ public final class OperationSupervisor: Sendable {
         let identity = ProcessIdentity(
             pid: pid,
             startTime: live.startTime,
-            executablePath: executable.path,
+            executablePath: resolvedExecutable,
             argumentsDigest: LiveProcessEnumerator.digest(of: arguments),
             vmName: vmName,
             environmentID: environment,
@@ -89,6 +93,45 @@ public final class OperationSupervisor: Sendable {
         )
         try await store.record(identity)
         return identity
+    }
+
+    /// The recorded identity for an environment, if any.
+    public func identity(for environment: EnvironmentID) async -> ProcessIdentity? {
+        await store.identity(for: environment)
+    }
+
+    /// What the process table says about a recorded identity. `absent` is proof the recorded
+    /// process is gone; `unavailable` is the process table declining to answer, which is not
+    /// the same thing and must never end supervision (MVP-PLAN.md §4).
+    public enum IdentityObservation: Hashable, Sendable {
+        case present(LiveProcess)
+        case absent
+        case unavailable
+    }
+
+    /// Observes `identity` against the live process table. A PID that now carries a different
+    /// start time, executable, or arguments belongs to another process, which proves the
+    /// recorded one exited; a PID that exists but cannot be read proves nothing.
+    public func observe(_ identity: ProcessIdentity) -> IdentityObservation {
+        switch enumerator.observe(pid: identity.pid) {
+        case .absent:
+            .absent
+        case .unavailable:
+            .unavailable
+        case .present(let live):
+            live.startTime == identity.startTime
+                && live.executablePath == identity.executablePath
+                && live.argumentsDigest == identity.argumentsDigest
+                ? .present(live) : .absent
+        }
+    }
+
+    /// The live process that is exactly `identity` (same PID, start time, executable, and
+    /// arguments), or `nil`: a PID that now belongs to another process is never a match.
+    /// A caller that must tell "gone" from "unreadable" uses `observe` instead.
+    public func verify(_ identity: ProcessIdentity) -> LiveProcess? {
+        guard case .present(let live) = observe(identity) else { return nil }
+        return live
     }
 
     /// Forgets a process that is confirmed gone.
@@ -185,6 +228,16 @@ public final class OperationSupervisor: Sendable {
     /// recorded identity against a supplied observation.
     public static func verdict(recorded: ProcessIdentity, observed: [LiveProcess], vmLockPresent: Bool) -> OwnershipVerdict {
         ProcessReconciler.reconcile(recorded: recorded, observed: observed, vmLockPresent: vmLockPresent)
+    }
+}
+
+extension OperationSupervisor {
+    /// `realpath(3)`: every symbolic link resolved, including the `/var` → `/private/var`
+    /// prefix that Foundation's URL resolution keeps.
+    static func realPath(of url: URL) -> String {
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard let resolved = realpath(url.path, &buffer) else { return url.path }
+        return String(cString: resolved)
     }
 }
 

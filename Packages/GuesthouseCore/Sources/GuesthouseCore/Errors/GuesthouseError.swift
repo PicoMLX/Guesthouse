@@ -11,13 +11,14 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case insufficientDisk(requiredBytes: UInt64, availableBytes: UInt64, volumePath: SanitizedText)
     case downloadVerificationFailed(artifact: SanitizedText, check: VerificationCheck)
     case runtimeMissing
-    /// The installed runtime bundle failed verification and will not be executed.
-    /// Guesthouse's own storage could not be used: the location is missing, unsafe, or not
-    /// writable. Distinct from a missing runtime, which reinstalling Tart would fix.
+    /// The service is still bringing up its lifecycle after launch.
+    case runtimeStarting
+    /// The service's saved state could not be loaded or written.
     case runtimeStateUnavailable(reason: SanitizedText)
     /// Guesthouse's storage location itself could not be used. Carries which kind of problem
     /// it is, so the GUI offers what actually helps rather than a generic check.
     case runtimeStorageUnavailable(reason: SanitizedText, problem: StorageProblem)
+    /// The installed runtime bundle failed verification and will not be executed.
     case runtimeVerificationFailed(check: RuntimeVerificationCheck)
     case runtimeIncompatible(found: SanitizedText?, required: SanitizedText)
     case guestNotReachable(EnvironmentID)
@@ -27,6 +28,17 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case toolMismatch(tool: SanitizedText, found: SanitizedText?, expected: SanitizedText)
     case xcodeComponentsIncomplete(missing: MissingComponents)
     case vmSlotUnavailable(maximum: Int)
+    case environmentNotFound(EnvironmentID)
+    case environmentAlreadyRunning(EnvironmentID)
+    /// One VM at a time: another environment is running.
+    case anotherEnvironmentRunning(EnvironmentID)
+    /// The environment is preserved after a failed repair or export and must be repaired first.
+    case environmentPreserved(EnvironmentID)
+    /// A VM with the environment's name is running but Guesthouse cannot prove it started it.
+    case vmOwnershipUncertain(EnvironmentID)
+    /// The guest did not shut down within the graceful deadline; it is still running.
+    case gracefulStopTimedOut(EnvironmentID)
+    case operationInFlight(OperationID)
     case operationOutcomeUnknown(OperationID)
     case unauthorizedCaller
     case protocolMismatch(client: Int, service: Int)
@@ -96,11 +108,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         switch self {
         case .unsupportedHost: .host
         case .insufficientDisk, .runtimeStateUnavailable, .runtimeStorageUnavailable: .storage
-        case .downloadVerificationFailed, .runtimeMissing, .runtimeVerificationFailed, .runtimeIncompatible: .runtime
+        case .downloadVerificationFailed, .runtimeMissing, .runtimeStarting, .runtimeVerificationFailed, .runtimeIncompatible: .runtime
+        case .anotherEnvironmentRunning, .environmentPreserved: .workflow
+        case .vmOwnershipUncertain, .gracefulStopTimedOut: .guest
         case .guestNotReachable, .hostKeyChanged: .guest
         case .credentialsLocked, .loginExpired: .credentials
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
-        case .vmSlotUnavailable, .operationOutcomeUnknown: .workflow
+        case .vmSlotUnavailable, .environmentNotFound, .environmentAlreadyRunning, .operationInFlight, .operationOutcomeUnknown: .workflow
         case .unauthorizedCaller, .protocolMismatch, .invalidRequest: .ipc
         case .canceled: .user
         }
@@ -128,8 +142,18 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "The virtual machine runtime is not installed."
         case .runtimeStorageUnavailable(let reason, _):
             reason.value
+        case .runtimeStarting:
+            "The Guesthouse runtime is still starting. Try again in a moment."
         case .runtimeStateUnavailable(let reason):
             "Guesthouse's saved state could not be used (\(reason.value)). Guesthouse will inspect the actual virtual machines before offering anything; if this persists, check the storage location in Settings."
+        case .anotherEnvironmentRunning(let id):
+            "Another development Mac (\(id.tartVMName)) is running. Guesthouse runs one development Mac at a time until resource validation allows two; stop it first."
+        case .environmentPreserved(let id):
+            "The development Mac \(id.tartVMName) is preserved after a failed repair or an incomplete export, so it will not start until it is repaired. Export any unpublished work first."
+        case .vmOwnershipUncertain(let id):
+            "A virtual machine named \(id.tartVMName) is running, but Guesthouse cannot prove that it started it. Nothing will be started or stopped until this is inspected; open the console to see what is running."
+        case .gracefulStopTimedOut(let id):
+            "The development Mac \(id.tartVMName) did not shut down within the time allowed and is still running. Try again, open its console to finish what it is doing, or force-stop it (unsaved work inside can be lost)."
         case .runtimeVerificationFailed(let check):
             "The installed virtual machine runtime failed its \(Self.describe(check)) check and will not be run. Repair reinstalls the tested version."
         case .runtimeIncompatible(let found, let required):
@@ -150,6 +174,12 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "Xcode is installed on the development Mac but is missing required components: \(Self.list(missing))."
         case .vmSlotUnavailable(let maximum):
             "Guesthouse manages at most \(maximum) development Macs, including stopped and preserved ones. Export any unpublished work from one you no longer need, then delete it to make room."
+        case .environmentNotFound(let id):
+            "No development Mac with the identifier \(id) is registered on this Mac."
+        case .environmentAlreadyRunning(let id):
+            "The development Mac \(id.tartVMName) is already running."
+        case .operationInFlight:
+            "Another operation is still running. Guesthouse runs one lifecycle operation at a time."
         case .operationOutcomeUnknown:
             "Guesthouse lost contact with its runtime before this operation reported a result. The operation may or may not have completed."
         case .unauthorizedCaller:
@@ -172,10 +202,15 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
+        case .runtimeStarting: [.retry, .cancel]
         case .runtimeStateUnavailable: [.inspectState, .openSettings, .cancel]
         // The storage error's own actions, kept: freeing space and retrying are what help.
         case .runtimeStorageUnavailable(_, .unwritable): [.freeDiskSpace, .retry, .cancel]
         case .runtimeStorageUnavailable(_, .unsafeLocation): [.cancel]
+        case .anotherEnvironmentRunning: [.cancel]
+        case .environmentPreserved: [.repair(.tools), .exportWork, .cancel]
+        case .vmOwnershipUncertain: [.inspectState, .openConsole, .cancel]
+        case .gracefulStopTimedOut: [.retry, .openConsole, .cancel]
         case .runtimeVerificationFailed: [.repair(.runtime), .cancel]
         case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
         case .guestNotReachable: [.inspectState, .retry, .openConsole, .cancel]
@@ -186,6 +221,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .toolMismatch: [.repair(.tools), .openConsole, .exportWork, .cancel]
         case .xcodeComponentsIncomplete: [.repair(.xcodeComponents), .openConsole, .exportWork, .cancel]
         case .vmSlotUnavailable: [.exportWork, .deleteEnvironment, .cancel]
+        case .environmentNotFound: [.inspectState, .cancel]
+        case .environmentAlreadyRunning: [.inspectState, .cancel]
+        case .operationInFlight: [.inspectState, .cancel]
         case .operationOutcomeUnknown: [.inspectState, .cancel]
         case .unauthorizedCaller: [.cancel]
         case .protocolMismatch: [.reinstallApp, .cancel]
@@ -216,8 +254,13 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: "insufficientDisk"
         case .downloadVerificationFailed: "downloadVerificationFailed"
         case .runtimeMissing: "runtimeMissing"
+        case .runtimeStarting: "runtimeStarting"
         case .runtimeStateUnavailable: "runtimeStateUnavailable"
         case .runtimeStorageUnavailable: "runtimeStorageUnavailable"
+        case .anotherEnvironmentRunning: "anotherEnvironmentRunning"
+        case .environmentPreserved: "environmentPreserved"
+        case .vmOwnershipUncertain: "vmOwnershipUncertain"
+        case .gracefulStopTimedOut: "gracefulStopTimedOut"
         case .runtimeVerificationFailed: "runtimeVerificationFailed"
         case .runtimeIncompatible: "runtimeIncompatible"
         case .guestNotReachable: "guestNotReachable"
@@ -227,6 +270,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .toolMismatch: "toolMismatch"
         case .xcodeComponentsIncomplete: "xcodeComponentsIncomplete"
         case .vmSlotUnavailable: "vmSlotUnavailable"
+        case .environmentNotFound: "environmentNotFound"
+        case .environmentAlreadyRunning: "environmentAlreadyRunning"
+        case .operationInFlight: "operationInFlight"
         case .operationOutcomeUnknown: "operationOutcomeUnknown"
         case .unauthorizedCaller: "unauthorizedCaller"
         case .protocolMismatch: "protocolMismatch"

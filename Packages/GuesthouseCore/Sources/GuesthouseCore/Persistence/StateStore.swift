@@ -150,8 +150,7 @@ public actor StateStore {
     // MARK: - Journal
 
     /// Appends a `started` record and returns its id only once the record is on disk.
-    public func begin(_ operation: JournalOperation, for environmentID: EnvironmentID, at timestamp: Date = Date()) throws -> OperationID {
-        let id = OperationID()
+    public func begin(_ operation: JournalOperation, for environmentID: EnvironmentID, id: OperationID = OperationID(), at timestamp: Date = Date()) throws -> OperationID {
         try append(JournalRecord(id: id, environmentID: environmentID, operation: operation, timestamp: timestamp, outcome: .started))
         return id
     }

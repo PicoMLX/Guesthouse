@@ -48,6 +48,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     private nonisolated let configuration = Mutex(Configuration())
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
+    private var environments: [DevelopmentEnvironment] = []
     private var versionInfo: RuntimeVersionInfo
     private var canceledOperations: Set<OperationID> = []
     /// Where a recorded request falls in the order the requests were *made*, which is the order
@@ -99,6 +100,11 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         statuses[status.environmentID] = status
     }
 
+    /// The environments returned for `listEnvironments`.
+    public func setEnvironments(_ environments: [DevelopmentEnvironment]) {
+        self.environments = environments
+    }
+
     public func setVersionInfo(_ info: RuntimeVersionInfo) {
         versionInfo = info
     }
@@ -138,7 +144,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         let scenario = binding.scenario
 
         switch request {
-        case .runtimeVersion, .environmentStatus:
+        case .runtimeVersion, .environmentStatus, .listEnvironments:
             advanceTurn()
             await pause()
             switch scenario {
@@ -151,9 +157,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
                 continuation.finish(throwing: RuntimeConnectionInterrupted())
             case .succeed:
-                if case .environmentStatus(let id) = request {
+                switch request {
+                case .environmentStatus(let id):
                     continuation.yield(.status(statuses[id] ?? EnvironmentStatus(environmentID: id, vm: .notFound, readiness: .checking)))
-                } else {
+                case .listEnvironments:
+                    continuation.yield(.environments(environments))
+                default:
                     continuation.yield(.runtimeVersion(versionInfo))
                 }
                 continuation.finish()
@@ -324,7 +333,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         switch request {
         case .startEnvironment(let environment, _), .stopEnvironment(let environment, _), .importXcode(let environment, _):
             statuses[environment]?.inFlightOperation = id
-        case .runtimeVersion, .environmentStatus, .cancelOperation:
+        case .runtimeVersion, .listEnvironments, .environmentStatus, .cancelOperation:
             break
         }
     }

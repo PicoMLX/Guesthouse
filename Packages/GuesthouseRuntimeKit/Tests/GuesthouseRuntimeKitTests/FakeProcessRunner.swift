@@ -2,28 +2,88 @@ import Foundation
 import GuesthouseCore
 @testable import GuesthouseRuntimeKit
 
-/// A `ProcessRunning` that never launches anything: it records invocations and replays
-/// scripted output and an exit.
+/// A `ProcessRunning` that never launches anything: it records invocations and answers each
+/// from a script keyed by the first argument, or from fixed output.
 actor FakeProcessRunner: ProcessRunning {
+    struct Reply: Sendable {
+        var stdout: [String] = []
+        var stderr: [String] = []
+        var exit: ProcessExit = ProcessExit(reason: .status(0))
+        /// The run stays alive until `finishHanging` or termination.
+        var hangs = false
+        /// How long the command takes before it answers, so a test can act while it is in
+        /// flight without having to end it.
+        var delay: Duration = .zero
+        /// The program itself cannot be started, as when the runtime bundle has been removed.
+        /// Nothing runs, so the command has no exit status of its own.
+        var failsToLaunch = false
+    }
+
     private(set) var invocations: [ProcessInvocation] = []
-    private let stdout: [String]
-    private let stderr: [String]
-    private let exit: ProcessExit
+    private var fixed: Reply
+    private var script: [String: Reply] = [:]
+    private var hanging: [(command: String, run: ProcessRun)] = []
 
     init(stdout: [String] = [], stderr: [String] = [], exit: ProcessExit) {
-        self.stdout = stdout
-        self.stderr = stderr
-        self.exit = exit
+        fixed = Reply(stdout: stdout, stderr: stderr, exit: exit)
+    }
+
+    init(script: [String: Reply]) {
+        fixed = Reply()
+        self.script = script
+    }
+
+    func set(_ command: String, _ reply: Reply) { script[command] = reply }
+
+    /// Ends every hanging run. Hanging runs are real `sleep` processes (so they have a pid and
+    /// a start time the supervisor can record); ending them terminates the process, and the
+    /// run reports a `terminated` exit with SIGTERM.
+    func finishHanging(with exit: ProcessExit = ProcessExit(reason: .status(0))) async {
+        await finishHanging { _ in true }
+    }
+
+    /// Ends only the hanging runs of one command, so a test can end the VM's own process while
+    /// another query is still in flight.
+    func finishHanging(command: String) async {
+        await finishHanging { $0 == command }
+    }
+
+    private func finishHanging(_ matches: (String) -> Bool) async {
+        let ending = hanging.filter { matches($0.command) }
+        hanging.removeAll { matches($0.command) }
+        for entry in ending {
+            entry.run.terminate(gracePeriod: .milliseconds(200))
+            _ = await entry.run.exit()
+        }
     }
 
     func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
         invocations.append(invocation)
+        let command = invocation.arguments.first ?? ""
+        let delay = (script[command] ?? fixed).delay
+        if delay > .zero { try? await Task.sleep(for: delay) }
+        // Read after the delay, so a test can change what a command answers while that command
+        // is already in flight.
+        let reply = script[command] ?? fixed
+        if reply.failsToLaunch {
+            throw ProcessLaunchError.executableNotFound(invocation.executable.lastPathComponent)
+        }
+        if reply.hangs {
+            // A real process, so the supervisor can record a pid and a start time. When the
+            // invocation's executable exists (a fixture bundle whose binary is a copy of
+            // `yes`), it runs with the invocation's own arguments so identity checks hold.
+            let executable = FileManager.default.isExecutableFile(atPath: invocation.executable.path) ? invocation.executable : URL(fileURLWithPath: "/bin/sleep")
+            let arguments = executable == invocation.executable ? invocation.arguments : ["600"]
+            let run = try await ProcessRunner().run(ProcessInvocation(executable: executable, arguments: arguments, timeout: min(invocation.timeout, .seconds(600)), terminationGracePeriod: .milliseconds(500), maximumOutputBytes: 64 << 10))
+            hanging.append((command: command, run: run))
+            return run
+        }
         let (stream, continuation) = AsyncStream.makeStream(of: ProcessOutput.self, bufferingPolicy: .unbounded)
         let run = ProcessRun(process: Process(), output: stream, continuation: continuation)
         let redactor = Redactor()
-        for line in stdout { continuation.yield(.stdout(redactor.redact(lines: [line])[0])) }
-        for line in stderr { continuation.yield(.stderr(redactor.redact(lines: [line])[0])) }
-        run.finish(with: exit.reason)
+        for line in reply.stdout { continuation.yield(.stdout(redactor.redact(lines: [line])[0])) }
+        for line in reply.stderr { continuation.yield(.stderr(redactor.redact(lines: [line])[0])) }
+        run.finish(with: reply.exit.reason)
         return run
     }
 }
