@@ -42,7 +42,8 @@ extension Redactor {
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
             state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || explicit
             let header = match.0[..<match.2.startIndex].lowercased()
-            let name = header.contains("set-cookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
+            let compactHeader = header.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }
+            let name = compactHeader.contains("setcookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
@@ -66,6 +67,11 @@ extension Redactor {
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
+        // Do not repeatedly search credential-field suffixes that cannot contain a DSN.
+        if let end = text.matches(of: p.mysqlTransport).last?.range.upperBound {
+            let prefix = text[..<end].replacing(p.mysqlUserInfo) { match in "\(match.1)\(marker("userinfo"))\(match.2)" }
+            text = String(prefix) + text[end...]
+        }
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
