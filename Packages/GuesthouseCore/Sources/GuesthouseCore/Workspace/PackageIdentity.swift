@@ -83,7 +83,6 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
             case remoteSourceControl
             case localSourceControl
             case registry
-            case fileSystem
         }
 
         public let identity: PackageIdentity
@@ -113,13 +112,19 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw .notJSON }
         guard let version = object["version"] as? Int else { throw .missingVersion }
         guard version == 2 || version == 3 else { throw .unsupportedVersion(version) }
+        if version == 3 { _ = try string(object["originHash"], field: "originHash") }
         guard let rawPins = object["pins"] as? [[String: Any]] else { throw .malformed("pins") }
         var pins: [Pin] = []
+        var identities: Set<PackageIdentity> = []
         for raw in rawPins {
             guard let identityRaw = raw["identity"] as? String, let identity = PackageIdentity(resolvedIdentity: identityRaw) else { throw .malformed("identity") }
+            guard identities.insert(identity).inserted else { throw .malformed("pins.identity (duplicate)") }
             guard let kindRaw = raw["kind"] as? String else { throw .malformed("kind") }
             guard let kind = Pin.Kind(rawValue: kindRaw) else { throw .unknownKind(kindRaw) }
             guard let location = raw["location"] as? String else { throw .malformed("location") }
+            // SwiftPM's Unix AbsolutePath validation is syntactic: the path must
+            // start with `/`. Do not inspect the host or change the stored spelling.
+            if kind == .localSourceControl, !location.hasPrefix("/") { throw .malformed("location") }
             let state = try decodeState(raw["state"], kind: kind)
             pins.append(Pin(identity: identity, kind: kind, location: location, revision: state.revision, version: state.version, branch: state.branch))
         }
@@ -132,15 +137,7 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
     /// that identifies no code, and the failure would surface later, at the build.
     private static func decodeState(_ raw: Any?, kind: Pin.Kind) throws(ResolvedPackagesError) -> (revision: String?, version: String?, branch: String?) {
         let isSourceControl = kind == .remoteSourceControl || kind == .localSourceControl
-        guard let raw, !(raw is NSNull) else {
-            // A registry pin is pinned by version alone, so SwiftPM refuses one that carries
-            // no state for the same reason it refuses a source-control pin without a commit.
-            // Reading it as a pin with no metadata would approve overrides from a lockfile the
-            // wrapper's own resolution then rejects, where re-resolving is no longer a repair
-            // the user can make.
-            if isSourceControl || kind == .registry { throw .malformed("state") }
-            return (nil, nil, nil)
-        }
+        guard let raw, !(raw is NSNull) else { throw .malformed("state") }
         guard let fields = raw as? [String: Any] else { throw .malformed("state") }
         let revision = try string(fields["revision"], field: "state.revision")
         let version = try string(fields["version"], field: "state.version")
@@ -159,8 +156,9 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
         return (revision, version, branch)
     }
 
-    /// SwiftPM's `Version` grammar: three numeric identifiers, then an optional prerelease and
-    /// optional build metadata, each a dot-separated run of alphanumerics and hyphens.
+    /// SwiftPM's TSCUtility.Version parser accepts leading zeros and empty
+    /// prerelease/build identifiers, but numeric components must fit in Int.
+    /// Keep the canonical lockfile's spelling rather than normalizing it.
     static func isSemanticVersion(_ text: String) -> Bool {
         var numbers = Substring(text)
         // Build metadata is split off first: it may contain hyphens, which would otherwise
@@ -177,15 +175,14 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
         }
         let parts = numbers.split(separator: ".", omittingEmptySubsequences: false)
         return parts.count == 3 && parts.allSatisfy { part in
-            !part.isEmpty && part.allSatisfy { $0.isASCII && $0.isNumber }
+            Int(part) != nil && part.allSatisfy { $0.isASCII && $0.isNumber }
         }
     }
 
     private static func isVersionIdentifiers(_ text: Substring) -> Bool {
         let identifiers = text.split(separator: ".", omittingEmptySubsequences: false)
-        guard !identifiers.isEmpty else { return false }
         return identifiers.allSatisfy { identifier in
-            !identifier.isEmpty && identifier.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+            identifier.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
         }
     }
 

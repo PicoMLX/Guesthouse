@@ -88,10 +88,10 @@ import Testing
         func pin(_ version: String) -> Data {
             Data(#"{"version":3,"pins":[{"identity":"sharedui","kind":"remoteSourceControl","location":"https://github.com/Org/SharedUI.git","state":{"revision":"0123456789abcdef0123456789abcdef01234567","version":"\#(version)"}}]}"#.utf8)
         }
-        for bad in ["not-semver", "1.0", "1.0.0.0", "v1.0.0", "1.0.0-", "1.0.0+", "1.0.0-beta..1", "1.0.x"] {
+        for bad in ["not-semver", "1.0", "1.0.0.0", "v1.0.0", "1.0.x"] {
             #expect(throws: ResolvedPackagesError.malformed("state.version")) { try ResolvedPackagesFile.decode(pin(bad)) }
         }
-        for good in ["1.0.0", "0.1.0-beta.1", "1.2.3+build.5", "1.2.3-rc.1+exp.sha.5114f85"] {
+        for good in ["1.0.0", "0.1.0-beta.1", "1.2.3+build.5", "1.2.3-rc.1+exp.sha.5114f85", "1.0.0-", "1.0.0+", "1.0.0-beta..1"] {
             #expect(throws: Never.self) { try ResolvedPackagesFile.decode(pin(good)) }
         }
     }
