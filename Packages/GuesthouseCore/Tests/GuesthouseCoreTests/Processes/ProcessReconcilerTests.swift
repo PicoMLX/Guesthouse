@@ -3,6 +3,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct ProcessReconcilerTests {
+    @Test func reconcilerConformsToSendable() {
+        // Require the enum itself to conform, not just its always-sendable metatype value.
+        func requiringSendable<T: Sendable>(_ type: T.Type) {}
+        requiringSendable(ProcessReconciler.self)
+    }
+
     let started = Date(timeIntervalSince1970: 1_800_000_000)
     let environment = EnvironmentID()
 

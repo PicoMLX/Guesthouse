@@ -83,7 +83,7 @@ public enum OwnershipVerdict: Hashable, Sendable {
 }
 
 /// Pure decision logic for "is the VM I recorded still mine?".
-public enum ProcessReconciler {
+public enum ProcessReconciler: Sendable {
     /// The kernel's start time is an identity, stored losslessly and compared exactly; a
     /// process with the same PID and a different start time is another process.
 
