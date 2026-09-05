@@ -203,9 +203,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     /// marks cannot hide behind a single `Character`.
     /// Input is bounded before any work: only the first `limit + lookahead` scalars are
     /// normalized and redacted, so an oversized value costs a bounded amount of memory and CPU.
-    /// The lookahead is longer than any credential the redactor recognizes, so a secret that
-    /// begins inside the visible prefix is inside the window unless scalars that normalization
-    /// drops padded it out; the repairs below cover the value left standing at the cut.
+    /// Credentials can exceed this finite lookahead. The repairs below therefore remove
+    /// recognized open credential forms and normalization-shortened fragments at the cut,
+    /// without assuming that the entire credential fits inside the inspection window.
     static let sanitizeLookahead = 512
 
     public static func sanitize(_ value: String, limit: Int = 80) -> String {
@@ -244,10 +244,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             // A JWT whose payload is longer than the window loses the second `.` the redactor
             // matches on, so a token that began inside the visible prefix would be emitted in
             // the clear. A JOSE header followed by a segment running to the cut is one. The
-            // header is looked for the way `redactedJWT` looks for it, after each `_` and `-`
-            // as well as at the start: those are Base64URL characters, so an untrusted name
-            // concatenated in front of the token (`artifact_<jwt>`) is inside the segment this
-            // rule captures, and asking `isJOSEHeader` about the whole of it always says no.
+            // header search is shared with `redactedJWT`: an untrusted name concatenated in
+            // front of the token is inside the segment this rule captures. Asking only about
+            // that entire segment would miss the embedded JOSE header.
             normalized = normalized.replacing(#/\b([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*$/#) { match in
                 guard let start = Redactor.joseHeaderStart(match.1) else { return String(match.0) }
                 return match.1[..<start] + Redactor.marker("jwt")
