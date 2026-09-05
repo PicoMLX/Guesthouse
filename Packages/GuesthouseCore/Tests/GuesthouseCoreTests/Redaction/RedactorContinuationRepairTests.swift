@@ -13,6 +13,11 @@ import Testing
         #expect(output[1] == "Finished")
     }
 
+    @Test(arguments: ["artifact", "artifact_", "artifact-"])
+    func anUnambiguousFilenamePrefixBeforeIncompleteJOSEStaysVisible(prefix: String) {
+        #expect(redactor.redact(prefix + "eyJhbGciOiJIUzI1NiJ9.syntheticPayload") == prefix + "[redacted:jwt]")
+    }
+
     @Test(arguments: ["ghp_", "sk-proj-"])
     func otherTokenMarkersDoNotDestroyIncompleteJOSEEvidence(prefix: String) {
         let output = redactor.redact(lines: [prefix + "eyJhbGciOiJIUzI1NiJ9.syntheticPayload",
