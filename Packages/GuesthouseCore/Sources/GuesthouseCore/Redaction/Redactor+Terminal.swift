@@ -184,9 +184,12 @@ extension Redactor {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
                 boundaries.insert(offsets.count - 1)
                 let prefix = escape.0.hasPrefix("\u{1B}[") ? 2 : (escape.0.hasPrefix("\u{009B}") ? 1 : 0)
+                // Generic ESC commands can consume a label character too. Never interpret
+                // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
+                let generic = escape.0.wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
                 let completeBody = escape.0.dropFirst(prefix)
-                let body = reading == 1 ? completeBody.suffix(1) : completeBody
-                if prefix > 0, !body.isEmpty, reading != 0 || body.count == 1 {
+                let body = generic || reading == 1 ? completeBody.suffix(1) : completeBody
+                if prefix > 0 || generic, !body.isEmpty, reading != 0 || body.count == 1 {
                     let start = offsets.count - 1
                     alternate += body
                     offsets.append(contentsOf: repeatElement(joinedCount, count: body.utf8.count))
@@ -352,7 +355,15 @@ extension Redactor {
                 rangeIndex += 1
             }
             if rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].lowerBound < offset {
-                continue
+                let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
+                let suffix = joined[boundary...]
+                guard suffix.prefixMatch(of: patterns.labeledSecret) != nil
+                    || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
+                    || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
+                    || suffix.prefixMatch(of: patterns.codeField) != nil else { continue }
+                // The token may have swallowed a separate label. Keep that label available
+                // to the stream scanner, but conceal even a now-short token prefix.
+                recovered.append((mergedRanges[rangeIndex].lowerBound..<offset, "secret"))
             }
             let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
             spliced += joined[scanned..<boundary]
@@ -363,7 +374,7 @@ extension Redactor {
         spliced += joined[scanned...]
         var mapped: [RecoveredCredential] = []
         var insertedIndex = 0
-        for span in recovered {
+        for span in expandingRecoveredRanges(recovered, through: []) {
             let range = span.range
             while insertedIndex < insertedOffsets.count, insertedOffsets[insertedIndex] <= range.lowerBound { insertedIndex += 1 }
             let lower = range.lowerBound + insertedIndex * splicedBoundary.utf8.count
