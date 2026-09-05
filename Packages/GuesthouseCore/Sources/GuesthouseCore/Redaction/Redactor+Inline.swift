@@ -13,11 +13,22 @@ extension Redactor {
     }
 
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState,
-                              prepareQuotedValues: Bool = true) -> String {
+                              prepareQuotedValues: Bool = true, encodingDepth: Int = 0) -> String {
         let p = patterns
         let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
+            // Each recursive step removes one encoding layer from this bounded value, never
+            // rescans its siblings or a remaining suffix. Excessive nesting fails closed.
+            guard encodingDepth < 8 else { return (marker("secret"), StreamState()) }
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
+            let normalized = removingQuotedEncodingLayer(value)
+            var nestedState = StreamState()
+            let nested = applyPatterns(to: normalized, codeExpected: false, state: &nestedState,
+                                       encodingDepth: encodingDepth + 1)
+            mergePendingContexts(from: nestedState, into: &quotedState)
+            // Do not attempt to splice decoded offsets back into multiply escaped text.
+            // Hide the containing value if the decoded reading adds credential evidence.
+            if nested != normalized { return (marker("secret"), quotedState) }
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text

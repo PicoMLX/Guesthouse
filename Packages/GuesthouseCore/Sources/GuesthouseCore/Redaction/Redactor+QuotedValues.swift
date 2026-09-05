@@ -2,6 +2,22 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
+    /// Decode only quoting/backslash escapes, not control escapes such as `\n`: physical
+    /// line framing belongs to the stream parser. Each call strictly reduces escape depth.
+    static func removingQuotedEncodingLayer(_ value: String) -> String {
+        var result = ""
+        var cursor = value.startIndex
+        while cursor < value.endIndex {
+            let character = value[cursor]
+            value.formIndex(after: &cursor)
+            if character == "\\", cursor < value.endIndex, "\\\"'".contains(value[cursor]) {
+                result.append(value[cursor])
+                value.formIndex(after: &cursor)
+            } else { result.append(character) }
+        }
+        return result
+    }
+
     struct ProtectedQuotedValues {
         var text: String
         var values: [String: String] = [:]
@@ -34,7 +50,10 @@ extension Redactor {
             let tail = input[end...].drop(while: { $0.isWhitespace })
             // A colon/equal means this is a key, not a value. Undelimited suffixes can still
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
-            guard tail.isEmpty || tail.first.map({ ",;]}".contains($0) }) == true else { continue }
+            // Closing delimiters from outer encodings can precede the structural boundary.
+            // An arbitrary suffix (including another quoted word) is still ambiguous.
+            let structuralTail = tail.drop(while: { $0.isWhitespace || "\\\"'".contains($0) })
+            guard structuralTail.isEmpty || structuralTail.first.map({ ",;]}".contains($0) }) == true else { continue }
             while reserved.contains(String(identifier)) { identifier += 1 }
             let key = String(identifier)
             identifier += 1
