@@ -55,35 +55,37 @@ import Testing
         #expect(throws: RuntimeStorageError.self) { try RuntimeStorage.hasAccessControlEntries(root.appending(path: "missing")) }
     }
 
-    @Test func strictVerificationRejectsPermissionDriftAfterInitialization() throws {
+    @Test(arguments: [false, true])
+    func tartEnvironmentRejectsPermissionDriftAfterInitialization(atRoot: Bool) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "mode-drift"))
-        let target = storage.url(for: .vms)
-        let unpublishedWork = target.appending(path: "unpublished-work.txt")
+        let target = atRoot ? storage.root : storage.tartHome
+        let unpublishedWork = storage.tartHome.appending(path: "unpublished-work.txt")
         try Data("keep me".utf8).write(to: unpublishedWork)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
 
         #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "permissions are not 0700")) {
-            try RuntimeStorage.verify(target)
+            try storage.environmentForTart()
         }
 
         _ = try RuntimeStorage(root: storage.root)
-        try RuntimeStorage.verify(target)
+        #expect(try storage.environmentForTart() == ["TART_HOME": storage.tartHome.path])
         #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
-    @Test func strictVerificationRejectsACLDriftAfterInitialization() throws {
+    @Test(arguments: [false, true])
+    func tartEnvironmentRejectsACLDriftAfterInitialization(atRoot: Bool) throws {
         let storage = try RuntimeStorage(root: root.appending(path: "acl-drift"))
-        let target = storage.url(for: .vms)
-        let unpublishedWork = target.appending(path: "unpublished-work.txt")
+        let target = atRoot ? storage.root : storage.tartHome
+        let unpublishedWork = storage.tartHome.appending(path: "unpublished-work.txt")
         try Data("keep me".utf8).write(to: unpublishedWork)
         try #require(try addAccessControlEntry("everyone allow read,list", to: target))
 
         #expect(throws: RuntimeStorageError.protectionDrift(path: target.path, reason: "carries access control entries")) {
-            try RuntimeStorage.verify(target)
+            try storage.environmentForTart()
         }
 
         _ = try RuntimeStorage(root: storage.root)
-        try RuntimeStorage.verify(target)
+        #expect(try storage.environmentForTart() == ["TART_HOME": storage.tartHome.path])
         #expect(try String(contentsOf: unpublishedWork, encoding: .utf8) == "keep me")
     }
 
