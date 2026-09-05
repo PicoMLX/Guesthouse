@@ -30,14 +30,14 @@ import Testing
 
     @Test func lumeEnvironmentPinsEveryWritableLocationAndDisablesNetworkFeatures() throws {
         let storage = try RuntimeStorage(root: base.appending(path: "lume"))
-        #expect(storage.environmentForLume() == [
+        #expect(try storage.environmentForLume() == [
             "LUME_TELEMETRY_ENABLED": "false",
             "LUME_UPDATE_CHECK": "false",
             "TMPDIR": storage.url(for: .staging).path,
             "XDG_CONFIG_HOME": storage.url(for: .lumeConfiguration).path,
         ])
-        #expect(!storage.environmentForLume().keys.contains("HOME"))
-        #expect(!storage.environmentForLume().keys.contains("PATH"))
+        #expect(try !storage.environmentForLume().keys.contains("HOME"))
+        #expect(try !storage.environmentForLume().keys.contains("PATH"))
     }
 
     @Test func largeOrTransientDirectoriesAreExcludedFromBackup() throws {
