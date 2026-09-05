@@ -39,8 +39,8 @@ public struct Redactor: Sendable {
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
         var expectingDeviceCode = false
-        /// A distinctive GitHub prefix reached a line boundary; payload may continue after it.
-        var expectingGitHubContinuation = false
+        /// A distinctive token prefix reached a line boundary; payload may continue after it.
+        var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
         var quotedValue: QuotedValue?
         /// A terminal control string opened on an earlier line and has not been terminated yet.
@@ -99,25 +99,27 @@ public struct Redactor: Sendable {
             text = Self.applyPatterns(to: stripped.spliced, codeExpected: state.expectingDeviceCode, state: &boundaryScan)
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
         }
-        let githubRunsToLineEnd = stripped.joined.firstMatch(of: Self.patterns.githubTokenAtLineEnd) != nil
-        if state.expectingGitHubContinuation, !text.allSatisfy(\.isWhitespace) {
-            state.expectingGitHubContinuation = false
-            if let continuation = text.firstMatch(of: Self.patterns.githubContinuation) {
-                // Scan the original line for any following field/PEM context before replacing
-                // its first token-shaped fragment. The normal scan still handles the suffix.
-                Self.armPendingContexts(from: text, state: &boundaryScan)
-                state.expectingGitHubContinuation = continuation.range.upperBound == text.endIndex
-                text.replaceSubrange(continuation.range, with: Self.marker("github-token"))
+        let tokenAtLineEnd = stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+            .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
+        if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
+            state.wrappedTokenKind = nil
+            if let continuation = text.firstMatch(of: Self.patterns.tokenContinuation) {
+                let fragment = String(continuation.0)
+                state.wrappedTokenKind = continuation.range.upperBound == text.endIndex ? kind : nil
+                // Detect and retain every ordinary redaction BEFORE masking the continuation.
+                // Otherwise replacing `password` first destroys the evidence that its value
+                // must be removed. Future state alone cannot protect this line's value.
+                var originalScan = StreamState()
+                let sanitized = redact(line: text, state: &originalScan).text
+                Self.mergePendingContexts(from: originalScan, into: &boundaryScan)
+                text = sanitized.hasPrefix(fragment)
+                    ? Self.marker(kind) + sanitized.dropFirst(fragment.count)
+                    : sanitized
             }
         }
         defer {
-            state.expectingGitHubContinuation = state.expectingGitHubContinuation || githubRunsToLineEnd
-            state.expectingAuthorizationValue = state.expectingAuthorizationValue || boundaryScan.expectingAuthorizationValue
-            state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || boundaryScan.authorizationValueIsOnTheNextLine
-            state.expectingSecretValue = state.expectingSecretValue || boundaryScan.expectingSecretValue
-            state.expectingSecretContinuation = state.expectingSecretContinuation || boundaryScan.expectingSecretContinuation
-            state.expectingDeviceCode = state.expectingDeviceCode || boundaryScan.expectingDeviceCode
-            state.quotedValue = state.quotedValue ?? boundaryScan.quotedValue
+            state.wrappedTokenKind = tokenAtLineEnd ?? state.wrappedTokenKind
+            Self.mergePendingContexts(from: boundaryScan, into: &state)
         }
 
         // A folded value runs over every consecutive indented line, so the state stays armed
@@ -322,6 +324,7 @@ public struct Redactor: Sendable {
         // a token may itself need restoring. They only protect its interior from splitting;
         // the actual redaction rules still require their usual boundary.
         tokenRanges += joined.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map(\.range)
+        tokenRanges += joined.matches(of: patterns.distinctiveAPIKey).map(\.range)
         tokenRanges += joined.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map(\.range)
         tokenRanges += joined.matches(of: patterns.basicCredentialSpan).compactMap { match in
             isBasicCredential(match.2) ? match.range : nil
@@ -370,12 +373,18 @@ public struct Redactor: Sendable {
     private static func armPendingContexts(from text: String, state: inout StreamState) {
         var scanned = state
         _ = applyPatterns(to: text, codeExpected: false, state: &scanned)
+        mergePendingContexts(from: scanned, into: &state)
+    }
+
+    private static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
         state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
         state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
         state.expectingSecretValue = state.expectingSecretValue || scanned.expectingSecretValue
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
+        state.pemLabel = state.pemLabel ?? scanned.pemLabel
+        state.wrappedTokenKind = state.wrappedTokenKind ?? scanned.wrappedTokenKind
     }
 
     // MARK: - Rules
@@ -468,12 +477,13 @@ public struct Redactor: Sendable {
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
         let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*/#
-        let githubTokenAtLineEnd = #/(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*)$/#
-        let githubContinuation = #/^[ \t]*[A-Za-z0-9_]+/#
+        let wrappedTokenAtLineEnd = #/((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-)[A-Za-z0-9_-]*$/#
+        let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
         /// remain intact.
         let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-[A-Za-z0-9_-]{16,})/#
+        let distinctiveAPIKey = #/sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]*/#
         /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
         /// which one decodes to a JSON object, whitespace allowed. More than three segments are
         /// taken because a JWT can follow a label, as in `session.<jwt>`.
@@ -541,6 +551,13 @@ public struct Redactor: Sendable {
             #/(^|\s)--?[A-Za-z0-9_-]*/#
             secretName
             #/[ \t]*(?:=[ \t]*)?$/#
+        }.ignoresCase()
+        /// JSON/Python-style argv diagnostics retain the option as a quoted array element.
+        /// Its value is the next element, possibly on a later line.
+        let serializedSecretOption = Regex {
+            #/(?:\\?["'])--?[A-Za-z0-9_-]*/#
+            secretName
+            #/(?:\\?["'])[ \t]*,[ \t]*/#
         }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
@@ -657,17 +674,19 @@ public struct Redactor: Sendable {
         }
         // The GitHub rule captures nothing in front of the token: it needs no boundary there.
         text = text.replacing(p.githubToken, with: marker("github-token"))
+        text = text.replacing(p.distinctiveAPIKey, with: marker("api-key"))
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
         // Scan argv boundaries before generic labelled values can consume following options.
+        text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
         // A labeled value can be folded onto the next line, so the label arms the continuation
         // state the way an authorization header does.
         var labelCarriedAValue = false
         // Inspect the original input too: a preceding missing-value option may otherwise
         // consume this last option before the generic rules get to see it.
-        var labelAwaitsValue = input.contains(p.secretOptionOnly)
+        var labelAwaitsValue = state.expectingSecretValue || input.contains(p.secretOptionOnly)
         text = text.replacing(p.labeledSecret) { match in
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
             labelCarriedAValue = true
@@ -738,6 +757,7 @@ public struct Redactor: Sendable {
             }
             let argument = secretArgument(in: text, from: match.range.upperBound)
             state.quotedValue = state.quotedValue ?? argument.quoted
+            state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
             // Canonicalize equals to a space so the generic field rule cannot treat the
             // replacement and later arguments as a single unquoted passphrase.
             let separator = match.3 == "=" ? " " : String(match.3)
@@ -747,19 +767,23 @@ public struct Redactor: Sendable {
         return result + text[cursor...]
     }
 
-    private static func secretArgument(in text: String, from start: String.Index) -> (end: String.Index, quoted: StreamState.QuotedValue?) {
+    private static func secretArgument(in text: String, from start: String.Index) -> (end: String.Index, quoted: StreamState.QuotedValue?, continuesLine: Bool) {
         var cursor = start
         var quote: Character?
         var quoteEscapeDepth = 0
+        var continuesLine = false
         while cursor < text.endIndex {
-            if quote == nil, text[cursor].isWhitespace { return (cursor, nil) }
+            if quote == nil, text[cursor].isWhitespace { return (cursor, nil, false) }
             let escapeStart = cursor
             var escapeDepth = 0
             while cursor < text.endIndex, text[cursor] == "\\" {
                 escapeDepth += 1
                 text.formIndex(after: &cursor)
             }
-            guard cursor < text.endIndex else { break }
+            guard cursor < text.endIndex else {
+                continuesLine = !escapeDepth.isMultiple(of: 2)
+                break
+            }
             if let delimiter = quote {
                 let closesQuote = quoteEscapeDepth == 0
                     ? escapeDepth.isMultiple(of: 2)
@@ -775,11 +799,44 @@ public struct Redactor: Sendable {
                     quoteEscapeDepth = escapeStart == start ? escapeDepth : 0
                 }
             } else if text[cursor].isWhitespace, escapeDepth.isMultiple(of: 2) {
-                return (cursor, nil)
+                return (cursor, nil, false)
             }
             text.formIndex(after: &cursor)
         }
-        return (text.endIndex, quote.map { .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret") })
+        return (text.endIndex, quote.map { .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret") }, continuesLine)
+    }
+
+    private static func redactSerializedOptions(_ text: String, state: inout StreamState) -> String {
+        var result = ""
+        var cursor = text.startIndex
+        while let match = text[cursor...].firstMatch(of: patterns.serializedSecretOption) {
+            result += text[cursor..<match.range.upperBound]
+            let value = text[match.range.upperBound...]
+            // Do not consume a second secret option as a missing first option's value.
+            if value.prefixMatch(of: patterns.serializedSecretOption) != nil {
+                cursor = value.startIndex
+                continue
+            }
+            guard !value.isEmpty else {
+                state.expectingSecretValue = true
+                return result
+            }
+            let slashes = value.prefix(while: { $0 == "\\" }).count
+            let afterSlashes = value.dropFirst(slashes)
+            if let delimiter = afterSlashes.first, delimiter == "\"" || delimiter == "'" {
+                let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: slashes, kind: "secret")
+                if let end = closingQuoteEnd(in: afterSlashes.dropFirst(), for: quoted) {
+                    cursor = end
+                } else {
+                    state.quotedValue = state.quotedValue ?? quoted
+                    cursor = text.endIndex
+                }
+            } else {
+                cursor = value.firstIndex(where: { $0 == "," || $0 == "]" }) ?? text.endIndex
+            }
+            result += marker("secret")
+        }
+        return result + text[cursor...]
     }
 
     /// Replaces all three JWS or five JWE segments inside a run of dot-separated segments. A dot is
