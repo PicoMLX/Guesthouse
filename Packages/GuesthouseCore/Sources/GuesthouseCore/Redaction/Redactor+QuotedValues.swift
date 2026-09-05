@@ -2,6 +2,35 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
+    /// Decode one scan-only quoting layer. Escaped whitespace becomes a space, never a
+    /// physical record separator; original encoded output is restored or concealed whole.
+    static func removingQuotedEncodingLayer(_ value: String) -> String {
+        var result = ""
+        var cursor = value.startIndex
+        while cursor < value.endIndex {
+            let character = value[cursor]
+            value.formIndex(after: &cursor)
+            if character == "\\", cursor < value.endIndex, "nrtfv".contains(value[cursor]) {
+                result.append(" ")
+                value.formIndex(after: &cursor)
+            } else if character == "\\", cursor < value.endIndex, "\\\"'/".contains(value[cursor]) {
+                result.append(value[cursor])
+                value.formIndex(after: &cursor)
+            } else { result.append(character) }
+        }
+        return result
+    }
+
+    /// A completely decoded string has its own argument boundary. Only remove a wrapper
+    /// whose first matching closing quote is the end, never a quote plus sibling suffix.
+    static func unwrappingCompleteDecodedString(_ value: String) -> String {
+        guard let quote = value.first, quote == "\"" || quote == "'",
+              closingQuoteEnd(in: value.dropFirst(),
+                  for: .init(delimiter: quote, escapeDepth: 0, kind: "secret")) == value.endIndex
+        else { return value }
+        return String(value.dropFirst().dropLast())
+    }
+
     struct ProtectedQuotedValues {
         var text: String
         var values: [String: String] = [:]
@@ -26,15 +55,56 @@ extension Redactor {
         var cursor = input.startIndex
         var copied = cursor
         var identifier = 0
+        var contextCursor = cursor
+        var enclosingQuote: Character?
+        var escaped = false
+        func advanceContext(to end: String.Index) {
+            while contextCursor < end {
+                let character = input[contextCursor]
+                if escaped { escaped = false }
+                else if character == "\\" { escaped = true }
+                else if character == enclosingQuote { enclosingQuote = nil }
+                else if enclosingQuote == nil, character == "\"" || character == "'",
+                        input[..<contextCursor].last.map({ $0.isWhitespace || "=:[{(,".contains($0) }) ?? true {
+                    enclosingQuote = character
+                }
+                input.formIndex(after: &contextCursor)
+            }
+        }
         while let opener = input[cursor...].firstMatch(of: #/(\\+)(["'])/#) {
+            // Visit each source character once, including raw quotes inside a protected span.
+            // An encoded delimiter itself cannot open or close its raw enclosing wrapper.
+            advanceContext(to: opener.range.lowerBound)
             guard let quote = opener.2.first,
                   let end = closingQuoteEnd(in: input[opener.range.upperBound...],
                       for: .init(delimiter: quote, escapeDepth: opener.1.count, kind: "secret")) else { break }
             cursor = end
+            advanceContext(to: end)
             let tail = input[end...].drop(while: { $0.isWhitespace })
             // A colon/equal means this is a key, not a value. Undelimited suffixes can still
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
-            guard tail.isEmpty || tail.first.map({ ",;]}".contains($0) }) == true else { continue }
+            // Closing delimiters from outer encodings can precede the structural boundary.
+            // An arbitrary suffix (including another quoted word) is still ambiguous.
+            var structuralTail = tail
+            if let closure = tail.first, closure == "\"" || closure == "'" {
+                // Only a proven, adjacent enclosing closure may precede the delimiter.
+                // A new/unmatched quote or whitespace-separated word is credential content.
+                guard input[end...].first == closure, enclosingQuote == closure else { continue }
+                structuralTail = tail.dropFirst().drop(while: { $0.isWhitespace })
+            }
+            guard structuralTail.isEmpty || structuralTail.first.map({ ",;]}".contains($0) }) == true else { continue }
+            let content = input[opener.range.upperBound..<end].dropLast(opener.1.count + 1)
+            let previous = input[..<opener.range.lowerBound].last(where: { !$0.isWhitespace })
+            // Preserve argv adjacency in the parent scan: hiding an option name behind a
+            // placeholder would detach the following value. Canonicalize only known names
+            // at an array-element boundary, not arbitrary diagnostic strings.
+            if previous == "[" || previous == ",",
+               tail.first == ",", !content.contains("="),
+               content.wholeMatch(of: patterns.secretOptionOnly) != nil {
+                result.text += input[copied..<opener.range.lowerBound] + "\"" + content + "\""
+                copied = end
+                continue
+            }
             while reserved.contains(String(identifier)) { identifier += 1 }
             let key = String(identifier)
             identifier += 1
