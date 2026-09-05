@@ -2,7 +2,7 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
-    /// Decode only quoting/backslash escapes, not control escapes such as `\n`: physical
+    /// Decode quoting/backslash/solidus escapes, not controls such as `\n`: physical
     /// line framing belongs to the stream parser. Each call strictly reduces escape depth.
     static func removingQuotedEncodingLayer(_ value: String) -> String {
         var result = ""
@@ -10,7 +10,7 @@ extension Redactor {
         while cursor < value.endIndex {
             let character = value[cursor]
             value.formIndex(after: &cursor)
-            if character == "\\", cursor < value.endIndex, "\\\"'".contains(value[cursor]) {
+            if character == "\\", cursor < value.endIndex, "\\\"'/".contains(value[cursor]) {
                 result.append(value[cursor])
                 value.formIndex(after: &cursor)
             } else { result.append(character) }
@@ -55,10 +55,8 @@ extension Redactor {
         var contextCursor = cursor
         var enclosingQuote: Character?
         var escaped = false
-        while let opener = input[cursor...].firstMatch(of: #/(\\+)(["'])/#) {
-            // Advance once through the source prefix, rather than rescanning each sibling.
-            // An encoded quote cannot open or close the raw wrapper containing it.
-            while contextCursor < opener.range.lowerBound {
+        func advanceContext(to end: String.Index) {
+            while contextCursor < end {
                 let character = input[contextCursor]
                 if escaped { escaped = false }
                 else if character == "\\" { escaped = true }
@@ -69,10 +67,16 @@ extension Redactor {
                 }
                 input.formIndex(after: &contextCursor)
             }
+        }
+        while let opener = input[cursor...].firstMatch(of: #/(\\+)(["'])/#) {
+            // Visit each source character once, including raw quotes inside a protected span.
+            // An encoded delimiter itself cannot open or close its raw enclosing wrapper.
+            advanceContext(to: opener.range.lowerBound)
             guard let quote = opener.2.first,
                   let end = closingQuoteEnd(in: input[opener.range.upperBound...],
                       for: .init(delimiter: quote, escapeDepth: opener.1.count, kind: "secret")) else { break }
             cursor = end
+            advanceContext(to: end)
             let tail = input[end...].drop(while: { $0.isWhitespace })
             // A colon/equal means this is a key, not a value. Undelimited suffixes can still
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.

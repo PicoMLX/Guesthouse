@@ -29,7 +29,9 @@ extension Redactor {
             // cannot acquire a value from a later unrelated physical record.
             // Do not attempt to splice decoded offsets back into multiply escaped text.
             // Hide the containing value if the decoded reading adds credential evidence.
-            if nested != normalized { return (marker("secret"), quotedState) }
+            if nested != normalized || incompleteJWTStartAtLineEnd(in: normalized) != nil {
+                return (marker("secret"), quotedState)
+            }
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
         var text = protected.text
