@@ -36,6 +36,7 @@ extension Redactor {
         /// The label is matched lazily and has to end on an alphanumeric, so it can never eat
         /// the closing dashes and a second block on the same line stays its own match.
         let pemBegin = #/-----BEGIN ([A-Za-z0-9](?:[A-Za-z0-9 ._+-]*?[A-Za-z0-9])?)-----/#
+        let ppkBegin = #/PuTTY-User-Key-File-([0-9]+):/#
         /// The whole header value, quoted or to the end of the line, so multi-parameter schemes
         /// (Digest, AWS SigV4) leave nothing behind. The key may be quoted the way JSON, a
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
@@ -113,7 +114,7 @@ extension Redactor {
         /// delimiter must start a value, so doubled slashes inside a path or URL query do not
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
-        let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        let urlUserInfo = #/((?::|^|[\s\u{001F}"'(<\[{]|(?:^|[\s\u{001F}"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Known qualifiers allow lowercase spelling; other camel-case names
@@ -156,7 +157,7 @@ extension Redactor {
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
         let secretOption = Regex {
-            #/(^|[\s\u{009F}])/#
+            #/(^|[\s\u{001F}])/#
             Capture {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
@@ -164,7 +165,7 @@ extension Redactor {
             #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|[\s\u{009F}])--?[A-Za-z0-9_-]*/#
+            #/(^|[\s\u{001F}])--?[A-Za-z0-9_-]*/#
             secretName
             #/[ \t]*(?:=[ \t]*)?$/#
         }.ignoresCase()
