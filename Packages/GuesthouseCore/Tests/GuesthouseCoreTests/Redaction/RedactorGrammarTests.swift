@@ -4,6 +4,13 @@ import Testing
 
 /// Synthetic examples exercise recognition before a public sanitizer is introduced.
 @Suite struct RedactorGrammarTests {
+    @Test(arguments: ["\\\"", "\\'", "\\\\\\\""])
+    func encodedCodeValuesKeepTheirCompleteQuotedPayload(quote: String) throws {
+        let value = quote + "synthetic secret value" + quote
+        let match = try #require(("Your code is " + value).firstMatch(of: Redactor.patterns.declarativeCodePrompt))
+        #expect(match.2 == value)
+    }
+
     @Test(arguments: [
         ("Enter the code: ABC123", "Enter the code:"),
         ("Enter this code: abcdef", "Enter this code:"),
