@@ -9,7 +9,7 @@ import Testing
     @Test(arguments: ["\"", "'", "\\\""])
     func aQuotedPendingSecretReleasesAfterItsIndentedValue(quote: String) {
         let output = redactor.redact(lines: [
-            "password:", quote, " correct horse", "  battery staple", "Finished",
+            "password:", quote, " correct horse", "  battery staple" + quote, "Finished",
         ]).map(\.text)
         #expect(output[2] == "[redacted:secret]")
         #expect(output[3] == "[redacted:secret]")
@@ -37,7 +37,7 @@ import Testing
     ])
     func aStandaloneOpeningQuoteDoesNotConsumePendingValueContext(label: String, quote: String, marker: String) {
         let output = redactor.redact(lines: [
-            label, quote, "", "reviewNextLineValue", "Finished",
+            label, quote, "", "reviewNextLineValue" + quote, "Finished",
         ]).map(\.text)
         #expect(output[2] == "")
         #expect(output[3] == marker)

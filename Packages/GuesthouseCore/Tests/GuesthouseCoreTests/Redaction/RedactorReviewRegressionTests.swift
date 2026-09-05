@@ -47,7 +47,8 @@ import Testing
         #"payload={\"private_key\":\""#,
     ])
     func privateKeyOpeningQuotesKeepTheNextValuePending(label: String) {
-        let output = redactor.redact(lines: [label, "", "\u{1B}[0m", "reviewOpaqueValue", "Finished"]).map(\.text)
+        let closing = label.hasSuffix(#"\""#) ? #"\""# : String(label.suffix(1))
+        let output = redactor.redact(lines: [label, "", "\u{1B}[0m", "reviewOpaqueValue" + closing, "Finished"]).map(\.text)
         #expect(output[0].contains("[redacted:secret]"))
         #expect(output[1] == "")
         #expect(output[2] == "")
@@ -88,7 +89,8 @@ import Testing
         #"payload={\"Authorization\":\""#,
     ], ["Basic cmV2aWV3OnN5bnRoZXRpYw==", "Custom reviewOpaqueValue"])
     func authorizationOpeningQuotesKeepTheNextValuePending(label: String, value: String) {
-        let output = redactor.redact(lines: [label, "", "\u{1B}[0m", value, "Finished"]).map(\.text)
+        let closing = label.hasSuffix(#"\""#) ? #"\""# : String(label.suffix(1))
+        let output = redactor.redact(lines: [label, "", "\u{1B}[0m", value + closing, "Finished"]).map(\.text)
         #expect(output[0].contains("[redacted:authorization]"))
         #expect(output[1] == "")
         #expect(output[2] == "")
@@ -122,7 +124,9 @@ import Testing
 
     @Test(arguments: ["", " \"", " '", #" \""#], ["abcdef", "\"abcdef", "'abcdef", #"\"abcdef"#])
     func declarativeCodePromptsKeepTheNextValuePending(promptSuffix: String, value: String) {
-        let output = redactor.redact(lines: ["Your one-time code is" + promptSuffix, "", "\u{1B}[0m", value, "Finished"]).map(\.text)
+        let closing = promptSuffix.isEmpty ? String(value.prefix { $0 == "\\" || $0 == "\"" || $0 == "'" })
+            : promptSuffix.trimmingCharacters(in: .whitespaces)
+        let output = redactor.redact(lines: ["Your one-time code is" + promptSuffix, "", "\u{1B}[0m", value + closing, "Finished"]).map(\.text)
         #expect(output[1] == "")
         #expect(output[2] == "")
         #expect(output[3] == "[redacted:device-code]")

@@ -20,6 +20,12 @@ public struct Redactor: Sendable {
             case other
         }
 
+        struct QuotedValue: Hashable, Sendable {
+            let delimiter: Character
+            let escapeDepth: Int
+            let kind: String
+        }
+
         /// The label of the PEM block being removed, until its matching footer.
         var pemLabel: String?
         /// The previous line was a bare `Authorization:` label; the value follows on this line.
@@ -33,6 +39,8 @@ public struct Redactor: Sendable {
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
         var expectingDeviceCode = false
+        /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
+        var quotedValue: QuotedValue?
         /// A terminal control string opened on an earlier line and has not been terminated yet.
         var openControlString: ControlString?
 
@@ -67,6 +75,21 @@ public struct Redactor: Sendable {
         // a label has to be read in.
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
         var text = stripped.joined
+        if let quoted = state.quotedValue {
+            // Inspect the original normalized text: replacement markers no longer contain the
+            // closing delimiter. A closing line is redacted whole, but its suffix can open a new
+            // pending field. Blank/styling-only lines do not close the quoted value.
+            if let end = Self.closingQuoteEnd(in: text[...], for: quoted) {
+                state.quotedValue = nil
+                state.expectingSecretValue = false
+                state.expectingSecretContinuation = false
+                state.expectingAuthorizationValue = false
+                state.authorizationValueIsOnTheNextLine = false
+                state.expectingDeviceCode = false
+                _ = redact(line: String(text[end...]), state: &state)
+            }
+            return RedactedLine(text.isEmpty ? text : Self.marker(quoted.kind))
+        }
         // What the boundary rendering armed, kept apart until this line's own pending contexts
         // have been consumed below and unioned in on the way out.
         var boundaryScan = StreamState()
@@ -80,6 +103,7 @@ public struct Redactor: Sendable {
             state.expectingSecretValue = state.expectingSecretValue || boundaryScan.expectingSecretValue
             state.expectingSecretContinuation = state.expectingSecretContinuation || boundaryScan.expectingSecretContinuation
             state.expectingDeviceCode = state.expectingDeviceCode || boundaryScan.expectingDeviceCode
+            state.quotedValue = state.quotedValue ?? boundaryScan.quotedValue
         }
 
         // A folded value runs over every consecutive indented line, so the state stays armed
@@ -137,6 +161,7 @@ public struct Redactor: Sendable {
         // A secret label or a code prompt inside the fold opens a context the *next* line
         // completes, and only a scan arms that, so the rules run here for their state alone.
         if authorizationContinuation {
+            state.quotedValue = Self.unterminatedQuote(in: text[...], kind: "authorization")
             if authorizationWasAwaitingValue, Self.valueStartsOnNextLine(text[...]) {
                 state.authorizationValueIsOnTheNextLine = true
             }
@@ -144,6 +169,7 @@ public struct Redactor: Sendable {
             return RedactedLine(Self.marker("authorization"))
         }
         if secretContinuation {
+            state.quotedValue = Self.unterminatedQuote(in: text[...], kind: "secret")
             if state.expectingSecretValue, !Self.valueStartsOnNextLine(text[...]) {
                 state.expectingSecretValue = false
             }
@@ -164,6 +190,7 @@ public struct Redactor: Sendable {
         if state.expectingSecretValue || codeExpected {
             let secretExpected = state.expectingSecretValue
             let kind = secretExpected ? "secret" : "device-code"
+            state.quotedValue = Self.unterminatedQuote(in: text[...], kind: kind)
             state.expectingSecretValue = false
             _ = Self.applyPatterns(to: text, codeExpected: false, state: &state)
             // The consumed value may fold onto further indented lines. A lone opening quote
@@ -282,6 +309,10 @@ public struct Redactor: Sendable {
         // the actual redaction rules still require their usual boundary.
         tokenRanges += joined.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map(\.range)
         tokenRanges += joined.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map(\.range)
+        tokenRanges += joined.matches(of: patterns.basicCredentialSpan).compactMap { match in
+            isBasicCredential(match.2) ? match.range : nil
+        }
+        tokenRanges += joined.matches(of: patterns.digestCredentialSpan).map(\.range)
         tokenRanges += joined.matches(of: patterns.jwt).compactMap { match in
             redactedJWT(match.2) == String(match.2) ? nil : match.range
         }
@@ -329,6 +360,7 @@ public struct Redactor: Sendable {
         state.expectingSecretValue = state.expectingSecretValue || scanned.expectingSecretValue
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
+        state.quotedValue = state.quotedValue ?? scanned.quotedValue
     }
 
     // MARK: - Rules
@@ -374,7 +406,7 @@ public struct Redactor: Sendable {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?authorization\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -382,6 +414,25 @@ public struct Redactor: Sendable {
         /// one would survive. The character is captured so it can be put back. A label may also
         /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
         let bearer = #/(^|[^A-Za-z0-9_])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
+        /// A standalone authentication value can reach decoded diagnostics without its header
+        /// name. Basic is recognized only when the Base64 decodes to a user/password separator;
+        /// Digest must start with an authentication parameter assignment, not ordinary prose.
+        private static var basicValue: Regex<(Substring, Substring, Substring)> {
+            #/(basic[ \t]+)([A-Za-z0-9+\/]{2,}={0,2})(?![A-Za-z0-9+\/=])/#
+        }
+        let basicCredentialSpan = basicValue.ignoresCase()
+        let basicAuthorization = Regex {
+            #/(^|[^A-Za-z0-9_])/#
+            basicValue
+        }.ignoresCase()
+        private static var digestValue: Regex<Substring> {
+            #/digest[ \t]+(?=(?:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash)\s*=)[^\r\n]+/#
+        }
+        let digestCredentialSpan = digestValue.ignoresCase()
+        let digestAuthorization = Regex {
+            #/(^|[^A-Za-z0-9_])/#
+            digestValue
+        }.ignoresCase()
         /// Classic and fine-grained GitHub tokens. Nothing at all is required in front of the
         /// prefix, not even a delimiter: an untrusted file, branch, or cache name is glued
         /// straight onto a token by concatenation, and `artifactghp_...` carried a complete
@@ -391,8 +442,10 @@ public struct Redactor: Sendable {
         /// than the concatenation. The API-key rule below keeps its boundary, because `sk-` is
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/#
-        /// OpenAI-style API keys.
-        let apiKey = #/(^|[^A-Za-z0-9])(sk-[A-Za-z0-9_-]{16,})/#
+        /// Distinctive project/provider prefixes survive filename concatenation. A generic
+        /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
+        /// remain intact.
+        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-[A-Za-z0-9_-]{16,})/#
         /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
         /// which one decodes to a JSON object, whitespace allowed. More than three segments are
         /// taken because a JWT can follow a label, as in `session.<jwt>`.
@@ -454,12 +507,12 @@ public struct Redactor: Sendable {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
             }
-            #/([ \t]+)(?=\S)/#
+            #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]codes?)\b(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)\b(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -512,12 +565,43 @@ public struct Redactor: Sendable {
         }
     }
 
+    private static func isBasicCredential(_ value: Substring) -> Bool {
+        decodedBase64URL(value)?.contains(0x3A) == true
+    }
+
+    private static func unterminatedQuote(in value: Substring, kind: String) -> StreamState.QuotedValue? {
+        let value = value.drop(while: { $0.isWhitespace })
+        let slashes = value.prefix(while: { $0 == "\\" }).count
+        let afterSlashes = value.dropFirst(slashes)
+        guard let delimiter = afterSlashes.first, delimiter == "\"" || delimiter == "'" else { return nil }
+        let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: slashes, kind: kind)
+        return closingQuoteEnd(in: afterSlashes.dropFirst(), for: quoted) == nil ? quoted : nil
+    }
+
+    private static func closingQuoteEnd(in value: Substring, for quoted: StreamState.QuotedValue) -> String.Index? {
+        var slashes = 0
+        for index in value.indices {
+            let character = value[index]
+            if character == "\\" {
+                slashes += 1
+                continue
+            }
+            if character == quoted.delimiter,
+               quoted.escapeDepth == 0 ? slashes.isMultiple(of: 2) : slashes == quoted.escapeDepth {
+                return value.index(after: index)
+            }
+            slashes = 0
+        }
+        return nil
+    }
+
     private static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState) -> String {
         let p = patterns
         var text = input
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
+            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
             state.expectingAuthorizationValue = true
             state.authorizationValueIsOnTheNextLine =
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2)
@@ -525,28 +609,46 @@ public struct Redactor: Sendable {
         }
         // Each token rule captures the character in front of the token, which is put back.
         text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
+        text = text.replacing(p.basicAuthorization) { match in
+            guard isBasicCredential(match.3) else { return String(match.0) }
+            state.expectingAuthorizationValue = true
+            return "\(match.1)Basic \(marker("authorization"))"
+        }
+        text = text.replacing(p.digestAuthorization) { match in
+            state.expectingAuthorizationValue = true
+            return "\(match.1)Digest \(marker("authorization"))"
+        }
         // The GitHub rule captures nothing in front of the token: it needs no boundary there.
         text = text.replacing(p.githubToken, with: marker("github-token"))
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
+        // Scan argv boundaries before generic labelled values can consume following options.
+        text = redactSecretOptions(text, state: &state)
         // A labeled value can be folded onto the next line, so the label arms the continuation
         // state the way an authorization header does.
         var labelCarriedAValue = false
         var labelAwaitsValue = false
         text = text.replacing(p.labeledSecret) { match in
+            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "secret")
             labelCarriedAValue = true
             labelAwaitsValue = labelAwaitsValue || valueStartsOnNextLine(match.3)
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretContinuation = labelCarriedAValue
-        // The option keeps its name and the spacing that followed it, so an echoed command line
-        // still reads as one: `--password [redacted:secret] --verbose`.
-        text = redactSecretOptions(text)
-        text = text.replacing(p.codeField) { match in "\(match.1)\(match.2): \(marker("device-code"))" }
-        text = text.replacing(p.codePrompt) { match in "\(match.1) \(marker("device-code"))" }
+        text = text.replacing(p.codeField) { match in
+            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
+            return "\(match.1)\(match.2): \(marker("device-code"))"
+        }
+        text = text.replacing(p.codePrompt) { match in
+            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
+            return "\(match.1) \(marker("device-code"))"
+        }
         text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
         text = text.replacing(p.declarativeCodePrompt) { match in
+            if let value = match.2 {
+                state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+            }
             state.expectingDeviceCode = state.expectingDeviceCode
                 || (match.2.map(valueStartsOnNextLine) ?? true)
             return "\(match.1) \(marker("device-code"))"
@@ -574,24 +676,36 @@ public struct Redactor: Sendable {
 
     /// Scan argument boundaries before replacing them. Plain shell quotes, quotes escaped by
     /// a surrounding diagnostic string, and escaped whitespace all belong to the same value.
-    private static func redactSecretOptions(_ text: String) -> String {
+    private static func redactSecretOptions(_ text: String, state: inout StreamState) -> String {
         var result = ""
         var cursor = text.startIndex
         while let match = text[cursor...].firstMatch(of: patterns.secretOption) {
             result += text[cursor..<match.range.lowerBound]
-            let end = secretArgumentEnd(in: text, from: match.range.upperBound)
-            result += "\(match.1)\(match.2)\(match.3)\(marker("secret"))"
-            cursor = end
+            // A missing value must not consume a later option's name and leave that option's
+            // value unlabelled. Only a recognized secret option is left for another scan:
+            // an opaque password beginning with a dash must still be removed.
+            if match.3 != "=", text[match.range.upperBound...].prefixMatch(of: patterns.secretOption) != nil {
+                result += match.0
+                cursor = match.range.upperBound
+                continue
+            }
+            let argument = secretArgument(in: text, from: match.range.upperBound)
+            state.quotedValue = state.quotedValue ?? argument.quoted
+            // Canonicalize equals to a space so the generic field rule cannot treat the
+            // replacement and later arguments as a single unquoted passphrase.
+            let separator = match.3 == "=" ? " " : String(match.3)
+            result += "\(match.1)\(match.2)\(separator)\(marker("secret"))"
+            cursor = argument.end
         }
         return result + text[cursor...]
     }
 
-    private static func secretArgumentEnd(in text: String, from start: String.Index) -> String.Index {
+    private static func secretArgument(in text: String, from start: String.Index) -> (end: String.Index, quoted: StreamState.QuotedValue?) {
         var cursor = start
         var quote: Character?
         var quoteEscapeDepth = 0
         while cursor < text.endIndex {
-            if quote == nil, text[cursor].isWhitespace { return cursor }
+            if quote == nil, text[cursor].isWhitespace { return (cursor, nil) }
             let escapeStart = cursor
             var escapeDepth = 0
             while cursor < text.endIndex, text[cursor] == "\\" {
@@ -614,11 +728,11 @@ public struct Redactor: Sendable {
                     quoteEscapeDepth = escapeStart == start ? escapeDepth : 0
                 }
             } else if text[cursor].isWhitespace, escapeDepth.isMultiple(of: 2) {
-                return cursor
+                return (cursor, nil)
             }
             text.formIndex(after: &cursor)
         }
-        return text.endIndex
+        return (text.endIndex, quote.map { .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret") })
     }
 
     /// Replaces all three JWS or five JWE segments inside a run of dot-separated segments. A dot is
