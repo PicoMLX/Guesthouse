@@ -1,0 +1,112 @@
+import Foundation
+import Testing
+@testable import GuesthouseCore
+
+@Suite struct RedactorNestedEncodingRepairTests {
+    @Test(arguments: 2...5, ["Bearer\tSYNTHETICVALUE", "--password\tSYNTHETICVALUE", "Enter the code\tSYNTHETICVALUE",
+                           "--password\nSYNTHETICVALUE", "--password\rSYNTHETICVALUE"])
+    func escapedWhitespaceRetainsScanOnlyCredentialBoundaries(layers: Int, credential: String) throws {
+        var input = credential
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("SYNTHETICVALUE"))
+        #expect(output[1] == "Finished")
+        #expect(!output[0].contains("\n") && !output[0].contains("\r"))
+    }
+
+    @Test func aRawWrapperClosedInsideAnEncodedValueCannotCloseAgainAfterIt() {
+        let input = #"prefix=' password: \"first'stuff\"', syntheticTail"#
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test(arguments: 2...5, ["https://user:syntheticSecret@example.com", "eyJhbGciOiJIUzI1NiJ9.syntheticPayload"])
+    func nestedURLsAndIncompleteJWTsConcealTheirClosedContainer(layers: Int, credential: String) throws {
+        var input = credential
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: 2...5)
+    func nestedEncodedFieldsStillConcealTheirOpaqueValues(layers: Int) throws {
+        var input = #"{"password":"syntheticCredential","note":"ordinaryValue"}"#
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        let output = Redactor().redact("payload: " + input + "\nFinished")
+        #expect(!output.contains("syntheticCredential"))
+        #expect(output.hasSuffix("\nFinished"))
+    }
+
+    @Test(arguments: 2...5)
+    func nestedOrdinaryValuesDoNotBecomeCredentials(layers: Int) throws {
+        var input = #"{"note":"ordinaryValue","count":42}"#
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        #expect(Redactor().redact(input) == input)
+    }
+
+    @Test func excessiveNestingIsConcealedInsteadOfRecursingWithoutABound() throws {
+        var input = #"{"note":"syntheticDeepValue"}"#
+        for _ in 0..<11 { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        let output = Redactor().redact(input + "\nFinished")
+        #expect(!output.contains("syntheticDeepValue"))
+        #expect(output.hasSuffix("\nFinished"))
+    }
+
+    @Test func layerDecodingDoesNotCreatePhysicalLineTerminators() {
+        #expect(Redactor.removingQuotedEncodingLayer(#"a\nb\rc\td"#) == "a b c d")
+    }
+
+    @Test func manyNestedSiblingsStayIndependent() throws {
+        let value = String(decoding: try JSONEncoder().encode(#"{"password":"syntheticValue"}"#), as: UTF8.self)
+        let input = Array(repeating: "\"payload\": " + value, count: 200).joined(separator: ", ")
+        #expect(!Redactor().redact(input).contains("syntheticValue"))
+    }
+
+    @Test(arguments: [",", ";", "]", "}"])
+    func escapedDelimitersDoNotReleaseAnAmbiguousCredentialTail(delimiter: String) {
+        let input = #"password: \"first\" \"# + delimiter + " syntheticTail"
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test func aClosedEncodedValueCannotConsumeTheNextPhysicalRecord() throws {
+        var input = #"{"password":"#
+        for _ in 0..<2 { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        #expect(Redactor().redact(input + "\nFinished").hasSuffix("\nFinished"))
+    }
+
+    @Test(arguments: ["--password", "--token", "--api-key"])
+    func twiceRepresentedPythonArgvKeepsItsOptionValuePair(option: String) {
+        let input = "'\"[\\'" + option + "\\', \\'OpaqueSynthetic987\\', \\'--verbose\\']\"'"
+        let output = Redactor().redact(input)
+        #expect(!output.contains("OpaqueSynthetic987"))
+        #expect(output.contains("--verbose"))
+    }
+
+    @Test(arguments: 2...5, ["--password", "--token", "--api-key"])
+    func aDecodedCompleteStringOwnsItsOptionBoundary(layers: Int, option: String) throws {
+        var input = option + " OpaqueSynthetic987"
+        for _ in 0..<layers { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        #expect(!Redactor().redact(input).contains("OpaqueSynthetic987"))
+    }
+
+    @Test(arguments: ["\"", "'"], ["", " "])
+    func unmatchedRawQuotesCannotReleaseACredentialTail(quote: String, separator: String) {
+        let input = #"password: \"first\""# + separator + quote + ", syntheticTail"
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test(arguments: [("it's ", "'"), ("some\"word ", "\"")])
+    func anInWordQuoteDoesNotProveAnEnclosingWrapper(parts: (String, String)) {
+        let input = parts.0 + #"password: \"first\""# + parts.1 + ", syntheticTail"
+        #expect(!Redactor().redact(input).contains("syntheticTail"))
+    }
+
+    @Test(arguments: [3, 7, 15])
+    func encodedSerializedArraysRetainOptionValuePairing(depth: Int) {
+        let quote = String(repeating: "\\", count: depth) + "\""
+        let input = "[" + quote + "--password" + quote + ", " + quote + "syntheticPassword" + quote + ", " + quote + "--verbose" + quote + "]"
+        let output = Redactor().redact(input)
+        #expect(!output.contains("syntheticPassword"))
+        #expect(output.contains("--verbose"))
+    }
+}
