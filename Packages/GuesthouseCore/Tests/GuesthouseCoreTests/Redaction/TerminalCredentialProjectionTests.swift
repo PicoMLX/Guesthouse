@@ -2,6 +2,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["\u{1B}", "\u{1B}[31", "\u{9B}31"])
+    func restoredCodeContextProtectsAnUnmodifiedValue(_ escape: String) throws {
+        let input = "The login co" + escape + "de was rejected; retry AB12-CD34."
+        let joined = TerminalControlGrammar.normalize(input)
+        let span = try #require(Redactor.recoveredCredentialRanges(in: input, joined: joined, priorPrefixes: [])
+            .ranges.first(where: { $0.kind == "device-code" }))
+        #expect(String(decoding: Array(joined.utf8)[span.range], as: UTF8.self) == "AB12-CD34")
+    }
+
+    @Test(arguments: ["\u{1B}[31", "\u{9B}31"])
+    func ordinaryCoverageRequiresAnActualCredentialBoundary(_ escape: String) throws {
+        let input = "filename" + escape + "@sk-" + escape + "abcdefghijklmnopq done"
+        let joined = TerminalControlGrammar.normalize(input)
+        let span = try #require(Redactor.recoveredCredentialRanges(in: input, joined: joined, priorPrefixes: [])
+            .ranges.first(where: { $0.kind == "api-key" }))
+        #expect(String(decoding: Array(joined.utf8)[span.range], as: UTF8.self) == "sk-bcdefghijklmnopq")
+    }
+
     @Test(arguments: ["\u{1B}--pass\u{1B}[31word syntheticOpaque",
                       "\u{1B}--passw\u{1B}[31ord syntheticOpaque"])
     func mixedOptionsProduceScanOnlyContexts(_ input: String) {

@@ -3,13 +3,25 @@ import Foundation
 extension Redactor {
     typealias TerminalCredentialRange = (range: Range<Int>, kind: String)
 
+    /// Boundary-free span discovery is not proof that the ordinary renderer recognizes it.
+    static func terminalRecognizedStarts(in text: String) -> Set<String.Index> {
+        Set(text.matches(of: patterns.apiKey).map { $0.2.startIndex }
+            + text.matches(of: patterns.bearer).map { $0.2.startIndex }
+            + text.matches(of: patterns.basicAuthorization).map { $0.2.startIndex }
+            + text.matches(of: patterns.digestAuthorization).map { $0.1.endIndex }
+            + text.matches(of: patterns.specializedAuthorization).map { $0.1.endIndex })
+    }
+
     /// Recover command finals as scan-only evidence, never as visible output. Token ranges
     /// can be masked here; opaque field contexts need the caller's quote/private-key state.
     static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [String])
         -> (ranges: [TerminalCredentialRange], contexts: [String]) {
         var recovered: [TerminalCredentialRange] = []
         var contexts: [String] = []
-        let ordinary = terminalCredentialSpans(in: joined).map { span -> TerminalCredentialRange in
+        let ordinaryStarts = terminalRecognizedStarts(in: joined)
+        let ordinary = terminalCredentialSpans(in: joined)
+            .filter { !$0.needsBoundary || ordinaryStarts.contains($0.range.lowerBound) }
+            .map { span -> TerminalCredentialRange in
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
             return (lower..<upper, span.kind)
@@ -47,13 +59,9 @@ extension Redactor {
                     break
                 }
             }
-            let recognizedStarts = Set(
-                alternate.matches(of: patterns.apiKey).map { $0.2.startIndex }
-                + alternate.matches(of: patterns.bearer).map { $0.2.startIndex }
-                + alternate.matches(of: patterns.basicAuthorization).map { $0.2.startIndex }
-                + alternate.matches(of: patterns.digestAuthorization).map { $0.1.endIndex }
-                + alternate.matches(of: patterns.specializedAuthorization).map { $0.1.endIndex }
-            )
+            let recognizedStarts = terminalRecognizedStarts(in: alternate)
+            // The restored evidence can be the contextual word "code", not the value itself.
+            let restoredCodeContext = !joined.contains(patterns.mentionsCode) && alternate.contains(patterns.mentionsCode)
             var retainedIndex = 0
             var ordinaryIndex = 0
             var coveredEnds: [String: Int] = [:]
@@ -71,7 +79,8 @@ extension Redactor {
                 let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.upperBound)
                 guard !span.needsBoundary || boundaries.contains(lower) || recognizedStarts.contains(span.range.lowerBound) else { continue }
                 while retainedIndex < retained.count, retained[retainedIndex].upperBound <= lower { retainedIndex += 1 }
-                if offsets[lower] < offsets[upper], retainedIndex < retained.count, retained[retainedIndex].lowerBound < upper {
+                let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound < upper
+                if offsets[lower] < offsets[upper], touchesEvidence || (span.kind == "device-code" && restoredCodeContext) {
                     while ordinaryIndex < ordinary.count, ordinary[ordinaryIndex].range.lowerBound <= offsets[lower] {
                         let known = ordinary[ordinaryIndex]
                         coveredEnds[known.kind] = max(coveredEnds[known.kind] ?? 0, known.range.upperBound)
