@@ -7,22 +7,8 @@ extension Redactor {
     struct Patterns: @unchecked Sendable {
         /// Any of the three line terminators, CRLF first so it is never split in half.
         let lineSeparator = #/\r\n|\n|\r/#
-        /// Control strings up to their terminator or the end of the line, then CSI introduced by
-        /// `ESC [` or U+009B; any other escape sequence, including the ones with intermediate
-        /// bytes such as `ESC ( B`; and bare C0/C1 controls, except tabs and line terminators.
-        /// OSC is the only control string that
-        /// BEL ends — ECMA-48 gives DCS, APC, PM, and SOS the ST terminator alone — so a BEL
-        /// inside one of those is payload. Ending them at it would hand the rest of the payload
-        /// to the secret rules as text, and the character in front of a token there defeats the
-        /// token rules' word boundary.
-        let terminalEscape = #/(?:\u{1B}\]|\u{9D})[^\u{07}\u{18}\u{1A}\u{9C}\u{1B}]*(?:[\u{07}\u{18}\u{1A}\u{9C}]|\u{1B}\\)?|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{18}\u{1A}\u{9C}\u{1B}]*(?:[\u{18}\u{1A}\u{9C}]|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[\u{00}-\u{09}\u{0B}\u{0C}\u{0E}-\u{17}\u{19}\u{1C}-\u{1F}\u{7F} -?]*(?:[\u{18}\u{1A}@-~]|(?=\u{1B}))|\u{1B}[\u{00}-\u{09}\u{0B}\u{0C}\u{0E}-\u{17}\u{19}\u{1C}-\u{1F}\u{7F} -\/]*(?:[\u{18}\u{1A}0-~]|(?=\u{1B}))|[\u{00}-\u{08}\u{0B}\u{0C}\u{0E}-\u{1F}\u{7F}-\u{9F}]/#
-        /// A control string introducer whose payload reaches the end of the line unterminated.
-        /// The first capture is present only for an OSC, whose payload a later BEL also ends.
-        let unterminatedControlString = #/(?:(\u{1B}\]|\u{9D})[^\u{07}\u{18}\u{1A}\u{9C}\u{1B}]*|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{18}\u{1A}\u{9C}\u{1B}]*)$/#
-        /// ST ends a control string; CAN and SUB cancel one without hiding later text.
-        let controlStringEnd = #/[\u{18}\u{1A}\u{9C}]|\u{1B}\\|(?=\u{1B})/#
-        /// An OSC ends at either of those or at BEL.
-        let oscEnd = #/[\u{07}\u{18}\u{1A}\u{9C}]|\u{1B}\\|(?=\u{1B})/#
+        /// Shared scalar grammar also owns bounded cross-record control state.
+        let terminalEscape = TerminalControlGrammar.escape
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
@@ -165,7 +151,7 @@ extension Redactor {
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
         let secretOption = Regex {
-            #/(^|[\s\u{009F}"'\[({<])/#
+            #/(^|[\s\u{001F}"'\[({<])/#
             Capture {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
@@ -173,7 +159,7 @@ extension Redactor {
             #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|[\s\u{009F}"'\[({<])--?[A-Za-z0-9_-]*/#
+            #/(^|[\s\u{001F}"'\[({<])--?[A-Za-z0-9_-]*/#
             secretName
             #/[ \t]*(?:=[ \t]*)?$/#
         }.ignoresCase()

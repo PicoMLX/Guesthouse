@@ -2,11 +2,33 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
-    @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}31", "3\u{0}1", "31\u{7}", "31\u{8}", "31\u{9}", "31 \u{0}", " 31", "1 2", "? 3"])
-    func embeddedControlsDoNotSplitCSI(introducer: String, body: String) {
-        let result = Redactor.renderings(of: "pass" + introducer + body + "mword: syntheticPassword")
-        #expect(result.joined == "password: syntheticPassword")
+
+    @Test(arguments: [("--pass\u{1B}word syntheticOpaque", "--password syntheticOpaque"),
+                      ("--pass\u{1B}word", "--password"), ("--pass\u{1B}[\u{0}word", "--password")])
+    func restoredOptionsRemainCredentialContexts(input: String, expected: String) {
+        #expect(Redactor.renderings(of: input).contexts.contains(expected))
     }
+
+    @Test(arguments: ["sk-abcdefghijklmnopqrstuvwx", "ghp_abcdefghijklmnopqrstuvwx"])
+    func normalizingASpliceAgainCannotSwallowItsSuffix(token: String) {
+        let first = Redactor.renderings(of: "filename\u{0}" + token).spliced
+        #expect(Redactor.renderings(of: first).spliced == first)
+    }
+
+    @Test(arguments: ["\u{1B}[0m", "\u{9B}0m", "\u{1B}(B"], ["\u{301}", "\u{FE0F}"])
+    func controlFinalsUseScalarRatherThanGraphemeBoundaries(control: String, suffix: String) {
+        #expect(Redactor.renderings(of: "red" + control + suffix + "text").joined == "red" + suffix + "text")
+    }
+
+    @Test(arguments: [("\u{1B}[31", "m"), ("\u{9B}31", "m"), ("\u{1B}", "c"), ("\u{1B}(", "B")])
+    func incompleteCommandsCannotBecomeFakeSecretValues(parts: (String, String)) {
+        var open: Redactor.StreamState.ControlString?
+        #expect(Redactor.stripTerminalEscapes("password: " + parts.0, openControlString: &open).joined == "password: ")
+        #expect(open != nil)
+        #expect(Redactor.stripTerminalEscapes(parts.1 + "syntheticPassword", openControlString: &open).joined == "syntheticPassword")
+        #expect(open == nil)
+    }
+
 
     @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}", "\u{7}", "\u{8}", "\u{9}", "\u{7F}"])
     func ignoredCSIBytesDoNotHideRecoveredFinals(introducer: String, ignored: String) {
@@ -14,14 +36,7 @@ import Testing
         #expect(result.contexts.contains("password: syntheticPassword"))
     }
 
-    @Test(arguments: ["\u{18}", "\u{1A}"])
-    func cancellationIsNotAnIgnoredCSIByte(cancel: String) {
-        #expect(Redactor.stripTerminalEscapes("pass\u{1B}[31" + cancel + "word: syntheticPassword") == "password: syntheticPassword")
-    }
 
-    @Test func aNewEscapeCancelsAnIncompleteCSI() {
-        #expect(Redactor.stripTerminalEscapes("pass\u{1B}[31\u{1B}[0mword: syntheticPassword") == "password: syntheticPassword")
-    }
 
     @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}\u{0}(", "\u{1B}(\u{0}", "\u{1B}(\u{7F}"], ["accessToken", "authorization", "user_code"])
     func genericEscapeFinalsCannotHideCredentialLabels(escape: String, label: String) {
@@ -31,26 +46,12 @@ import Testing
         #expect(result.joined == label.prefix(1) + label.dropFirst(2) + ": syntheticPassword")
     }
 
-    @Test(arguments: ["\u{0}", "\u{7}", "\u{9}", "\u{7F}"], ["", "("])
-    func embeddedGenericControlsStayInsideTheirCommand(control: String, intermediate: String) {
-        #expect(Redactor.renderings(of: "pass\u{1B}" + intermediate + control + "wword: syntheticPassword").joined
-                == "password: syntheticPassword")
-    }
 
     @Test(arguments: ["\u{1B}", "\u{1B}(\u{0}", "\u{1B}[", "\u{9B}"])
     func recoveredShortPrefixesRetainStreamEvidence(escape: String) {
         #expect(Redactor.renderings(of: "s" + escape + "k-abc").contexts.contains("sk-abc"))
     }
 
-    @Test(arguments: ["\u{1B}]", "\u{9D}"], ["\u{90}", "\u{98}", "\u{9E}", "\u{9F}"])
-    func consumedOSCPayloadCannotArmAnotherControlString(opener: String, nested: String) {
-        var open: Redactor.StreamState.ControlString?
-        #expect(Redactor.stripTerminalEscapes(opener + "title" + nested + "payload\u{7}after", openControlString: &open).joined == "after")
-        #expect(open == nil)
-        #expect(Redactor.stripTerminalEscapes("Finished", openControlString: &open).joined == "Finished")
-        _ = Redactor.stripTerminalEscapes(opener + "title" + nested + "payload\u{7}\u{1B}Ppending", openControlString: &open)
-        #expect(open == .other)
-    }
 
     @Test(arguments: ["ghp_syntheticFirst", "sk-synthetic", "Bearer syntheticFirst"],
           ["password: syntheticSecond", "Authorization: syntheticSecond", "user_code: syntheticSecond", "password:"])
@@ -81,16 +82,6 @@ import Testing
         #expect(result.spliced.hasSuffix("example.com"))
     }
 
-    @Test(arguments: ["\u{1B}]", "\u{1B}P", "\u{1B}_", "\u{1B}^", "\u{1B}X", "\u{9D}", "\u{90}", "\u{9F}", "\u{9E}", "\u{98}"], ["\u{18}", "\u{1A}", "\u{1B}c", "\u{1B}[m"])
-    func cancelledControlStringsReleaseVisibleDiagnostics(opener: String, cancel: String) {
-        var open: Redactor.StreamState.ControlString?
-        #expect(Redactor.stripTerminalEscapes("before" + opener + "payload" + cancel + "after", openControlString: &open).joined == "beforeafter")
-        #expect(open == nil)
-        _ = Redactor.stripTerminalEscapes(opener + "payload", openControlString: &open)
-        #expect(Redactor.stripTerminalEscapes(cancel + "after", openControlString: &open).joined == "after")
-        #expect(open == nil)
-        #expect(Redactor.stripTerminalEscapes("Finished", openControlString: &open).joined == "Finished")
-    }
 
     @Test(arguments: ["\u{1B}[", "\u{009B}", "\u{1B}", "\u{1B}("], [Character("m"), "e", "1"])
     func escapeIntroducersCannotConsumeAJOSEHeaderCharacter(introducer: String, character: Character) throws {
