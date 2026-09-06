@@ -134,6 +134,7 @@ extension Redactor {
                     || suffix.prefixMatch(of: patterns.pemBegin) != nil
                     || suffix.prefixMatch(of: patterns.apiKey) != nil
                     || suffix.prefixMatch(of: patterns.distinctiveAPIKey) != nil
+                    || suffix.prefixMatch(of: patterns.urlUserInfo) != nil
                     || suffix.prefixMatch(of: patterns.secretOption) != nil
                     || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil else { continue }
                 // The token may have swallowed a separate label. Keep that label available
