@@ -29,7 +29,9 @@ enum TerminalControlGrammar {
             let csiStart = Regex { ChoiceOf { Regex { esc; "[" }; "\u{9B}" } }
             let csiBody = Regex { ZeroOrMore { ChoiceOf { ignored; #/[ -?]/# } } }
             let escBody = Regex { ZeroOrMore { ChoiceOf { ignored; #/[ -\/]/# } } }
-            let abort = Regex { Lookahead { ChoiceOf { "\u{1B}"; Anchor.endOfSubject } } }
+            // A C1 or non-ASCII scalar cannot finish an ASCII CSI/ESC command. Leave the
+            // interrupting scalar for its own rule, but discard the whole old command.
+            let abort = Regex { Lookahead { ChoiceOf { #/[\r\n\u{1B}\u{80}-\u{10FFFF}]/#; Anchor.endOfSubject } } }
             let st = Regex { esc; "\\" }
             let oscPayload = #/[^\u{07}\u{18}\u{1A}\u{9C}\u{1B}]*/#
             let otherPayload = #/[^\u{18}\u{1A}\u{9C}\u{1B}]*/#
@@ -61,11 +63,20 @@ enum TerminalControlGrammar {
     /// class is retained, never an unbounded parameter or payload buffer. Synthetic control
     /// prefixes are consumed by the same grammar and cannot become visible text.
     static func prepare(_ line: String, pending: inout Pending?) -> String {
-        var text = line
+        // A physical record may still carry its framing. Preserve it separately so it
+        // cannot make an unfinished control body look like an ordinary field value.
+        var recordEnd = line.endIndex
+        while recordEnd > line.startIndex {
+            let previous = line.unicodeScalars.index(before: recordEnd)
+            guard line.unicodeScalars[previous] == "\r" || line.unicodeScalars[previous] == "\n" else { break }
+            recordEnd = previous
+        }
+        let framing = String(line[recordEnd...])
+        var text = String(line[..<recordEnd])
         switch pending {
         case .osc, .other:
             let end = pending == .osc ? patterns.oscEnd : patterns.stringEnd
-            guard let terminator = text.firstMatch(of: end) else { return "" }
+            guard let terminator = text.firstMatch(of: end) else { return framing }
             text = String(text[terminator.range.upperBound...])
         case .csi:
             text = "\u{1B}[" + text
@@ -75,14 +86,20 @@ enum TerminalControlGrammar {
         }
         pending = nil
         // Never discover a nested introducer by rescanning an already consumed payload.
-        guard let last = text.matches(of: escape).last, last.range.upperBound == text.endIndex else { return text }
+        // Retain only the most recent match, not an array proportional to control count.
+        var remaining = text[...]
+        var last: Regex<Substring>.Match?
+        while let match = remaining.firstMatch(of: escape) {
+            last = match
+            remaining = remaining[match.range.upperBound...]
+        }
+        guard let last, last.range.upperBound == text.endIndex else { return text + framing }
         if last.0.wholeMatch(of: patterns.unfinishedOSC) != nil { pending = .osc }
         else if last.0.wholeMatch(of: patterns.unfinishedOther) != nil { pending = .other }
         else if last.0.wholeMatch(of: patterns.unfinishedCSI) != nil { pending = .csi }
         else if last.0.wholeMatch(of: patterns.unfinishedEscape) != nil {
             pending = .escape(intermediate: last.0.unicodeScalars.contains { (0x20...0x2F).contains($0.value) })
         }
-        return pending == nil ? text : String(text[..<last.range.lowerBound])
+        return (pending == nil ? text : String(text[..<last.range.lowerBound])) + framing
     }
 }
-

@@ -2,6 +2,32 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalControlGrammarTests {
+    @Test(arguments: ["\u{9C}", "\u{85}", "\u{80}", "é", "\u{301}"], ["\u{1B}(", "\u{1B}[31"])
+    func anInterruptingScalarCannotExposeAReconstructedPrefix(interruption: String, opener: String) {
+        var pending: TerminalControlGrammar.Pending?
+        _ = TerminalControlGrammar.prepare(opener, pending: &pending)
+        let expected = interruption.unicodeScalars.first!.value > 0x9F ? interruption + "after" : "after"
+        #expect(TerminalControlGrammar.normalize(TerminalControlGrammar.prepare(interruption + "after", pending: &pending)) == expected)
+        #expect(pending == nil)
+    }
+
+    @Test(arguments: ["\r", "\n", "\r\n"], [("\u{1B}[31", "m"), ("\u{9B}31", "m"), ("\u{1B}(", "B"), ("\u{1B}", "c")])
+    func trailingPhysicalFramingDoesNotReleaseAnIncompleteCommand(framing: String, parts: (String, String)) {
+        var pending: TerminalControlGrammar.Pending?
+        #expect(TerminalControlGrammar.prepare("password: " + parts.0 + framing, pending: &pending) == "password: " + framing)
+        #expect(pending != nil)
+        #expect(TerminalControlGrammar.normalize(TerminalControlGrammar.prepare(parts.1 + "syntheticPassword" + framing, pending: &pending))
+                == "syntheticPassword" + framing)
+        #expect(pending == nil)
+    }
+
+    @Test func controlDenseRecordsRetainOnlyTheirUnfinishedSuffix() {
+        var pending: TerminalControlGrammar.Pending?
+        let controls = String(repeating: "\u{0}", count: 100_000)
+        #expect(TerminalControlGrammar.prepare(controls + "\u{1B}[31", pending: &pending) == controls)
+        #expect(pending == .csi)
+    }
+
     @Test(arguments: ["\u{1B}[", "\u{9B}", "\u{1B}\u{0}["], ["31", " 31", "1 2", "31\u{0}", ""])
     func incompleteCSIIsNotAnOrdinaryFieldValue(start: String, body: String) {
         var pending: TerminalControlGrammar.Pending?
