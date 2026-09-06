@@ -119,26 +119,15 @@ extension Redactor {
             if rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].lowerBound < offset {
                 let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
                 let suffix = joined[boundary...]
-                guard suffix.prefixMatch(of: patterns.labeledSecret) != nil
-                    || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
-                    || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
-                    || suffix.prefixMatch(of: patterns.bearer) != nil
-                    || suffix.prefixMatch(of: patterns.basicAuthorization) != nil
-                    || suffix.prefixMatch(of: patterns.digestAuthorization) != nil
-                    || suffix.prefixMatch(of: patterns.specializedAuthorization) != nil
-                    || suffix.prefixMatch(of: patterns.codeField) != nil
-                    || suffix.prefixMatch(of: patterns.codePrompt) != nil
-                    || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
-                    || suffix.prefixMatch(of: patterns.declarativeCodePrompt) != nil
-                    || suffix.prefixMatch(of: patterns.codePromptOnly) != nil
-                    || suffix.prefixMatch(of: patterns.pemBegin) != nil
-                    || suffix.prefixMatch(of: patterns.apiKey) != nil
-                    || suffix.prefixMatch(of: patterns.distinctiveAPIKey) != nil
-                    || suffix.prefixMatch(of: patterns.urlUserInfo) != nil
-                    || suffix.prefixMatch(of: patterns.secretOption) != nil
-                    || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil else { continue }
+                guard terminalHasCredentialOpener(suffix) else { continue }
                 // The token may have swallowed a separate label. Keep that label available
                 // to the stream scanner, but conceal even a now-short token prefix.
+                // A recovered token can cross this boundary too. Its speculative suffix
+                // must not erase the independently recognized next credential's opener.
+                recovered = recovered.map { span in
+                    span.range.lowerBound < offset && offset < span.range.upperBound
+                        ? (span.range.lowerBound..<offset, span.kind) : span
+                }
                 recovered.append((mergedRanges[rangeIndex].lowerBound..<offset, "secret"))
             }
             let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)

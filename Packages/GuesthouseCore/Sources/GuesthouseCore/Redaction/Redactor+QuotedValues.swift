@@ -35,9 +35,16 @@ extension Redactor {
             // for the serialized-option pass instead of hiding its label in a placeholder.
             if input[opener.range.lowerBound...].prefixMatch(of: patterns.serializedSecretOption) != nil { continue }
             let tail = input[end...].drop(while: { $0.isWhitespace })
+            // An adjacent, proven whole-record wrapper may close after this encoded value.
+            let wrapper = input.first.flatMap { quote in
+                (quote == "\"" || quote == "'") && input[end...].first == quote
+                    && closingQuoteEnd(in: input.dropFirst(), for: .init(delimiter: quote, escapeDepth: 0, kind: "secret")) == input.endIndex
+                    ? quote : nil
+            }
+            let structuralTail = wrapper == nil ? tail : tail.dropFirst().drop(while: { $0.isWhitespace })
             // A colon/equal means this is a key, not a value. Undelimited suffixes can still
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
-            guard tail.isEmpty || tail.first.map({ ",;]})>".contains($0) }) == true else { continue }
+            guard structuralTail.isEmpty || structuralTail.first.map({ ",;]})>".contains($0) }) == true else { continue }
             while reserved.contains(String(identifier)) { identifier += 1 }
             let key = String(identifier)
             identifier += 1

@@ -2,6 +2,15 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLContinuationTests {
+    @Test(arguments: [("https:/", "/user:syntheticOpaque@host/path"), ("https:", "//user:syntheticOpaque@host/path"),
+                      ("/", "/user:syntheticOpaque@host/path"), ("url=https:\\/", "\\/user:syntheticOpaque@host/path")])
+    func partialAuthorityDelimitersRetainUserinfo(_ parts: (String, String)) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: parts.0, codeExpected: false, state: &state)
+        #expect(!Redactor.applyPatterns(to: parts.1, codeExpected: false, state: &state).contains("syntheticOpaque"))
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
     @Test(arguments: [2, 3, 16, 256])
     func nestedSlashEscapesKeepCompleteAndContinuedUserInfoPrivate(_ depth: Int) {
         let slash = String(repeating: "\\", count: depth) + "/"
