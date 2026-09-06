@@ -2,6 +2,34 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["ghp_syntheticSecond", "github_pat_syntheticSecond", "gho_syntheticSecond"])
+    func adjacentGitHubTokensKeepIndependentOpeners(_ token: String) {
+        let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}" + token)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + token))
+        #expect(!result.spliced.contains("abcdefghijklmnopqrstuvwx"))
+    }
+
+    @Test(arguments: ["--password syntheticOpaque", "password: syntheticOpaque",
+                      "Authorization: syntheticOpaque", "device_code: syntheticOpaque"])
+    func recoveredTokensCannotConsumeAnIndependentField(_ field: String) {
+        let result = Redactor.renderings(of: "ey\u{1B}[JhbGciOiJIUzI1NiJ9.payload.signature\u{0}" + field)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + field))
+        #expect(!result.spliced.contains("payload"))
+    }
+
+    @Test(arguments: [60, 70, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
+    func longPendingPEMOpenersFailClosedWithoutUnboundedEvidence(_ length: Int, _ command: String) {
+        var open: Redactor.StreamState.ControlString?
+        _ = Redactor.stripTerminalEscapes("-----BEGIN " + String(repeating: "X", count: length) + " PRIVATE" + command,
+                                         openControlString: &open)
+        let second = Redactor.stripTerminalEscapes("m KEY-----syntheticBody", openControlString: &open)
+        #expect(!second.joined.contains("syntheticBody"))
+        #expect(open?.quarantined == true)
+        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &open).joined
+            == "[redacted:terminal-ambiguity]")
+    }
+
+
     @Test(arguments: [60, 64, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
     func longPendingOptionsPreserveTheirStructuralOpener(_ length: Int, _ command: String) {
         var open: Redactor.StreamState.ControlString?
