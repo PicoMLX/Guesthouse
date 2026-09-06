@@ -2,6 +2,20 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: [#"{\\"password\\":\\"synthetic\\"}"#, #"{\\"Authorization\\":\\"synthetic\\"}"#])
+    func encodedFieldKeysIdentifyTheirValues(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("synthetic"))
+    }
+
+
+
+    @Test(arguments: ["Cookie: session=syntheticOpaque", "Set-Cookie: session=syntheticOpaque; HttpOnly"])
+    func cookieHeadersConcealTheWholeSessionValue(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
     @Test(arguments: ["password", "Authorization", "device_code"], ["\"", "\\\""])
     func completeFieldsBoundInlineOwnership(label: String, quote: String) {
         var state = Redactor.StreamState()
