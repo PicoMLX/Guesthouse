@@ -17,25 +17,14 @@ extension Redactor {
         _ line: String,
         openControlString: inout StreamState.ControlString?
     ) -> (joined: String, spliced: String, contexts: [String]) {
-        var text = line
-        if let open = openControlString {
-            let end = open == .osc ? patterns.oscEnd : patterns.controlStringEnd
-            guard let terminator = text.firstMatch(of: end) else { return ("", "", []) }
-            text = String(text[terminator.range.upperBound...])
-        }
-        // Only top-level consumed spans can own pending state; never rescan their payload.
-        openControlString = text.matches(of: patterns.terminalEscape).last
-            .flatMap { $0.range.upperBound == text.endIndex ? $0.0.wholeMatch(of: patterns.unterminatedControlString) : nil }
-            .map { $0.1 == nil ? .other : .osc }
+        let text = TerminalControlGrammar.prepare(line, pending: &openControlString)
         return renderings(of: text)
     }
 
     /// Stands where an escape did, in the `spliced` reading only. It has to be a boundary to
-    /// every token rule and to be removable again afterwards without taking anything the line
-    /// itself contained: `terminalEscape` matches every bare C1 control, so no scalar in this
-    /// range survives stripping and every occurrence of this one in a stripped line is one this
-    /// type put there.
-    static let splicedBoundary = "\u{009F}"
+    /// every token rule and removable without consuming the remaining diagnostic. Unit
+    /// Separator is a bare control, never a control-string introducer.
+    static let splicedBoundary = "\u{001F}"
 
     private typealias RecoveredCredential = (range: Range<Int>, kind: String)
 
@@ -82,7 +71,10 @@ extension Redactor {
             for escape in escapes {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
                 boundaries.insert(offsets.count - 1)
-                let prefix = escape.0.hasPrefix("\u{1B}[") ? 2 : (escape.0.hasPrefix("\u{009B}") ? 1 : 0)
+                let command = String(String.UnicodeScalarView(escape.0.unicodeScalars.filter {
+                    !((0...0x1A).contains($0.value) || (0x1C...0x1F).contains($0.value) || $0.value == 0x7F)
+                }))
+                let prefix = command.hasPrefix("\u{1B}[") ? 2 : (command.hasPrefix("\u{009B}") ? 1 : 0)
                 // CAN/SUB or a fresh ESC abort the old CSI; its parameters are not evidence.
                 if prefix > 0, let final = escape.0.unicodeScalars.last, !(0x40...0x7E).contains(final.value) {
                     cursor = escape.range.upperBound
@@ -90,10 +82,9 @@ extension Redactor {
                 }
                 // Generic ESC commands can consume a label character too. Never interpret
                 // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
-                let generic = escape.0.replacing(#/[\u{00}-\u{1A}\u{1C}-\u{1F}\u{7F}]/#, with: "")
+                let generic = command
                     .wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
-                let body = String(generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix))
-                    .replacing(#/[\u{00}-\u{1F}\u{7F}]/#, with: "")
+                let body = String(generic ? command.suffix(1) : command.dropFirst(prefix))
                 if prefix > 0 || generic, !body.isEmpty, retainParameters || body.count == 1 {
                     let start = offsets.count - 1
                     alternate += body
@@ -112,6 +103,15 @@ extension Redactor {
             let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
                 + alternate.matches(of: patterns.authorizationHeader).map { ($0.range, $0.2.startIndex) }
                 + alternate.matches(of: patterns.codeField).map { ($0.range, $0.3.startIndex) }
+                + alternate.matches(of: patterns.secretOption).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.secretOptionOnly).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.secretLabelOnly).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.serializedSecretOption).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.codePrompt).map { ($0.range, $0.1.endIndex) }
+                + alternate.matches(of: patterns.codePromptWithoutDelimiter).map { ($0.range, $0.1.endIndex) }
+                + alternate.matches(of: patterns.declarativeCodePrompt).map { ($0.range, $0.1.endIndex) }
+                + alternate.matches(of: patterns.codePromptOnly).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.pemBegin).map { ($0.range, $0.range.upperBound) }
             for (range, valueStart) in fields {
                 let lower = alternate.utf8.distance(from: alternate.startIndex, to: range.lowerBound)
                 let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: valueStart)
