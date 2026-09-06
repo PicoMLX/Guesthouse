@@ -37,7 +37,7 @@ extension Redactor {
             let tail = input[end...].drop(while: { $0.isWhitespace })
             // A colon/equal means this is a key, not a value. Undelimited suffixes can still
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
-            guard tail.isEmpty || tail.first.map({ ",;]}".contains($0) }) == true else { continue }
+            guard tail.isEmpty || tail.first.map({ ",;]})>".contains($0) }) == true else { continue }
             while reserved.contains(String(identifier)) { identifier += 1 }
             let key = String(identifier)
             identifier += 1
@@ -71,7 +71,7 @@ extension Redactor {
         let tail = value[end...]
         let suffix = tail.drop(while: { $0.isWhitespace })
         guard suffix.isEmpty || suffix.allSatisfy({ $0 == "\\" })
-                || suffix.first.map({ ",;]}".contains($0) }) == true else { return nil }
+                || suffix.first.map({ ",;]})>".contains($0) }) == true else { return nil }
         return tail
     }
 }

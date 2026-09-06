@@ -20,7 +20,12 @@ extension Redactor {
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
             return (sanitized, quotedState)
         } : ProtectedQuotedValues(text: input)
-        var text = redactURLContinuations(protected.text, state: &state)
+        var originalURLContext = StreamState()
+        let original = state.expectingURLUserInfo
+            ? applyPatterns(to: protected.text, codeExpected: codeExpected, state: &originalURLContext, prepareQuotedValues: false)
+            : protected.text
+        defer { mergePendingContexts(from: originalURLContext, into: &state) }
+        var text = redactURLContinuations(original, state: &state)
         // Recognition and continuation state use the original field, never its replacement
         // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
         text = text.replacing(p.authorizationHeader) { match in
@@ -35,7 +40,7 @@ extension Redactor {
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
-        if text.wholeMatch(of: #/[ \t]*(?i:Basic)[ \t]*(?:\\[ \t]*)?/#) != nil {
+        if text.wholeMatch(of: #/[ \t]*(?i:Basic|Bearer)[ \t]*(?:\\[ \t]*)?/#) != nil {
             state.expectingAuthorizationValue = true
             state.authorizationValueIsOnTheNextLine = true
             state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
@@ -47,7 +52,9 @@ extension Redactor {
         }
         text = text.replacing(p.basicAuthorization) { match in
             let explicit = retainExplicitAuthorization(match.3, tail: text[match.range.upperBound...], state: &state)
-            guard isBasicCredential(match.3) || explicit else { return String(match.0) }
+            // A physical break may arrive before the decoded username/password colon.
+            let partialAtEnd = text[match.range.upperBound...].allSatisfy(\.isWhitespace)
+            guard isBasicCredential(match.3) || explicit || partialAtEnd else { return String(match.0) }
             state.expectingAuthorizationValue = true
             return "\(match.1)Basic \(marker("authorization"))"
         }
@@ -86,21 +93,21 @@ extension Redactor {
         }
         state.expectingSecretContinuation = labelMayContinue
         text = text.replacing(p.codeField) { match in
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
-            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.3)
-                || fieldExplicitlyContinues(match.3, tail: text[match.range.upperBound...])
+            retainDeviceCodeContext(match.3, tail: text[match.range.upperBound...], state: &state)
             return "\(match.1)\(match.2): \(marker("device-code"))"
         }
         text = text.replacing(p.codePrompt) { match in
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
-            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.0.dropFirst(match.1.count))
+            retainDeviceCodeContext(match.0.dropFirst(match.1.count), tail: text[match.range.upperBound...], state: &state)
             let punctuation = match.0.hasSuffix(".") ? "." : ""
             return "\(match.1) \(marker("device-code"))\(punctuation)"
         }
-        text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
+        text = text.replacing(p.codePromptWithoutDelimiter) { match in
+            retainDeviceCodeContext(match.0.dropFirst(match.1.count), tail: text[match.range.upperBound...], state: &state)
+            return "\(match.1) \(marker("device-code"))"
+        }
         text = text.replacing(p.declarativeCodePrompt) { match in
             if let value = match.2 {
-                state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+                retainDeviceCodeContext(value, tail: text[match.range.upperBound...], state: &state)
             }
             state.expectingDeviceCode = state.expectingDeviceCode
                 || (match.2.map(valueStartsOnNextLine) ?? true)
@@ -110,11 +117,11 @@ extension Redactor {
             labelAwaitsValue = true
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
-        state.expectingSecretValue = labelAwaitsValue
+        state.expectingSecretValue = labelAwaitsValue || input.contains(p.secretLabelOnly)
         // "Your one-time code is:" with the value on the next line. Only a line that asks for a
         // code arms the next one: arming on any mention of the word would replace the failure
         // that follows `process exited with code 1` with a device-code marker.
-        if text.contains(p.codePromptOnly) {
+        if text.contains(p.codePromptOnly) || input.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
         }
         text = protected.restoring(in: text, state: &state)
@@ -122,6 +129,13 @@ extension Redactor {
             text = applyDeviceCodePattern(to: text)
         }
         return text
+    }
+
+    private static func retainDeviceCodeContext(_ value: Substring, tail: Substring, state: inout StreamState) {
+        let explicit = fieldExplicitlyContinues(value, tail: tail)
+        state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+        state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(value) || explicit
+        state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || !isClosedQuotedValue(value) || explicit
     }
 
     private static func retainExplicitAuthorization(_ value: Substring, tail: Substring, state: inout StreamState) -> Bool {
@@ -141,7 +155,12 @@ extension Redactor {
     /// These ambiguous authorities therefore take the conservative path too.
     /// A visible path/query/fragment boundary proves the authority complete (RFC 3986 §3.2).
     private static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
-        var text = input
+        // Commas separate unquoted elements inside diagnostic lists, not inside an
+        // ordinary URL path/query. Scan each flat list element at its own value boundary.
+        var text = input.replacing(#/\[[^\[\]\r\n]*\]/#) { match in
+            "[" + match.0.dropFirst().dropLast().split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" } }.joined(separator: ",") + "]"
+        }
         if state.expectingURLUserInfo {
             let value = text.drop(while: \.isWhitespace)
             guard !value.isEmpty else { return text }

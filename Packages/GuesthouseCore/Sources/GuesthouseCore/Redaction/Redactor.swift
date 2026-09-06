@@ -45,6 +45,8 @@ struct Redactor: Sendable {
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
         var expectingDeviceCode = false
+        /// An unquoted code already began; only indented later records continue its value.
+        var expectingDeviceCodeContinuation = false
         /// An authority with a password delimiter reached a physical boundary before its @.
         var expectingURLUserInfo = false
         /// A distinctive token prefix reached a line boundary; payload may continue after it.
@@ -69,6 +71,7 @@ struct Redactor: Sendable {
         state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || scanned.secretValueExplicitlyContinues
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
+        state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || scanned.expectingDeviceCodeContinuation
         state.expectingURLUserInfo = state.expectingURLUserInfo || scanned.expectingURLUserInfo
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
         if scanned.quotedValue?.enclosingAuthorizationFold == true { state.quotedValue?.enclosingAuthorizationFold = true }
