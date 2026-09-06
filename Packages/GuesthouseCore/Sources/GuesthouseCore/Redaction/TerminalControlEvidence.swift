@@ -124,11 +124,23 @@ enum TerminalControlEvidence {
         guard continuation?.quarantined != true else { return quarantine() }
         let text = TerminalControlGrammar.prepare(line, pending: &pending, commandSuffix: &commandSuffix)
         guard let readings = projections(in: text, prefixes: prefixes) else { return quarantine() }
+        // A truncated unfinished PEM label cannot be reconstructed or safely matched to
+        // a footer. Keep the same bounded state by quarantining instead of forgetting BEGIN.
+        if pending != nil, readings.contains(where: { reading in
+            guard let opener = reading.text.firstMatch(of: #/-----BEGIN [A-Za-z0-9](?:(?!-----)[A-Za-z0-9 ._+-])*$/#) else { return false }
+            return opener.0.unicodeScalars.count > 64
+        }) { return quarantine() }
         continuation = pending.map { command in
             let suffixes = readings.map { reading in
                 let scalars = reading.text.unicodeScalars
                 let end = scalars.lastIndex(where: { $0 != "\r" && $0 != "\n" })
                     .map { scalars.index(after: $0) } ?? scalars.startIndex
+                // Option names permit arbitrarily long identifier prefixes. Preserve the
+                // structural dash plus their bounded suffix, not a misleading bare word.
+                // This is scan-only evidence; omitted option bytes never become output.
+                if let option = reading.text[..<end].firstMatch(of: #/(?:^|[^A-Za-z0-9_\/-])(--?[A-Za-z0-9_-]{64,})$/#) {
+                    return "--" + option.1.suffix(62)
+                }
                 return String(String.UnicodeScalarView(scalars[..<end].suffix(64)))
             }
             return Continuation(pending: command, prefixes: Array(Set(suffixes)).sorted(), commandSuffix: commandSuffix)
