@@ -12,7 +12,7 @@ enum TerminalControlEvidence {
 
     struct Continuation: Hashable, Sendable {
         let pending: TerminalControlGrammar.Pending?
-        /// At most 64 distinct suffixes of at most 64 Unicode scalars (256 UTF-8 bytes).
+        /// At most 64 complete prefixes of at most 64 Unicode scalars (256 UTF-8 bytes).
         let prefixes: [String]
         let commandSuffix: String
         let quarantined: Bool
@@ -88,6 +88,16 @@ enum TerminalControlEvidence {
         while let escape = remaining.firstMatch(of: TerminalControlGrammar.escape) {
             let literal = remaining[..<escape.range.lowerBound]
             let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) })).sorted()
+            // Most controls (including C0/C1 and opaque strings) have one empty reading.
+            // Mutate those projections in place: copying/hashing each growing prefix is quadratic.
+            if bodies == [""] {
+                for index in results.indices {
+                    results[index].append(literal: literal)
+                    results[index].append(body: "")
+                }
+                remaining = remaining[escape.range.upperBound...]
+                continue
+            }
             var next: [Projection] = []
             var seen: Set<Projection> = []
             for var result in results {
@@ -111,6 +121,14 @@ enum TerminalControlEvidence {
         }
     }
 
+    /// Terminal preparation retains physical CR/LF framing; it is not credential evidence.
+    static func contentBeforeTerminator(_ text: String) -> Substring {
+        let scalars = text.unicodeScalars
+        let end = scalars.lastIndex(where: { $0 != "\r" && $0 != "\n" })
+            .map { scalars.index(after: $0) } ?? scalars.startIndex
+        return text[..<end]
+    }
+
     static func prepare(_ line: String, continuation: inout Continuation?) -> (text: String, prefixes: [String]) {
         let prefixes = continuation?.prefixes ?? []
         var pending = continuation?.pending
@@ -124,13 +142,14 @@ enum TerminalControlEvidence {
         guard continuation?.quarantined != true else { return quarantine() }
         let text = TerminalControlGrammar.prepare(line, pending: &pending, commandSuffix: &commandSuffix)
         guard let readings = projections(in: text, prefixes: prefixes) else { return quarantine() }
+        // A pending command may split ANY credential opener, not just options or PEM.
+        // Never truncate structural evidence: once its bounded capacity is exceeded, quarantine
+        // this StreamState. Even apparently ordinary long prefixes can hide a later opener.
+        if pending != nil, readings.contains(where: {
+            contentBeforeTerminator($0.text).unicodeScalars.prefix(65).count > 64
+        }) { return quarantine() }
         continuation = pending.map { command in
-            let suffixes = readings.map { reading in
-                let scalars = reading.text.unicodeScalars
-                let end = scalars.lastIndex(where: { $0 != "\r" && $0 != "\n" })
-                    .map { scalars.index(after: $0) } ?? scalars.startIndex
-                return String(String.UnicodeScalarView(scalars[..<end].suffix(64)))
-            }
+            let suffixes = readings.map { String(contentBeforeTerminator($0.text)) }
             return Continuation(pending: command, prefixes: Array(Set(suffixes)).sorted(), commandSuffix: commandSuffix)
         }
         return (text, prefixes)
