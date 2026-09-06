@@ -3,6 +3,30 @@ import Foundation
 extension Redactor {
     typealias TerminalCredentialRange = (range: Range<Int>, kind: String)
 
+    /// A control boundary must survive when its suffix starts a separate credential.
+    static func terminalHasCredentialOpener(_ suffix: Substring) -> Bool {
+        suffix.prefixMatch(of: patterns.labeledSecret) != nil
+            || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
+            || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
+            || suffix.prefixMatch(of: patterns.bearer) != nil
+            || suffix.prefixMatch(of: patterns.basicAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.digestAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.specializedAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.codeField) != nil
+            || suffix.prefixMatch(of: patterns.codePrompt) != nil
+            || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
+            || suffix.prefixMatch(of: patterns.declarativeCodePrompt) != nil
+            || suffix.prefixMatch(of: patterns.codePromptOnly) != nil
+            || suffix.prefixMatch(of: patterns.pemBegin) != nil
+            || suffix.prefixMatch(of: patterns.apiKey) != nil
+            || suffix.prefixMatch(of: patterns.distinctiveAPIKey) != nil
+            || suffix.prefixMatch(of: patterns.githubToken) != nil
+            || suffix.prefixMatch(of: patterns.urlUserInfo) != nil
+            || suffix.prefixMatch(of: patterns.secretOption) != nil
+            || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil
+    }
+
+
     /// Boundary-free span discovery is not proof that the ordinary renderer recognizes it.
     static func terminalRecognizedStarts(in text: String) -> Set<String.Index> {
         Set(text.matches(of: patterns.apiKey).map { $0.2.startIndex }
@@ -79,7 +103,9 @@ extension Redactor {
                 let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.upperBound)
                 guard !span.needsBoundary || boundaries.contains(lower) || recognizedStarts.contains(span.range.lowerBound) else { continue }
                 while retainedIndex < retained.count, retained[retainedIndex].upperBound <= lower { retainedIndex += 1 }
-                let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound < upper
+                // The first retained byte may be the trailing separator that makes a
+                // credential recognizable, not a byte inside the credential itself.
+                let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound <= upper
                 let restoredBoundary = span.needsBoundary && (boundaries.contains(lower)
                     || (recognizedStarts.contains(span.range.lowerBound) && retainedIndex > 0
                         && retained[retainedIndex - 1].upperBound == lower))
