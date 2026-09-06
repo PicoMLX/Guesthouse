@@ -2,6 +2,23 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
+    /// A decoded JOSE parameter identifies an incomplete compact token at a record boundary.
+    static func incompleteJWTStartAtLineEnd(in text: String) -> String.Index? {
+        guard let run = text.firstMatch(of: #/(?:^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]+)$/#),
+              run.1.contains(".") else { return nil }
+        let segments = run.1.split(separator: ".", omittingEmptySubsequences: false)
+        for index in segments.indices {
+            guard let start = joseHeaderStart(segments[index]),
+                  let header = decodedJOSEHeader(segments[index][start...]),
+                  header["alg"] != nil || header["enc"] != nil else { continue }
+            let required = header["enc"] == nil ? 3 : 5
+            let emptySignature = required == 3 && header["alg"] as? String == "none"
+            let available = segments.count - index - (segments.last?.isEmpty == true && !emptySignature ? 1 : 0)
+            if available < required { return start }
+        }
+        return nil
+    }
+
     /// Replaces all three JWS or five JWE segments inside a run of dot-separated segments. A dot is
     /// not a word boundary, so the run can begin with a label such as `session.` and can hold two
     /// adjacent tokens; every segment with at least two following it is tried as a JOSE header, and the
