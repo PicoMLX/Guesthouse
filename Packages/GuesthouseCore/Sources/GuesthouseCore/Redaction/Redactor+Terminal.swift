@@ -17,8 +17,8 @@ extension Redactor {
         _ line: String,
         openControlString: inout StreamState.ControlString?
     ) -> (joined: String, spliced: String, contexts: [String]) {
-        let text = TerminalControlGrammar.prepare(line, pending: &openControlString)
-        return renderings(of: text)
+        let prepared = TerminalControlEvidence.prepare(line, continuation: &openControlString)
+        return renderings(of: prepared.text, priorPrefixes: prepared.prefixes)
     }
 
     /// Stands where an escape did, in the `spliced` reading only. It has to be a boundary to
@@ -28,26 +28,9 @@ extension Redactor {
 
     private typealias RecoveredCredential = (range: Range<Int>, kind: String)
 
-    /// Boundary-free spans protect token interiors; recognition still requires each rule's
-    /// usual leading boundary unless an actual removed control supplied one at that position.
-    private static func terminalCredentialSpans(in text: String) -> [(range: Range<String.Index>, kind: String, needsBoundary: Bool)] {
-        var spans = text.matches(of: patterns.githubToken).map { ($0.range, "github-token", false) }
-        spans += text.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map { ($0.range, "api-key", true) }
-        spans += text.matches(of: patterns.distinctiveAPIKey).map { ($0.range, "api-key", false) }
-        spans += text.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map { ($0.range, "bearer-token", true) }
-        spans += text.matches(of: patterns.basicCredentialSpan).compactMap { match in
-            isBasicCredential(match.2) ? (match.range, "authorization", true) : nil
-        }
-        spans += text.matches(of: patterns.digestCredentialSpan).map { ($0.range, "authorization", true) }
-        spans += text.matches(of: patterns.specializedCredentialSpan).map { ($0.range, "authorization", true) }
-        spans += text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2).map { ($0, "jwt", false) } }
-        spans += text.matches(of: patterns.urlUserInfo).map { ($0.1.endIndex..<$0.range.upperBound, "userinfo", false) }
-        return spans
-    }
-
     /// Recover command finals as scan-only evidence, never as visible output. Token ranges
     /// can be masked here; opaque field contexts need the caller's quote/private-key state.
-    private static func recoveredCredentialRanges(in text: String, joined: String)
+    private static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [String])
         -> (ranges: [RecoveredCredential], contexts: [String]) {
         var recovered: [RecoveredCredential] = []
         var contexts: [String] = []
@@ -57,11 +40,12 @@ extension Redactor {
             return (lower..<upper, span.kind)
         }.sorted { $0.range.lowerBound < $1.range.lowerBound }
         let escapes = text.matches(of: patterns.terminalEscape)
-        for retainParameters in [false, true] {
-            var alternate = ""
-            var offsets = [0]
-            var retained: [Range<Int>] = []
-            var boundaries: Set<Int> = []
+        for reading in TerminalControlEvidence.Reading.allCases {
+            let prefix = priorPrefixes.indices.contains(reading.rawValue) ? priorPrefixes[reading.rawValue] : ""
+            var alternate = prefix
+            var offsets = Array(repeating: 0, count: prefix.utf8.count + 1)
+            var retained: [Range<Int>] = prefix.isEmpty ? [] : [0..<prefix.utf8.count]
+            var boundaries: Set<Int> = [0]
             var joinedCount = 0
             var cursor = text.startIndex
             func appendLiteral(_ literal: Substring) {
@@ -71,21 +55,8 @@ extension Redactor {
             for escape in escapes {
                 appendLiteral(text[cursor..<escape.range.lowerBound])
                 boundaries.insert(offsets.count - 1)
-                let command = String(String.UnicodeScalarView(escape.0.unicodeScalars.filter {
-                    !((0...0x1A).contains($0.value) || (0x1C...0x1F).contains($0.value) || $0.value == 0x7F)
-                }))
-                let prefix = command.hasPrefix("\u{1B}[") ? 2 : (command.hasPrefix("\u{009B}") ? 1 : 0)
-                // CAN/SUB or a fresh ESC abort the old CSI; its parameters are not evidence.
-                if prefix > 0, let final = escape.0.unicodeScalars.last, !(0x40...0x7E).contains(final.value) {
-                    cursor = escape.range.upperBound
-                    continue
-                }
-                // Generic ESC commands can consume a label character too. Never interpret
-                // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
-                let generic = command
-                    .wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
-                let body = String(generic ? command.suffix(1) : command.dropFirst(prefix))
-                if prefix > 0 || generic, !body.isEmpty, retainParameters || body.count == 1 {
+                let body = TerminalControlEvidence.body(of: escape.0, reading: reading)
+                if !body.isEmpty {
                     let start = offsets.count - 1
                     alternate += body
                     offsets.append(contentsOf: repeatElement(joinedCount, count: body.utf8.count))
@@ -166,25 +137,10 @@ extension Redactor {
         return (merged, contexts)
     }
 
-    /// Inserting a marker must never hide evidence of a larger credential recognized in the
-    /// ordinary reading (for example a five-segment JWE or a longer Bearer value).
-    private static func expandingRecoveredRanges(_ recovered: [RecoveredCredential], through ordinary: [Range<Int>]) -> [RecoveredCredential] {
-        let spans = (recovered.map { (range: $0.range, kind: Optional($0.kind)) } + ordinary.map { (range: $0, kind: nil as String?) })
-            .sorted { $0.range.lowerBound < $1.range.lowerBound }
-        var clusters: [(range: Range<Int>, kind: String?)] = []
-        for span in spans {
-            if let last = clusters.last, span.range.lowerBound < last.range.upperBound {
-                clusters[clusters.count - 1] = (last.range.lowerBound..<max(last.range.upperBound, span.range.upperBound),
-                                                last.kind ?? span.kind)
-            } else { clusters.append(span) }
-        }
-        return clusters.compactMap { span in span.kind.map { (span.range, $0) } }
-    }
-
     /// Joined text repairs interrupted labels; spliced text preserves control-supplied token
     /// boundaries and conceals recovered token spans. Scan-only contexts retain restored field
     /// evidence for the state-aware caller. Ordinary lines have identical visible readings.
-    static func renderings(of text: String) -> (joined: String, spliced: String, contexts: [String]) {
+    static func renderings(of text: String, priorPrefixes: [String] = []) -> (joined: String, spliced: String, contexts: [String]) {
         func isTokenCharacter(_ character: Character) -> Bool {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
         }
@@ -209,7 +165,7 @@ extension Redactor {
             return joined[..<boundary].last.map(isTokenCharacter) == true
                 && joined[boundary...].first.map(isTokenCharacter) == true
         }
-        let recovery = recoveredCredentialRanges(in: text, joined: joined)
+        let recovery = recoveredCredentialRanges(in: text, joined: joined, priorPrefixes: priorPrefixes)
         var recovered = recovery.ranges
         guard !boundaryOffsets.isEmpty || !recovered.isEmpty else { return (joined, joined, recovery.contexts) }
 
@@ -263,6 +219,10 @@ extension Redactor {
                 guard suffix.prefixMatch(of: patterns.labeledSecret) != nil
                     || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
                     || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
+                    || suffix.prefixMatch(of: patterns.bearer) != nil
+                    || suffix.prefixMatch(of: patterns.basicAuthorization) != nil
+                    || suffix.prefixMatch(of: patterns.digestAuthorization) != nil
+                    || suffix.prefixMatch(of: patterns.specializedAuthorization) != nil
                     || suffix.prefixMatch(of: patterns.codeField) != nil
                     || suffix.prefixMatch(of: patterns.codePrompt) != nil
                     || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
