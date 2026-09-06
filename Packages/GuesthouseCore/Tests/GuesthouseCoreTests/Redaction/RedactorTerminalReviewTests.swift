@@ -2,6 +2,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test func networkPathCredentialsRetainAControlSuppliedBoundary() {
+        let result = Redactor.renderings(of: "filename\u{0}//sample:syntheticPassword@example.com")
+        #expect(result.spliced.contains(Redactor.splicedBoundary + "//sample:syntheticPassword@example.com"))
+    }
+
+    @Test func adjacentGenericAPIKeysRetainTheirOwnOpener() {
+        let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}sk-qrstuvwxyzabcdef")
+        #expect(result.spliced.contains(Redactor.splicedBoundary + "sk-qrstuvwxyzabcdef"))
+        #expect(!result.spliced.contains("abcdefghijklmnopqrstuvwx"))
+    }
+
+    @Test(arguments: [("\u{1B}]", "\u{7}"), ("\u{1B}P", "\u{1B}\\"),
+                      ("\u{1B}_", "\u{9C}"), ("\u{1B}^", "\u{9C}"), ("\u{1B}X", "\u{9C}")],
+          ["\r", "\n", "\r\n"])
+    func wholeTextNormalizationPreservesOpaqueRecordFraming(parts: (String, String), separator: String) {
+        #expect(Redactor.stripTerminalEscapes("before" + parts.0 + "title" + separator + "payload" + parts.1 + "after")
+            == "before" + separator + "after")
+    }
     @Test(arguments: ["\u{1B}--pass\u{1B}[31word syntheticOpaque",
                       "\u{1B}--passw\u{1B}[31ord syntheticOpaque"])
     func independentlyRecoveredOptionsRemainContexts(_ input: String) {
