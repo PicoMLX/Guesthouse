@@ -55,7 +55,8 @@ extension Redactor {
             // pending field. Blank/styling-only lines do not close the quoted value.
             if let end = Self.closingQuoteEnd(in: text[...], for: quoted) {
                 let tail = String(text[end...])
-                let explicitlyContinues = Self.valueExplicitlyContinues(tail[...])
+                let explicitlyContinues = tail.allSatisfy { $0.isWhitespace || $0 == "\\" }
+                    && Self.valueExplicitlyContinues(tail[...])
                 // This suffix is still on the same physical line. Scan it independently so
                 // it cannot consume a next-line value or terminate the enclosing fold.
                 var suffixState = StreamState()

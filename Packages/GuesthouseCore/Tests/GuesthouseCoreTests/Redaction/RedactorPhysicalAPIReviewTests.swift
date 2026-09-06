@@ -2,6 +2,18 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPhysicalAPIReviewTests {
+    @Test(arguments: ["password", "Authorization", "device_code"])
+    func unrelatedSuffixBackslashesCannotContinueAClosedCredential(_ label: String) {
+        let output = Redactor().redact(lines: [
+            label + ": \"syntheticFirst",
+            "syntheticSecond\" --verbose \\",
+            "Finished", "  diagnostic details"
+        ]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "Finished")
+        #expect(output[3] == "  diagnostic details")
+    }
+
     @Test(arguments: ["password:", "authorization:", "user_code:", "--password"],
           ["\u{1B}", "\u{1B}[31"])
     func recoveredOpenersProtectTheirCurrentAndFollowingValues(label: String, escape: String) {
