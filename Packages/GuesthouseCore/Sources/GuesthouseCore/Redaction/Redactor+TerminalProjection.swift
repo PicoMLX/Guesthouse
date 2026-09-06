@@ -80,7 +80,10 @@ extension Redactor {
                 guard !span.needsBoundary || boundaries.contains(lower) || recognizedStarts.contains(span.range.lowerBound) else { continue }
                 while retainedIndex < retained.count, retained[retainedIndex].upperBound <= lower { retainedIndex += 1 }
                 let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound < upper
-                if offsets[lower] < offsets[upper], touchesEvidence || (span.kind == "device-code" && restoredCodeContext) {
+                let restoredBoundary = span.needsBoundary && (boundaries.contains(lower)
+                    || (recognizedStarts.contains(span.range.lowerBound) && retainedIndex > 0
+                        && retained[retainedIndex - 1].upperBound == lower))
+                if offsets[lower] < offsets[upper], touchesEvidence || restoredBoundary || (span.kind == "device-code" && restoredCodeContext) {
                     while ordinaryIndex < ordinary.count, ordinary[ordinaryIndex].range.lowerBound <= offsets[lower] {
                         let known = ordinary[ordinaryIndex]
                         coveredEnds[known.kind] = max(coveredEnds[known.kind] ?? 0, known.range.upperBound)
