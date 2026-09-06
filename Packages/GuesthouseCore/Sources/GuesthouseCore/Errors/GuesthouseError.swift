@@ -121,7 +121,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk: [.freeDiskSpace, .retry, .openSettings, .cancel]
         case .downloadVerificationFailed: [.retry, .cancel]
         case .runtimeMissing: [.repair(.runtime), .cancel]
-        case .runtimeIncompatible: [.repair(.runtime), .exportWork, .cancel]
+        case .runtimeIncompatible: [.repair(.runtime), .openConsole, .exportWork, .cancel]
         case .guestNotReachable: [.inspectState, .retry, .openConsole, .cancel]
         case .hostKeyChanged: [.repair(.sshPairing), .openConsole, .exportWork, .cancel]
         case .credentialsLocked(.guestKeychain): [.openConsole, .repair(.credentials), .cancel]
@@ -208,6 +208,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
 
     static func list(_ components: MissingComponents) -> String {
         let shown = components.listed.map(\.value).joined(separator: ", ")
+        if shown.isEmpty {
+            guard components.omitted > 0 else { return "unspecified components" }
+            return "\(components.omitted.formatted()) unnamed component\(components.omitted == 1 ? "" : "s")"
+        }
         return components.omitted > 0 ? "\(shown), and \(components.omitted) more" : shown
     }
 
