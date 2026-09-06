@@ -2,6 +2,33 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["ghp_syntheticSecond", "github_pat_syntheticSecond", "gho_syntheticSecond"])
+    func adjacentGitHubTokensKeepIndependentOpeners(_ token: String) {
+        let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}" + token)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + token))
+        #expect(!result.spliced.contains("abcdefghijklmnopqrstuvwx"))
+    }
+
+    @Test(arguments: ["--password syntheticOpaque", "password: syntheticOpaque",
+                      "Authorization: syntheticOpaque", "device_code: syntheticOpaque"])
+    func recoveredTokensCannotConsumeAnIndependentField(_ field: String) {
+        let result = Redactor.renderings(of: "ey\u{1B}[JhbGciOiJIUzI1NiJ9.payload.signature\u{0}" + field)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + field))
+        #expect(!result.spliced.contains("payload"))
+    }
+
+    @Test(arguments: [60, 70, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
+    func longPendingPEMOpenersFailClosedWithoutUnboundedEvidence(_ length: Int, _ command: String) {
+        var open: Redactor.StreamState.ControlString?
+        _ = Redactor.stripTerminalEscapes("-----BEGIN " + String(repeating: "X", count: length) + " PRIVATE" + command,
+                                         openControlString: &open)
+        let second = Redactor.stripTerminalEscapes("m KEY-----syntheticBody", openControlString: &open)
+        #expect(!second.joined.contains("syntheticBody"))
+        #expect(open?.quarantined == true)
+        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &open).joined
+            == "[redacted:terminal-ambiguity]")
+    }
+
     @Test(arguments: [60, 64, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
     func longPendingOptionsPreserveTheirStructuralOpener(_ length: Int, _ command: String) {
         var open: Redactor.StreamState.ControlString?
@@ -118,14 +145,11 @@ import Testing
         #expect(open == nil)
     }
 
-
     @Test(arguments: ["\u{1B}[", "\u{9B}"], ["\u{0}", "\u{7}", "\u{8}", "\u{9}", "\u{7F}"])
     func ignoredCSIBytesDoNotHideRecoveredFinals(introducer: String, ignored: String) {
         let result = Redactor.renderings(of: "pass" + introducer + ignored + "word: syntheticPassword")
         #expect(result.contexts.contains("password: syntheticPassword"))
     }
-
-
 
     @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}\u{0}(", "\u{1B}(\u{0}", "\u{1B}(\u{7F}"], ["accessToken", "authorization", "user_code"])
     func genericEscapeFinalsCannotHideCredentialLabels(escape: String, label: String) {
@@ -135,12 +159,10 @@ import Testing
         #expect(result.joined == label.prefix(1) + label.dropFirst(2) + ": syntheticPassword")
     }
 
-
     @Test(arguments: ["\u{1B}", "\u{1B}(\u{0}", "\u{1B}[", "\u{9B}"])
     func recoveredShortPrefixesRetainStreamEvidence(escape: String) {
         #expect(Redactor.renderings(of: "s" + escape + "k-abc").contexts.contains("sk-abc"))
     }
-
 
     @Test(arguments: ["ghp_syntheticFirst", "sk-synthetic", "Bearer syntheticFirst"],
           ["password: syntheticSecond", "Authorization: syntheticSecond", "user_code: syntheticSecond", "password:"])
@@ -170,7 +192,6 @@ import Testing
         #expect(!result.spliced.contains("syntheticPassword"))
         #expect(result.spliced.hasSuffix("example.com"))
     }
-
 
     @Test(arguments: ["\u{1B}[", "\u{009B}", "\u{1B}", "\u{1B}("], [Character("m"), "e", "1"])
     func escapeIntroducersCannotConsumeAJOSEHeaderCharacter(introducer: String, character: Character) throws {
