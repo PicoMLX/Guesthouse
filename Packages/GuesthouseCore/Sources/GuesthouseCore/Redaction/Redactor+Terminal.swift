@@ -23,7 +23,9 @@ extension Redactor {
             guard let terminator = text.firstMatch(of: end) else { return ("", "", []) }
             text = String(text[terminator.range.upperBound...])
         }
-        openControlString = text.firstMatch(of: patterns.unterminatedControlString)
+        // Only top-level consumed spans can own pending state; never rescan their payload.
+        openControlString = text.matches(of: patterns.terminalEscape).last
+            .flatMap { $0.range.upperBound == text.endIndex ? $0.0.wholeMatch(of: patterns.unterminatedControlString) : nil }
             .map { $0.1 == nil ? .other : .osc }
         return renderings(of: text)
     }
@@ -88,7 +90,8 @@ extension Redactor {
                 }
                 // Generic ESC commands can consume a label character too. Never interpret
                 // an OSC/DCS/APC/PM/SOS payload as a generic command's final byte.
-                let generic = escape.0.wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
+                let generic = escape.0.replacing(#/[\u{00}-\u{1A}\u{1C}-\u{1F}\u{7F}]/#, with: "")
+                    .wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
                 let body = String(generic ? escape.0.suffix(1) : escape.0.dropFirst(prefix))
                     .replacing(#/[\u{00}-\u{1F}\u{7F}]/#, with: "")
                 if prefix > 0 || generic, !body.isEmpty, retainParameters || body.count == 1 {
@@ -101,6 +104,10 @@ extension Redactor {
             }
             guard !retained.isEmpty else { continue }
             appendLiteral(text[cursor...])
+            // Short recognizable prefixes still own a possible next-record continuation.
+            if alternate.contains(patterns.wrappedTokenAtLineEnd) && !joined.contains(patterns.wrappedTokenAtLineEnd) {
+                contexts.append(alternate)
+            }
             // A restored label can identify an opaque value with no recognizable token shape.
             let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
                 + alternate.matches(of: patterns.authorizationHeader).map { ($0.range, $0.2.startIndex) }
