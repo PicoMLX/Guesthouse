@@ -3,6 +3,27 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct GuesthouseErrorTests {
+    @Test(arguments: [nil, SanitizedText("1")])
+    func runtimeDriftPreservesConsoleRecovery(found: SanitizedText?) {
+        let actions = GuesthouseError.runtimeIncompatible(found: found, required: "2").recoveryActions
+        #expect(actions == [.repair(.runtime), .openConsole, .exportWork, .cancel])
+    }
+
+    @Test func unnamedMissingComponentsHaveAnActionableMessage() {
+        let error = GuesthouseError.xcodeComponentsIncomplete(missing: [])
+        #expect(error.userMessage.hasSuffix("required components: unspecified components."))
+        #expect(error.recoveryActions.contains(.repair(.xcodeComponents)))
+    }
+
+    @Test(arguments: [(1, "component"), (2, "components"), (Int.max, "components")])
+    func decodedCountOnlyComponentsHaveNoLeadingComma(omitted: Int, noun: String) throws {
+        let data = Data("{\"listed\":[],\"omitted\":\(omitted)}".utf8)
+        let missing = try JSONDecoder().decode(MissingComponents.self, from: data)
+        #expect(GuesthouseError.list(missing) == "\(omitted.formatted()) unnamed \(noun)")
+        #expect(GuesthouseError.xcodeComponentsIncomplete(missing: missing).userMessage
+                .hasSuffix("required components: \(omitted.formatted()) unnamed \(noun)."))
+    }
+
     /// One representative value per case. Keep in sync with `expectedCaseNames`; the exhaustive
     /// switches in `GuesthouseError` force a source update when a case is added.
     static let samples: [GuesthouseError] = [
