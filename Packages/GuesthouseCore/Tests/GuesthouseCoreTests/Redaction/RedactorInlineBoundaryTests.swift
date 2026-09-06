@@ -2,6 +2,29 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineBoundaryTests {
+    @Test func completedEncodedContainersDoNotArmAnInnerField() {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: #""\"{\\\"password\\\":\"""#, codeExpected: false, state: &state)
+        #expect(!state.expectingSecretValue && state.quotedValue == nil)
+    }
+
+    @Test(arguments: ["password", "Authorization", "device_code", "Cookie", "Set-Cookie"], [2, 3, 16, 256])
+    func multiplyEncodedCredentialKeysRemainVisibleToMatching(_ label: String, _ depth: Int) {
+        let quote = String(repeating: "\\", count: depth) + "\""
+        var state = Redactor.StreamState()
+        let input = "{" + quote + label + quote + ":" + quote + "syntheticOpaque" + quote + "}"
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
+    @Test func delimiterSlashesCanArriveOnSeparateRecords() {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: "https:", codeExpected: false, state: &state)
+        _ = Redactor.applyPatterns(to: "/", codeExpected: false, state: &state)
+        _ = Redactor.applyPatterns(to: " ", codeExpected: false, state: &state)
+        #expect(!Redactor.applyPatterns(to: "/user:syntheticOpaque@host", codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
+
     @Test(arguments: ["device_code: ABCD", "Enter the code: ABCD", "Your code is ABCD"])
     func nonemptyCodesRetainOnlyAnOrdinaryFold(_ input: String) {
         var state = Redactor.StreamState()

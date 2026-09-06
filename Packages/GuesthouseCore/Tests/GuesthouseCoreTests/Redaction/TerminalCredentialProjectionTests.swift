@@ -2,6 +2,57 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["ghp_synthetic", "--password opaque", "remote=//user:opaque@host",
+                      "Authorization: opaque", "device_code: opaque", "-----BEGIN PRIVATE KEY-----"])
+    func independentCredentialOpenersRemainRecognizable(_ suffix: String) {
+        #expect(Redactor.terminalHasCredentialOpener(suffix[...]))
+    }
+
+    @Test(arguments: ["filename", "build_status", "ordinary diagnostic"])
+    func ordinarySuffixesAreNotCredentialOpeners(_ suffix: String) {
+        #expect(!Redactor.terminalHasCredentialOpener(suffix[...]))
+    }
+
+    @Test(arguments: [60, 70, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
+    func longPendingPEMEvidenceIsQuarantined(_ length: Int, _ command: String) {
+        var continuation: TerminalControlEvidence.Continuation?
+        let result = TerminalControlEvidence.prepare(
+            "-----BEGIN " + String(repeating: "X", count: length) + " PRIVATE" + command,
+            continuation: &continuation)
+        #expect(result.text == "[redacted:terminal-ambiguity]")
+        #expect(continuation?.quarantined == true)
+        #expect(continuation?.prefixes.isEmpty == true)
+    }
+
+    @Test(arguments: [60, 70, 256])
+    func boundedLongOptionsRetainTheirStructuralDash(_ length: Int) {
+        var continuation: TerminalControlEvidence.Continuation?
+        _ = TerminalControlEvidence.prepare("--" + String(repeating: "x", count: length) + "pass\u{1B}[31",
+                                            continuation: &continuation)
+        #expect(continuation?.prefixes.contains(where: { $0.hasPrefix("--") && $0.hasSuffix("pass") }) == true)
+        #expect(continuation?.prefixes.allSatisfy { $0.unicodeScalars.count <= 64 } == true)
+    }
+
+    @Test(arguments: ["-----BEGIN " + String(repeating: "X", count: 70) + "-----",
+                      String(repeating: "ordinary", count: 20)])
+    func CompletePEMAndOrdinaryTextDoNotTriggerTruncationQuarantine(_ prefix: String) {
+        var continuation: TerminalControlEvidence.Continuation?
+        _ = TerminalControlEvidence.prepare(prefix + "\u{1B}[31", continuation: &continuation)
+        #expect(continuation?.quarantined == false)
+    }
+
+
+    @Test(arguments: ["\u{1B}[@", "\u{9B}@", "\u{1B}@"],
+          ["The login code is ", "The login code was rejected; retry "])
+    func restoredTrailingBoundariesProtectContextualCodes(_ command: String, _ context: String) throws {
+        let input = context + "AB12-CD34" + command + "filename"
+        let joined = TerminalControlGrammar.normalize(input)
+        let span = try #require(Redactor.recoveredCredentialRanges(in: input, joined: joined, priorPrefixes: [])
+            .ranges.first(where: { $0.kind == "device-code" }))
+        #expect(String(decoding: Array(joined.utf8)[span.range], as: UTF8.self) == "AB12-CD34")
+    }
+
+
     @Test(arguments: ["\u{1B}[31@", "\u{9B}31@", "\u{1B}@"],
           ["sk-abcdefghijklmnopq", "Bearer syntheticToken", "Basic dXNlcjpwYXNz"])
     func restoredLeadingBoundariesAreCredentialEvidence(_ escape: String, _ token: String) {
