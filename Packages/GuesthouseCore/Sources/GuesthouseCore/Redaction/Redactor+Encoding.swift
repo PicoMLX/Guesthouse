@@ -4,8 +4,7 @@ import RegexBuilder
 extension Redactor {
     /// A decoded JOSE parameter identifies an incomplete compact token at a record boundary.
     static func incompleteJWTStartAtLineEnd(in text: String) -> String.Index? {
-        guard let run = text.firstMatch(of: #/(?:^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]+)$/#),
-              run.1.contains(".") else { return nil }
+        guard let run = text.firstMatch(of: #/(?:^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]+)$/#) else { return nil }
         let segments = run.1.split(separator: ".", omittingEmptySubsequences: false)
         for index in segments.indices {
             guard let start = joseHeaderStart(segments[index]),
