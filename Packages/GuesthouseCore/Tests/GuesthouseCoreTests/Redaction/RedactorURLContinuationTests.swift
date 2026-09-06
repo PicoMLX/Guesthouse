@@ -2,6 +2,30 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLContinuationTests {
+    @Test(arguments: [2, 3, 16, 256])
+    func nestedSlashEscapesKeepCompleteAndContinuedUserInfoPrivate(_ depth: Int) {
+        let slash = String(repeating: "\\", count: depth) + "/"
+        let prefix = "https:" + slash + slash
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: prefix + "user:syntheticOpaque@example.com/path", codeExpected: false, state: &state)
+            == prefix + "[redacted:userinfo]@example.com/path")
+        #expect(!state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: prefix + "user:syntheticFirst", codeExpected: false, state: &state)
+            == prefix + "[redacted:userinfo]")
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "syntheticSecond@example.com/path", codeExpected: false, state: &state)
+            == "[redacted:userinfo]@example.com/path")
+        #expect(!state.expectingURLUserInfo)
+    }
+
+    @Test func bearerFragmentsArmAnOrdinaryFoldWithoutDemandingTheNextRecord() {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: "Bearer syntheticFirst", codeExpected: false, state: &state)
+            == "Bearer [redacted:bearer-token]")
+        #expect(state.expectingAuthorizationValue)
+        #expect(!state.authorizationValueIsOnTheNextLine)
+        #expect(!state.authorizationValueExplicitlyContinues)
+    }
 
     @Test(arguments: ["cloning https://opaqueCredential", "//opaqueCredential", #"url=https:\/\/opaqueCredential"#, "https://"])
     func usernameOnlyAuthorityPrefixesRetainTheirFollowingCredential(_ input: String) {

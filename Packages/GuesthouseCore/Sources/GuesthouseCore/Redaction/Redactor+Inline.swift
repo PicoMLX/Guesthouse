@@ -42,6 +42,7 @@ extension Redactor {
         }
         text = text.replacing(p.bearer) { match in
             _ = retainExplicitAuthorization(match.2, tail: text[match.range.upperBound...], state: &state)
+            state.expectingAuthorizationValue = true
             return "\(match.1)Bearer \(marker("bearer-token"))"
         }
         text = text.replacing(p.basicAuthorization) { match in

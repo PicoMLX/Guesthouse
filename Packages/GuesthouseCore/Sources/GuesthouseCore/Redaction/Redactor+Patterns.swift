@@ -99,7 +99,9 @@ extension Redactor {
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
         private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
-            #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})/#
+            // Scan the existing record; no escape-depth buffer is retained. A depth cap
+            // here would leave deeper encodings unmatched and expose their credentials.
+            #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
         }
         let urlUserInfo = Regex {
             urlAuthorityPrefix
