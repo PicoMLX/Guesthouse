@@ -30,13 +30,13 @@ import Testing
     }
 
     @Test(arguments: [60, 64, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
-    func longPendingOptionsPreserveTheirStructuralOpener(_ length: Int, _ command: String) {
+    func longPendingOptionsQuarantineRatherThanTruncateTheirOpener(_ length: Int, _ command: String) {
         var open: Redactor.StreamState.ControlString?
         _ = Redactor.stripTerminalEscapes("--" + String(repeating: "x", count: length) + "pass" + command,
                                          openControlString: &open)
         let second = Redactor.stripTerminalEscapes("word syntheticOpaque", openControlString: &open)
-        #expect(second.contexts.contains(where: { $0.hasPrefix("--") && $0.hasSuffix("password syntheticOpaque") }))
-        #expect(open == nil)
+        #expect(second.joined == "[redacted:terminal-ambiguity]")
+        #expect(open?.quarantined == true)
     }
 
     @Test(arguments: ["remote=", "url=", "--remote="])
