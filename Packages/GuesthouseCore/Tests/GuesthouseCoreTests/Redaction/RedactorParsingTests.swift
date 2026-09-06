@@ -31,6 +31,17 @@ import Testing
         #expect(Redactor.redactedJWT(input[...]) == expected)
     }
 
+
+    @Test func terminalRenderingRetainsTokenBoundariesWithoutSplittingTokens() {
+        let boundary = Redactor.renderings(of: "prefix\u{1B}[31mghp_demo")
+        #expect(boundary.joined == "prefixghp_demo")
+        #expect(boundary.spliced == "prefix" + Redactor.splicedBoundary + "ghp_demo")
+        let interior = Redactor.renderings(of: "ghp_de\u{1B}[31mmo")
+        #expect(interior.joined == "ghp_demo")
+        #expect(interior.spliced == interior.joined)
+        #expect(Redactor.stripTerminalEscapes("a\t\u{8}b\r\n") == "a\tb\r\n")
+    }
+
     @Test(arguments: [#"first\ second --verbose"#, #"first" two"third --verbose"#, #"\"first second\" --verbose"#])
     func shellArgumentsIncludeEscapedWhitespaceAndAdjacentQuotes(input: String) {
         let argument = Redactor.secretArgument(in: input, from: input.startIndex)
