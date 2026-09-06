@@ -58,6 +58,9 @@ extension Redactor {
             let offsets = projection.offsets
             let retained = projection.retained
             let boundaries = projection.boundaries
+            if alternate.contains(patterns.incompleteURLUserInfo) && !joined.contains(patterns.incompleteURLUserInfo) {
+                contexts.append(alternate)
+            }
             // Short recognizable prefixes still own a possible next-record continuation.
             if alternate.contains(patterns.wrappedTokenAtLineEnd) && !joined.contains(patterns.wrappedTokenAtLineEnd) {
                 contexts.append(alternate)
