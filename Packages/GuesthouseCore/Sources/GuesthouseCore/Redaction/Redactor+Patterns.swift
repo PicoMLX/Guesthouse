@@ -15,7 +15,7 @@ extension Redactor {
         /// A line that opens with a header field name and its colon. Used the other way round
         /// from the rules here: a line that matches is the *next header*, and everything else
         /// standing unindented under a bare authorization label is that label's value.
-        let headerLabelStart = #/^\s*(?:\\?["'])?[A-Za-z0-9][A-Za-z0-9-]*(?:\\?["'])?\s*:/#
+        let headerLabelStart = #/^\s*(?:\\*["'])?[A-Za-z0-9][A-Za-z0-9-]*(?:\\*["'])?\s*:/#
         /// A PEM header. RFC 7468 labels are not only upper-case letters and spaces: they carry
         /// hyphens, digits, and dots (`ACME-PRIVATE KEY`, `X9.42 DH PARAMETERS`), and a label
         /// this rule cannot spell leaves the block, header and key material alike, in the clear.
@@ -27,7 +27,7 @@ extension Redactor {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookies?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -107,6 +107,7 @@ extension Redactor {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
+        let partialURLAuthority = #/(?:^|[\s"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|\\*\/)$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/(?!\[)[^\s\/?#@]*$/#
@@ -127,9 +128,9 @@ extension Redactor {
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
-                #/(^|[^A-Za-z0-9])(?:\\?["'])?/#
+                #/(^|[^A-Za-z0-9])(?:\\*["'])?/#
                 Capture { secretName }
-                #/(?:\\?["'])?\s*[:=]\s*/#
+                #/(?:\\*["'])?\s*[:=]\s*/#
             }
         }
         // A quote only bounds the value at a real sibling/whitespace boundary. Adjacent
@@ -178,7 +179,7 @@ extension Redactor {
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\*["'])?((?:user|device)[ _-]?codes?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -187,12 +188,12 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
         /// nothing else on it for the word to belong to.
-        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?\s*$/#.ignoresCase()
+        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?\s*$/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D` and the `WDJB.MJHT` an RFC 8628 provider may print:
         /// runs of four to eight upper-case characters joined by single separators. Applied only
         /// on lines that mention a code (including the `user_code` and `device_code` field names

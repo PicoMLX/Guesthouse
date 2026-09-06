@@ -49,6 +49,8 @@ struct Redactor: Sendable {
         var expectingDeviceCodeContinuation = false
         /// An authority with a password delimiter reached a physical boundary before its @.
         var expectingURLUserInfo = false
+        /// Missing authority slashes across physical records; no credential bytes are stored.
+        var pendingURLSlashes = 0
         /// A distinctive token prefix reached a line boundary; payload may continue after it.
         var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
@@ -73,6 +75,8 @@ struct Redactor: Sendable {
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
         state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || scanned.expectingDeviceCodeContinuation
         state.expectingURLUserInfo = state.expectingURLUserInfo || scanned.expectingURLUserInfo
+        let slashCounts = [state.pendingURLSlashes, scanned.pendingURLSlashes].filter { $0 > 0 }
+        state.pendingURLSlashes = slashCounts.min() ?? 0
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
         if scanned.quotedValue?.enclosingAuthorizationFold == true { state.quotedValue?.enclosingAuthorizationFold = true }
         if scanned.quotedValue?.enclosingSecretFold == true { state.quotedValue?.enclosingSecretFold = true }

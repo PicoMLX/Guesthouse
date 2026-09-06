@@ -2,10 +2,7 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
-    /// Runs the rules over a line that is replaced whole, so a secret label or a code prompt
-    /// inside it still opens the context the next line completes. Nothing the rules produce is
-    /// used, and a context that was already open stays open: this line is the value of the fold
-    /// it continues, not the value that context is waiting for.
+    /// Scan a wholly concealed record for new contexts without clearing existing folds.
     static func armPendingContexts(from text: String, state: inout StreamState) {
         var scanned = state
         _ = applyPatterns(to: text, codeExpected: false, state: &scanned)
@@ -18,7 +15,11 @@ extension Redactor {
         let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
-            return (sanitized, quotedState)
+            // This encoded container is closed. Inner field fragments cannot own a
+            // later physical record; independently recognized PEM state still can.
+            var boundedState = StreamState()
+            boundedState.pemLabel = quotedState.pemLabel
+            return (sanitized, boundedState)
         } : ProtectedQuotedValues(text: input)
         var originalURLContext = StreamState()
         let original = state.expectingURLUserInfo
@@ -26,8 +27,7 @@ extension Redactor {
             : protected.text
         defer { mergePendingContexts(from: originalURLContext, into: &state) }
         var text = redactURLContinuations(original, state: &state)
-        // Recognition and continuation state use the original field, never its replacement
-        // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
+        // Continuation state uses the original field, never its replacement marker.
         text = text.replacing(p.authorizationHeader) { match in
             let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
@@ -77,8 +77,7 @@ extension Redactor {
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
-        // Unquoted or unfinished quoted values can fold onto the next line. A closing quote
-        // bounds a completed structured value even when the next sibling is indented.
+        // Unfinished values can fold; a closing quote bounds a completed structured value.
         var labelMayContinue = false
         // Inspect the original input too: a preceding missing-value option may otherwise
         // consume this last option before the generic rules get to see it.
@@ -149,17 +148,30 @@ extension Redactor {
         return explicit
     }
 
-    /// Stream output cannot retract an earlier fragment after a later @ proves it sensitive.
-    /// Userinfo can be a username alone: an EOL authority, even an empty one or a bare host,
-    /// cannot be distinguished from a credential that reaches its @ on a following record.
-    /// These ambiguous authorities therefore take the conservative path too.
-    /// A visible path/query/fragment boundary proves the authority complete (RFC 3986 §3.2).
+    /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
+    /// retracted. Only a path/query/fragment boundary proves closure (RFC 3986 §3.2).
     private static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
         // Commas separate unquoted elements inside diagnostic lists, not inside an
         // ordinary URL path/query. Scan each flat list element at its own value boundary.
         var text = input.replacing(#/\[[^\[\]\r\n]*\]/#) { match in
             "[" + match.0.dropFirst().dropLast().split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" } }.joined(separator: ",") + "]"
+        }
+        if state.pendingURLSlashes > 0 {
+            var remaining = state.pendingURLSlashes
+            state.pendingURLSlashes = 0
+            var cursor = text.drop(while: \.isWhitespace).startIndex
+            while remaining > 0 {
+                while cursor < text.endIndex, text[cursor] == "\\" { text.formIndex(after: &cursor) }
+                guard cursor < text.endIndex else { state.pendingURLSlashes = remaining; return text }
+                guard text[cursor] == "/" else { break }
+                text.formIndex(after: &cursor)
+                remaining -= 1
+            }
+            if remaining == 0 {
+                state.expectingURLUserInfo = true
+                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state)
+            }
         }
         if state.expectingURLUserInfo {
             let value = text.drop(while: \.isWhitespace)
@@ -169,6 +181,9 @@ extension Redactor {
             state.expectingURLUserInfo = at == nil && end == text.endIndex
             let stop = at ?? end
             text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+        }
+        if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
+            state.pendingURLSlashes = partial.0.hasSuffix("/") ? 1 : 2
         }
         return text.replacing(patterns.incompleteURLUserInfo) { match in
             if hasCompleteURLFrame(in: text, prefixEnd: match.1.endIndex) { return String(match.0) }

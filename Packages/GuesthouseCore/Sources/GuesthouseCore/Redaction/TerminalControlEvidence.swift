@@ -124,6 +124,12 @@ enum TerminalControlEvidence {
         guard continuation?.quarantined != true else { return quarantine() }
         let text = TerminalControlGrammar.prepare(line, pending: &pending, commandSuffix: &commandSuffix)
         guard let readings = projections(in: text, prefixes: prefixes) else { return quarantine() }
+        // A truncated unfinished PEM label cannot be reconstructed or safely matched to
+        // a footer. Keep the same bounded state by quarantining instead of forgetting BEGIN.
+        if pending != nil, readings.contains(where: { reading in
+            guard let opener = reading.text.firstMatch(of: #/-----BEGIN [A-Za-z0-9](?:(?!-----)[A-Za-z0-9 ._+-])*$/#) else { return false }
+            return opener.0.unicodeScalars.count > 64
+        }) { return quarantine() }
         continuation = pending.map { command in
             let suffixes = readings.map { reading in
                 let scalars = reading.text.unicodeScalars
