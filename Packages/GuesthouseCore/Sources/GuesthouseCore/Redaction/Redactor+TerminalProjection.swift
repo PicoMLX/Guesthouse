@@ -59,8 +59,10 @@ extension Redactor {
             let retained = projection.retained
             let boundaries = projection.boundaries
             // Short recognizable prefixes still own a possible next-record continuation.
-            if alternate.contains(patterns.wrappedTokenAtLineEnd) && !joined.contains(patterns.wrappedTokenAtLineEnd) {
-                contexts.append(alternate)
+            let content = String(TerminalControlEvidence.contentBeforeTerminator(alternate))
+            if content.contains(patterns.wrappedTokenAtLineEnd)
+                && !TerminalControlEvidence.contentBeforeTerminator(joined).contains(patterns.wrappedTokenAtLineEnd) {
+                contexts.append(content)
             }
             // A restored label can identify an opaque value with no recognizable token shape.
             let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
@@ -106,9 +108,8 @@ extension Redactor {
                 // The first retained byte may be the trailing separator that makes a
                 // credential recognizable, not a byte inside the credential itself.
                 let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound <= upper
-                let restoredBoundary = span.needsBoundary && (boundaries.contains(lower)
-                    || (recognizedStarts.contains(span.range.lowerBound) && retainedIndex > 0
-                        && retained[retainedIndex - 1].upperBound == lower))
+                let restoredBoundary = (span.needsBoundary && boundaries.contains(lower))
+                    || (retainedIndex > 0 && retained[retainedIndex - 1].upperBound == lower)
                 if offsets[lower] < offsets[upper], touchesEvidence || restoredBoundary || (span.kind == "device-code" && restoredCodeContext) {
                     while ordinaryIndex < ordinary.count, ordinary[ordinaryIndex].range.lowerBound <= offsets[lower] {
                         let known = ordinary[ordinaryIndex]
