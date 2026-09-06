@@ -15,10 +15,7 @@ struct Redactor: Sendable {
     /// removed in full.
     struct StreamState: Hashable, Sendable {
         /// Which kind of control string is open, because only an OSC also ends at BEL.
-        enum ControlString: Hashable, Sendable {
-            case osc
-            case other
-        }
+        typealias ControlString = TerminalControlEvidence.Continuation
 
         struct QuotedValue: Hashable, Sendable {
             let delimiter: Character
@@ -48,6 +45,8 @@ struct Redactor: Sendable {
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
         var expectingDeviceCode = false
+        /// An authority with a password delimiter reached a physical boundary before its @.
+        var expectingURLUserInfo = false
         /// A distinctive token prefix reached a line boundary; payload may continue after it.
         var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
@@ -70,6 +69,7 @@ struct Redactor: Sendable {
         state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || scanned.secretValueExplicitlyContinues
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
+        state.expectingURLUserInfo = state.expectingURLUserInfo || scanned.expectingURLUserInfo
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
         if scanned.quotedValue?.enclosingAuthorizationFold == true { state.quotedValue?.enclosingAuthorizationFold = true }
         if scanned.quotedValue?.enclosingSecretFold == true { state.quotedValue?.enclosingSecretFold = true }

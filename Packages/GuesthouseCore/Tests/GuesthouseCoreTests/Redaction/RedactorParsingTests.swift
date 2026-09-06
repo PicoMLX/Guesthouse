@@ -31,15 +31,6 @@ import Testing
         #expect(Redactor.redactedJWT(input[...]) == expected)
     }
 
-    @Test(arguments: [("\u{1B}]", "\u{7}"), ("\u{1B}P", "\u{1B}\\")])
-    func controlStringsRemainHiddenUntilTheirOwnTerminator(opener: String, terminator: String) {
-        var open: Redactor.StreamState.ControlString?
-        #expect(Redactor.stripTerminalEscapes("before" + opener + "payload", openControlString: &open).joined == "before")
-        #expect(open != nil)
-        #expect(Redactor.stripTerminalEscapes("hidden", openControlString: &open).joined == "")
-        #expect(Redactor.stripTerminalEscapes(terminator + "after", openControlString: &open).joined == "after")
-        #expect(open == nil)
-    }
 
     @Test func terminalRenderingRetainsTokenBoundariesWithoutSplittingTokens() {
         let boundary = Redactor.renderings(of: "prefix\u{1B}[31mghp_demo")

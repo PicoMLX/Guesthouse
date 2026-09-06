@@ -7,22 +7,8 @@ extension Redactor {
     struct Patterns: @unchecked Sendable {
         /// Any of the three line terminators, CRLF first so it is never split in half.
         let lineSeparator = #/\r\n|\n|\r/#
-        /// Control strings up to their terminator or the end of the line, then CSI introduced by
-        /// `ESC [` or U+009B; any other escape sequence, including the ones with intermediate
-        /// bytes such as `ESC ( B`; and bare C0/C1 controls, except tabs and line terminators.
-        /// OSC is the only control string that
-        /// BEL ends — ECMA-48 gives DCS, APC, PM, and SOS the ST terminator alone — so a BEL
-        /// inside one of those is payload. Ending them at it would hand the rest of the payload
-        /// to the secret rules as text, and the character in front of a token there defeats the
-        /// token rules' word boundary.
-        let terminalEscape = #/(?:\u{1B}\]|\u{9D})[^\u{07}\u{9C}\u{1B}]*(?:\u{07}|\u{9C}|\u{1B}\\)?|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{9C}\u{1B}]*(?:\u{9C}|\u{1B}\\)?|(?:\u{1B}\[|\u{9B})[0-9;:?<=>]*[ -\/]*[@-~]|\u{1B}[ -\/]*[0-~]|[\u{00}-\u{08}\u{0B}\u{0C}\u{0E}-\u{1F}\u{7F}-\u{9F}]/#
-        /// A control string introducer whose payload reaches the end of the line unterminated.
-        /// The first capture is present only for an OSC, whose payload a later BEL also ends.
-        let unterminatedControlString = #/(?:(\u{1B}\]|\u{9D})[^\u{07}\u{9C}\u{1B}]*|(?:\u{1B}[P_^X]|[\u{90}\u{9F}\u{9E}\u{98}])[^\u{9C}\u{1B}]*)$/#
-        /// The two ways any control string ends: C1 ST or the two-byte ST.
-        let controlStringEnd = #/\u{9C}|\u{1B}\\/#
-        /// An OSC ends at either of those or at BEL.
-        let oscEnd = #/\u{07}|\u{9C}|\u{1B}\\/#
+        /// Shared scalar grammar also owns bounded cross-record control state.
+        let terminalEscape = TerminalControlGrammar.escape
         /// The continuation of a folded header: leading whitespace (folding requires it) and
         /// anything at all after it.
         let foldedContinuation = #/\s+\S.*/#
@@ -41,7 +27,7 @@ extension Redactor {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -112,7 +98,19 @@ extension Redactor {
         /// delimiter must start a value, so doubled slashes inside a path or URL query do not
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
-        let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
+            // Scan the existing record; no escape-depth buffer is retained. A depth cap
+            // here would leave deeper encodings unmatched and expose their credentials.
+            #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
+        }
+        let urlUserInfo = Regex {
+            urlAuthorityPrefix
+            #/[^\s\/?#]+@/#
+        }
+        let incompleteURLUserInfo = Regex {
+            urlAuthorityPrefix
+            #/(?!\[)[^\s\/?#@]*$/#
+        }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Those need a name in front of the label word, and the names come from
@@ -134,10 +132,12 @@ extension Redactor {
                 #/(?:\\?["'])?\s*[:=]\s*/#
             }
         }
+        // A quote only bounds the value at a real sibling/whitespace boundary. Adjacent
+        // fragments remain in the conservative unquoted-value alternative below.
         let labeledSecret = Regex {
             secretLabel
             Capture {
-                #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*/#
+                #/"(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\S[^\r\n]*/#
             }
         }.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
@@ -153,7 +153,7 @@ extension Redactor {
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
         let secretOption = Regex {
-            #/(^|[\s\u{009F}])/#
+            #/(^|[\s\u{001F}"'\[({<:=])/#
             Capture {
                 #/--?[A-Za-z0-9_-]*/#
                 secretName
@@ -161,7 +161,7 @@ extension Redactor {
             #/([ \t]+|=)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|[\s\u{009F}])--?[A-Za-z0-9_-]*/#
+            #/(^|[\s\u{001F}"'\[({<:=])--?[A-Za-z0-9_-]*/#
             secretName
             #/[ \t]*(?:=[ \t]*)?$/#
         }.ignoresCase()
@@ -175,7 +175,7 @@ extension Redactor {
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -184,7 +184,7 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
@@ -208,18 +208,29 @@ extension Redactor {
         /// imperative one, which asks for the code, and a historical declaration with a copula.
         /// Present-tense declarations also have the opaque-value rule below. Here a value has
         /// to look like a code rather than
-        /// like the next English word: four or more characters that are all upper-case or
-        /// digits, or that carry a digit. `process exited with code 1`, `Enter the code shown
+        /// like the next English word: four or more alphanumerics across groups that are
+        /// upper-case or carry a digit. `process exited with code 1`, `Enter the code shown
         /// below`, and `the login code was rejected` are all left alone. The words are matched
         /// without regard to case; the value's own alternatives are not, or every lower-case
         /// word after the label would be a code.
-        let codePromptWithoutDelimiter = #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))\s+(?=[A-Za-z0-9._-]{4})(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])/#
+        let codePromptWithoutDelimiter = Regex {
+            #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))/#
+            #/\s+/#
+            TryCapture {
+                #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
+            } transform: { value -> Substring? in
+                // Providers may group a six-digit code as 123 456. Validate the total
+                // candidate, not each group; short diagnostic fragments remain visible.
+                value.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count == 4 ? value : nil
+            }
+        }
         /// Present-tense declarations explicitly supply the code. Lowercase, short, and
         /// quoted values are opaque. Historical status prose keeps the conservative rule above.
         /// Encoded quotes span the remaining line; the value scanner preserves their suffix.
         /// A copula may end in a delimiter; without one, whitespace still bounds the word.
         /// Empty delimited declarations belong to `codePromptOnly` and keep their prompt text.
-        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\\+["'][^\r\n]*|[^\s,;]+)|\s*$)/#.ignoresCase()
+        /// Spaces can group an opaque code; a comma or semicolon bounds following prose.
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]}])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]}])|\\+["'][^\r\n]*|[^,;\r\n]+)|\s*$)/#.ignoresCase()
     }
 
     static let patterns = Patterns()

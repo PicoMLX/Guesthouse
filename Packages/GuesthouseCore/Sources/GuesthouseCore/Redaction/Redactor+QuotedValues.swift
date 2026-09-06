@@ -31,6 +31,9 @@ extension Redactor {
                   let end = closingQuoteEnd(in: input[opener.range.upperBound...],
                       for: .init(delimiter: quote, escapeDepth: opener.1.count, kind: "secret")) else { break }
             cursor = end
+            // A comma-delimited argv option owns the next value; preserve that adjacency
+            // for the serialized-option pass instead of hiding its label in a placeholder.
+            if input[opener.range.lowerBound...].prefixMatch(of: patterns.serializedSecretOption) != nil { continue }
             let tail = input[end...].drop(while: { $0.isWhitespace })
             // A colon/equal means this is a key, not a value. Undelimited suffixes can still
             // belong to a shell/diagnostic credential and must stay in the unquoted rule.
