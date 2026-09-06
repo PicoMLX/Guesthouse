@@ -2,6 +2,27 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLContinuationTests {
+
+    @Test(arguments: ["cloning https://opaqueCredential", "//opaqueCredential", #"url=https:\/\/opaqueCredential"#, "https://"])
+    func usernameOnlyAuthorityPrefixesRetainTheirFollowingCredential(_ input: String) {
+        var state = Redactor.StreamState()
+        let first = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(!first.contains("opaqueCredential"))
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "anotherFragment", codeExpected: false, state: &state) == "[redacted:userinfo]")
+        #expect(Redactor.applyPatterns(to: "@example.com/repo", codeExpected: false, state: &state)
+                == "[redacted:userinfo]@example.com/repo")
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
+    @Test(arguments: [#"URL "https://example.com""#, "URL <https://example.com>", "https://example.com/path", "https://example.com?query", "https://example.com#fragment"])
+    func completedHostOnlyURLsStillHaveAProvenBoundary(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
     @Test func anUnclosedNestedFrameCannotReleaseUserInfo() {
         var state = Redactor.StreamState()
         let first = Redactor.applyPatterns(to: "URL (https://user:first(partial)", codeExpected: false, state: &state)

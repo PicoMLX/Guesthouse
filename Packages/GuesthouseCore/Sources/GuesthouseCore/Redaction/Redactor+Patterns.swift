@@ -107,7 +107,7 @@ extension Redactor {
         }
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
-            #/(?!\[)[^\s\/?#@]*:[^\s\/?#@]*$/#
+            #/(?!\[)[^\s\/?#@]*$/#
         }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,

@@ -135,7 +135,9 @@ extension Redactor {
     }
 
     /// Stream output cannot retract an earlier fragment after a later @ proves it sensitive.
-    /// Ambiguous bare host:port authorities at EOL therefore take the conservative path too.
+    /// Userinfo can be a username alone: an EOL authority, even an empty one or a bare host,
+    /// cannot be distinguished from a credential that reaches its @ on a following record.
+    /// These ambiguous authorities therefore take the conservative path too.
     /// A visible path/query/fragment boundary proves the authority complete (RFC 3986 §3.2).
     private static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
         var text = input
