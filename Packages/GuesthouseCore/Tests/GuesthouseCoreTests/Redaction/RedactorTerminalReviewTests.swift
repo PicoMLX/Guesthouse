@@ -2,6 +2,25 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["\u{1B}--pass\u{1B}[31word syntheticOpaque",
+                      "\u{1B}--passw\u{1B}[31ord syntheticOpaque"])
+    func independentlyRecoveredOptionsRemainContexts(_ input: String) {
+        #expect(Redactor.renderings(of: input).contexts.contains("--password syntheticOpaque"))
+    }
+
+    @Test func aSwallowedPEMHeaderRetainsItsBoundary() {
+        let pem = "-----BEGIN PRIVATE KEY-----syntheticBody"
+        let result = Redactor.renderings(of: "sk-abcdefghijklmnop\u{0}" + pem)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + pem))
+        #expect(!result.spliced.contains("abcdefghijklmnop"))
+    }
+
+    @Test func contextualCodesRecoveredFromCommandsKeepOnlyTheirValuePrivate() {
+        let result = Redactor.renderings(of: "The login code was rejected; retry AB12-\u{1B}CD34.")
+        #expect(result.spliced == "The login code was rejected; retry [redacted:device-code].")
+        #expect(Redactor.renderings(of: "Build revision AB12-\u{1B}CD34.").spliced
+            .replacing(Redactor.splicedBoundary, with: "") == "Build revision AB12-D34.")
+    }
 
     @Test(arguments: ["Bearer syntheticSecond", "Basic dXNlcjpwYXNz",
                       "Digest username=sample, response=syntheticSecond", "Negotiate syntheticSecond"])

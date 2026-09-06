@@ -39,33 +39,14 @@ extension Redactor {
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
             return (lower..<upper, span.kind)
         }.sorted { $0.range.lowerBound < $1.range.lowerBound }
-        let escapes = text.matches(of: patterns.terminalEscape)
-        for reading in TerminalControlEvidence.Reading.allCases {
-            let prefix = priorPrefixes.indices.contains(reading.rawValue) ? priorPrefixes[reading.rawValue] : ""
-            var alternate = prefix
-            var offsets = Array(repeating: 0, count: prefix.utf8.count + 1)
-            var retained: [Range<Int>] = prefix.isEmpty ? [] : [0..<prefix.utf8.count]
-            var boundaries: Set<Int> = [0]
-            var joinedCount = 0
-            var cursor = text.startIndex
-            func appendLiteral(_ literal: Substring) {
-                alternate += literal
-                for _ in literal.utf8 { joinedCount += 1; offsets.append(joinedCount) }
-            }
-            for escape in escapes {
-                appendLiteral(text[cursor..<escape.range.lowerBound])
-                boundaries.insert(offsets.count - 1)
-                let body = TerminalControlEvidence.body(of: escape.0, reading: reading)
-                if !body.isEmpty {
-                    let start = offsets.count - 1
-                    alternate += body
-                    offsets.append(contentsOf: repeatElement(joinedCount, count: body.utf8.count))
-                    retained.append(start..<(offsets.count - 1))
-                }
-                cursor = escape.range.upperBound
-            }
-            guard !retained.isEmpty else { continue }
-            appendLiteral(text[cursor...])
+        guard let projections = TerminalControlEvidence.projections(in: text, prefixes: priorPrefixes) else {
+            return ([(0..<joined.utf8.count, "terminal-ambiguity")], [])
+        }
+        for projection in projections where !projection.retained.isEmpty {
+            let alternate = projection.text
+            let offsets = projection.offsets
+            let retained = projection.retained
+            let boundaries = projection.boundaries
             // Short recognizable prefixes still own a possible next-record continuation.
             if alternate.contains(patterns.wrappedTokenAtLineEnd) && !joined.contains(patterns.wrappedTokenAtLineEnd) {
                 contexts.append(alternate)
@@ -228,6 +209,7 @@ extension Redactor {
                     || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
                     || suffix.prefixMatch(of: patterns.declarativeCodePrompt) != nil
                     || suffix.prefixMatch(of: patterns.codePromptOnly) != nil
+                    || suffix.prefixMatch(of: patterns.pemBegin) != nil
                     || suffix.prefixMatch(of: patterns.secretOption) != nil
                     || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil else { continue }
                 // The token may have swallowed a separate label. Keep that label available
