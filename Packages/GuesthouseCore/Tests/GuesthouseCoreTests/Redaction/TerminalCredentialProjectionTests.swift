@@ -2,6 +2,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["\u{1B}[31@", "\u{9B}31@", "\u{1B}@"],
+          ["sk-abcdefghijklmnopq", "Bearer syntheticToken", "Basic dXNlcjpwYXNz"])
+    func restoredLeadingBoundariesAreCredentialEvidence(_ escape: String, _ token: String) {
+        let input = "filename" + escape + token
+        let joined = TerminalControlGrammar.normalize(input)
+        let ranges = Redactor.recoveredCredentialRanges(in: input, joined: joined, priorPrefixes: []).ranges
+        #expect(ranges.contains(where: {
+            String(decoding: Array(joined.utf8)[$0.range], as: UTF8.self) == token
+        }))
+    }
+
     @Test(arguments: ["\u{1B}", "\u{1B}[31", "\u{9B}31"])
     func restoredCodeContextProtectsAnUnmodifiedValue(_ escape: String) throws {
         let input = "The login co" + escape + "de was rejected; retry AB12-CD34."
