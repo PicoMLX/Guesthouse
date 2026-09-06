@@ -27,6 +27,27 @@ extension Redactor {
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
         let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        var recoveredContexts = StreamState()
+        for reading in stripped.contexts {
+            var start = reading.startIndex
+            if let label = state.pemLabel {
+                guard let footer = reading.range(of: "-----END \(label)-----") else { continue }
+                start = footer.upperBound
+            }
+            if let quoted = state.quotedValue {
+                guard let end = Self.closingQuoteEnd(in: reading[...], for: quoted) else { continue }
+                start = max(start, end)
+            }
+            // Evidence contains no terminal controls, so this replay cannot recursively
+            // invent alternate readings. Its state is for later records, not this value.
+            var scanned = StreamState()
+            _ = redact(line: String(reading[start...]), state: &scanned)
+            Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
+        }
+        defer { Self.mergePendingContexts(from: recoveredContexts, into: &state) }
+        func output(_ value: String) -> RedactedLine {
+            RedactedLine(stripped.contexts.isEmpty ? value : Self.marker("secret"))
+        }
         var text = stripped.joined
         if let quoted = state.quotedValue {
             // Inspect the original normalized text: replacement markers no longer contain the
@@ -51,7 +72,7 @@ extension Redactor {
                 state.expectingDeviceCode = explicitlyContinues && quoted.kind == "device-code"
                 Self.mergePendingContexts(from: suffixState, into: &state)
             }
-            return RedactedLine(text.isEmpty ? text : Self.marker(quoted.kind))
+            return output(text.isEmpty ? text : Self.marker(quoted.kind))
         }
         // What the boundary rendering armed, kept apart until this line's own pending contexts
         // have been consumed below and unioned in on the way out.
@@ -126,7 +147,7 @@ extension Redactor {
         }
         if let label = state.pemLabel {
             guard let footer = text.range(of: "-----END \(label)-----") else {
-                return RedactedLine(Self.marker("private-key"))
+                return output(Self.marker("private-key"))
             }
             // The block ends here; whatever follows the footer is scanned like any other text,
             // including another block that begins on the same line.
@@ -161,7 +182,7 @@ extension Redactor {
             if wholeValueQuote == nil || authorizationFoldWasEstablished {
                 state.quotedValue?.enclosingAuthorizationFold = state.expectingAuthorizationValue
             }
-            return RedactedLine(Self.marker("authorization"))
+            return output(Self.marker("authorization"))
         }
         if secretContinuation {
             let wholeValueQuote = Self.unterminatedQuote(in: text[...], kind: "secret")
@@ -173,12 +194,12 @@ extension Redactor {
             if wholeValueQuote == nil || secretFoldWasEstablished {
                 state.quotedValue?.enclosingSecretFold = state.expectingSecretContinuation
             }
-            return RedactedLine(Self.marker("secret"))
+            return output(Self.marker("secret"))
         }
 
         // A blank line carries nothing and keeps the device-code context for the next one.
         if blankLine {
-            return RedactedLine(text)
+            return output(text)
         }
         let codeExpected = state.expectingDeviceCode
         state.expectingDeviceCode = false
@@ -206,11 +227,11 @@ extension Redactor {
             } else if valueContinues {
                 state.expectingDeviceCode = true
             }
-            return RedactedLine(Self.marker(kind))
+            return output(Self.marker(kind))
         }
         let redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
-        return RedactedLine(redacted)
+        return output(redacted)
     }
 
     /// Redacts a single value that came from outside the app (a version string, a path, a
