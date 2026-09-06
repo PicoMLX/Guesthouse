@@ -2,6 +2,27 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineReviewTests {
+
+    @Test(arguments: ["args=--password", "command:--token", "args=--github-token"])
+    func assignmentDelimitedOptionsKeepTheirValueContext(_ prefix: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: prefix + " opaqueCredential", codeExpected: false, state: &state).contains("opaqueCredential"))
+        _ = Redactor.applyPatterns(to: prefix, codeExpected: false, state: &state)
+        #expect(state.expectingSecretValue)
+    }
+
+    @Test(arguments: ["123 456", "12 34", "1 2 3 4", "ABC DEF", "A BC D", "12 ab34"])
+    func imperativeCodeLengthCountsTheWholeGroupedValue(_ value: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: "Enter the code " + value + ", then continue", codeExpected: false, state: &state)
+                == "Enter the code [redacted:device-code], then continue")
+    }
+
+    @Test(arguments: ["Enter the code 1 2", "Enter the code A B", "Enter the code shown below"])
+    func shortGroupedDiagnosticsDoNotInventACompleteCode(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+    }
     @Test(arguments: [#"args: "--password opaqueCredential""#, #"["--password opaqueCredential"]"#,
                       "(--password opaqueCredential)", "{--token opaqueCredential}", "<--password opaqueCredential>"])
     func diagnosticFramesDoNotHideSecretOptions(_ input: String) {
