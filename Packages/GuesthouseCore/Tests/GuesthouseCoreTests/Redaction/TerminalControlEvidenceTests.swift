@@ -77,8 +77,18 @@ import Testing
         var state: TerminalControlEvidence.Continuation?
         _ = TerminalControlEvidence.prepare(String(repeating: scalar, count: 10_000) + "\u{1B}[", continuation: &state)
         let prefixes = try #require(state).prefixes
-        #expect(prefixes.count == 1)
+        #expect(state?.quarantined == true)
+        #expect(prefixes.isEmpty)
         #expect(prefixes.allSatisfy { $0.unicodeScalars.count <= 64 && $0.utf8.count <= 256 })
+    }
+
+    @Test(arguments: ["a", "🧪", "\u{301}"], [1, 64])
+    func evidenceWithinTheScalarBudgetRemainsExact(_ scalar: String, _ count: Int) throws {
+        var state: TerminalControlEvidence.Continuation?
+        let prefix = String(repeating: scalar, count: count)
+        _ = TerminalControlEvidence.prepare(prefix + "\u{1B}[", continuation: &state)
+        #expect(try #require(state).prefixes == [prefix])
+        #expect(state?.quarantined == false)
     }
 
     @Test func controlStringsCarryOnlyVisiblePrefixesNeverTheirPayload() throws {
