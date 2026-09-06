@@ -50,6 +50,7 @@ extension Redactor {
         }
         var text = stripped.joined
         if let quoted = state.quotedValue {
+            _ = Self.redactPEMBlocks(text, label: &state.pemLabel)
             // Inspect the original normalized text: replacement markers no longer contain the
             // closing delimiter. A closing line is redacted whole, but its suffix can open a new
             // pending field. Blank/styling-only lines do not close the quoted value.
@@ -71,6 +72,7 @@ extension Redactor {
                 state.authorizationValueExplicitlyContinues = state.authorizationValueIsOnTheNextLine
                 state.expectingAuthorizationValue = quoted.enclosingAuthorizationFold || state.authorizationValueIsOnTheNextLine
                 state.expectingDeviceCode = explicitlyContinues && quoted.kind == "device-code"
+                state.expectingDeviceCodeContinuation = false
                 Self.mergePendingContexts(from: suffixState, into: &state)
             }
             return output(text.isEmpty ? text : Self.marker(quoted.kind))
@@ -88,11 +90,14 @@ extension Redactor {
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
-        let tokenAtLineEnd = stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+        let incompleteJWT = Self.incompleteJWTStartAtLineEnd(in: stripped.joined) != nil
+            || Self.incompleteJWTStartAtLineEnd(in: stripped.spliced) != nil
+        let tokenAtLineEnd = incompleteJWT ? "jwt" : stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
         if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
             state.wrappedTokenKind = nil
-            if let continuation = text.firstMatch(of: Self.patterns.tokenContinuation) {
+            let continuationPattern = kind == "jwt" ? #/^[ \t]*[A-Za-z0-9_.-]+/# : Self.patterns.tokenContinuation
+            if let continuation = text.firstMatch(of: continuationPattern) {
                 let fragment = String(continuation.0)
                 state.wrappedTokenKind = continuation.range.upperBound == text.endIndex ? kind : nil
                 // Detect and retain every ordinary redaction BEFORE masking the continuation.
@@ -139,6 +144,9 @@ extension Redactor {
         }
         // A labeled value folds the same way a header value does, and the second half of a
         // passphrase is as usable as the first.
+        let codeContinuation = state.expectingDeviceCodeContinuation
+            && text.wholeMatch(of: Self.patterns.foldedContinuation) != nil
+        if !blankLine { state.expectingDeviceCodeContinuation = codeContinuation }
         let secretFoldWasEstablished = state.expectingSecretContinuation
             && (!state.expectingSecretValue || state.secretValueExplicitlyContinues)
         let secretContinuation = state.expectingSecretContinuation
@@ -146,25 +154,7 @@ extension Redactor {
         if !blankLine {
             state.expectingSecretContinuation = secretContinuation
         }
-        if let label = state.pemLabel {
-            guard let footer = text.range(of: "-----END \(label)-----") else {
-                return output(Self.marker("private-key"))
-            }
-            // The block ends here; whatever follows the footer is scanned like any other text,
-            // including another block that begins on the same line.
-            state.pemLabel = nil
-            text = Self.marker("private-key") + text[footer.upperBound...]
-        }
-        while let begin = text.firstMatch(of: Self.patterns.pemBegin) {
-            let label = String(begin.1)
-            if let end = text[begin.range.upperBound...].range(of: "-----END \(label)-----") {
-                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: Self.marker("private-key"))
-            } else {
-                state.pemLabel = label
-                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: Self.marker("private-key"))
-                break
-            }
-        }
+        text = Self.redactPEMBlocks(text, label: &state.pemLabel)
 
         // The continuation's own text is all credential, but a PEM block it opens keeps running
         // over the lines that follow, so the block is detected above before the marker returns.
@@ -202,7 +192,7 @@ extension Redactor {
         if blankLine {
             return output(text)
         }
-        let codeExpected = state.expectingDeviceCode
+        let codeExpected = state.expectingDeviceCode || codeContinuation
         state.expectingDeviceCode = false
         // The previous line was a label or a code prompt with no value, so this whole line is
         // the value: its shape is the provider's choice, and a device code that is not
@@ -225,14 +215,41 @@ extension Redactor {
                 if wholeValueQuote == nil || secretFoldWasEstablished {
                     state.quotedValue?.enclosingSecretFold = state.expectingSecretContinuation
                 }
-            } else if valueContinues {
-                state.expectingDeviceCode = true
+            } else {
+                state.expectingDeviceCode = state.expectingDeviceCode || valueContinues
+                state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || closedValueTail == nil || valueContinues
             }
             return output(Self.marker(kind))
         }
-        let redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
+        var redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
+        if let start = Self.incompleteJWTStartAtLineEnd(in: redacted) {
+            redacted.replaceSubrange(start..<redacted.endIndex, with: Self.marker("jwt"))
+        } else if incompleteJWT {
+            redacted = Self.marker("jwt")
+        }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
         return output(redacted)
+    }
+
+    /// Quoted and ordinary records both advance footer-to-next-opener state.
+    private static func redactPEMBlocks(_ input: String, label: inout String?) -> String {
+        var text = input
+        if let active = label {
+            guard let footer = text.range(of: "-----END \(active)-----") else { return marker("private-key") }
+            label = nil
+            text = marker("private-key") + text[footer.upperBound...]
+        }
+        while let begin = text.firstMatch(of: patterns.pemBegin) {
+            let opened = String(begin.1)
+            if let end = text[begin.range.upperBound...].range(of: "-----END \(opened)-----") {
+                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: marker("private-key"))
+            } else {
+                label = opened
+                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: marker("private-key"))
+                break
+            }
+        }
+        return text
     }
 
     /// Redacts a single value that came from outside the app (a version string, a path, a
