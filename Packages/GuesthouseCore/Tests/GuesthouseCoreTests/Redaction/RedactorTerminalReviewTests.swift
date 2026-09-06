@@ -2,6 +2,14 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["remote=", "url=", "--remote="])
+    func assignedURLCredentialsRetainTheirOwnOpener(_ assignment: String) {
+        let value = assignment + "//sample:syntheticPassword@example.com"
+        let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}" + value)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + value))
+        #expect(!result.spliced.contains("abcdefghijklmnopqrstuvwx" + assignment))
+    }
+
     @Test func networkPathCredentialsRetainAControlSuppliedBoundary() {
         let result = Redactor.renderings(of: "filename\u{0}//sample:syntheticPassword@example.com")
         #expect(result.spliced.contains(Redactor.splicedBoundary + "//sample:syntheticPassword@example.com"))
