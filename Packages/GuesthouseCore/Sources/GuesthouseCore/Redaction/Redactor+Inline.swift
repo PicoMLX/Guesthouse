@@ -155,8 +155,8 @@ extension Redactor {
         }
     }
 
-    /// Only a matching, same-record outer frame proves closure. Parentheses/apostrophes
-    /// can be real URI userinfo characters, so an arbitrary trailing delimiter is not enough.
+    /// Only framing outside URI userinfo's grammar can prove same-record closure.
+    /// Parentheses/apostrophes are valid sub-delimiters even when they appear paired.
     private static func hasCompleteURLFrame(in text: String, prefixEnd: String.Index) -> Bool {
         var start = prefixEnd
         while start > text.startIndex, text[..<start].last.map({ "/\\".contains($0) }) == true {
@@ -168,7 +168,7 @@ extension Redactor {
                 $0.isASCII && ($0.isLetter || $0.isNumber || "+-.".contains($0))
             }) == true { text.formIndex(before: &start) }
         }
-        let closers: [Character: Character] = ["(": ")", "<": ">", "\"": "\"", "'": "'"]
+        let closers: [Character: Character] = ["<": ">", "\"": "\""]
         guard let opener = text[..<start].last, let closer = closers[opener], text.last == closer else { return false }
         let content = text[start..<text.index(before: text.endIndex)]
         return !content.contains(opener) && !content.contains(closer)

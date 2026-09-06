@@ -2,6 +2,26 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineReviewTests {
+    @Test(arguments: [#"args: "--password opaqueCredential""#, #"["--password opaqueCredential"]"#,
+                      "(--password opaqueCredential)", "{--token opaqueCredential}", "<--password opaqueCredential>"])
+    func diagnosticFramesDoNotHideSecretOptions(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("opaqueCredential"))
+    }
+
+    @Test(arguments: ["\"--password", "[--token", "(--password", "{--password", "<--password"])
+    func framedValuelessOptionsStillOwnTheirFollowingValue(_ input: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(state.expectingSecretValue)
+    }
+
+    @Test(arguments: ["prefix--password opaqueCredential", "build/--password opaqueCredential", "file.--token opaqueCredential"])
+    func identifierInteriorDashesDoNotBecomeOptions(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+    }
+
     @Test(arguments: ["Basic dXNl\\", "Digest username=sample, response=first\\", "Negotiate abcdefgh\\"])
     func partialAuthorizationValuesKeepTheirExplicitContinuation(_ input: String) {
         var state = Redactor.StreamState()

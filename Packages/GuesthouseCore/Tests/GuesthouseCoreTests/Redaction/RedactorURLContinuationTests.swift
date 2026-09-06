@@ -10,11 +10,23 @@ import Testing
                 == "[redacted:userinfo]@example.com")
     }
 
-    @Test(arguments: [("\"", "\""), ("'", "'"), ("(", ")"), ("<", ">")], ["https://", "//", #"https:\/\/"#])
+    @Test(arguments: [("\"", "\""), ("<", ">")], ["https://", "//", #"https:\/\/"#])
     func aCompleteOuterFrameProvesTheURLCannotContinue(frame: (String, String), prefix: String) {
         var state = Redactor.StreamState()
         let input = "URL " + frame.0 + prefix + "example.com:443" + frame.1
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
+    // Parentheses and apostrophes are URI sub-delimiters, not proof of closure.
+    @Test(arguments: [("(", ")"), ("'", "'")], ["user:opaque", "example.com:443"])
+    func apparentFramesCannotReleaseAValidUserinfoContinuation(frame: (String, String), authority: String) {
+        var state = Redactor.StreamState()
+        let first = Redactor.applyPatterns(to: frame.0 + "https://" + authority + frame.1, codeExpected: false, state: &state)
+        #expect(!first.contains(authority))
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "@example.com/path", codeExpected: false, state: &state)
+                == "[redacted:userinfo]@example.com/path")
         #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
     }
 
