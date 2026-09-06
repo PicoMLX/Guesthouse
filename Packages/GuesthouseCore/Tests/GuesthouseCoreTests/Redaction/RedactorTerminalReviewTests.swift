@@ -23,12 +23,33 @@ import Testing
         #expect(Redactor.stripTerminalEscapes("pass\u{1B}[31\u{1B}[0mword: syntheticPassword") == "password: syntheticPassword")
     }
 
-    @Test(arguments: ["\u{1B}", "\u{1B}("], ["accessToken", "authorization", "user_code"])
+    @Test(arguments: ["\u{1B}", "\u{1B}(", "\u{1B}\u{0}(", "\u{1B}(\u{0}", "\u{1B}(\u{7F}"], ["accessToken", "authorization", "user_code"])
     func genericEscapeFinalsCannotHideCredentialLabels(escape: String, label: String) {
         let input = label.prefix(1) + escape + label.dropFirst() + ": syntheticPassword"
         let result = Redactor.renderings(of: String(input))
         #expect(result.contexts.contains(label + ": syntheticPassword"))
         #expect(result.joined == label.prefix(1) + label.dropFirst(2) + ": syntheticPassword")
+    }
+
+    @Test(arguments: ["\u{0}", "\u{7}", "\u{9}", "\u{7F}"], ["", "("])
+    func embeddedGenericControlsStayInsideTheirCommand(control: String, intermediate: String) {
+        #expect(Redactor.renderings(of: "pass\u{1B}" + intermediate + control + "wword: syntheticPassword").joined
+                == "password: syntheticPassword")
+    }
+
+    @Test(arguments: ["\u{1B}", "\u{1B}(\u{0}", "\u{1B}[", "\u{9B}"])
+    func recoveredShortPrefixesRetainStreamEvidence(escape: String) {
+        #expect(Redactor.renderings(of: "s" + escape + "k-abc").contexts.contains("sk-abc"))
+    }
+
+    @Test(arguments: ["\u{1B}]", "\u{9D}"], ["\u{90}", "\u{98}", "\u{9E}", "\u{9F}"])
+    func consumedOSCPayloadCannotArmAnotherControlString(opener: String, nested: String) {
+        var open: Redactor.StreamState.ControlString?
+        #expect(Redactor.stripTerminalEscapes(opener + "title" + nested + "payload\u{7}after", openControlString: &open).joined == "after")
+        #expect(open == nil)
+        #expect(Redactor.stripTerminalEscapes("Finished", openControlString: &open).joined == "Finished")
+        _ = Redactor.stripTerminalEscapes(opener + "title" + nested + "payload\u{7}\u{1B}Ppending", openControlString: &open)
+        #expect(open == .other)
     }
 
     @Test(arguments: ["ghp_syntheticFirst", "sk-synthetic", "Bearer syntheticFirst"],
