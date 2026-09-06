@@ -3,6 +3,40 @@ import Testing
 
 @Suite struct RedactorTerminalReviewTests {
 
+    @Test(arguments: ["Bearer syntheticSecond", "Basic dXNlcjpwYXNz",
+                      "Digest username=sample, response=syntheticSecond", "Negotiate syntheticSecond"])
+    func swallowedStandaloneAuthorizationRetainsItsBoundary(_ value: String) {
+        let result = Redactor.renderings(of: "sk-abcdefghijklmnop\u{0}" + value)
+        #expect(result.spliced.contains(Redactor.splicedBoundary + value))
+        #expect(!result.spliced.contains("abcdefghijklmnop"))
+    }
+
+    @Test(arguments: ["--password syntheticOpaque", "--password", "--token syntheticOpaque"])
+    func genericIntermediatesRemainScanOnlyOptionEvidence(_ option: String) {
+        let result = Redactor.renderings(of: "\u{1B}" + option)
+        #expect(result.contexts.contains(option))
+        #expect(!result.joined.contains("--"))
+    }
+
+    @Test(arguments: [("s", "k-abcdefghijklmnop"), ("g", "hp_abcdefghijklmnop")],
+          ["\u{1B}[31", "\u{9B}31", "\u{1B}", "\u{1B}("])
+    func aPendingCommandRetainsEarlierCredentialPrefix(parts: (String, String), command: String) {
+        var open: Redactor.StreamState.ControlString?
+        _ = Redactor.stripTerminalEscapes(parts.0 + command, openControlString: &open)
+        let second = Redactor.stripTerminalEscapes(parts.1, openControlString: &open)
+        #expect(!second.spliced.contains("abcdefghijklmnop"))
+        #expect(open == nil)
+    }
+
+    @Test func severalPendingCommandsCannotLoseTheCredentialPrefix() {
+        var open: Redactor.StreamState.ControlString?
+        _ = Redactor.stripTerminalEscapes("s\u{1B}[31", openControlString: &open)
+        _ = Redactor.stripTerminalEscapes("k\u{1B}[32", openControlString: &open)
+        let result = Redactor.stripTerminalEscapes("-abcdefghijklmnop", openControlString: &open)
+        #expect(!result.spliced.contains("bcdefghijklmnop"))
+        #expect(open == nil)
+    }
+
     @Test(arguments: [("--pass\u{1B}word syntheticOpaque", "--password syntheticOpaque"),
                       ("--pass\u{1B}word", "--password"), ("--pass\u{1B}[\u{0}word", "--password")])
     func restoredOptionsRemainCredentialContexts(input: String, expected: String) {

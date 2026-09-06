@@ -15,7 +15,7 @@ struct Redactor: Sendable {
     /// removed in full.
     struct StreamState: Hashable, Sendable {
         /// Which kind of control string is open, because only an OSC also ends at BEL.
-        typealias ControlString = TerminalControlGrammar.Pending
+        typealias ControlString = TerminalControlEvidence.Continuation
 
         struct QuotedValue: Hashable, Sendable {
             let delimiter: Character
