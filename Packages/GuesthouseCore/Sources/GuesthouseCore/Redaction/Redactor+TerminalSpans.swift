@@ -15,6 +15,9 @@ extension Redactor {
         spans += text.matches(of: patterns.specializedCredentialSpan).map { ($0.range, "authorization", true) }
         spans += text.matches(of: patterns.jwt).flatMap { jwtRedactionRanges($0.2).map { ($0, "jwt", false) } }
         spans += text.matches(of: patterns.urlUserInfo).map { ($0.1.endIndex..<$0.range.upperBound, "userinfo", false) }
+        if text.contains(patterns.mentionsCode) {
+            spans += text.matches(of: patterns.deviceCode).map { ($0.2.startIndex..<$0.2.endIndex, "device-code", false) }
+        }
         return spans
     }
 
