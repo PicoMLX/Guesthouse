@@ -1,5 +1,6 @@
 import Foundation
 import GuesthouseCore
+import Synchronization
 
 /// Identity for one consumer stream, so its termination can be matched to the operation.
 nonisolated final class ContinuationKey: Hashable, Sendable {
@@ -435,6 +436,14 @@ actor RuntimeClient: RuntimeBackend {
         pendingEvents[id] = events
     }
 
+    /// Held outside the actor so a subscription is complete when `connectionInterruptions()`
+    /// returns: a registration deferred to a task could miss the very first loss, and a
+    /// cached Ready would then never be re-checked.
+    private nonisolated let interruptionObservers = Mutex<[AsyncStream<RuntimeConnectionInterrupted>.Continuation]>([])
+
+    /// How many observers are registered. Test seam for the registration guarantee above.
+    nonisolated var interruptionObserverCount: Int { interruptionObservers.withLock { $0.count } }
+
     private func consumerGone(_ key: ContinuationKey) {
         guard let id = consumers.removeValue(forKey: key) else {
             // Already answered (a query or a failed send): nothing to cancel. Otherwise not
@@ -448,7 +457,14 @@ actor RuntimeClient: RuntimeBackend {
         try? transport.send(RuntimeRequestEnvelope(request: .cancelOperation(id))) { _ in }
     }
 
+    nonisolated func connectionInterruptions() -> AsyncStream<RuntimeConnectionInterrupted> {
+        AsyncStream { continuation in
+            interruptionObservers.withLock { $0.append(continuation) }
+        }
+    }
+
     private func connectionDropped() {
+        for observer in interruptionObservers.withLock({ $0 }) { observer.yield(RuntimeConnectionInterrupted()) }
         let pending = operations
         operations.removeAll()
         pendingEvents.removeAll()
