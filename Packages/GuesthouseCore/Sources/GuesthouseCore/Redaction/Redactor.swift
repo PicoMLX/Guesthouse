@@ -34,6 +34,18 @@ public struct Redactor: Sendable {
         var expectingDeviceCode = false
         /// A terminal control string opened on an earlier line and has not been terminated yet.
         var openControlString: ControlString?
+        /// Which credential the previous record was carrying when it ended without a line
+        /// ending. A reader that cuts an over-long line hands the rest over as another record,
+        /// and that tail is the same value.
+        var continuedValue: ContinuedValue?
+
+        /// A credential whose value the previous record was still spelling out.
+        enum ContinuedValue: Hashable, Sendable {
+            case secret
+            case deviceCode
+
+            var kind: String { self == .secret ? "secret" : "device-code" }
+        }
 
         public init() {}
     }
@@ -54,6 +66,18 @@ public struct Redactor: Sendable {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     public func redact(line: String, state: inout StreamState) -> RedactedLine {
+        redact(line: line, continuesPreviousRecord: false, state: &state)
+    }
+
+    /// Redacts one line of a stream.
+    ///
+    /// `continuesPreviousRecord` says that this text is the tail of a line a reader had to cut
+    /// because it was too long to keep whole, rather than a line of its own. The cut can fall
+    /// on any byte, so such a tail is not required to look like a folded continuation the way
+    /// a genuinely new line is: whatever the previous record established still applies, and a
+    /// header value cut away from its label at a comma is removed exactly as one cut at a
+    /// space would be.
+    public func redact(line: String, continuesPreviousRecord: Bool, state: inout StreamState) -> RedactedLine {
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
@@ -92,11 +116,13 @@ public struct Redactor: Sendable {
         // keeps an open registry of authentication schemes, so a closed list of them let
         // `Custom opaqueCredential` through in full. `Accept: */*` is still the next header and
         // still drops the context. Once the value has started, further lines belong to it only
-        // by being indented, which is what folding means.
+        // by being indented, which is what folding means — or by continuing the record the
+        // reader cut, which is not a line break the writer made at all.
         let unindentedValue = state.authorizationValueIsOnTheNextLine
             && text.firstMatch(of: Self.patterns.headerLabelStart) == nil
         let authorizationContinuation = state.expectingAuthorizationValue && !blankLine
-            && (unindentedValue || text.wholeMatch(of: Self.patterns.foldedContinuation) != nil)
+            && (unindentedValue || continuesPreviousRecord
+                || text.wholeMatch(of: Self.patterns.foldedContinuation) != nil)
         if !blankLine {
             state.expectingAuthorizationValue = authorizationContinuation
             state.authorizationValueIsOnTheNextLine = false
@@ -151,6 +177,18 @@ public struct Redactor: Sendable {
         if blankLine {
             return RedactedLine(text)
         }
+        // The label that armed a pending value, or that introduced one running to the end of
+        // the line, was consumed by an earlier record of the same line. Re-arming here is what
+        // removes the rest of a password or a device code: its shape is the provider's choice,
+        // so nothing below would recognize the tail on its own and it would go out verbatim.
+        if continuesPreviousRecord {
+            switch state.continuedValue {
+            case .secret: state.expectingSecretValue = true
+            case .deviceCode: state.expectingDeviceCode = true
+            case nil: break
+            }
+        }
+        state.continuedValue = nil
         let codeExpected = state.expectingDeviceCode
         state.expectingDeviceCode = false
         // A header whose value may continue on an indented line keeps the continuation state.
@@ -162,10 +200,12 @@ public struct Redactor: Sendable {
         // `XXXX-XXXX` would otherwise be returned intact. The line is still scanned, because
         // one credential prompt often follows another and only the scan arms the next state.
         if state.expectingSecretValue || codeExpected {
-            let kind = state.expectingSecretValue ? "secret" : "device-code"
+            let value: StreamState.ContinuedValue = state.expectingSecretValue ? .secret : .deviceCode
             state.expectingSecretValue = false
             _ = Self.applyPatterns(to: text, codeExpected: false, state: &state)
-            return RedactedLine(Self.marker(kind))
+            // Whatever a forced cut left of this value is the same value.
+            state.continuedValue = value
+            return RedactedLine(Self.marker(value.kind))
         }
         return RedactedLine(Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state))
     }
@@ -175,6 +215,20 @@ public struct Redactor: Sendable {
     /// applies unconditionally instead of only on lines that mention a code.
     public func redact(fieldValue: String) -> String {
         redact(untrusted: fieldValue)
+    }
+
+    /// Redacts one line of child-process output: everything `redact(line:state:)` does, and
+    /// the device-code rule unconditionally, because an authentication CLI may print a bare
+    /// code on a line of its own.
+    public func redact(processOutputLine line: String, state: inout StreamState) -> RedactedLine {
+        redact(processOutputLine: line, continuesPreviousRecord: false, state: &state)
+    }
+
+    /// One record of child-process output, saying whether it is the tail of a line the reader
+    /// had to cut rather than a line of its own. See `redact(line:continuesPreviousRecord:state:)`.
+    public func redact(processOutputLine line: String, continuesPreviousRecord: Bool, state: inout StreamState) -> RedactedLine {
+        let first = redact(line: line, continuesPreviousRecord: continuesPreviousRecord, state: &state)
+        return RedactedLine(Self.applyDeviceCodePattern(to: first.text))
     }
 
     /// Convenience for a batch of lines from one stream.
@@ -391,6 +445,10 @@ public struct Redactor: Sendable {
         /// one would survive. The character is captured so it can be put back. A label may also
         /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
         let bearer = #/(^|[^A-Za-z0-9_])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
+        /// The word with nothing after it. A reader that cuts an over-long line cuts it at the
+        /// last separator, which for `Bearer <token>` is the space between the two, so this is
+        /// what the first record ends with and the whole credential is in the tail.
+        let bearerLabelOnly = #/(^|[^A-Za-z0-9_])bearer\s*$/#.ignoresCase()
         /// Classic and fine-grained GitHub tokens. Nothing at all is required in front of the
         /// prefix, not even a delimiter: an untrusted file, branch, or cache name is glued
         /// straight onto a token by concatenation, and `artifactghp_...` carried a complete
@@ -485,26 +543,58 @@ public struct Redactor: Sendable {
         var text = input
         text = text.replacing(p.authorizationHeader) { match in "\(match.1)Authorization: \(marker("authorization"))" }
         // Each token rule captures the character in front of the token, which is put back.
-        text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
+        //
+        // A bearer credential is cut like any other value: the token may run to the end of what
+        // was scanned, and the word may be all that is left of the record in front of it. Both
+        // halves remember that the value continues, because a bearer token is opaque and no
+        // rule below would recognize the rest of one on its shape alone.
+        var runningValue: StreamState.ContinuedValue?
+        let beforeBearer = text
+        text = beforeBearer.replacing(p.bearer) { match in
+            if match.range.upperBound == beforeBearer.endIndex { runningValue = .secret }
+            return "\(match.1)Bearer \(marker("bearer-token"))"
+        }
+        if text.contains(p.bearerLabelOnly) { runningValue = .secret }
         // The GitHub rule captures nothing in front of the token: it needs no boundary there.
         text = text.replacing(p.githubToken, with: marker("github-token"))
         text = text.replacing(p.apiKey) { match in "\(match.1)\(marker("api-key"))" }
         text = text.replacing(p.jwt) { match in "\(match.1)\(redactedJWT(match.2))" }
         text = text.replacing(p.urlUserInfo) { match in "\(match.1)\(marker("userinfo"))@" }
         // A labeled value can be folded onto the next line, so the label arms the continuation
-        // state the way an authorization header does.
+        // state the way an authorization header does. A value that also runs to the end of what
+        // was scanned may have been cut short rather than finished, so which kind it was is
+        // remembered too: the tail the reader hands over next is removed as the same value.
         var labelCarriedAValue = false
-        text = text.replacing(p.labeledSecret) { match in
+        let beforeSecrets = text
+        text = beforeSecrets.replacing(p.labeledSecret) { match in
             labelCarriedAValue = true
+            if match.range.upperBound == beforeSecrets.endIndex { runningValue = .secret }
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
         state.expectingSecretContinuation = labelCarriedAValue
         // The option keeps its name and the spacing that followed it, so an echoed command line
         // still reads as one: `--password [redacted:secret] --verbose`.
         text = text.replacing(p.secretOption) { match in "\(match.1)\(match.2)\(match.3)\(marker("secret"))" }
-        text = text.replacing(p.codeField) { match in "\(match.1)\(match.2): \(marker("device-code"))" }
-        text = text.replacing(p.codePrompt) { match in "\(match.1) \(marker("device-code"))" }
-        text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
+        let beforeCodes = text
+        text = beforeCodes.replacing(p.codeField) { match in
+            if match.range.upperBound == beforeCodes.endIndex { runningValue = .deviceCode }
+            return "\(match.1)\(match.2): \(marker("device-code"))"
+        }
+        // A prompt's value is as opaque as a field's, and a forced cut can leave part of it in
+        // the next record, so both prompt rules remember that the value continues exactly as
+        // the field rule above does: nothing below would recognize the tail of `verification
+        // code: <opaque>` on its shape alone, and it would go out verbatim.
+        let beforePrompts = text
+        text = beforePrompts.replacing(p.codePrompt) { match in
+            if match.range.upperBound == beforePrompts.endIndex { runningValue = .deviceCode }
+            return "\(match.1) \(marker("device-code"))"
+        }
+        let beforeBarePrompts = text
+        text = beforeBarePrompts.replacing(p.codePromptWithoutDelimiter) { match in
+            if match.range.upperBound == beforeBarePrompts.endIndex { runningValue = .deviceCode }
+            return "\(match.1) \(marker("device-code"))"
+        }
+        state.continuedValue = runningValue
         var labelAwaitsValue = false
         text = text.replacing(p.secretLabelOnly) { match in
             labelAwaitsValue = true

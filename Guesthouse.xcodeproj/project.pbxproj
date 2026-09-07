@@ -10,6 +10,7 @@
 		F8ACD8A830493E2C00550943 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* GuesthouseCore */; };
 		4DF3B7691BA84C0992A05F43 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9668531454184F48A8F15863 /* GuesthouseCore */; };
 		24C65336F28345A5ACC4C24E /* GuesthouseRuntime.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		22B52BEEEC624D9FA450CDE7 /* GuesthouseRuntimeKit in Frameworks */ = {isa = PBXBuildFile; productRef = F409764626174EF18EA3054A /* GuesthouseRuntimeKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 		F8ACD8A93049406300550943 /* MVP-PLAN.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MVP-PLAN.md"; sourceTree = "<group>"; };
 		921BF84465C14B2296CA65E2 /* GuesthouseCore */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = GuesthouseCore; path = Packages/GuesthouseCore; sourceTree = "<group>"; };
 		A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = GuesthouseRuntime.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF094EE115594F94BD77D5E8 /* GuesthouseRuntimeKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = GuesthouseRuntimeKit; path = Packages/GuesthouseRuntimeKit; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -111,6 +113,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4DF3B7691BA84C0992A05F43 /* GuesthouseCore in Frameworks */,
+				22B52BEEEC624D9FA450CDE7 /* GuesthouseRuntimeKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -122,6 +125,7 @@
 			children = (
 				F8ACD8A93049406300550943 /* MVP-PLAN.md */,
 				921BF84465C14B2296CA65E2 /* GuesthouseCore */,
+				CF094EE115594F94BD77D5E8 /* GuesthouseRuntimeKit */,
 				F8976E8C304933D10071C234 /* Guesthouse */,
 				F8976E9A304933D30071C234 /* GuesthouseTests */,
 				F8976EA4304933D30071C234 /* GuesthouseUITests */,
@@ -233,6 +237,7 @@
 			name = GuesthouseRuntime;
 			packageProductDependencies = (
 				9668531454184F48A8F15863 /* GuesthouseCore */,
+				F409764626174EF18EA3054A /* GuesthouseRuntimeKit */,
 			);
 			productName = GuesthouseRuntime;
 			productReference = A7BC2A0FC7FD4B87A4B65300 /* GuesthouseRuntime.xpc */;
@@ -275,6 +280,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/GuesthouseCore" */,
+				A403278BC9264BEDBB6092D3 /* XCLocalSwiftPackageReference "Packages/GuesthouseRuntimeKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F8976E8B304933D10071C234 /* Products */;
@@ -791,6 +797,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/GuesthouseCore;
 		};
+		A403278BC9264BEDBB6092D3 /* XCLocalSwiftPackageReference "Packages/GuesthouseRuntimeKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/GuesthouseRuntimeKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -801,6 +811,10 @@
 		9668531454184F48A8F15863 /* GuesthouseCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = GuesthouseCore;
+		};
+		F409764626174EF18EA3054A /* GuesthouseRuntimeKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GuesthouseRuntimeKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
