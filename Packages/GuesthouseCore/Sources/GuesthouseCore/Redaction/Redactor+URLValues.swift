@@ -9,7 +9,7 @@ extension Redactor {
     /// bounded, closed string, inspect at most three string layers, and re-encode
     /// only when sanitization changes it. Deeper encoded structure fails closed.
     /// No decoded payload is retained in stream state or emitted without sanitization.
-    private static func redactEncodedURLStrings(_ input: String, state: inout StreamState, depth: Int = 0) -> String {
+    static func redactEncodedURLStrings(_ input: String, state: inout StreamState, depth: Int = 0) -> String {
         let closedString = #/"(?:[^"\\\r\n]|\\[^\r\n])*"/#
         var text = input
         if state.pendingEncodedURLString {
