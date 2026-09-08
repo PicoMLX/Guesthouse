@@ -42,6 +42,7 @@ extension Redactor {
         // A Unicode escape can hide every authority delimiter. Until this quoted
         // URL closes, emit a marker per record and retain only escape parity.
         if let partial = text.firstMatch(of: #/"(?:[^"\\\r\n]|\\[^\r\n])*\\?$/#),
+           text[..<partial.range.lowerBound].reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2),
            !text.matches(of: closedString).contains(where: { $0.range.contains(partial.range.lowerBound) }),
            partial.0.contains(#"\u"#) || partial.0.hasSuffix("\\") {
             // Before an escape completes, even a URI's scheme/colon can be hidden.
