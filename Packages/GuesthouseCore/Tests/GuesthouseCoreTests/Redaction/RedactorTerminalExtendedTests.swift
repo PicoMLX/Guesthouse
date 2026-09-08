@@ -3,6 +3,51 @@ import Testing
 
 /// Extended terminal regressions accompany the bounded implementation stack.
 @Suite struct RedactorTerminalExtendedTests {
+    @Test(arguments: ["\u{1B}[", "\u{9B}"])
+    func intermediateOnlyCSIReadingsRecoverURLDelimiters(_ introducer: String) {
+        let input = "https:" + introducer + "31/m/user:syntheticOpaque@host"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "userinfo" })
+    }
+
+    @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "])
+    func restoredTrailingBackslashIsContinuationEvidence(_ field: String) {
+        let input = field + "synthetic\u{1B}\\"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.contexts.contains(field + "synthetic\\"))
+    }
+
+    @Test(arguments: ["\u{1B}[:", "\u{9B}:", "\u{1B}/"], [64, 70])
+    func overflowingPendingCommandBodiesQuarantineBeforeTruncation(_ command: String, _ length: Int) {
+        var state: TerminalControlEvidence.Continuation?
+        _ = TerminalControlEvidence.prepare("password" + command + String(repeating: command.hasSuffix("/") ? "/" : "1", count: length), continuation: &state)
+        #expect(state?.quarantined == true)
+        #expect(TerminalControlEvidence.prepare("msyntheticOpaque", continuation: &state).text == "[redacted:terminal-ambiguity]")
+    }
+
+    @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "],
+          ["\"", "'", "\\\""])
+    func restoredOpeningDelimitersAreStateEvidence(_ field: String, _ delimiter: String) {
+        let input = field + "\u{1B}" + delimiter + "syntheticFirst"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.contexts.contains(field + delimiter + "syntheticFirst"))
+    }
+
+    @Test func largePlainRecordsAvoidTerminalProjectionBudgets() {
+        let input = String(repeating: "ordinary", count: 10_000)
+        var state: Redactor.StreamState.ControlString?
+        let output = Redactor.stripTerminalEscapes(input, openControlString: &state)
+        #expect(output.joined == input && output.spliced == input && state == nil)
+    }
+
+    @Test(arguments: [8_000, 100_000])
+    func sparseRecordOverflowQuarantinesTheStream(_ count: Int) {
+        var state: Redactor.StreamState.ControlString?
+        let output = Redactor.stripTerminalEscapes("\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: count), openControlString: &state)
+        #expect(output.spliced == "[redacted:terminal-ambiguity]" && state?.quarantined == true)
+        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &state).spliced == "[redacted:terminal-ambiguity]")
+    }
+
     @Test func excessiveDistinctCSIComponentsQuarantineRatherThanTruncate() {
         let command = "\u{1B}[" + (1...65).map(String.init).joined(separator: ";") + "@"
         #expect(TerminalControlEvidence.projections(in: command)?.count == nil)
@@ -83,4 +128,3 @@ import Testing
     }
 
 }
-

@@ -2,6 +2,32 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorSplitLabelTests {
+    @Test(arguments: ["\u{1B}[31/-m", "\u{9B}31/-m", "\u{1B}/-m"])
+    func individualIntermediatesConcealThePhysicalAPIKey(_ command: String) {
+        #expect(!Redactor().redact("sk" + command + "abcdefghijklmnopq").contains("abcdefghijklmnopq"))
+    }
+
+    @Test(arguments: [".", "-", "@"], ["The login code is ", "The login code was rejected; retry "])
+    func punctuationBeforeAContextualCodeDoesNotExposeIt(_ punctuation: String, _ context: String) {
+        #expect(!Redactor().redact(context + "filename" + punctuation + "\u{0}ABCD-EFGH").contains("ABCD-EFGH"))
+        #expect(Redactor().redact("Build revision filename" + punctuation + "\u{0}ABCD-EFGH")
+            == "Build revision filename" + punctuation + "ABCD-EFGH")
+    }
+
+    @Test(arguments: ["'", "\""])
+    func completedOuterCommandQuotesReleaseFollowingDiagnostics(_ quote: String) {
+        let output = Redactor().redact(lines: [quote + "--password syntheticOpaque" + quote, "Finished"]).map(\.text)
+        #expect(!output[0].contains("syntheticOpaque"))
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: ["'", "\""])
+    func unfinishedOuterCommandQuotesRetainTheWrappedValue(_ quote: String) {
+        let output = Redactor().redact(lines: [quote + "--password syntheticFirst", "syntheticSecond" + quote, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "Finished")
+    }
+
     @Test(arguments: ["\u{1B}[2:3@", "\u{9B}2;3@", "\u{1B}[?2:3@", "\u{9B}2:3/m"])
     func CSIComponentsProtectTheVisibleCodeFragments(_ command: String) {
         let output = Redactor().redact("The login code was rejected; retry AB1" + command + "-CD34.")
