@@ -293,7 +293,7 @@ import Testing
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
             == "https://example.com/path?next=,//[redacted:userinfo]")
         #expect(state.expectingURLUserInfo)
-        #expect(Redactor.applyPatterns(to: "/path", codeExpected: false, state: &state) == "/path")
+        #expect(Redactor.applyPatterns(to: "/path", codeExpected: false, state: &state) == "[redacted:userinfo]/path")
         #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
         #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
     }
