@@ -1,19 +1,23 @@
 import Foundation
 
 extension Redactor {
+    /// A flat diagnostic list can contain one bracket pair inside an IPv6 host literal.
+    private static var URLDiagnosticList: Regex<Substring> {
+        #/\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\]/#
+    }
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
     static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
         // A comma separates URLs only when the next element starts another authority.
         // Otherwise it may be part of the current URI's userinfo (or path/query).
-        var text = input.replacing(#/\[[^\[\]\r\n]*\]/#) { match in
+        var text = input.replacing(URLDiagnosticList) { match in
             let list = match.0.dropFirst().dropLast()
             func sanitized(_ element: Substring) -> String {
                 String(element).replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" }
             }
             var cursor = list.startIndex
             var result = "["
-            for separator in list.matches(of: #/,(?=[ \t]*(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
+            for separator in list.matches(of: #/,(?=[ \t]*(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
                 result += sanitized(list[cursor..<separator.range.lowerBound]) + ","
                 cursor = separator.range.upperBound
             }
@@ -40,10 +44,10 @@ extension Redactor {
             guard !value.isEmpty else { return text }
             let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
             let at = text[value.startIndex..<end].lastIndex(of: "@")
-            // An @ at EOL can itself belong to a password that wraps before the real @.
+            // Every @ may belong to the password until the authority is structurally closed.
+            // Do not expose a provisional host suffix while another record can extend it.
             state.expectingURLUserInfo = end == text.endIndex
-                && (at == nil || at == text.index(before: end))
-            let stop = at ?? end
+            let stop = state.expectingURLUserInfo ? end : (at ?? end)
             text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
         }
         if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
@@ -75,7 +79,7 @@ extension Redactor {
         // The URL can be the final element of a flat diagnostic list, or part of
         // prose inside one whole-record double-quoted value. Neither frame belongs
         // to URI userinfo; escaped or missing closing quotes are not proof of closure.
-        if text.matches(of: #/\[[^\[\]\r\n]*\]/#).contains(where: {
+        if text.matches(of: URLDiagnosticList).contains(where: {
             $0.range.lowerBound < start && prefixEnd < $0.range.upperBound
         }) { return true }
         let quotedRecord = text.drop(while: \.isWhitespace)
@@ -88,7 +92,7 @@ extension Redactor {
                 for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) else { return false }
             return text[end...].allSatisfy { $0.isWhitespace || "]})>".contains($0) }
         }
-        let closers: [Character: Character] = ["<": ">", "{": "}"]
+        let closers: [Character: Character] = ["<": ">", "{": "}", "`": "`"]
         guard let opener = text[..<start].last, let closer = closers[opener],
               let end = text[start...].firstIndex(of: closer),
               text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }
