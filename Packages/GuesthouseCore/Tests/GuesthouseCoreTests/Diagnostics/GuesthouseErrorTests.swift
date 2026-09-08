@@ -43,6 +43,20 @@ struct GuesthouseErrorTests {
         #expect(GuesthouseError.hostKeyChanged(EnvironmentID(uuid: Self.uuid)).recoveryActions.first == .repair(.sshPairing))
     }
 
+    @Test func environmentCapacityUsesTheDomainErrorPath() throws {
+        let error = GuesthouseError.vmSlotUnavailable(maximum: 2)
+        let event = DiagnosticEvent(operation: .createEnvironment, outcome: .operationFailed(error), operationID: Self.uuid)
+        #expect(event.message == "Create development Mac: All 2 supported environment slots are in use, including stopped environments.")
+        #expect(error.recoveryActions == [.exportWork, .deleteEnvironment, .cancel])
+        #expect(event.recoveryMessage == "Export unpublished work; Delete an unused environment after exporting its work; Cancel")
+        #expect(!error.isRetryable)
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+        var log = DiagnosticLog()
+        log.append(event, recordedAt: Date(timeIntervalSince1970: 0))
+        #expect(log.text.contains("All 2 supported environment slots are in use"))
+        #expect(log.text.contains("Delete an unused environment after exporting its work"))
+    }
+
     @Test func noRawErrorPayloadSurvivesDecodeAndExport() throws {
         let input = Data(#"{"runtimeMissing":{},"message":"syntheticOpaque","underlyingError":"syntheticOpaque"}"#.utf8)
         let error = try JSONDecoder().decode(GuesthouseError.self, from: input)
