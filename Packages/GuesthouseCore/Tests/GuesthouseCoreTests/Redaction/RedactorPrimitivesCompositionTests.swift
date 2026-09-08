@@ -2,6 +2,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPrimitivesCompositionTests {
+    @Test(arguments: [["Enter the supp", "lied code syntheticOpaque"],
+                      ["Enter the supp", "lied co", "de syntheticOpaque"],
+                      ["Your code i", "s syntheticOpaque"], ["device code rea", "ds syntheticOpaque"],
+                      ["Your code re", "a", "ds syntheticOpaque"],
+                      ["--ven", "dor-pass", "word syntheticOpaque"]])
+    func restoredPromptAndOptionFragmentsConcealTheirWholeValue(_ records: [String]) {
+        let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic") && !output.joined().contains("Opaque"))
+        #expect(output.joined().contains("[redacted:"))
+        #expect(output.last == "; Finished")
+    }
+
+    @Test(arguments: ["abc 123", "abcd efgh", "abc DEF 123", "a bc d"])
+    func lowercaseLedCodeGroupsAreConcealedTogether(_ value: String) {
+        #expect(Redactor().redact("Enter the code " + value + ", then continue")
+            == "Enter the code [redacted:device-code], then continue")
+    }
+
     @Test(arguments: ["user code", "device code", "verification code", "Enter the code"])
     func singularStemCanContinueIntoAPluralCodeField(_ first: String) {
         let output = Redactor().redact(lines: [first, "s: syntheticOpaque", "; Finished"]).map(\.text)
@@ -21,6 +39,8 @@ import Testing
     }
 
     @Test(arguments: [
+        [#"{"url":""#, #"\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#],
+        ["[//one.example;//user:syntheticOpaque@two.example]"],
         ["--url", "=//user:syntheticOpaque@example.com/path"],
         [#"{"url":"https"#, #"\u003a\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#],
         [#""{\"url\":\"https:\\u002f\\u002fuser:syntheticOpaque\\u0040example.com\"}""#],
