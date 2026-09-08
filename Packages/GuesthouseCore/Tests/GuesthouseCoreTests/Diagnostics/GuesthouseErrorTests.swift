@@ -143,7 +143,7 @@ struct GuesthouseErrorTests {
         let error = GuesthouseError.canceled
         #expect(try JSONDecoder().decode(GuesthouseError.self, from: JSONEncoder().encode(error)) == error)
         #expect(error.errorDescription == "The operation was canceled; any partial changes must be inspected before retrying.")
-        #expect(error.recoverySuggestion == "Inspect the current environment state; Cancel")
+        #expect(error.recoverySuggestion == "Inspect the operation's current state; Cancel")
         let outcome = DiagnosticEvent.Outcome(error: error)
         #expect(outcome == .canceled)
         #expect(String(decoding: try JSONEncoder().encode(outcome), as: UTF8.self) == #"{"canceled":{}}"#)

@@ -7,7 +7,7 @@ public enum RecoveryAction: Codable, Hashable, Sendable {
     public var title: String {
         switch self {
         case .retry: "Try again"
-        case .inspectState: "Inspect the current environment state"
+        case .inspectState: "Inspect the operation's current state"
         case .repair(let kind): kind.title
         case .openConsole: "Open the development Mac console"
         case .exportWork: "Export unpublished work"
