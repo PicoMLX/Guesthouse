@@ -1,7 +1,16 @@
+import Foundation
 import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [#"Digest username="syntheticFirst"#, #"AWS4-HMAC-SHA256 Credential="syntheticFirst"#,
+                      #"Authorization: Digest username="syntheticFirst"#, #"password: "syntheticFirst"#])
+    func ordinaryOpenCredentialQuotesRemainOwnedByTheirFieldScanner(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.redactURLContinuations(input, state: &state) == input)
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+    }
+
     @Test func anEscapedFieldQuoteCannotOpenJSONValueQuarantine() {
         var state = Redactor.StreamState()
         let input = #"\"clientSecret\"#
@@ -17,7 +26,7 @@ import Testing
         #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
     }
 
-    @Test(arguments: [1, 2, 3, 4, 5])
+    @Test(arguments: [0, 1, 2, 3, 4, 5])
     func everyFirstUnicodeEscapeBoundaryIsQuarantined(_ split: Int) {
         let escape = #"\u003a"#
         var state = Redactor.StreamState()
@@ -55,6 +64,7 @@ import Testing
     }
 
     @Test(arguments: [["url", "=//user:syntheticOpaque@example.com/path"],
+                      ["--url", "=//user:syntheticOpaque@example.com/path"],
                       ["url", "=/", "/user:syntheticOpaque@example.com/path"]])
     func continuedAssignmentsDoNotNeedTheirNameOnTheSameRecord(_ input: [String]) {
         var state = Redactor.StreamState()
@@ -74,6 +84,27 @@ import Testing
         #expect(Redactor.redactURLContinuations(input, state: &state)
             == #"{"url":"https://[redacted:userinfo]@example.com/path"}"#)
         #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+    }
+
+    @Test func nestedUnicodeURLStringsCannotExposeTheInnerCredential() {
+        var state = Redactor.StreamState()
+        let input = #""{\"url\":\"https:\\u002f\\u002fuser:syntheticOpaque\\u0040example.com\"}""#
+        let output = Redactor.redactURLContinuations(input, state: &state)
+        #expect(!output.contains("synthetic") && !output.contains("Opaque"))
+        #expect(output.contains("[redacted:"))
+        #expect(!state.pendingEncodedURLString && !state.expectingURLUserInfo)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [1, 2, 3, 5])
+    func nestedURLDecodeDepthHasAConservativeBound(_ depth: Int) throws {
+        var input = #"{"url":"https:\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#
+        for _ in 0..<depth { input = String(decoding: try JSONEncoder().encode(input), as: UTF8.self) }
+        var state = Redactor.StreamState()
+        let output = Redactor.redactURLContinuations(input, state: &state)
+        #expect(!output.contains("synthetic") && !output.contains("Opaque"))
+        #expect(output.contains("[redacted:"))
+        #expect(!state.pendingEncodedURLString && !state.expectingURLUserInfo)
     }
 
     @Test(arguments: [#"{"url":"https:\u002f\u002fexample.com/path"}"#,
