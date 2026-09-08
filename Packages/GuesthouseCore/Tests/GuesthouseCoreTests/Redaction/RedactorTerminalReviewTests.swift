@@ -3,6 +3,15 @@ import Testing
 
 @Suite struct RedactorTerminalReviewTests {
 
+    @Test(arguments: ["\u{1B}[31", "\u{9B}31"])
+    func pendingCommandsCannotPublishCodesBeforeTheirContextArrives(_ command: String) {
+        var pending: Redactor.StreamState.ControlString?
+        let first = Redactor.stripTerminalEscapes("AB12-CD34 is your co" + command, openControlString: &pending)
+        #expect(!first.joined.contains("AB12-CD34"))
+        #expect(!first.spliced.contains("AB12-CD34"))
+        #expect(pending != nil)
+    }
+
     @Test(arguments: [" ", " / "])
     func recoveredTokenMarkersCannotEraseDependentCodeContext(_ separator: String) {
         let input = "eyJhbGciOiJIUzI1NiIsI\u{1B}[mtpZCI6Im5hYmMifQ.payload.-code" + separator + "ABCD-EFGH"
@@ -214,10 +223,15 @@ import Testing
         #expect(result.spliced.replacing(Redactor.splicedBoundary, with: "") == "beforeafter")
     }
 
-    @Test func actualTerminalCommandsKeepTheirOriginalMeaning() {
-        let result = Redactor.renderings(of: "\u{1B}[31mred\u{1B}[0m \u{009B}2Jclear")
-        #expect(result.joined == "red clear")
-        #expect(result.spliced == result.joined)
+    @Test(arguments: [
+        ("\u{1B}[31mred", "red", "red"),
+        ("\u{1B}[31mred\u{1B}[0m", "red", "red"),
+        ("\u{1B}[31mred\u{1B}[0m \u{009B}2Jclear", "red clear", "[redacted:terminal-ambiguity]")
+    ])
+    func ordinaryRenderingIsSeparateFromBoundedRecovery(_ input: String, _ joined: String, _ spliced: String) {
+        let result = Redactor.renderings(of: input)
+        #expect(result.joined == joined)
+        #expect(result.spliced == spliced)
     }
 
     @Test(arguments: [1, 3])
