@@ -32,6 +32,19 @@ import Testing
         #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == expected)
     }
 
+    @Test(arguments: ["your", "one-time", "one time", "one_time", "onetime", "verification", "activation",
+                      "confirmation", "pairing", "login", "security", "authorization", "auth", "access", "user", "device"]
+        .flatMap { qualifier in (1...qualifier.count).map { (qualifier, $0) } })
+    func everyQualifierSplitRestoresARecognizablePrompt(_ qualifier: String, _ split: Int) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: String(qualifier.prefix(split)))
+        let prefix = try #require(state.pendingCredentialLabel)
+        #expect(prefix.count <= 48 && !prefix.contains("opaque"))
+        let restored = try #require(Redactor.restoringCredentialLabel(
+            in: String(qualifier.dropFirst(split)) + " code is opaque", state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.declarativeCodePrompt).flatMap { $0.2.map(String.init) } == "opaque")
+    }
+
     @Test(arguments: ["tokens", "passwords", "secrets", "api_keys", "api.key", "clientSecrets", "private_keys"])
     func pluralCredentialFieldsUseTheSharedVocabulary(_ label: String) {
         #expect((label + ": opaque").firstMatch(of: Redactor.patterns.labeledSecret).map { String($0.3) } == "opaque")
