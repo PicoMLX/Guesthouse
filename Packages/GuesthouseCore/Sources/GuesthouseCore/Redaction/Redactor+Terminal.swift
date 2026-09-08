@@ -119,7 +119,9 @@ extension Redactor {
             if rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].lowerBound < offset {
                 let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
                 let suffix = joined[boundary...]
-                guard terminalHasCredentialOpener(suffix) else { continue }
+                let contextualCode = joined.contains(patterns.mentionsCode)
+                    && suffix.prefixMatch(of: patterns.deviceCode) != nil
+                guard terminalHasCredentialOpener(suffix) || contextualCode else { continue }
                 // The token may have swallowed a separate label. Keep that label available
                 // to the stream scanner, but conceal even a now-short token prefix.
                 // A recovered token can cross this boundary too. Its speculative suffix
