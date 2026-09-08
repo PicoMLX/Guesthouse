@@ -129,6 +129,16 @@ extension Redactor {
             prefix.removeLast()
         }
         let combined = prefix + visible
+        // A possible instruction after a completed keyword is not yet a prompt.
+        // Carry its bounded slots without injecting the old keyword into diagnostics.
+        if prefix.hasSuffix("code ") || prefix.hasSuffix("codes "),
+           let successor = partialCredentialLabel(in: combined),
+           successor.contains(#/codes?(?: x){1,2}[ ]?$/#),
+           combined.prefixMatch(of: patterns.codePrompt) == nil,
+           combined.wholeMatch(of: patterns.codePromptOnly) == nil {
+            state.pendingCredentialLabel = successor
+            return nil
+        }
         // An unknown qualifier carries only an option boundary across more name fragments.
         // It must not inject synthetic dashes into ordinary visible diagnostics.
         if prefix == "--", partialCredentialLabel(in: combined) == "--",
