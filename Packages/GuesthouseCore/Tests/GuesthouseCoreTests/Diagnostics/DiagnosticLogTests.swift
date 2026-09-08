@@ -163,4 +163,10 @@ struct DiagnosticLogTests {
         #expect(event.recoveryMessage == "Use Repair to inspect the failed import, then select a trusted, stable Xcode bundle and import it again. Preserve the existing installation until verification succeeds; do not bypass signature checks.")
         #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
     }
+
+    @Test(arguments: [DiagnosticEvent.Operation.downloadRuntime, .downloadGuestImage])
+    func diskExhaustedDownloadsRequireStagingInspection(_ operation: DiagnosticEvent.Operation) {
+        let event = DiagnosticEvent(operation: operation, outcome: .failed(.insufficientDiskSpace), operationID: Self.operationID)
+        #expect(event.recoveryMessage == "Free disk space, then use Repair to inspect the staged download before resuming it.")
+    }
 }
