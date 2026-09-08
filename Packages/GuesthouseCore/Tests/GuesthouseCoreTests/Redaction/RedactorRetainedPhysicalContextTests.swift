@@ -2,6 +2,68 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: [["Authorization:", "Digest username="],
+                      [#"Authorization: Digest username="closed","#, " response="]])
+    func assignmentsInsideAuthorizationFoldsRetainTheFollowingValue(_ prefix: [String]) {
+        let output = Redactor().redact(lines: prefix + ["syntheticOpaque", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(output.last == "Finished")
+    }
+
+    @Test(arguments: ["Digest username=", #"Digest username="closed", response="#,
+                      "AWS4-HMAC-SHA256 Credential=", "Authorization: Digest username="])
+    func terminalAuthorizationAssignmentsConcealTheNextRecord(_ input: String) {
+        let output = Redactor().redact(lines: [input, "syntheticOpaque", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: [#"Digest username="Muf"#, #"AWS4-HMAC-SHA256 Credential="Muf"#])
+    func bareAuthorizationHeadersRetainParameterQuotesInTheirValue(_ value: String) {
+        let output = Redactor().redact(lines: ["Authorization:", value, #"asa", response="syntheticResponse""#,
+            " syntheticTail", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("Muf") && !output.joined().contains("asa"))
+        #expect(!output.joined().contains("syntheticResponse") && !output.joined().contains("syntheticTail"))
+        #expect(output[4] == "Finished")
+    }
+
+    @Test(arguments: [("Bas", "ic\tdXNlcjpwYXNz", "dXNlcjpwYXNz"),
+                      ("Bea", "rer\topaque", "opaque"),
+                      ("AWS4-HMAC-S", "HA256 Credential=opaque", "opaque"),
+                      ("url:https:/", "/user:opaque@example.com/path", "opaque"),
+                      (#"prefix "https://user:opaque\""#, "@example.com/path", "opaque")])
+    func restoredSchemesAndURLFramesConcealTheirCredential(_ first: String, _ second: String, _ secret: String) {
+        #expect(!Redactor().redact(lines: [first, second]).map(\.text).joined().contains(secret))
+    }
+
+    @Test func markerSeparatedBearerSurvivesTerminalRendering() {
+        let text = Redactor().redact(lines: ["Bearer [redacted:jwt] synthetic\u{1B}[31mCredential"]).map(\.text).joined()
+        #expect(!text.contains("synthetic") && !text.contains("Credential"))
+    }
+
+    @Test(arguments: [#"["--password", opaque\, "--verbose"]"#, #"["--password", opaque\]"#])
+    func serializedDelimitersReleaseTheNextDiagnostic(_ input: String) {
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output[0].contains("opaque"))
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: [#"Digest username="Muf"#, #"AWS4-HMAC-SHA256 Credential="Muf"#,
+                      #"Authorization: Digest username="Muf"#])
+    func openAuthorizationParameterQuotesConcealTheirEnclosingFold(_ first: String) {
+        let output = Redactor().redact(lines: [first, #"asa", response="syntheticResponse""#,
+            " syntheticTail", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("Muf") && !output.joined().contains("asa"))
+        #expect(!output.joined().contains("syntheticResponse") && !output.joined().contains("syntheticTail"))
+        #expect(output[3] == "Finished")
+    }
+
+    @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
+                      #""visit https://example.com""#, #""visit https://example.com:443""#])
+    func completeURLDiagnosticsDoNotQuarantineTheNextRecord(_ input: String) {
+        #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
+    }
+
     @Test(arguments: [("--cl", "ient-secret opaque"), ("--access-k", "ey-secret opaque"),
                       ("cod", "e: opaque"), ("code", ": opaque")])
     func restoredOptionModifiersAndCodePromptsProtectValues(_ first: String, _ second: String) {
