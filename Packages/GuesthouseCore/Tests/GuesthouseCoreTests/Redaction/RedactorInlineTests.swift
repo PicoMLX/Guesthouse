@@ -2,6 +2,22 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: ["Digest user", "AWS4-HMAC-SHA256 Cred"])
+    func partialParameterNamesArmAuthorization(_ input: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output.hasSuffix("[redacted:authorization]"))
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: [("Bearer", "syntheticOpaque"), ("Basic", "dXNlcjpwYXNz"), ("NTLM", "TlRMTVNTUAABAAAA")])
+    func literalMarkersCannotHideStandaloneAuthorization(_ scheme: String, _ value: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.applyPatterns(to: scheme + " [redacted:decoy] " + value, codeExpected: false, state: &state)
+        #expect(!output.contains(value))
+        #expect(state.expectingAuthorizationValue)
+    }
+
     @Test(arguments: ["password", "Authorization", "device_code"], ["\"", "\\\""])
     func completeFieldsBoundInlineOwnership(label: String, quote: String) {
         var state = Redactor.StreamState()
