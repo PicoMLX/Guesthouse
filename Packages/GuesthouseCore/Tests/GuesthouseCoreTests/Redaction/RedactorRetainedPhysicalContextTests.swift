@@ -2,12 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
-    @Test(arguments: [("sk-abcdefgh", "ijklmnopqrstuvwx"), ("ghp_abcdefgh", "ijklmnopqrstuvwx"),
-                      ("eyJhbGciOiJIUzI1NiJ9.", "cGF5bG9hZA.c2ln")], ["\r", "\n", "\r\n"])
-    func retainedTerminatorsCannotBreakWrappedCredentialDetection(_ parts: (String, String), _ terminator: String) {
+    @Test(arguments: [("sk-abcdefgh", "ijklmnopqrstuvwx", "[redacted:api-key]"), ("ghp_abcdefgh", "ijklmnopqrstuvwx", "[redacted:github-token]"),
+                      ("eyJhbGciOiJIUzI1NiJ9.", "cGF5bG9hZA.c2ln", "[redacted:jwt]")], ["\r", "\n", "\r\n"])
+    func retainedTerminatorsCannotBreakWrappedCredentialDetection(_ parts: (String, String, String), _ terminator: String) {
         let output = Redactor().redact(lines: [parts.0 + terminator, parts.1, "; Finished"]).map(\.text)
         #expect(!output.joined().contains(parts.0) && !output.joined().contains(parts.1))
-        #expect(output[0].hasSuffix(terminator) && output[2] == "; Finished")
+        #expect(output == [parts.2 + terminator, parts.2, "; Finished"])
     }
 
     @Test(arguments: ["your", "one-time", "one time", "one_time", "onetime", "verification", "activation",
