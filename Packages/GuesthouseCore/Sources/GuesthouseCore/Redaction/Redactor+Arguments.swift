@@ -72,7 +72,9 @@ extension Redactor {
                 state.expectingSecretValue = state.expectingSecretValue || bareOption
                 continue
             }
-            let argument = secretArgument(in: text, from: match.range.upperBound)
+            var outer = unterminatedQuote(in: text[..<match.2.startIndex], kind: "secret")
+            if outer?.delimiter == "'", outer?.escapeDepth == 0 { outer?.singleQuotesAreLiteral = true }
+            let argument = secretArgument(in: text, from: match.range.upperBound, outerQuote: outer)
             state.quotedValue = state.quotedValue ?? argument.quoted
             state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
             state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || argument.continuesLine
@@ -85,7 +87,8 @@ extension Redactor {
         return result + text[cursor...]
     }
 
-    static func secretArgument(in text: String, from start: String.Index) -> (end: String.Index, quoted: StreamState.QuotedValue?, continuesLine: Bool) {
+    static func secretArgument(in text: String, from start: String.Index,
+                               outerQuote: StreamState.QuotedValue? = nil) -> (end: String.Index, quoted: StreamState.QuotedValue?, continuesLine: Bool) {
         var cursor = start
         var quote: Character?
         var quoteEscapeDepth = 0
@@ -101,6 +104,11 @@ extension Redactor {
             guard cursor < text.endIndex else {
                 continuesLine = !escapeDepth.isMultiple(of: 2)
                 break
+            }
+            // A surrounding command's closing quote is a boundary, not a new argument quote.
+            if quote == nil, let outerQuote, text[cursor] == outerQuote.delimiter,
+               outerQuote.singleQuotesAreLiteral || quoteCloses(depth: outerQuote.escapeDepth, slashes: escapeDepth) {
+                return (escapeStart, nil, false)
             }
             if let delimiter = quote {
                 // Unlike serialized diagnostic strings, shell single quotes have no escapes.
@@ -124,7 +132,7 @@ extension Redactor {
         return (text.endIndex, quote.map {
             .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret",
                   singleQuotesAreLiteral: $0 == "'" && quoteEscapeDepth == 0)
-        }, continuesLine)
+        } ?? outerQuote, continuesLine)
     }
 
     static func redactSerializedOptions(_ text: String, state: inout StreamState) -> String {
