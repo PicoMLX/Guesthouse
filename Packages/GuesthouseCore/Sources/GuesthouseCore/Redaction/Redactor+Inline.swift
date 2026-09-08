@@ -31,7 +31,7 @@ extension Redactor {
         // Continuation state uses the original field, never its replacement marker.
         text = text.replacing(p.authorizationHeader) { match in
             let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
-                || match.2.last(where: { !$0.isWhitespace }) == ","
+                || authorizationParameterContinues(match.2)
             state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.2)
             state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
@@ -80,14 +80,14 @@ extension Redactor {
         }
         text = text.replacing(p.digestAuthorization) { match in
             state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.0)
-            if match.0.last(where: { !$0.isWhitespace }) == "," { state.authorizationValueIsOnTheNextLine = true }
+            if authorizationParameterContinues(match.0) { state.authorizationValueIsOnTheNextLine = true }
             _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)Digest \(marker("authorization"))"
         }
         text = text.replacing(p.specializedAuthorization) { match in
             state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.0)
-            if match.0.last(where: { !$0.isWhitespace }) == "," { state.authorizationValueIsOnTheNextLine = true }
+            if authorizationParameterContinues(match.0) { state.authorizationValueIsOnTheNextLine = true }
             _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)\(marker("authorization"))"
@@ -171,6 +171,12 @@ extension Redactor {
             && !trimmed.dropLast().contains(patterns.deviceCode)
         state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(value) || explicit || unfinishedGroup
         state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || !isClosedQuotedValue(value) || explicit
+    }
+
+    /// Only known parameter assignments qualify; Base64 padding is not an assignment.
+    static func authorizationParameterContinues(_ value: Substring) -> Bool {
+        value.last(where: { !$0.isWhitespace }) == ","
+            || value.contains(#/(?:^|[\s,])(?i:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|credential|signedheaders|signature)[ \t]*=[ \t]*$/#)
     }
 
     /// Parameter quotes can wrap even when the enclosing authorization value is unquoted.

@@ -2,14 +2,32 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
-    @Test(arguments: [#"Digest username="syntheticFirst"#, #"AWS4-HMAC-SHA256 Credential="syntheticFirst"#,
-                      #"Authorization: Digest username="syntheticFirst"#])
-    func openAuthorizationParametersKeepTheirQuoteAndEnclosingFold(_ input: String) {
+    @Test(arguments: ["Digest username=", #"Digest username="closed", response="#,
+                      "AWS4-HMAC-SHA256 Credential=", "Authorization: Digest username="])
+    func terminalAuthorizationAssignmentsRequireTheNextValue(_ input: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: [(#"Digest username="syntheticFirst"#, 0), (#"AWS4-HMAC-SHA256 Credential="syntheticFirst"#, 0),
+                      (#"Authorization: Digest username="syntheticFirst"#, 0), (#"Digest username=\"syntheticFirst"#, 1),
+                      (#"Digest username="closed", response="syntheticFirst"#, 0)])
+    func openAuthorizationParametersKeepTheirQuoteAndEnclosingFold(_ input: String, _ depth: Int) {
         var state = Redactor.StreamState()
         #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticFirst"))
         #expect(state.quotedValue?.delimiter == "\"")
         #expect(state.quotedValue?.kind == "authorization")
+        #expect(state.quotedValue?.escapeDepth == depth)
         #expect(state.quotedValue?.enclosingAuthorizationFold == true)
+    }
+
+    @Test(arguments: [#"Digest username="syntheticClosed""#, #"Authorization: "Digest username='syntheticClosed""#,
+                      "NTLM dXNlcjpwYXNz=", #"Digest username="syntheticClosed=""#])
+    func closedAuthorizationValuesDoNotRetainAnInnerQuote(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticClosed"))
+        #expect(state.quotedValue == nil && !state.authorizationValueIsOnTheNextLine)
     }
 
     @Test(arguments: ["Enter the code AB12CD34", "Your code is AB12CD34"])
