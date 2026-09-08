@@ -223,8 +223,12 @@ extension Redactor {
             #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))/#
             #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
             TryCapture {
-                #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
+                ChoiceOf {
+                    #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n]*\]|\([^\)\r\n]*\)|<[^>\r\n]*>|\u{0060}[^\u{0060}\r\n]*\u{0060}|"[^"\r\n]*$|'[^'\r\n]*$/#
+                    #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
+                }
             } transform: { value -> Substring? in
+                if value.first.map({ "\"'[<(`".contains($0) }) == true { return value }
                 // Providers may group a six-digit code as 123 456. Validate the total
                 // candidate, not each group. An eligible short EOL fragment may wrap.
                 let count = value.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count
