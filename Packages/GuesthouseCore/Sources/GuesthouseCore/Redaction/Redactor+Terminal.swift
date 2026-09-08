@@ -27,7 +27,15 @@ extension Redactor {
         openControlString: inout StreamState.ControlString?
     ) -> (joined: String, spliced: String, contexts: [String]) {
         let prepared = TerminalControlEvidence.prepare(line, continuation: &openControlString)
-        return renderings(of: prepared.text, priorPrefixes: prepared.prefixes)
+        let result = renderings(of: prepared.text, priorPrefixes: prepared.prefixes)
+        guard openControlString?.pending != nil else { return result }
+        // A later record can finish "code" after a value already present in this prefix.
+        // Emitted bytes cannot be retracted. Hide code-shaped values now while retaining
+        // the original bounded scan-only prefix for the completing record.
+        func concealPotentialCodes(_ value: String) -> String {
+            value.replacing(patterns.deviceCode) { "\($0.1)\(marker("device-code"))" }
+        }
+        return (concealPotentialCodes(result.joined), concealPotentialCodes(result.spliced), result.contexts)
     }
 
     /// Stands where an escape did, in the `spliced` reading only. It has to be a boundary to
