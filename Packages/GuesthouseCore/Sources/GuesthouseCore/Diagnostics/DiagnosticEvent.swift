@@ -9,6 +9,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case inspectEnvironment, connectSSH, importXcode, checkTools, codexSignIn, githubSignIn
         case synchronizeRepositories, testWorkspace, publishChanges, exportDiagnostics
         case deleteEnvironment, exportWork, openConsole, repairEnvironment, updateGuest
+        case codexSignOut, githubSignOut
+        case openInCodex, configureWorkspace, deleteWorkspace, restoreWork, preserveEnvironment
+        case downloadRuntime, downloadGuestImage, bootstrapGuest, installTools, pairSSH
 
         public var title: String {
             switch self {
@@ -32,12 +35,25 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
             case .openConsole: "Open development Mac console"
             case .repairEnvironment: "Repair development Mac"
             case .updateGuest: "Update development Mac"
+            case .codexSignOut: "Sign out of Codex"
+            case .githubSignOut: "Sign out of GitHub"
+            case .openInCodex: "Open in Codex"
+            case .configureWorkspace: "Configure workspace"
+            case .deleteWorkspace: "Delete workspace"
+            case .restoreWork: "Restore work"
+            case .preserveEnvironment: "Preserve development Mac"
+            case .downloadRuntime: "Download runtime"
+            case .downloadGuestImage: "Download macOS image"
+            case .bootstrapGuest: "Prepare guest accounts"
+            case .installTools: "Install development tools"
+            case .pairSSH: "Pair SSH identity"
             }
         }
     }
 
     public enum Outcome: Codable, Hashable, Sendable {
         case started, succeeded, cancellationRequested
+        case pending, waitingForUserAction
         /// Emit only after cancellation/termination is confirmed, not when it is requested.
         case canceled
         case failed(DiagnosticFailure)
@@ -65,6 +81,8 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     public var message: String {
         let detail: String
         switch outcome {
+        case .pending: detail = "Queued; not started yet."
+        case .waitingForUserAction: detail = "Waiting for user action; the operation has not failed."
         case .started: detail = "Started."
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
@@ -78,11 +96,12 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
 
     public var recoveryMessage: String? {
         switch outcome {
+        case .waitingForUserAction: "Complete the step shown by Guesthouse, then continue."
         case .failed(let failure): recovery(for: failure)
         case .operationFailed(let error): error.recoveryMessage
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
         case .canceled: "Inspect any partial changes before starting another operation."
-        case .started, .succeeded: nil
+        case .pending, .started, .succeeded: nil
         }
     }
 
@@ -93,15 +112,15 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         switch operation {
         case .preflight:
             return "Run Check this Mac again and review the host requirements in Settings."
-        case .verifyRuntime:
+        case .verifyRuntime, .downloadRuntime, .downloadGuestImage:
             return "Open Repair and inspect the runtime installation before trying again."
         case .exportDiagnostics:
             return "Check the selected export location and available disk space before exporting again."
-        case .codexSignIn, .githubSignIn:
+        case .codexSignIn, .githubSignIn, .codexSignOut, .githubSignOut:
             return "Open Accounts and check sign-in status before trying again."
         case .exportWork:
             return "Inspect the export destination and the development Mac before trying again."
-        case .synchronizeRepositories, .testWorkspace, .publishChanges:
+        case .synchronizeRepositories, .testWorkspace, .publishChanges, .configureWorkspace, .deleteWorkspace, .restoreWork:
             return "Inspect the workspace and any remote changes before trying the operation again."
         default:
             return failure.recoveryMessage

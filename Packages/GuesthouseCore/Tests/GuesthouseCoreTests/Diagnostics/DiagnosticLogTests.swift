@@ -101,4 +101,30 @@ struct DiagnosticLogTests {
         let event = DiagnosticEvent(operation: example.0, outcome: .failed(failure), operationID: Self.operationID)
         #expect(event.recoveryMessage == example.1)
     }
+
+    @Test(arguments: [
+        (DiagnosticEvent.Outcome.pending, "Queued; not started yet.", nil as String?),
+        (.waitingForUserAction, "Waiting for user action; the operation has not failed.",
+         "Complete the step shown by Guesthouse, then continue.")
+    ])
+    func nonterminalStagesHaveAnExplicitStatus(_ example: (DiagnosticEvent.Outcome, String, String?)) throws {
+        let event = DiagnosticEvent(operation: .codexSignIn, outcome: example.0, operationID: Self.operationID)
+        #expect(event.message == "Sign in to Codex: " + example.1)
+        #expect(event.recoveryMessage == example.2)
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
+
+    @Test func textExportIncludesStableUTCTimestamps() {
+        var log = DiagnosticLog()
+        let event = DiagnosticEvent(operation: .githubSignOut, outcome: .succeeded, operationID: Self.operationID)
+        log.append(event, recordedAt: Self.timestamp)
+        log.append(event, recordedAt: Date(timeIntervalSince1970: 1))
+        let expected = [
+            "Guesthouse structured diagnostics. Raw process and authentication output excluded.",
+            "Older/omitted events: 0.",
+            "1970-01-01T00:00:00Z [\(Self.operationID)] Sign out of GitHub: Succeeded.",
+            "1970-01-01T00:00:01Z [\(Self.operationID)] Sign out of GitHub: Succeeded."
+        ].joined(separator: "\n")
+        #expect(log.text == expected)
+    }
 }
