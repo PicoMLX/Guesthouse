@@ -71,12 +71,20 @@ import Testing
     }
 
     @Test(arguments: [
-        "process exited with code 1", "Enter the code shown below",
+        "process exited with code 1",
         "the login code was rejected", "error code: 42",
     ])
     func diagnosticProseDoesNotBecomeACodePrompt(input: String) {
         #expect(!input.contains(Redactor.patterns.codePrompt))
         #expect(!input.contains(Redactor.patterns.codePromptOnly))
+        #expect(!input.contains(Redactor.patterns.codePromptWithoutDelimiter))
+        #expect(!input.contains(Redactor.patterns.declarativeCodePrompt))
+    }
+
+    @Test func forwardCodeInstructionsAwaitTheirValueInsteadOfRedactingTheInstruction() {
+        let input = "Enter the code shown below"
+        #expect(input.contains(Redactor.patterns.codePromptOnly))
+        #expect(!input.contains(Redactor.patterns.codePrompt))
         #expect(!input.contains(Redactor.patterns.codePromptWithoutDelimiter))
         #expect(!input.contains(Redactor.patterns.declarativeCodePrompt))
     }
