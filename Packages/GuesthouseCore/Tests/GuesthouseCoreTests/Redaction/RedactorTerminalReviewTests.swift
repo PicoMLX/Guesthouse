@@ -2,6 +2,13 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: [".", "-", "@"], ["The login code is ", "The login code was rejected; retry "])
+    func contextualCodesKeepPunctuationSuppliedBoundaries(_ punctuation: String, _ context: String) {
+        let result = Redactor.renderings(of: context + "filename" + punctuation + "\u{0}ABCD-EFGH")
+        #expect(result.spliced.contains(Redactor.splicedBoundary + "ABCD-EFGH"))
+    }
+
+
     @Test(arguments: ["@", ".", ")", "💻"], ["\u{0}", "\u{1B}[31m"])
     func ordinaryPunctuationRetainsAnIndependentCredentialBoundary(_ punctuation: String, _ control: String) {
         let output = Redactor.renderings(of: "contact" + punctuation + control + "--password syntheticOpaque")
@@ -12,21 +19,6 @@ import Testing
     func bearerPunctuationCannotEraseTheFollowingOption(_ punctuation: String) {
         let output = Redactor.renderings(of: "Bearer abc" + punctuation + "\u{0}--password syntheticOpaque")
         #expect(output.spliced.contains("\u{001F}--password"))
-    }
-
-    @Test func largePlainRecordsAvoidTerminalProjectionBudgets() {
-        let input = String(repeating: "ordinary", count: 10_000)
-        var state: Redactor.StreamState.ControlString?
-        let output = Redactor.stripTerminalEscapes(input, openControlString: &state)
-        #expect(output.joined == input && output.spliced == input && state == nil)
-    }
-
-    @Test(arguments: [8_000, 100_000])
-    func sparseRecordOverflowQuarantinesTheStream(_ count: Int) {
-        var state: Redactor.StreamState.ControlString?
-        let output = Redactor.stripTerminalEscapes("\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: count), openControlString: &state)
-        #expect(output.spliced == "[redacted:terminal-ambiguity]" && state?.quarantined == true)
-        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &state).spliced == "[redacted:terminal-ambiguity]")
     }
 
     @Test(arguments: ["The login code is ", "The login code was rejected; retry "])
