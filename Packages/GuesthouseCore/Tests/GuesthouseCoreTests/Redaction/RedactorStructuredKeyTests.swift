@@ -76,6 +76,8 @@ import Testing
 
     @Test(arguments: [
         #"{"na\u006de":"visible","value":"pass\u0077ord"}"#,
+        #"password: \"synthetic\", status: ready"#,
+        #"Authorization: \"synthetic\", status: ready"#,
         #"{"message":"{\"pass\\u0077ord\":\"visible\"}"}"#,
         #"{"message":"literal \"pass\\u0077ord\": visible"}"#,
         #"{"password":"already literal"}"#,
