@@ -100,6 +100,7 @@ import Testing
     }
 
     @Test(arguments: [("--cl", "ient-secret opaque", "--client-secret opaque"),
+                      ("--device-co", "de opaque", "--device-code opaque"),
                       ("--access-k", "ey-secret opaque", "--access-key-secret opaque"),
                       ("cod", "e: ABCD-EFGH", "code: ABCD-EFGH"),
                       ("code", ": ABCD-EFGH", "code: ABCD-EFGH")])
