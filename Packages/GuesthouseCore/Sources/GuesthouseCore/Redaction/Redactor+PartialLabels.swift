@@ -43,7 +43,8 @@ extension Redactor {
             // A split may occur inside a modifier (for example --cl / ient-secret).
             // Keep the option boundary, not a field-only prefix without its dashes.
             let tail = String(name.suffix(48))
-            for start in tail.indices where tail[start].isLetter {
+            for start in tail.indices where tail[start].isLetter
+                && (start == tail.startIndex || "-_.".contains(tail[tail.index(before: start)])) {
                 let suffix = String(tail[start...])
                 if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && $0 != "." }) { return "--" + suffix }
             }
@@ -56,6 +57,19 @@ extension Redactor {
         }
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ ._-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
             return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
+        }
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?)[ \t]+([A-Za-z]+)[ \t]*$/#),
+           ["is", "are", "was", "were", "reads", "equals"].contains(where: { $0.hasPrefix(prompt.2.lowercased()) }) {
+            return prompt.1.lowercased() + " " + prompt.2.lowercased()
+        }
+        // Retain at most three instruction-word slots, never their arbitrary bytes.
+        // A final slot without whitespace can continue within the same word next time.
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))((?:[ \t]+\S+){1,3})[ \t]*$/#) {
+            let words = prompt.2.split(whereSeparator: \.isWhitespace)
+            if !words.contains(where: { $0.lowercased() == "code" || $0.lowercased() == "codes" }) {
+                return prompt.1.lowercased() + String(repeating: " x", count: words.count)
+                    + (text.last?.isWhitespace == true ? " " : "")
+            }
         }
         // Compare provider stems with field suffixes; neither may steal a longer prefix.
         let unpadded = text.dropLast(text.reversed().prefix(while: { $0 == " " || $0 == "\t" }).count)
@@ -111,7 +125,10 @@ extension Redactor {
             return nil
         }
         if partialCredentialLabel(in: combined).map({ successor in
-            successor.hasPrefix(prefix) || (prefix.hasPrefix("-")
+            successor.hasPrefix(prefix)
+                || (prefix.wholeMatch(of: #/(?:enter|type|paste|copy|input)(?: x){1,3}[ ]?/#) != nil
+                    && successor.hasPrefix(String(prefix.prefix(while: { $0 != " " })) + " "))
+                || (prefix.hasPrefix("-")
                 && combined.wholeMatch(of: #/--?[A-Za-z0-9_.-]+[ \t]*/#) != nil
                 && credentialFieldPrefixes.contains(combined.lowercased().filter { $0 != "-" && $0 != "_" && $0 != "." && !$0.isWhitespace }))
         }) == true

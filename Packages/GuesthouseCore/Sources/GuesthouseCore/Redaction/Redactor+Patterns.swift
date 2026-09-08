@@ -110,13 +110,13 @@ extension Redactor {
         private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
             // Scan the existing record; no escape-depth buffer is retained. A depth cap
             // here would leave deeper encodings unmatched and expose their credentials.
-            #/((?::|^|^[ \t]*=|[\s,"'(<\[{\u{0060}]|(?:^|[\s,"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
+            #/((?::|^|^[ \t]*=|[\s,;"'(<\[{\u{0060}]|(?:^|[\s,;"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
         }
         let urlUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
-        let partialURLAuthority = #/(?:^[ \t]*=|^|[\s,:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
+        let partialURLAuthority = #/(?:^[ \t]*=|^|[\s,;:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#]*$/#
@@ -228,7 +228,9 @@ extension Redactor {
                     #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n]*\]|\{[^}\r\n]*\}|\([^\)\r\n]*\)|<[^>\r\n]*>|\u{0060}[^\u{0060}\r\n]*\u{0060}|"[^"\r\n]*$|'[^'\r\n]*$/#
                     #/\[[^\]\r\n]*$|\{[^}\r\n]*$|\([^\)\r\n]*$|<[^>\r\n]*$|\u{0060}[^\u{0060}\r\n]*$/#
                     #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
-                    #/[A-Za-z0-9._-]+(?![A-Za-z0-9._-])/#
+                    // Lowercase-led opaque codes can contain space-separated groups too.
+                    // Do not truncate their remaining groups at the single-word fallback.
+                    #/[A-Za-z0-9._-]*[a-z][A-Za-z0-9._-]*(?:[ \t]+[A-Za-z0-9._-]+)*(?![A-Za-z0-9._-])/#
                 }
             } transform: { value -> Substring? in
                 if value.first.map({ "\"'[{<(`".contains($0) }) == true { return value }
