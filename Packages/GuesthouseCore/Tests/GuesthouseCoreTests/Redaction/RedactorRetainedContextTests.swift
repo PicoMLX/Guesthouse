@@ -2,6 +2,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedContextTests {
+    @Test(arguments: [
+        ("x\u{1B}Authorization: opaque", "x Authorization: opaque"),
+        ("x\u{1B}password: opaque", "x password: opaque"),
+        ("x\u{1B}[--password opaque", "x --password opaque"),
+        ("x\u{1B}device_code: opaque", "x device_code: opaque"),
+        ("☃x\u{1B}pass\u{1B}word: opaque", "☃x password: opaque")
+    ])
+    func recoveredFieldsHonorControlSuppliedBoundaries(_ input: String, _ context: String) {
+        #expect(Redactor.renderings(of: input).contexts.contains(context))
+    }
+
     @Test(arguments: ["-password:", "-token:", "-passphrase:"])
     func recoveredTokensKeepBareCredentialContext(_ label: String) {
         let input = "eyJhbGciOiJIUzI1NiIsI\u{1B}[mtpZCI6Im5hYmMifQ.payload." + label
