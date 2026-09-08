@@ -52,7 +52,8 @@ extension Redactor {
 
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
-    static func redactURLContinuations(_ input: String, state: inout StreamState, decodeStrings: Bool = true) -> String {
+    static func redactURLContinuations(_ input: String, state: inout StreamState, decodeStrings: Bool = true,
+                                       authorityStartsHere: Bool = false) -> String {
         let input = decodeStrings ? redactEncodedURLStrings(input, state: &state) : input
         defer {
             if !input.allSatisfy(\.isWhitespace) {
@@ -87,7 +88,7 @@ extension Redactor {
             }
             if remaining == 0 {
                 state.expectingURLUserInfo = true
-                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings)
+                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings, authorityStartsHere: true)
             }
         }
         if state.expectingURLUserInfo {
@@ -110,7 +111,9 @@ extension Redactor {
             let stop = state.expectingURLUserInfo ? end : (at ?? end)
             // A non-userinfo frame closer also bounds a host-only continuation.
             // Apostrophes/parentheses remain possible password bytes, not closers.
-            if at != nil || end == text.endIndex {
+            // Only newly completed slashes prove that all authority bytes are on this
+            // record. An established opaque continuation must remain concealed.
+            if at != nil || end == text.endIndex || (!authorityStartsHere && !frameClosers.contains(text[end])) {
                 text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
             }
         }
