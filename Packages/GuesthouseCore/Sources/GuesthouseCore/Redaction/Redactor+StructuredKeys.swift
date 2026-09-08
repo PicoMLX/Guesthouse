@@ -21,6 +21,10 @@ extension Redactor {
         var stringIndex = strings.startIndex
         return input.replacing(#/((?:^|[^A-Za-z0-9\\:=])\s*)(\\*)("(?:(?!\\*"\s*[:=])(?:[^"\\]|\\.))*\\*"|"(?:(?!\\*"\s*[:=])(?:[^"'\\:=]|\\.))*\\*|'(?:(?!\\*'\s*[:=])(?:[^'\\]|\\.))*\\*'|'(?:(?!\\*'\s*[:=])(?:[^'"\\:=]|\\.))*\\*)(?=\s*[:=]|[ \t]*$)/#) { match in
             guard match.3.contains("\\") else { return String(match.0) }
+            // Whitespace after an assignment introduces its value, not another key.
+            if input[..<match.range.lowerBound].last(where: { !$0.isWhitespace }).map({ ":=".contains($0) }) == true {
+                return String(match.0)
+            }
             let quote = String(match.3.prefix(1))
             let keyStart = match.3.startIndex
             let content = match.3.dropFirst().dropLast(match.3.hasSuffix(quote) ? 1 : 0)
