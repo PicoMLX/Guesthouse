@@ -59,6 +59,9 @@ struct Redactor: Sendable {
         var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
         var quotedValue: QuotedValue?
+        /// An incomplete Unicode-encoded URL string retains framing bits, never payload.
+        var pendingEncodedURLString = false
+        var encodedURLHasTrailingEscape = false
         /// A terminal control string opened on an earlier line and has not been terminated yet.
         var openControlString: ControlString?
 
@@ -81,6 +84,8 @@ struct Redactor: Sendable {
         state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || scanned.expectingDeviceCodeContinuation
         state.expectingURLUserInfo = state.expectingURLUserInfo || scanned.expectingURLUserInfo
         state.urlHasTrailingEscape = state.urlHasTrailingEscape || scanned.urlHasTrailingEscape
+        state.pendingEncodedURLString = state.pendingEncodedURLString || scanned.pendingEncodedURLString
+        state.encodedURLHasTrailingEscape = state.encodedURLHasTrailingEscape || scanned.encodedURLHasTrailingEscape
         let slashCounts = [state.pendingURLSlashes, scanned.pendingURLSlashes].filter { $0 > 0 }
         state.pendingURLSlashes = slashCounts.min() ?? 0
         state.quotedValue = state.quotedValue ?? scanned.quotedValue

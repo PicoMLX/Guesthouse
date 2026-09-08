@@ -2,6 +2,8 @@
 
 `MVP-PLAN.md` §10 defines eight phase-zero gates plus a final complete-path run. Each is an experiment a person runs on the reference Mac. The result lives here, in one file per gate, written from [TEMPLATE.md](TEMPLATE.md).
 
+The [Lume/shared work-priority decision](../decisions/0002-prioritize-lume-and-shared-infrastructure.md) records no gate result; all nine gates remain **not started**. Provider-specific procedures require review and updates to the plan, gate issues, registry, and template after a separate accepted provider-selection ADR, before formal Lume gate evidence is recorded. Existing proof requirements and the narrow exception rules below remain unchanged.
+
 A gate record is evidence, not a plan. It is written only from an actual run, never from reasoning about what should happen. Autonomous agents do not run gates and do not fill in these files.
 
 ## Gates

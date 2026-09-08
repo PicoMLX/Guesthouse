@@ -1,6 +1,8 @@
 # Working on Guesthouse
 
-Guesthouse is a native macOS app that prepares an isolated development Mac (a macOS VM run by Tart), connects it to the Codex desktop app, and manages multi-repository Xcode workspaces inside that VM. The developer never needs Terminal, Homebrew, or a hand-written SSH configuration. `MVP-PLAN.md` is the specification; cite its section when a change interprets it.
+Guesthouse is a native macOS app that prepares an isolated development Mac (a macOS VM), connects it to the Codex desktop app, and manages multi-repository Xcode workspaces inside that VM. The developer never needs Terminal, Homebrew, or a hand-written SSH configuration. `MVP-PLAN.md` is the specification; cite its section when a change interprets it.
+
+Prioritize Lume candidate validation and shared infrastructure under [ADR 0002](docs/decisions/0002-prioritize-lume-and-shared-infrastructure.md). New Tart-specific work is deferred; retain its existing implementation and documentation as legacy reference. Lume remains a candidate pending strict runtime verification, human provider preflight, and a separate provider-selection decision.
 
 ## Layout
 
@@ -9,23 +11,29 @@ Guesthouse is a native macOS app that prepares an isolated development Mac (a ma
 | `Guesthouse/` | The SwiftUI app. App Sandbox and Hardened Runtime on. Product name is "Guesthouse Codex VM". | UI state is `@MainActor` (the target sets MainActor default isolation). Never launches processes. |
 | `GuesthouseRuntime/` | Embedded XPC service, non-sandboxed, Hardened Runtime on (added by issue #19). | The only place host operations run. Exposes named operations, never a generic "run a command" API. |
 | `Packages/GuesthouseCore` | Shared models, typed XPC contract, state machines, parsers, validation. | Nonisolated by default; every public type is `Sendable`. No process execution, no host mutations. |
-| `Packages/GuesthouseRuntimeKit` | Process execution and Tart adapters (added by issue #21). | Linked only by `GuesthouseRuntime`. The app target must never import it. |
+| `Packages/GuesthouseRuntimeKit` | Process execution and provider adapters (added by issue #21); shared infrastructure and Lume candidate work are active, Tart adapters are retained. | Linked only by `GuesthouseRuntime`. The app target must never import it. |
 | `Fixtures/` | Sample app and package repositories used inside the guest VM by the phase-0 gates. | Not part of the product. Excluded from CI. |
 | `docs/phase0/` | Recorded results of the phase-0 hardware experiments. | Only filled in from a real run. Never from reasoning. |
 | `docs/decisions/` | Architecture decision records. | One file per decision. |
 
 ## Commands
 
-Package tests (fast, no signing):
+All package tests with the CI warning policy (fast, no signing):
 
 ```bash
-swift test --package-path Packages/GuesthouseCore
+./ci_scripts/ci_pre_xcodebuild.sh
+```
+
+One package:
+
+```bash
+swift test --package-path Packages/GuesthouseCore -Xswiftc -warnings-as-errors
 ```
 
 One package test:
 
 ```bash
-swift test --package-path Packages/GuesthouseCore --filter coreModuleIdentity
+swift test --package-path Packages/GuesthouseCore --filter coreModuleIdentity -Xswiftc -warnings-as-errors
 ```
 
 App build and tests through the shared scheme (also runs the package tests):
@@ -44,7 +52,15 @@ Open in Xcode with `open Guesthouse.xcodeproj`. Xcode 26.6 or later, macOS 26.4 
 
 ## Continuous integration and review
 
-Xcode Cloud runs the `Guesthouse` scheme's Test action on pull requests to `main` and reports a check to GitHub. Codex reviews every pull request automatically. Keep the scheme's Test action as the single source of truth for what CI runs; when you add a package, add its test target to the shared scheme.
+Xcode Cloud runs the `Guesthouse` scheme's Test action on pull requests to `main` and reports a check to GitHub. Keep the scheme's Test action as the source of truth for Xcode tests; when you add a package, add its test target to the shared scheme. Codex reviews every pull request automatically.
+
+The executable `ci_scripts/ci_pre_xcodebuild.sh` additionally runs every immediate `Packages/*/Package.swift` package with warnings treated as errors, independently guarding against missing scheme coverage (issue #2; `MVP-PLAN.md` §11). It uses `CI_PRIMARY_REPOSITORY_PATH` in Xcode Cloud and its own repository location locally, excludes `Fixtures/`, and fails if no packages are found. It skips only `test-without-building`: [Apple documents that phase as having no source checkout](https://developer.apple.com/documentation/xcode/configuring-your-xcode-cloud-workflow-s-actions); package tests have already run during `build-for-testing`.
+
+Validate hook discovery, paths with spaces, phase handling, and failure propagation without compiling Swift:
+
+```bash
+bash Tests/CI/test-package-hook.sh
+```
 
 ## Conventions
 
@@ -52,7 +68,7 @@ Xcode Cloud runs the `Guesthouse` scheme's Test action on pull requests to `main
 - Core package types are `Sendable` and nonisolated. Do not add `@MainActor` to core types.
 - No third-party dependencies. If one seems necessary, open an issue that justifies it first.
 - Launch processes only in the runtime service or `GuesthouseRuntimeKit`, always with an executable URL and an argument array. Never `/bin/sh -c`, never string interpolation into a command, never an inherited environment.
-- The service chooses executable paths and flags. Requests from the GUI carry environment IDs and validated options, never paths to run or Tart flags.
+- The service chooses executable paths and flags. Requests from the GUI carry environment IDs and validated options, never paths to run or provider CLI flags, including Tart or Lume flags.
 - Treat guest output, repository content, branch names, file names, and CLI text as untrusted data. Never turn any of it into a host command.
 - Never log or persist tokens, passwords, device codes, private keys, or authorization headers. Route every log line through the redaction layer once it exists (issue #11).
 - Prefer environment UUIDs and relative guest paths over IP addresses as persistent identity.
@@ -61,7 +77,9 @@ Xcode Cloud runs the `Guesthouse` scheme's Test action on pull requests to `main
 
 ## Picking work
 
-Issues labeled `agent-ready` are self-contained and CI-verifiable; pick one whose dependencies are closed. Issues labeled `needs-hardware` are experiments a person runs on the reference Mac. Do not attempt them, do not close them, and never write their `docs/phase0/` record from reasoning. Issue #48 lists the order of work.
+Issues labeled `agent-ready` are self-contained and CI-verifiable; pick one whose dependencies are closed and whose scope follows the active Lume/shared priority. Check existing PR coverage before starting another implementation. [Issue #48](https://github.com/PicoMLX/Guesthouse/issues/48) tracks work ordering; [issue #82](https://github.com/PicoMLX/Guesthouse/issues/82) tracks the Lume candidate and its remaining provider blockers. Tart-specific ancestry does not make shared code obsolete or authorize new Tart features.
+
+Issues labeled `needs-hardware` are experiments a person runs on the reference Mac. Do not attempt them, do not close them, and never write their `docs/phase0/` record from reasoning. The priority change does not pass a gate, waive its proofs, or authorize bypassing signature verification. Review provider-specific procedures through a separate accepted provider-selection ADR and corresponding plan/gate updates before recording formal Lume gate evidence.
 
 ## Definition of done
 
