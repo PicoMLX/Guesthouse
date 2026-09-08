@@ -16,6 +16,7 @@ import Testing
         #expect(Redactor.redactSecretOptions(input, state: &state) == expected)
         #expect(state.quotedValue == nil)
         #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
+        #expect(!state.expectingSecretContinuation)
     }
 
     @Test(arguments: [(#"args=["--password syntheticFirst"#, Character("\""), #"args=["--password [redacted:secret]"#),
