@@ -50,8 +50,7 @@ extension Redactor {
                   before == nil || before?.isWhitespace == true
                     || before.map({ "=:([{,".contains($0) }) == true else { continue }
             let quoted = StreamState.QuotedValue(delimiter: delimiter,
-                escapeDepth: slashes.isMultiple(of: 2) ? 0 : slashes, kind: "secret",
-                singleQuotesAreLiteral: delimiter == "'" && slashes == 0)
+                escapeDepth: slashes.isMultiple(of: 2) ? 0 : slashes, kind: "secret")
             guard let end = closingQuoteEnd(in: prefix[cursor...], for: quoted) else { return quoted }
             cursor = end
         }
@@ -99,8 +98,9 @@ extension Redactor {
                 state.expectingSecretValue = state.expectingSecretValue || bareOption
                 continue
             }
-            var outer = enclosingCommandQuote(in: text[..<match.2.startIndex])
-            if outer?.delimiter == "'", outer?.escapeDepth == 0 { outer?.singleQuotesAreLiteral = true }
+            // Diagnostic wrappers can escape apostrophes; literal shell-single-quote
+            // semantics apply only to an argument's own quotes, not to this container.
+            let outer = enclosingCommandQuote(in: text[..<match.2.startIndex])
             let argument = secretArgument(in: text, from: match.range.upperBound, outerQuote: outer)
             state.quotedValue = state.quotedValue ?? argument.quoted
             state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
