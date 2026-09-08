@@ -3,12 +3,14 @@ import Foundation
 /// Error explanations owned by Guesthouse, not copied from subprocesses or Error descriptions.
 /// Unknown errors stay actionable without attempting to recognize secrets in their text.
 public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
+    case unsupportedHost
     case timedOut, connectionFailed, authenticationRequired, credentialsLocked
     case executableUnavailable, permissionDenied, insufficientDiskSpace
     case verificationFailed, invalidResponse, processFailed, outcomeUnknown
 
     public var message: String {
         switch self {
+        case .unsupportedHost: "This Mac does not meet Guesthouse's supported host requirements."
         case .timedOut: "The operation timed out; its outcome may be unknown."
         case .connectionFailed: "Guesthouse could not connect to the development Mac."
         case .authenticationRequired: "Sign-in is required to continue."
@@ -25,6 +27,8 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
 
     public var recoveryMessage: String {
         switch self {
+        case .unsupportedHost:
+            "Open Settings and check the supported Mac architecture, macOS release and resource requirements."
         case .timedOut, .processFailed, .outcomeUnknown:
             "Inspect the development Mac's current state before trying the operation again."
         case .connectionFailed:
@@ -32,7 +36,7 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         case .authenticationRequired:
             "Open Accounts and sign in again."
         case .credentialsLocked:
-            "Unlock the guest Keychain, then check account readiness."
+            "Unlock the Keychain used by this operation, then check account readiness."
         case .executableUnavailable:
             "Open Repair and check the required tool installation."
         case .permissionDenied:
