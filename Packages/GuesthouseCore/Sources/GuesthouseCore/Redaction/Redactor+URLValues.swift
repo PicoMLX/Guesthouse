@@ -8,8 +8,23 @@ extension Redactor {
     /// RFC 8259 strings can encode URL delimiters as Unicode escapes. Decode only a
     /// bounded, closed string, scan once, and re-encode only when it contains userinfo.
     /// No decoded payload is retained in stream state or emitted without sanitization.
-    private static func redactEncodedURLStrings(_ input: String) -> String {
-        input.replacing(#/"(?:[^"\\\r\n]|\\[^\r\n])*"/#) { match in
+    private static func redactEncodedURLStrings(_ input: String, state: inout StreamState) -> String {
+        var text = input
+        if state.pendingEncodedURLString {
+            var escaped = state.encodedURLHasTrailingEscape
+            var closing: String.Index?
+            for index in text.indices {
+                let character = text[index]
+                if character == "\"" && !escaped { closing = index; break }
+                escaped = character == "\\" ? !escaped : false
+            }
+            state.encodedURLHasTrailingEscape = escaped
+            guard let closing else { return marker("encoded-value") }
+            state.pendingEncodedURLString = false
+            state.encodedURLHasTrailingEscape = false
+            text = marker("encoded-value") + text[text.index(after: closing)...]
+        }
+        text = text.replacing(#/"(?:[^"\\\r\n]|\\[^\r\n])*"/#) { match in
             let encoded = match.0
             guard encoded.contains(#"\u"#) else { return String(encoded) }
             guard encoded.utf8.prefix(8193).count <= 8192,
@@ -23,12 +38,23 @@ extension Redactor {
             guard let data = try? encoder.encode(sanitized) else { return "\"" + marker("userinfo") + "\"" }
             return String(decoding: data, as: UTF8.self)
         }
+        // A Unicode escape can hide every authority delimiter. Until this quoted
+        // URL closes, emit a marker per record and retain only escape parity.
+        if let partial = text.firstMatch(of: #/"(?:[^"\\\r\n]|\\[^\r\n])*\\?$/#),
+           partial.0.contains(#"\u"#),
+           partial.0.contains(#/[A-Za-z][A-Za-z0-9+.-]*(?::|\\u003[aA])|\\u002[fF]/#) {
+            state.pendingEncodedURLString = true
+            state.encodedURLHasTrailingEscape = !partial.0.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
+            text = String(text[..<partial.range.lowerBound]) + marker("encoded-value")
+        }
+        return text
     }
 
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
-    static func redactURLContinuations(_ input: String, state: inout StreamState, decodeStrings: Bool = true) -> String {
-        let input = decodeStrings ? redactEncodedURLStrings(input) : input
+    static func redactURLContinuations(_ input: String, state: inout StreamState, decodeStrings: Bool = true,
+                                       authorityStartsHere: Bool = false) -> String {
+        let input = decodeStrings ? redactEncodedURLStrings(input, state: &state) : input
         defer {
             if !input.allSatisfy(\.isWhitespace) {
                 state.urlHasTrailingEscape = state.expectingURLUserInfo
@@ -37,6 +63,8 @@ extension Redactor {
         }
         // A comma separates URLs only when the next element starts another authority.
         // Otherwise it may be part of the current URI's userinfo (or path/query).
+        // A comma + authority is ambiguous even inside a query. Conceal its userinfo
+        // rather than assuming that a nested URL or compact list element is public.
         func sanitized(_ element: Substring) -> String {
             String(element).replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" }
         }
@@ -60,7 +88,7 @@ extension Redactor {
             }
             if remaining == 0 {
                 state.expectingURLUserInfo = true
-                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings)
+                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings, authorityStartsHere: true)
             }
         }
         if state.expectingURLUserInfo {
@@ -83,7 +111,9 @@ extension Redactor {
             let stop = state.expectingURLUserInfo ? end : (at ?? end)
             // A non-userinfo frame closer also bounds a host-only continuation.
             // Apostrophes/parentheses remain possible password bytes, not closers.
-            if at != nil || end == text.endIndex || !frameClosers.contains(text[end]) {
+            // Only newly completed slashes prove that all authority bytes are on this
+            // record. An established opaque continuation must remain concealed.
+            if at != nil || end == text.endIndex || (!authorityStartsHere && !frameClosers.contains(text[end])) {
                 text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
             }
         }

@@ -136,7 +136,7 @@ import Testing
         #expect(state.expectingAuthorizationValue)
     }
 
-    @Test(arguments: ["password", "api.key", "Authorization", "device_code"], ["\"", "\\\""])
+    @Test(arguments: ["password", "api.key", "Authorization", "device_code", "device.code", "user.code"], ["\"", "\\\""])
     func completeFieldsBoundInlineOwnership(label: String, quote: String) {
         var state = Redactor.StreamState()
         let input = label + ": " + quote + "synthetic" + quote + ", status: ready"

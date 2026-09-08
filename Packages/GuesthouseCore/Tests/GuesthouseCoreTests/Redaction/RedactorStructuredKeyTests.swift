@@ -4,6 +4,8 @@ import Testing
 @Suite struct RedactorStructuredKeyTests {
     @Test(arguments: [
         (#"{"pass\u0077ord""#, #"{"password""#),
+        ("{\r\n  " + #""pass\u0077ord": "syntheticOpaque""# + "\r\n}", "{\r\n  " + #""password": "syntheticOpaque""# + "\r\n}"),
+        ("{\n  " + #""pass\u0077ord": "syntheticOpaque""# + "\n}", "{\n  " + #""password": "syntheticOpaque""# + "\n}"),
         (#"{"pass\u0077ord""# + "\r\n:" + #""syntheticOpaque"}"#, #"{"password""# + "\r\n:" + #""syntheticOpaque"}"#),
         (#"{"pass\u0077ord":"syntheticOpaque"}"#, #"{"password":"syntheticOpaque"}"#),
         (#"{"\u0061ccess_token":"syntheticOpaque"}"#, #"{"access_token":"syntheticOpaque"}"#),
