@@ -39,7 +39,7 @@ import Testing
     @Test(arguments: ["HMAC-SHA256", "ECDSA-SHA512", "CHACHA20-POLY1305"])
     func pendingCodeShapeMatchingDoesNotPreserveAlgorithms(_ value: String) {
         var state = Redactor.StreamState()
-        #expect(!Redactor.applyPatterns(to: value, codeExpected: true, state: &state).contains(value))
+        #expect(Redactor.applyPatterns(to: value, codeExpected: true, state: &state) == "[redacted:device-code]")
     }
 
     @Test(arguments: [(#"password: "syntheticOpaque" , status: ready"#, "password: [redacted:secret] , status: ready"),
