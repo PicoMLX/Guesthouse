@@ -3,6 +3,13 @@ import Testing
 
 @Suite struct TerminalCredentialProjectionTests {
 
+    @Test(arguments: ["\u{1B}[12345678m", "\u{9B}12345678m"])
+    func numericPrefixesCannotHideAnAcceptedJWT(_ command: String) {
+        let input = "eyJ4Ijo" + command + "LCJwYWRkaW5nIjoiIn0.cGF5bG9hZA.c2ln"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "jwt" || $0.kind == "terminal-ambiguity" })
+    }
+
     @Test(arguments: ["\u{1B}[:;//m", "\u{9B}:;//m"])
     func mixedGrammarClassesRestoreURLUserInfo(_ command: String) throws {
         let input = "https" + command + "user:syntheticOpaque@host"
