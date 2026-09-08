@@ -2,7 +2,21 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
-    @Test(arguments: [("<", ">"), ("{", "}"), ("`", "`"), ("\"", "\"")])
+    @Test(arguments: [
+        ([#"prefix "https://user:syntheticFirst"#, #"syntheticSecond\"syntheticThird@example.com/path""#]),
+        ([#"prefix "https://user:syntheticFirst\"#, #""syntheticThird@example.com/path""#]),
+        ([#"[https://one.example,/"#, #"/user:syntheticOpaque@example.com]"#]),
+        ([#"[https://one.example,\/"#, #"\/user:syntheticOpaque@example.com]"#])
+    ])
+    func continuedEscapedQuotesAndCompactListsConcealEveryCredential(_ records: [String]) {
+        var state = Redactor.StreamState()
+        let output = records.map { Redactor.redactURLContinuations($0, state: &state) }.joined()
+        #expect(!output.contains("synthetic"))
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [("<", ">"), ("{", "}"), ("`", "`"), ("\"", "\""), ("[", "]")])
     func continuedHostOnlyFramesReleaseTheFollowingRecord(_ opener: String, _ closer: String) {
         var state = Redactor.StreamState()
         let first = "prefix " + opener + "https:/"
