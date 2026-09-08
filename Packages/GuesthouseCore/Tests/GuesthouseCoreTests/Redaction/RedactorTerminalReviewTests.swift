@@ -2,6 +2,21 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test func largePlainRecordsAvoidTerminalProjectionBudgets() {
+        let input = String(repeating: "ordinary", count: 10_000)
+        var state: Redactor.StreamState.ControlString?
+        let output = Redactor.stripTerminalEscapes(input, openControlString: &state)
+        #expect(output.joined == input && output.spliced == input && state == nil)
+    }
+
+    @Test(arguments: [8_000, 100_000])
+    func sparseRecordOverflowQuarantinesTheStream(_ count: Int) {
+        var state: Redactor.StreamState.ControlString?
+        let output = Redactor.stripTerminalEscapes("\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: count), openControlString: &state)
+        #expect(output.spliced == "[redacted:terminal-ambiguity]" && state?.quarantined == true)
+        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &state).spliced == "[redacted:terminal-ambiguity]")
+    }
+
     @Test(arguments: ["The login code is ", "The login code was rejected; retry "])
     func contextualDeviceCodesKeepIndependentBoundaries(_ context: String) {
         let result = Redactor.renderings(of: context + "ghp_abcdefghijklmnopqrstuvwx\u{0}ABCD-EFGH")

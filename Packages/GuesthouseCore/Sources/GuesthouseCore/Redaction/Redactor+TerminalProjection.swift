@@ -7,6 +7,7 @@ extension Redactor {
     /// Interior styling or an already-completed quoted value adds no next-record evidence.
     static func terminalContextEnd(in text: String, valueStart: String.Index) -> String.Index {
         let value = text[valueStart...].drop(while: { $0.isWhitespace })
+        if valueExplicitlyContinues(value) { return text.endIndex }
         guard let quote = unterminatedQuote(in: value, kind: "secret") else { return valueStart }
         return value.index(value.startIndex, offsetBy: quote.escapeDepth + 1)
     }
