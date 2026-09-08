@@ -4,10 +4,25 @@ import Foundation
 /// byte becomes visible. Ambiguity exceeding the fixed budget quarantines the rest of a stream.
 enum TerminalControlEvidence {
     enum Reading: Int, CaseIterable, Sendable {
-        case joined, parameterless, final, intermediates, complete
+        case joined, parameterless, final, intermediates, parameterDelimiter, complete
     }
 
     static let maximumAlternatives = 64
+    static let maximumControlScalars = 256
+
+    /// One linear preflight bounds repeated regex work, including non-branching C0 records.
+    /// Tabs and CR/LF are framing/whitespace, not terminal commands.
+    static func isWithinControlBudget(_ text: String) -> Bool {
+        var count = 0
+        for scalar in text.unicodeScalars {
+            if ((0...0x1F).contains(scalar.value) && ![9, 10, 13].contains(scalar.value))
+                || (0x7F...0x9F).contains(scalar.value) {
+                count += 1
+                if count > maximumControlScalars { return false }
+            }
+        }
+        return true
+    }
     static let quarantineMarker = "[redacted:terminal-ambiguity]"
 
     struct Continuation: Hashable, Sendable {
@@ -75,6 +90,11 @@ enum TerminalControlEvidence {
             return prefix > 0 ? String(String.UnicodeScalarView(complete.unicodeScalars.filter {
                 !(0x30...0x3F).contains($0.value)
             })) : complete
+        case .parameterDelimiter:
+            // Numeric CSI parameters may hide a field's colon or equals delimiter.
+            // Keep the delimiter suffix as scan-only evidence, never as visible output.
+            guard prefix > 0, let delimiter = complete.firstIndex(where: { $0 == ":" || $0 == "=" }) else { return "" }
+            return String(complete[delimiter...])
         case .complete: return complete
         }
     }
@@ -82,6 +102,7 @@ enum TerminalControlEvidence {
     /// Nil means that no safe bounded enumeration is possible. Do not silently drop
     /// alternatives: the missing reading might be the only one containing the credential.
     static func projections(in text: String, prefixes: [String] = []) -> [Projection]? {
+        guard isWithinControlBudget(text) else { return nil }
         var results = Array(Set(prefixes.isEmpty ? [""] : prefixes)).sorted().map { Projection(prefix: $0) }
         guard results.count <= maximumAlternatives else { return nil }
         var remaining = text[...]
@@ -139,7 +160,7 @@ enum TerminalControlEvidence {
             continuation = Continuation(pending: nil, prefixes: [], commandSuffix: "", quarantined: true)
             return (quarantineMarker, [])
         }
-        guard continuation?.quarantined != true else { return quarantine() }
+        guard continuation?.quarantined != true, isWithinControlBudget(line) else { return quarantine() }
         let text = TerminalControlGrammar.prepare(line, pending: &pending, commandSuffix: &commandSuffix)
         guard let readings = projections(in: text, prefixes: prefixes) else { return quarantine() }
         // A pending command may split ANY credential opener, not just options or PEM.

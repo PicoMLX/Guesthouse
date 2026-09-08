@@ -2,6 +2,30 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["\r", "\n", "\r\n"])
+    func bareRecoveredOptionsExcludePhysicalFraming(_ terminator: String) {
+        let input = "\u{1B}--pass\u{1B}[31word" + terminator
+        let recovery = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(recovery.contexts.contains("--password"))
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{9B}"], [":", "="])
+    func parameterDelimitersCanRestoreCredentialFields(_ control: String, _ delimiter: String) {
+        let input = "password" + control + "31" + delimiter + "msyntheticOpaque"
+        let recovery = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(recovery.contexts.contains("password" + delimiter + "msyntheticOpaque"))
+    }
+
+    @Test(arguments: [257, 8_000])
+    func excessiveControlDensityQuarantinesBeforeRegexExpansion(_ count: Int) {
+        let input = String(repeating: "a\u{0}", count: count)
+        #expect(TerminalControlEvidence.projections(in: input)?.count == nil)
+        var state: TerminalControlEvidence.Continuation?
+        _ = TerminalControlEvidence.prepare(input, continuation: &state)
+        #expect(state?.quarantined == true)
+        #expect(TerminalControlEvidence.prepare("syntheticNext", continuation: &state).text == "[redacted:terminal-ambiguity]")
+    }
+
     @Test(arguments: ["\u{1B}[@", "\u{9B}@", "\u{1B}@"],
           ["The login code is ", "The login code was rejected; retry "])
     func restoredLeadingCodeBoundariesProtectValues(_ command: String, _ context: String) throws {
@@ -47,6 +71,11 @@ import Testing
     }
 
     @Test(arguments: [2_000, 4_000, 8_000])
+    func formerlySlowDenseRecordsExceedTheExplicitControlBudget(_ count: Int) {
+        #expect(TerminalControlEvidence.projections(in: String(repeating: "a\u{0}", count: count))?.count == nil)
+    }
+
+    @Test(arguments: [32, 128, 256])
     func denseSingleReadingControlsKeepExactProjection(_ count: Int) throws {
         let input = String(repeating: "a\u{0}", count: count) + "end"
         let start = ContinuousClock.now

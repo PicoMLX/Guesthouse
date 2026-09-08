@@ -54,12 +54,13 @@ extension Redactor {
             return ([(0..<joined.utf8.count, "terminal-ambiguity")], [])
         }
         for projection in projections where !projection.retained.isEmpty {
-            let alternate = projection.text
+            // Matching and replay use content only; projection offsets still address the framed record.
+            let alternate = String(TerminalControlEvidence.contentBeforeTerminator(projection.text))
             let offsets = projection.offsets
             let retained = projection.retained
             let boundaries = projection.boundaries
             // Short recognizable prefixes still own a possible next-record continuation.
-            let content = String(TerminalControlEvidence.contentBeforeTerminator(alternate))
+            let content = alternate
             if content.contains(patterns.wrappedTokenAtLineEnd)
                 && !TerminalControlEvidence.contentBeforeTerminator(joined).contains(patterns.wrappedTokenAtLineEnd) {
                 contexts.append(content)
