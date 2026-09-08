@@ -2,6 +2,45 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: [["private k", "ey: syntheticOpaque"], ["secret access k", "ey: syntheticOpaque"],
+                      [#""clientSecret""#, ": syntheticOpaque"], [#"\"clientSecret\"#, #"": syntheticOpaque"#],
+                      ["prefix AWS4-HMAC-S", "HA256 Credential=syntheticOpaque"]])
+    func fieldNameFramingSurvivesBeforeTheAssignment(_ records: [String]) {
+        let output = Redactor().redact(lines: records + ["Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(output.last == "Finished")
+    }
+
+    @Test(arguments: ["password", "Authorization"])
+    func quotedFieldDecoysCannotExposeTheUnframedTail(_ label: String) {
+        let output = Redactor().redact(lines: [label + #": "[redacted:decoy]" syntheticOpaque"#,
+            " syntheticFold", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque") && !output.joined().contains("syntheticFold"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test func physicalAPIAlreadyRetainsAValidatedSplitJWTHeader() {
+        let output = Redactor().redact(lines: ["eyJhbGciOiJIUzI1NiJ9.", "cGF5bG9hZA.c2ln", "; Finished"]).map(\.text)
+        #expect(!output.joined().contains("eyJhbGciOiJIUzI1NiJ9"))
+        #expect(!output.joined().contains("cGF5bG9hZA") && !output.joined().contains("c2ln"))
+        #expect(output[2] == "; Finished")
+    }
+
+    @Test(arguments: [["Bas", "ic", " dXNlcjpwYXNz"], ["Dige", "st", " username=syntheticOpaque"],
+                      ["--cl", "ient-s", "ecret syntheticOpaque"]])
+    func intermediatePrefixRecordsRetainTheFinalCredential(_ records: [String]) {
+        let output = Redactor().redact(lines: records + ["Finished"]).map(\.text)
+        #expect(!output.joined().contains("dXNlcjpwYXNz") && !output.joined().contains("syntheticOpaque"))
+        #expect(output.last == "Finished")
+    }
+
+    @Test(arguments: ["\u{1B}[31mret: syntheticOpaque", "\u{9B}31mret: syntheticOpaque"])
+    func physicalAPIAlreadyNormalizesStyledLabelContinuations(_ second: String) {
+        let output = Redactor().redact(lines: ["clientSec", second, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(output[2] == "Finished")
+    }
+
     @Test(arguments: [["Authorization:", "Digest username="],
                       [#"Authorization: Digest username="closed","#, " response="]])
     func assignmentsInsideAuthorizationFoldsRetainTheFollowingValue(_ prefix: [String]) {
@@ -60,7 +99,7 @@ import Testing
 
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
                       #""visit https://example.com""#, #""visit https://example.com:443""#,
-                      #"prefix "url=https://example.com""#, "prefix <url=https://example.com>"])
+                      #"prefix "url=https://example.com""#, "prefix <url=https://example.com>", "{url=https://example.com}"])
     func completeURLDiagnosticsDoNotQuarantineTheNextRecord(_ input: String) {
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
     }
