@@ -51,10 +51,13 @@ import Testing
     }
 
     @Test(arguments: ["ghp", "gho", "ghu", "ghs", "ghr", "github_pat"])
-    func completeProviderStemsAwaitTheirUnderscore(_ stem: String) {
+    func completeProviderStemsAwaitTheirUnderscore(_ stem: String) throws {
         var state = Redactor.StreamState()
         #expect(stem.contains(Redactor.patterns.wrappedTokenAtLineEnd))
         #expect(Redactor.applyPatterns(to: stem, codeExpected: false, state: &state) == "[redacted:github-token]")
+        #expect(state.pendingCredentialLabel == stem)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: "_syntheticOpaque", state: &state))
+        #expect(Redactor.applyPatterns(to: restored, codeExpected: false, state: &state) == "[redacted:github-token]")
     }
 
     @Test(arguments: ["Basic", "Digest", "NTLM", "Negotiate", "AWS4-HMAC-SHA256"])
@@ -144,7 +147,8 @@ import Testing
     @Test(arguments: ["device_code: ABCD", "Enter the code: ABCD", "Your code is ABCD"])
     func nonemptyCodesRetainOnlyAnOrdinaryFold(_ input: String) {
         var state = Redactor.StreamState()
-        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output.contains("[redacted:device-code]") && !output.contains("ABCD"))
         #expect(state.expectingDeviceCodeContinuation)
         #expect(!state.expectingDeviceCode)
     }
