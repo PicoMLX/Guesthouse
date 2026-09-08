@@ -4,15 +4,18 @@ import Foundation
 /// byte becomes visible. Ambiguity exceeding the fixed budget quarantines the rest of a stream.
 enum TerminalControlEvidence {
     enum Reading: Int, CaseIterable, Sendable {
-        case joined, parameterless, final, intermediates, parameterDelimiter, complete
+        case joined, parameterless, final, intermediates, intermediateOnly, parameterDelimiter, complete
     }
 
     static let maximumAlternatives = 64
     static let maximumControlScalars = 256
+    static let maximumRecordBytes = 16 * 1024
+    static let maximumProjectionWorkBytes = 64 * 1024
 
     /// One linear preflight bounds repeated regex work, including non-branching C0 records.
     /// Tabs and CR/LF are framing/whitespace, not terminal commands.
     static func isWithinControlBudget(_ text: String) -> Bool {
+        guard text.utf8.prefix(maximumRecordBytes + 1).count <= maximumRecordBytes else { return false }
         var count = 0
         for scalar in text.unicodeScalars {
             if ((0...0x1F).contains(scalar.value) && ![9, 10, 13].contains(scalar.value))
@@ -90,6 +93,8 @@ enum TerminalControlEvidence {
             return prefix > 0 ? String(String.UnicodeScalarView(complete.unicodeScalars.filter {
                 !(0x30...0x3F).contains($0.value)
             })) : complete
+        case .intermediateOnly:
+            return String(String.UnicodeScalarView(complete.unicodeScalars.filter { (0x20...0x2F).contains($0.value) }))
         case .parameterDelimiter:
             // Numeric CSI parameters may hide a field's colon or equals delimiter.
             // Keep the delimiter suffix as scan-only evidence, never as visible output.
@@ -103,6 +108,13 @@ enum TerminalControlEvidence {
     /// alternatives: the missing reading might be the only one containing the credential.
     static func projections(in text: String, prefixes: [String] = []) -> [Projection]? {
         guard isWithinControlBudget(text) else { return nil }
+        guard prefixes.count <= maximumAlternatives,
+              prefixes.allSatisfy({ $0.utf8.prefix(257).count <= 256 }) else { return nil }
+        // Charge the full possible reading before copying/hashing it. Sparse controls
+        // cannot multiply a long unchanged suffix beyond this aggregate byte budget.
+        let readingBytes = max(1, text.utf8.count + (prefixes.map { $0.utf8.count }.max() ?? 0))
+        var workRemaining = maximumProjectionWorkBytes - readingBytes * max(1, prefixes.count)
+        guard workRemaining >= 0 else { return nil }
         var results = Array(Set(prefixes.isEmpty ? [""] : prefixes)).sorted().map { Projection(prefix: $0) }
         guard results.count <= maximumAlternatives else { return nil }
         var remaining = text[...]
@@ -124,6 +136,8 @@ enum TerminalControlEvidence {
             for var result in results {
                 result.append(literal: literal)
                 for body in bodies {
+                    guard workRemaining >= readingBytes else { return nil }
+                    workRemaining -= readingBytes
                     var candidate = result
                     candidate.append(body: body)
                     if seen.insert(candidate).inserted {
@@ -151,6 +165,8 @@ enum TerminalControlEvidence {
     }
 
     static func prepare(_ line: String, continuation: inout Continuation?) -> (text: String, prefixes: [String]) {
+        // Plain records need no alternate evidence or offset arrays, regardless of length.
+        if continuation == nil, line.firstMatch(of: TerminalControlGrammar.escape) == nil { return (line, []) }
         let prefixes = continuation?.prefixes ?? []
         var pending = continuation?.pending
         var commandSuffix = continuation?.commandSuffix ?? ""
@@ -162,6 +178,7 @@ enum TerminalControlEvidence {
         }
         guard continuation?.quarantined != true, isWithinControlBudget(line) else { return quarantine() }
         let text = TerminalControlGrammar.prepare(line, pending: &pending, commandSuffix: &commandSuffix)
+        guard commandSuffix.unicodeScalars.count <= 64 else { return quarantine() }
         guard let readings = projections(in: text, prefixes: prefixes) else { return quarantine() }
         // A pending command may split ANY credential opener, not just options or PEM.
         // Never truncate structural evidence: once its bounded capacity is exceeded, quarantine

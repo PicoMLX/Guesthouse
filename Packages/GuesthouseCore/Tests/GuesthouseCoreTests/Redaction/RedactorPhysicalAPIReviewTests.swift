@@ -15,9 +15,11 @@ import Testing
     @Test(arguments: ["\u{1B}", "\u{1B}("])
     func recoveredIncompleteURLsProtectTheCurrentAndNextRecord(_ escape: String) {
         let output = Redactor().redact(lines: [
-            "https" + escape + "://sample:syntheticPassword", "@example.com", "Finished"
+            "https" + escape + "://sample:syntheticFirst", "syntheticPassword@example.com", "Finished"
         ]).map(\.text)
         #expect(!output.joined().contains("syntheticPassword"))
+        #expect(!output[0].contains("syntheticFirst"))
+        #expect(output[1] == "[redacted:userinfo]@example.com")
         #expect(output[2] == "Finished")
     }
 

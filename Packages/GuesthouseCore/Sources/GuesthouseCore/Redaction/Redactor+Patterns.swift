@@ -34,12 +34,12 @@ extension Redactor {
         /// `cache.<token>`, or in `payload.Authorization` is not a break, and a secret beside
         /// one would survive. The character is captured so it can be put back. A label may also
         /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
-        let bearer = #/(^|[^A-Za-z0-9])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
+        let bearer = #/(^|[^A-Za-z0-9])(bearer\s+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
         /// A standalone authentication value can reach decoded diagnostics without its header
         /// name. Basic is recognized only when the Base64 decodes to a user/password separator;
         /// Digest must start with an authentication parameter assignment, not ordinary prose.
         private static var basicValue: Regex<(Substring, Substring, Substring)> {
-            #/(basic[ \t]+)([A-Za-z0-9+\/]+={0,2})(?![A-Za-z0-9+\/=])/#
+            #/(basic[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*)([A-Za-z0-9+\/]+={0,2})(?![A-Za-z0-9+\/=])/#
         }
         let basicCredentialSpan = basicValue.ignoresCase()
         let basicAuthorization = Regex {
@@ -47,7 +47,7 @@ extension Redactor {
             basicValue
         }.ignoresCase()
         private static var digestValue: Regex<Substring> {
-            #/digest[ \t]+(?=(?:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash)\s*=)[^\r\n]+/#
+            #/digest[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*(?=(?:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash)\s*=)[^\r\n]+/#
         }
         let digestCredentialSpan = digestValue.ignoresCase()
         let digestAuthorization = Regex {
@@ -57,10 +57,11 @@ extension Redactor {
         /// Distinctive integrated-auth blobs and signed AWS requests remain recognizable after
         /// their header name is lost. Ordinary scheme-name prose alone is not a credential.
         private static var specializedValue: Regex<Substring> {
-            #/(?:ntlm|negotiate)[ \t]+[A-Za-z0-9+\/_-]{8,}={0,2}|aws4-hmac-sha256[ \t]+(?=(?:credential|signedheaders|signature)\s*=)[^\r\n]+/#
+            #/(?:ntlm|negotiate)[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9+\/_-]{8,}={0,2}|aws4-hmac-sha256[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*(?=(?:credential|signedheaders|signature)\s*=)[^\r\n]+/#
         }
         let specializedCredentialSpan = specializedValue.ignoresCase()
-        let partialIntegratedAuthorization = #/(^|[^A-Za-z0-9])((?:ntlm|negotiate))[ \t]+[A-Za-z0-9+\/_-]{1,7}[ \t]*$/#.ignoresCase()
+        let partialIntegratedAuthorization = #/(^|[^A-Za-z0-9])((?:ntlm|negotiate))[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9+\/_-]{1,7}[ \t]*$/#.ignoresCase()
+        let partialParameterizedAuthorization = #/(^|[^A-Za-z0-9])(digest|aws4-hmac-sha256)[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*([A-Za-z*]+)[ \t]*$/#.ignoresCase()
         let specializedAuthorization = Regex {
             #/(^|[^A-Za-z0-9])/#
             specializedValue
@@ -74,14 +75,14 @@ extension Redactor {
         /// than the concatenation. The API-key rule below keeps its boundary, because `sk-` is
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
-        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*|(?:ghp|gho|ghu|ghs|ghr|github_pat)$/#
+        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*|(?:ghp|gho|ghu|ghs|ghr|github_pat)(?=[ \t]*$)/#
         /// At line end a boundary-delimited bare `sk-` conservatively arms wrapped-key redaction.
-        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)(?:_|$)|github_pat(?:_|$)|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
+        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)(?:_|(?=[ \t]*$))|github_pat(?:_|(?=[ \t]*$))|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*(?=[ \t]*$)/#
         let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
         /// remain intact.
-        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-(?:[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]*$))/#
+        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-(?:[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]*(?=[ \t]*$)))/#
         let distinctiveAPIKey = #/sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]*/#
         /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
         /// which one decodes to a JSON object, whitespace allowed. More than three segments are
@@ -111,7 +112,7 @@ extension Redactor {
         let partialURLAuthority = #/(?:^|[\s"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
-            #/(?!\[)[^\s\/?#@]*$/#
+            #/[^\s\/?#@]*$/#
         }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,

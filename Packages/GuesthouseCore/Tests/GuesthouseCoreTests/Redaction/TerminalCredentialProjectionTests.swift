@@ -2,6 +2,43 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: [8_000, 100_000])
+    func sparseLongRecordsExceedTheRecoveryWorkBudget(_ length: Int) {
+        let input = "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: length)
+        #expect(TerminalControlEvidence.projections(in: input)?.count == nil)
+        var state: TerminalControlEvidence.Continuation?
+        #expect(TerminalControlEvidence.prepare(input, continuation: &state).text == "[redacted:terminal-ambiguity]")
+        #expect(state?.quarantined == true)
+    }
+
+    @Test func boundedSparseRecordsKeepEveryReading() throws {
+        let readings = try #require(TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: 1_000)))
+        #expect(readings.count == 9)
+        #expect(readings.allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{9B}"])
+    func intermediateOnlyCSIReadingsRecoverURLDelimiters(_ introducer: String) {
+        let input = "https:" + introducer + "31/m/user:syntheticOpaque@host"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "userinfo" })
+    }
+
+    @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "])
+    func restoredTrailingBackslashIsContinuationEvidence(_ field: String) {
+        let input = field + "synthetic\u{1B}\\"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.contexts.contains(field + "synthetic\\"))
+    }
+
+    @Test(arguments: ["\u{1B}[:", "\u{9B}:", "\u{1B}/"], [64, 70])
+    func overflowingPendingCommandBodiesQuarantineBeforeTruncation(_ command: String, _ length: Int) {
+        var state: TerminalControlEvidence.Continuation?
+        _ = TerminalControlEvidence.prepare("password" + command + String(repeating: command.hasSuffix("/") ? "/" : "1", count: length), continuation: &state)
+        #expect(state?.quarantined == true)
+        #expect(TerminalControlEvidence.prepare("msyntheticOpaque", continuation: &state).text == "[redacted:terminal-ambiguity]")
+    }
+
     @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "],
           ["\"", "'", "\\\""])
     func restoredOpeningDelimitersAreStateEvidence(_ field: String, _ delimiter: String) {
