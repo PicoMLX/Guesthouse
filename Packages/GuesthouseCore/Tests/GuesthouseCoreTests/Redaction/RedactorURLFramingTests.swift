@@ -3,6 +3,26 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [#"{"url":""#, #"{"uri":""#, #"url = ""#])
+    func emptyURLValuesQuarantineTheFirstEncodedAuthority(_ first: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.redactURLContinuations(first, state: &state).hasSuffix("[redacted:encoded-value]"))
+        #expect(state.pendingEncodedURLString)
+        let output = Redactor.redactURLContinuations(#"\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#, state: &state)
+        #expect(!output.contains("synthetic") && !output.contains("Opaque"))
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [("[//one.example;//user:opaque@two.example]", "[//one.example;//[redacted:userinfo]@two.example]"),
+                      ("[//user:sec;ret@one.example;//other:opaque@two.example]", "[//[redacted:userinfo]@one.example;//[redacted:userinfo]@two.example]")])
+    func semicolonListsKeepSeparatorsOutOfUserinfo(_ input: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.redactURLContinuations(input, state: &state) == expected)
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
     @Test(arguments: [#"Digest username="syntheticFirst"#, #"AWS4-HMAC-SHA256 Credential="syntheticFirst"#,
                       #"Authorization: Digest username="syntheticFirst"#, #"password: "syntheticFirst"#])
     func ordinaryOpenCredentialQuotesRemainOwnedByTheirFieldScanner(_ input: String) {
@@ -117,6 +137,9 @@ import Testing
 
     @Test(arguments: [
         (["[https:/", "/[2001:db8::1],//user:syntheticOpaque@example.com]"]),
+        (["[https:/", "/[2001:db8::1];//user:syntheticOpaque@example.com]"]),
+        (["[https://one.example;/", "/user:syntheticOpaque@example.com]"]),
+        (["https://one.example/path;//user:syntheticFirst", "syntheticSecond@example.com/path"]),
         (["[https:/", "/[2001:db8::1],//user:syntheticFirst", "syntheticSecond@example.com/path]"]),
         ([#"prefix "https://user:syntheticFirst"#, #"syntheticSecond\"syntheticThird@example.com/path""#]),
         ([#"prefix "https://user:syntheticFirst\"#, #""syntheticThird@example.com/path""#]),
