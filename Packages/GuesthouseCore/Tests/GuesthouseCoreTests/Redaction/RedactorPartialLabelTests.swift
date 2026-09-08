@@ -2,6 +2,54 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: ["supplied", "displayed", "provided", "arbitraryinstruction"]
+        .flatMap { word in (1..<word.count).map { (word, $0) } })
+    func instructionWordSplitsRetainOnlyBoundedSlots(_ word: String, _ split: Int) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: "Enter the " + word.prefix(split))
+        #expect(state.pendingCredentialLabel == "enter x x")
+        let restored = try #require(Redactor.restoringCredentialLabel(
+            in: word.dropFirst(split) + " code opaque", state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.codePromptWithoutDelimiter).map { String($0.2) } == "opaque")
+    }
+
+    @Test(arguments: ["is", "are", "reads", "equals"].flatMap { word in (1..<word.count).map { (word, $0) } })
+    func declarativeCopulaSplitsRetainRecognizedWords(_ word: String, _ split: Int) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: "Your code " + word.prefix(split))
+        let restored = try #require(Redactor.restoringCredentialLabel(in: word.dropFirst(split) + " opaque", state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.declarativeCodePrompt).flatMap { $0.2.map(String.init) } == "opaque")
+    }
+
+    @Test func unknownOptionQualifierCanContinueAcrossThreeRecords() throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: "--ven")
+        #expect(state.pendingCredentialLabel == "--")
+        let middle = try #require(Redactor.restoringCredentialLabel(in: "dor-pass", state: &state))
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: middle)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: "word opaque", state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.secretOption) != nil)
+    }
+
+    @Test(arguments: [("Enter the supp", "lied co", "de opaque"),
+                      ("Enter one tw", "o supplied ", "code opaque"),
+                      ("Your code re", "a", "ds opaque")])
+    func promptStructureCanCrossMoreThanOneBoundary(_ first: String, _ middle: String, _ last: String) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        let restoredMiddle = try #require(Redactor.restoringCredentialLabel(in: middle, state: &state))
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: restoredMiddle)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: last, state: &state))
+        #expect(restored.contains(Redactor.patterns.codePromptWithoutDelimiter)
+            || restored.contains(Redactor.patterns.declarativeCodePrompt))
+    }
+
+    @Test func instructionSlotsDoNotRetainPayloadOrAcceptUnlimitedWords() {
+        #expect(Redactor.partialCredentialLabel(in: "Enter one two three four") == nil)
+        #expect(Redactor.partialCredentialLabel(in: "Enter the code opaque") == nil)
+        #expect(Redactor.partialCredentialLabel(in: "Enter " + String(repeating: "arbitrary", count: 1_000)) == "enter x")
+    }
+
     @Test(arguments: ["user code", "device code", "verification code", "Enter the code"])
     func pluralCodeSuffixCanFollowTheSingularStem(_ first: String) throws {
         var state = Redactor.StreamState()
