@@ -28,12 +28,19 @@ import Testing
         #expect(state.expectingDeviceCodeContinuation)
     }
 
-    @Test(arguments: ["Enter the code shown below", "Enter the code A B then continue",
+    @Test(arguments: ["Enter the code A B then continue",
                       "Enter the code 1 2 then continue"])
     func shortGroupedDiagnosticProseDoesNotBecomeAPendingCode(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
         #expect(!state.expectingDeviceCode && !state.expectingDeviceCodeContinuation)
+    }
+
+    @Test func forwardCodeInstructionsKeepTheNextRecordSensitive() {
+        var state = Redactor.StreamState()
+        let prompt = "Enter the code shown below"
+        #expect(Redactor.applyPatterns(to: prompt, codeExpected: false, state: &state) == prompt)
+        #expect(state.expectingDeviceCode && !state.expectingDeviceCodeContinuation)
     }
     @Test(arguments: [#"args: "--password opaqueCredential""#, #"["--password opaqueCredential"]"#,
                       "(--password opaqueCredential)", "{--token opaqueCredential}", "<--password opaqueCredential>"])
