@@ -2,6 +2,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: [("--cl", "ient-secret opaque"), ("--access-k", "ey-secret opaque"),
+                      ("cod", "e: opaque"), ("code", ": opaque")])
+    func restoredOptionModifiersAndCodePromptsProtectValues(_ first: String, _ second: String) {
+        let output = Redactor().redact(lines: [first, second, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("opaque"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: [1, 2, 16, 256])
+    func authorityEscapesCanSplitBeforeTheSecondSlash(_ depth: Int) {
+        let escape = String(repeating: "\\", count: depth)
+        let output = Redactor().redact(lines: ["https:" + escape + "/" + escape,
+            "/user:syntheticOpaque@example.com/path", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(output[1].contains("@example.com/path"))
+        #expect(output[2] == "Finished")
+    }
+
     @Test func splitSchemeAfterALiteralMarkerStillProtectsThePayload() {
         let output = Redactor().redact(lines: ["Bearer [redacted:decoy] Be", "arer syntheticOpaque", "Finished"]).map(\.text)
         #expect(!output.joined().contains("syntheticOpaque"))

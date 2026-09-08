@@ -2,6 +2,22 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: [("--cl", "ient-secret opaque", "--client-secret opaque"),
+                      ("--access-k", "ey-secret opaque", "--access-key-secret opaque"),
+                      ("cod", "e: ABCD-EFGH", "code: ABCD-EFGH"),
+                      ("code", ": ABCD-EFGH", "code: ABCD-EFGH")])
+    func qualifiedOptionsAndStandalonePromptsRetainTheirGrammar(_ first: String, _ second: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(state.pendingCredentialLabel != nil)
+        #expect(Redactor.restoringCredentialLabel(in: second, state: &state) == expected)
+    }
+
+    @Test(arguments: ["https:\\/\\", "https:\\", "/\\", "url=https:\\/\\"])
+    func trailingSlashEscapesRemainAnIncompleteAuthority(_ input: String) {
+        #expect(input.firstMatch(of: Redactor.patterns.partialURLAuthority) != nil)
+    }
+
     @Test(arguments: [" = ", " : ", "= ", ": ", "\t=\t", "=", ":"])
     func spacedOptionAssignmentsConsumeTheValueNotTheDelimiter(_ separator: String) {
         var state = Redactor.StreamState()
