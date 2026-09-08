@@ -135,7 +135,14 @@ enum TerminalControlEvidence {
             // with a code group (at most eight digits). Whole-component readings cannot
             // prove its suffix safe; quarantine rather than omit those interpretations.
             guard components.allSatisfy({ $0.utf8.count <= 8 }) else { return nil }
-            let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + components)).sorted()
+            // A credential can also start inside the command body while retaining its
+            // later delimiter/final. Bound before copying any of those suffix readings.
+            let complete = body(of: escape.0, reading: .complete)
+            guard complete.utf8.count <= maximumAlternatives else { return nil }
+            let suffixes = components.flatMap { component in
+                component.indices.map { String(component[$0...]) }
+            } + complete.indices.map { String(complete[$0...]) }
+            let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + suffixes)).sorted()
             guard bodies.count <= maximumAlternatives else { return nil }
             // Most controls (including C0/C1 and opaque strings) have one empty reading.
             // Mutate those projections in place: copying/hashing each growing prefix is quadratic.
