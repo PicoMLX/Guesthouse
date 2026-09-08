@@ -188,7 +188,7 @@ extension Redactor {
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\*["'])?((?:user|device)[ _-]?codes?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\*["'])?((?:user|device)[ ._-]?codes?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -197,18 +197,18 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ ._-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
         /// nothing else on it for the word to belong to.
-        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?:shown|displayed|provided|listed)\s+below)?\s*$/#.ignoresCase()
+        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?:shown|displayed|provided|listed)\s+below)?\s*$/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D` and the `WDJB.MJHT` an RFC 8628 provider may print:
         /// runs of four to eight upper-case characters joined by single separators. Applied only
         /// on lines that mention a code (including the `user_code` and `device_code` field names
         /// of OAuth device flows), and never when the match is part of a longer hyphenated or
         /// dotted identifier such as a UUID or a reverse-DNS name.
-        let mentionsCode = #/\b(?:codes?|(?:user|device)[_-]code)\b/#.ignoresCase()
+        let mentionsCode = #/\b(?:codes?|(?:user|device)[_.-]code)\b/#.ignoresCase()
         /// The trailing exclusion covers a dot that continues the identifier as well as a letter,
         /// a digit, or a hyphen: without it `ABCD-EFGH.example.com` becomes
         /// `[redacted:device-code].example.com`, which is the longer dotted identifier this rule
@@ -221,7 +221,7 @@ extension Redactor {
         /// status prose such as "the login code was rejected" remains visible.
         let codePromptWithoutDelimiter = Regex {
             // Reject ordinary historical words locally, without rescanning the record prefix.
-            #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)(?!\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*[A-Za-z._-]*[a-z][A-Za-z._-]*(?![A-Za-z0-9._-]))))/#
+            #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)(?!\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*[A-Za-z._-]*[a-z][A-Za-z._-]*(?![A-Za-z0-9._-]))))/#
             #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
             TryCapture {
                 ChoiceOf {
@@ -249,7 +249,7 @@ extension Redactor {
         /// A copula may end in a delimiter; without one, whitespace still bounds the word.
         /// Empty delimited declarations belong to `codePromptOnly` and keep their prompt text.
         /// Spaces can group an opaque code; a comma or semicolon bounds following prose.
-        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\\+["'][^\r\n]*|[^,;\r\n]+)|\s*$)/#.ignoresCase()
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\\+["'][^\r\n]*|[^,;\r\n]+)|\s*$)/#.ignoresCase()
     }
 
     static let patterns = Patterns()
