@@ -2,9 +2,18 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [("[https://user:sec,ret@example.com]", "[https://[redacted:userinfo]@example.com]"),
+                      ("[//user:sec,ret@one.example,//other:opaque@two.example]", "[//[redacted:userinfo]@one.example,//[redacted:userinfo]@two.example]")])
+    func commasInsideUserinfoAreNotListSeparators(_ input: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.redactURLContinuations(input, state: &state) == expected)
+        #expect(!state.expectingURLUserInfo)
+    }
+
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
                       #""visit https://example.com""#, #""visit https://example.com:443""#,
-                      #"prefix "https://example.com""#])
+                      #"prefix "https://example.com""#, #"prefix "url=https://example.com""#,
+                      "prefix <url=https://example.com>", #"prefix "--url=//example.com""#])
     func provenDiagnosticFramesPreservePublicAuthorities(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.redactURLContinuations(input, state: &state) == input)
