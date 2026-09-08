@@ -24,6 +24,13 @@ import Testing
 
     @Test(arguments: [
         ([#"{"pass\u0077ord":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord\":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord""#, #":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord""# + "\r\n", #":"syntheticOpaque"}"#], "syntheticOpaque"),
+        (["[https:/", "/[2001:db8::1],//user:syntheticOpaque@example.com]"], "syntheticOpaque"),
+        ([#"{"url":"https://user:syntheticOpaque\u0040example.com/path"}"#], "syntheticOpaque"),
+        (["api.key: syntheticOpaque"], "syntheticOpaque"),
+        (["--github.", "token syntheticOpaque"], "syntheticOpaque"),
         ([#"{"password\u0020":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"\u0020password":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"\u0061ccess_token":"syntheticOpaque"}"#], "syntheticOpaque"),
@@ -31,7 +38,7 @@ import Testing
         ([#"{"\u0041uthorization":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"pass\u0077ord":"#, #""syntheticOpaque"}"#], "syntheticOpaque")
     ])
-    func encodedStructuredNamesCannotExposeTheirValues(_ records: [String], _ secret: String) {
+    func structuredNamesAndURLListsCannotExposeTheirValues(_ records: [String], _ secret: String) {
         let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
         #expect(!output.joined().contains(secret))
         #expect(output.last == "; Finished")
