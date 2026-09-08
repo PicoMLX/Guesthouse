@@ -81,6 +81,8 @@ import Testing
         let output = Redactor().redact(input)
         #expect(!output.contains("payload"))
         #expect(!output.contains("ABCD-EFGH"))
+        #expect(!output.contains("eyJhbGciOiJIUzI1NiIsI") && !output.contains("mtpZCI6Im5hYmMifQ"))
+        #expect(!output.contains("ABCD") && !output.contains("EFGH"))
     }
     @Test(arguments: ["\u{1B}[31/-m", "\u{9B}31/-m", "\u{1B}/-m"])
     func individualIntermediatesConcealThePhysicalAPIKey(_ command: String) {
@@ -90,6 +92,8 @@ import Testing
     @Test(arguments: [".", "-", "@"], ["The login code is ", "The login code was rejected; retry "])
     func punctuationBeforeAContextualCodeDoesNotExposeIt(_ punctuation: String, _ context: String) {
         #expect(!Redactor().redact(context + "filename" + punctuation + "\u{0}ABCD-EFGH").contains("ABCD-EFGH"))
+        let output = Redactor().redact(context + "filename" + punctuation + "\u{0}ABCD-EFGH")
+        #expect(!output.contains("ABCD") && !output.contains("EFGH"))
         #expect(Redactor().redact("Build revision filename" + punctuation + "\u{0}ABCD-EFGH")
             == "Build revision filename" + punctuation + "ABCD-EFGH")
     }
