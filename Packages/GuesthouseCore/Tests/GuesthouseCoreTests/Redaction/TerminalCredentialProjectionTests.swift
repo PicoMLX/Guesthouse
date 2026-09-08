@@ -3,6 +3,22 @@ import Testing
 
 @Suite struct TerminalCredentialProjectionTests {
 
+    @Test(arguments: ["\u{1B}[12345672m", "\u{9B}12345672m", "\u{1B}[12;12345672m"])
+    func numericComponentSuffixesRemainCredentialEvidence(_ command: String) {
+        let input = "The login code was rejected; retry AB1" + command + "-CD34."
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "device-code" || $0.kind == "terminal-ambiguity" })
+    }
+
+    @Test(arguments: [#"['--password synthetic\'secretTail']"#, #"args=['run --password synthetic\'secretTail']"#])
+    func diagnosticCommandApostrophesRespectEscaping(_ input: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.redactSecretOptions(input, state: &state)
+        #expect(!output.contains("synthetic") && !output.contains("secretTail"))
+        #expect(output.hasSuffix("']"))
+        #expect(state.quotedValue == nil)
+    }
+
 
 
     @Test(arguments: ["\u{1B}[", "\u{9B}"])
