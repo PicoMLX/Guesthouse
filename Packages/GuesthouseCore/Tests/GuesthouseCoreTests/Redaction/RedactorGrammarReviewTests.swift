@@ -2,7 +2,8 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorGrammarReviewTests {
-    @Test(arguments: ["=//user:opaque@example.com", " =//user:opaque@example.com", "=\\/\\/user:opaque@example.com"])
+    @Test(arguments: ["=//user:opaque@example.com", " =//user:opaque@example.com", "=\\/\\/user:opaque@example.com",
+                      ";//user:opaque@example.com", ";url=//user:opaque@example.com"])
     func assignedNetworkPathAtRecordStartRetainsItsUserinfo(_ input: String) throws {
         let match = try #require(input.firstMatch(of: Redactor.patterns.urlUserInfo))
         #expect(String(match.0).hasSuffix("user:opaque@"))
@@ -52,7 +53,8 @@ import Testing
         #expect(prompt.contains(Redactor.patterns.codePromptOnly))
     }
 
-    @Test(arguments: ["abcdef", "abcDEF", "abc.def", "a", "{ABC123}", "{abcdef}", "{ABC123"])
+    @Test(arguments: ["abcdef", "abcDEF", "abc.def", "a", "abc 123", "abcd efgh", "abc DEF 123",
+                      "a bc d", "{ABC123}", "{abcdef}", "{ABC123"])
     func imperativePromptsAcceptLowercaseOpaqueCodes(_ value: String) throws {
         let match = try #require(("Enter the code " + value).firstMatch(of: Redactor.patterns.codePromptWithoutDelimiter))
         #expect(match.2 == value)

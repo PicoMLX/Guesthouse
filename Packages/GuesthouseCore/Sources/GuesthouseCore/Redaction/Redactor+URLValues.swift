@@ -50,6 +50,8 @@ extension Redactor {
            text[..<partial.range.lowerBound].reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2),
            !text.matches(of: closedString).contains(where: { $0.range.contains(partial.range.lowerBound) }),
            partial.0.contains(#"\u"#) || partial.0.hasSuffix("\\")
+            || (partial.0 == "\""
+                && text[..<partial.range.lowerBound].contains(#/(?:^|[^A-Za-z0-9])(?i:url|uri)["']?[ \t]*[:=][ \t]*$/#))
             || (partial.0.dropFirst().wholeMatch(of: #/[A-Za-z][A-Za-z0-9+.-]*:?/#) != nil
                 && (partial.0.hasSuffix(":")
                     || ["http", "https", "ssh", "git", "ftp", "ftps", "ws", "wss"].contains(partial.0.dropFirst().lowercased())
@@ -75,7 +77,7 @@ extension Redactor {
                     && !input.reversed().drop(while: \.isWhitespace).prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
             }
         }
-        // A comma separates URLs only when the next element starts another authority.
+        // A comma/semicolon separates URLs only when the next element starts another authority.
         // Otherwise it may be part of the current URI's userinfo (or path/query).
         // A comma + authority is ambiguous even inside a query. Conceal its userinfo
         // rather than assuming that a nested URL or compact list element is public.
@@ -84,8 +86,8 @@ extension Redactor {
         }
         var cursor = input.startIndex
         var text = ""
-        for separator in input.matches(of: #/,(?=[ \t]*(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
-            text += sanitized(input[cursor..<separator.range.lowerBound]) + ","
+        for separator in input.matches(of: #/[,;](?=[ \t]*(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
+            text += sanitized(input[cursor..<separator.range.lowerBound]) + separator.0
             cursor = separator.range.upperBound
         }
         text += sanitized(input[cursor...])
@@ -165,7 +167,7 @@ extension Redactor {
         }) { return true }
         // A continued list may have lost its opener on a preceding record. A comma
         // authority boundary plus the terminal list closer still bounds its last element.
-        if text[..<start].last == ",", text[prefixEnd...].last == "]" { return true }
+        if text[..<start].last.map({ ",;".contains($0) }) == true, text[prefixEnd...].last == "]" { return true }
         let quotedRecord = text.drop(while: \.isWhitespace)
         if quotedRecord.first == "\"", quotedRecord.startIndex < start,
            let end = closingQuoteEnd(in: quotedRecord.dropFirst(),
