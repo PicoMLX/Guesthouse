@@ -2,6 +2,41 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: ["user code", "device code", "verification code", "Enter the code"])
+    func pluralCodeSuffixCanFollowTheSingularStem(_ first: String) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: "s: opaque", state: &state))
+        #expect(restored.hasSuffix("codes: opaque"))
+        #expect(restored.contains(Redactor.patterns.codeField) || restored.contains(Redactor.patterns.codePrompt))
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        let middle = try #require(Redactor.restoringCredentialLabel(in: "s", state: &state))
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: middle)
+        let completed = try #require(Redactor.restoringCredentialLabel(in: ": opaque", state: &state))
+        #expect(completed.contains(Redactor.patterns.codeField) || completed.contains(Redactor.patterns.codePrompt))
+    }
+
+    @Test(arguments: ["enter", "type", "paste", "copy", "input"]
+        .flatMap { verb in (1...verb.count).map { (verb, $0) } })
+    func everyImperativeVerbSplitRestoresTheCodePrompt(_ verb: String, _ split: Int) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: String(verb.prefix(split)))
+        let prefix = try #require(state.pendingCredentialLabel)
+        #expect(prefix.count <= 6 && !prefix.contains("opaque"))
+        let restored = try #require(Redactor.restoringCredentialLabel(
+            in: String(verb.dropFirst(split)) + " the code opaque", state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.codePromptWithoutDelimiter).map { String($0.2) } == "opaque")
+        #expect(state.pendingCredentialLabel == nil)
+    }
+
+    @Test(arguments: [("Ente", "rtaining diagnostics"), ("user code", "status ready")])
+    func promptPrefixMismatchDoesNotAlterOrdinaryDiagnostics(_ first: String, _ next: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == nil)
+        #expect(state.pendingCredentialLabel == nil)
+    }
+
     @Test(arguments: [("--g", "ithub-token opaque"), ("--ve", "ndor-password opaque")])
     func unknownQualifierPrefixesKeepTheirOptionBoundary(_ first: String, _ next: String) throws {
         var state = Redactor.StreamState()
