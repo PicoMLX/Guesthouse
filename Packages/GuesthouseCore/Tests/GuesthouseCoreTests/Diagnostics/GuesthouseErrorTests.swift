@@ -10,7 +10,7 @@ struct GuesthouseErrorTests {
         .insufficientDisk(requiredBytes: 2, availableBytes: 1), .runtimeMissing, .runtimeIncompatible,
         .guestNotReachable(EnvironmentID(uuid: uuid)), .hostKeyChanged(EnvironmentID(uuid: uuid)),
         .xcodeComponentsIncomplete, .vmSlotUnavailable(maximum: 2), .operationOutcomeUnknown(OperationID(uuid: uuid)),
-        .unauthorizedCaller, .protocolMismatch(client: 1, service: 2), .canceled
+        .unauthorizedCaller, .protocolMismatch(client: 1, service: 2)
     ] + GuesthouseError.VerificationCheck.allCases.map { .downloadVerificationFailed(check: $0) }
       + GuesthouseError.CredentialStore.allCases.map { .credentialsLocked($0) }
       + GuesthouseError.Provider.allCases.map { .loginExpired($0) }
@@ -24,7 +24,9 @@ struct GuesthouseErrorTests {
         #expect(error.errorDescription == error.userMessage)
         #expect(error.recoverySuggestion == error.recoveryMessage)
         #expect(try JSONDecoder().decode(GuesthouseError.self, from: JSONEncoder().encode(error)) == error)
-        let event = DiagnosticEvent(operation: .checkTools, outcome: .operationFailed(error), operationID: Self.uuid)
+        let outcome = DiagnosticEvent.Outcome(error: error)
+        #expect(outcome == .operationFailed(error))
+        let event = DiagnosticEvent(operation: .checkTools, outcome: outcome, operationID: Self.uuid)
         #expect(event.message == "Check tools: " + error.userMessage)
         #expect(event.recoveryMessage == error.recoveryMessage)
         var log = DiagnosticLog()
@@ -115,5 +117,42 @@ struct GuesthouseErrorTests {
         #expect(error.recoveryActions == [.repair(.runtime), .cancel])
         #expect(error.recoveryMessage == "Repair the verified runtime installation; Cancel")
         #expect(!error.isRetryable)
+    }
+
+    @Test(arguments: [
+        (GuesthouseError.InvalidRequestReason.invalidVMName, RecoveryAction.editEnvironmentName, "Choose a valid development Mac name; Cancel"),
+        (.pathEscapesAllowedRoot, .chooseAllowedLocation, "Choose a location inside the allowed workspace or environment; Cancel"),
+        (.oversized, .reduceRequestSize, "Reduce the requested operation's size; Cancel"),
+        (.unsupportedOperation, .updateApp, "Update Guesthouse and its embedded runtime together; Cancel"),
+        (.malformed, .reviewRequest, "Review the requested operation and its options; Cancel")
+    ])
+    func rejectedRequestsHaveCorrectiveActions(_ example: (GuesthouseError.InvalidRequestReason, RecoveryAction, String)) {
+        let error = GuesthouseError.invalidRequest(example.0)
+        #expect(error.recoveryActions == [example.1, .cancel])
+        #expect(error.recoveryMessage == example.2)
+        #expect(!error.isRetryable)
+    }
+
+    @Test func untrustedSSHDoesNotOfferWorkExport() {
+        let error = GuesthouseError.hostKeyChanged(EnvironmentID(uuid: Self.uuid))
+        #expect(error.recoveryActions == [.repair(.sshPairing), .openConsole, .cancel])
+        #expect(!GuesthouseError.toolMismatch(tool: .ssh).recoveryActions.contains(.exportWork))
+    }
+
+    @Test func confirmedCancellationIsNotADiagnosticFailure() throws {
+        let error = GuesthouseError.canceled
+        #expect(try JSONDecoder().decode(GuesthouseError.self, from: JSONEncoder().encode(error)) == error)
+        #expect(error.errorDescription == "The operation was canceled; any partial changes must be inspected before retrying.")
+        #expect(error.recoverySuggestion == "Inspect the current environment state; Cancel")
+        let outcome = DiagnosticEvent.Outcome(error: error)
+        #expect(outcome == .canceled)
+        #expect(String(decoding: try JSONEncoder().encode(outcome), as: UTF8.self) == #"{"canceled":{}}"#)
+        let event = DiagnosticEvent(operation: .createEnvironment, outcome: outcome, operationID: Self.uuid)
+        #expect(event.message == "Create development Mac: Cancellation confirmed; partial changes may remain.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)).outcome == .canceled)
+        var log = DiagnosticLog()
+        log.append(event, recordedAt: Date(timeIntervalSince1970: 0))
+        #expect(log.text.contains("Cancellation confirmed; partial changes may remain."))
+        #expect(!String(decoding: try log.jsonData(), as: UTF8.self).contains("operationFailed"))
     }
 }

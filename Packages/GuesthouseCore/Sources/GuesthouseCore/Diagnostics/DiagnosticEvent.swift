@@ -57,7 +57,13 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         /// Emit only after cancellation/termination is confirmed, not when it is requested.
         case canceled
         case failed(DiagnosticFailure)
+        /// Non-cancellation errors. Adapters use init(error:) to preserve terminal cancellation.
         case operationFailed(GuesthouseError)
+
+        /// A canceled error means cancellation was confirmed, not merely requested.
+        public init(error: GuesthouseError) {
+            self = error == .canceled ? .canceled : .operationFailed(error)
+        }
     }
 
     public let operation: Operation

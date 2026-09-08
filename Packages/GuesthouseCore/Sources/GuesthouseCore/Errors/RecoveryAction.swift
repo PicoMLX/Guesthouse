@@ -2,6 +2,7 @@
 public enum RecoveryAction: Codable, Hashable, Sendable {
     case retry, inspectState, repair(RepairKind), openConsole, exportWork, openSettings
     case signInAgain, freeDiskSpace, deleteEnvironment, reinstallApp, cancel
+    case editEnvironmentName, chooseAllowedLocation, reduceRequestSize, reviewRequest, updateApp
 
     public var title: String {
         switch self {
@@ -16,6 +17,11 @@ public enum RecoveryAction: Codable, Hashable, Sendable {
         case .deleteEnvironment: "Delete an unused environment after exporting its work"
         case .reinstallApp: "Reinstall Guesthouse"
         case .cancel: "Cancel"
+        case .editEnvironmentName: "Choose a valid development Mac name"
+        case .chooseAllowedLocation: "Choose a location inside the allowed workspace or environment"
+        case .reduceRequestSize: "Reduce the requested operation's size"
+        case .reviewRequest: "Review the requested operation and its options"
+        case .updateApp: "Update Guesthouse and its embedded runtime together"
         }
     }
 }
