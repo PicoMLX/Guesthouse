@@ -37,6 +37,7 @@ import Testing
     }
 
     @Test(arguments: [["private k", "ey: syntheticOpaque"], ["secret access k", "ey: syntheticOpaque"],
+                      ["signing", "Secret: syntheticOpaque"],
                       [#""clientSecret""#, ": syntheticOpaque"], [#"\"clientSecret\"#, #"": syntheticOpaque"#],
                       ["prefix AWS4-HMAC-S", "HA256 Credential=syntheticOpaque"]])
     func fieldNameFramingSurvivesBeforeTheAssignment(_ records: [String]) {
