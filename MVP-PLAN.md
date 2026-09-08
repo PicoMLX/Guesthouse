@@ -87,7 +87,7 @@ After a crash, sleep, or unexpected disconnection, show **Checking environment**
 - Environment dashboard with one or two slots.
 - Workspace detail with repository status and separate local-integration and remote-CI results.
 - Account sheets for sign-in, expiration, wrong-account recovery, and sign-out.
-- Diagnostics and repair sheet with sanitized logs and export controls.
+- Diagnostics and repair sheet with structured operation events, actionable error messages, and export controls. Raw subprocess output is excluded.
 
 Use native controls, keyboard navigation, VoiceOver labels, selectable paths, and clear cancel/retry behavior. A read-only log disclosure is useful; an embedded terminal is not necessary.
 
@@ -152,7 +152,7 @@ Keep SwiftUI view state on the main actor and long-running host operations in th
 | `EnvironmentCoordinator` | State machine, operation ordering, cancellation, restart recovery, VM-slot accounting |
 | `RuntimeClient` / XPC contract | Authenticated, versioned messages, status streaming, reconnection, validation |
 | `TartBackend` | Runtime verification, create/start/stop, VM inventory, IP discovery, console lifecycle |
-| `ProcessRunner` | Argument-safe process execution, output streaming, timeouts, termination, redaction |
+| `ProcessRunner` | Argument-safe execution, bounded temporary output for adapters, timeouts and termination; never automatic output logging |
 | `SSHService` | Dedicated identities, trust records, managed aliases, connections, file transfer |
 | `GuestProvisioner` | Versioned, repeatable guest setup and compatibility checks |
 | `CompatibilityService` | Connect-time version/capability checks and explicit verified, unverified, or incompatible states |
@@ -175,6 +175,16 @@ Keep runtime downloads, VM data, maintenance SSH files, operation state, and dia
 Export only the development SSH connection material needed by external Codex/OpenSSH to a dedicated user-approved location such as `~/.ssh/guesthouse/`. Do not assume Codex can read a private file inside Guesthouse's protected app container. Keep maintenance connection material out of that export and out of discoverable SSH aliases. Validate external access in phase zero before freezing the layout.
 
 Store no provider token in the application metadata. Exclude private keys, tokens, device codes, authorization headers, and raw authentication logs from diagnostic exports. Prefer relative guest workspace paths and environment UUIDs over IP addresses as persistent identity.
+
+### Structured diagnostics and error messages
+
+[ADR 0003](docs/decisions/0003-structured-diagnostics.md) replaces general-purpose output redaction with structured diagnostics. Logs, OSLog entries, XPC diagnostic events, error presentation, and exports use Guesthouse-owned event/error categories and fixed message templates. Allow operation/environment UUIDs and numeric exit status; arbitrary strings, paths, URLs, command arguments, environment dumps, and underlying error descriptions are not diagnostic fields.
+
+Keep useful error messages: explain the failed operation, a known failure category, and a recovery action. When a tool's response cannot be classified, report that it failed and include its exit status, not its stderr. Do not claim a canceled or interrupted mutation completed; inspect its outcome before retrying.
+
+Runtime adapters may consume bounded temporary stdout/stderr to interpret known command responses. Drain unused output without logging it. Authentication codes use a separate temporary sign-in UI channel, never diagnostic history or exports. No raw-output debug/export fallback is included in the MVP.
+
+`DiagnosticEvent`, `DiagnosticFailure`, and `DiagnosticLog` define the Core contract and bounded session history/export. Pending runtime, XPC, error and GUI integrations must adopt this contract before merging; adding the Core types alone is not proof of those integrations. Keep the old redactor implementation, tests and PR history as deferred reference, not a prerequisite for MVP features. Cross-session diagnostic persistence remains a separate task.
 
 ### Process and trust boundaries
 
@@ -533,7 +543,7 @@ If first-boot UI, runtime ownership, secure cold-boot auth, or GUI-only pairing 
 
 Implement the proven lifecycle boundary, typed XPC client/service, process execution, durable environment state, and a fake backend for previews/tests. Put operation ownership and VM-slot reservations in the service, with observable UI adapters. Add interfaces or stubs for later maintenance, account, workspace, build, and publication services rather than implementing all services at once. Start with one environment and one in-flight lifecycle operation.
 
-Add progress, cancellation, retry, sanitized logs, and error categories such as unsupported host, insufficient disk, failed download verification, guest not reachable, and credentials locked. Never show “something went wrong” as the only recovery information.
+Add progress, cancellation, retry, structured diagnostic events, and error categories such as unsupported host, insufficient disk, failed download verification, guest not reachable, and credentials locked. Never show “something went wrong” as the only recovery information. Follow §3's diagnostic boundary; do not copy raw tool output into error messages.
 
 Implement the phase-zero window-close, viewer-close, and stop-on-Quit contracts. Reconcile process identity safely after relaunch; do not trust a reused PID, assume every crash killed Tart, or assume any surviving process can be safely restarted. Treat an interrupted XPC request as an unknown outcome until inspected.
 
@@ -641,4 +651,3 @@ Expand tested Xcode/project layouts, template and backup handling within the VM 
 Build the phase-zero Guesthouse SwiftUI/XPC harness and an app-plus-package fixture. Start with a named runtime-version request and a fake backend. Its full success condition is one recorded run from VM creation through a cold-boot Codex connection to two draft PRs, with Xcode tests and native MLX validation executing in the guest, plus the named lifecycle and recovery gates.
 
 That experiment answers the costly questions before UI polish: the signed sandbox/XPC boundary, first-boot and returning console behavior, first-use SSH trust, cold-boot Keychain access, real desktop/CLI compatibility, local Swift package resolution, import performance, maintenance/sleep recovery, and the practical resource budget. Record decisions and measured versions, then turn the proven steps into the production wizard.
-

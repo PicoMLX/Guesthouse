@@ -70,7 +70,8 @@ bash Tests/CI/test-package-hook.sh
 - Launch processes only in the runtime service or `GuesthouseRuntimeKit`, always with an executable URL and an argument array. Never `/bin/sh -c`, never string interpolation into a command, never an inherited environment.
 - The service chooses executable paths and flags. Requests from the GUI carry environment IDs and validated options, never paths to run or provider CLI flags, including Tart or Lume flags.
 - Treat guest output, repository content, branch names, file names, and CLI text as untrusted data. Never turn any of it into a host command.
-- Never log or persist tokens, passwords, device codes, private keys, or authorization headers. Route every log line through the redaction layer once it exists (issue #11).
+- Diagnostics accept only typed `DiagnosticEvent` values (ADR 0003, issue #11). Never log raw stdout/stderr, arguments, environment variables, authentication transcripts, or arbitrary error descriptions. Keep useful error messages and recovery guidance in Guesthouse-owned templates. Runtime adapters may parse bounded temporary output; that output is not a log.
+- The general-purpose redactor is deferred reference code, not an MVP dependency. Do not extend or activate it, or restore `RedactedLine`/`SanitizedText` as a prerequisite for shared features. Preserve its history and tests; migrate pending consumers to structured events and typed errors instead.
 - Prefer environment UUIDs and relative guest paths over IP addresses as persistent identity.
 - An interrupted operation has an unknown outcome until the actual state is inspected. Never retry a mutating operation blindly.
 - Errors carry a user-facing message and at least one recovery action. "Something went wrong" is never the only information.
