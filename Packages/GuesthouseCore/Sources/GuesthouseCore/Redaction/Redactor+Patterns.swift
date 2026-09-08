@@ -15,7 +15,7 @@ extension Redactor {
         /// A line that opens with a header field name and its colon. Used the other way round
         /// from the rules here: a line that matches is the *next header*, and everything else
         /// standing unindented under a bare authorization label is that label's value.
-        let headerLabelStart = #/^\s*(?:\\?["'])?[A-Za-z0-9][A-Za-z0-9-]*(?:\\?["'])?\s*:/#
+        let headerLabelStart = #/^\s*(?:\\*["'])?[A-Za-z0-9][A-Za-z0-9-]*(?:\\*["'])?\s*:/#
         /// A PEM header. RFC 7468 labels are not only upper-case letters and spaces: they carry
         /// hyphens, digits, and dots (`ACME-PRIVATE KEY`, `X9.42 DH PARAMETERS`), and a label
         /// this rule cannot spell leaves the block, header and key material alike, in the clear.
@@ -27,19 +27,26 @@ extension Redactor {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:proxy|request)[ _-]?)?authorization(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookies?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=[ \t]*(?:$|[,;\]})>]))|'(?:[^'\\]|\\.)*'(?=[ \t]*(?:$|[,;\]})>]))|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
         /// `cache.<token>`, or in `payload.Authorization` is not a break, and a secret beside
         /// one would survive. The character is captured so it can be put back. A label may also
         /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
-        let bearer = #/(^|[^A-Za-z0-9])(bearer\s+[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
+        private static var bearerValue: Regex<(Substring, Substring)> {
+            #/(bearer\s+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9._~+\/=-]+)/#
+        }
+        let bearerCredentialSpan = bearerValue.ignoresCase()
+        let bearer = Regex {
+            #/(^|[^A-Za-z0-9])/#
+            bearerValue
+        }.ignoresCase()
         /// A standalone authentication value can reach decoded diagnostics without its header
         /// name. Basic is recognized only when the Base64 decodes to a user/password separator;
         /// Digest must start with an authentication parameter assignment, not ordinary prose.
         private static var basicValue: Regex<(Substring, Substring, Substring)> {
-            #/(basic[ \t]+)([A-Za-z0-9+\/]{2,}={0,2})(?![A-Za-z0-9+\/=])/#
+            #/(basic[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*)([A-Za-z0-9+\/]+={0,2})(?![A-Za-z0-9+\/=])/#
         }
         let basicCredentialSpan = basicValue.ignoresCase()
         let basicAuthorization = Regex {
@@ -47,7 +54,7 @@ extension Redactor {
             basicValue
         }.ignoresCase()
         private static var digestValue: Regex<Substring> {
-            #/digest[ \t]+(?=(?:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash)\s*=)[^\r\n]+/#
+            #/digest[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*(?=(?:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash)\s*=)[^\r\n]+/#
         }
         let digestCredentialSpan = digestValue.ignoresCase()
         let digestAuthorization = Regex {
@@ -57,9 +64,11 @@ extension Redactor {
         /// Distinctive integrated-auth blobs and signed AWS requests remain recognizable after
         /// their header name is lost. Ordinary scheme-name prose alone is not a credential.
         private static var specializedValue: Regex<Substring> {
-            #/(?:ntlm|negotiate)[ \t]+[A-Za-z0-9+\/_-]{8,}={0,2}|aws4-hmac-sha256[ \t]+(?=(?:credential|signedheaders|signature)\s*=)[^\r\n]+/#
+            #/(?:ntlm|negotiate)[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9+\/_-]{8,}={0,2}|aws4-hmac-sha256[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*(?=(?:credential|signedheaders|signature)\s*=)[^\r\n]+/#
         }
         let specializedCredentialSpan = specializedValue.ignoresCase()
+        let partialIntegratedAuthorization = #/(^|[^A-Za-z0-9])((?:ntlm|negotiate))[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9+\/_-]{1,7}[ \t]*$/#.ignoresCase()
+        let partialParameterizedAuthorization = #/(^|[^A-Za-z0-9])(digest|aws4-hmac-sha256)[ \t]+(?:\[redacted:[^\]\r\n]+\][ \t]*)*([A-Za-z*]+)[ \t]*$/#.ignoresCase()
         let specializedAuthorization = Regex {
             #/(^|[^A-Za-z0-9])/#
             specializedValue
@@ -73,9 +82,9 @@ extension Redactor {
         /// than the concatenation. The API-key rule below keeps its boundary, because `sk-` is
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
-        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*/#
+        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*|(?:ghp|gho|ghu|ghs|ghr|github_pat)$/#
         /// At line end a boundary-delimited bare `sk-` conservatively arms wrapped-key redaction.
-        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
+        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)(?:_|$)|github_pat(?:_|$)|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
         let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
@@ -98,7 +107,20 @@ extension Redactor {
         /// delimiter must start a value, so doubled slashes inside a path or URL query do not
         /// turn an ordinary `@` later in that value into userinfo.
         /// Assignment names may include a command option's leading one or two dashes.
-        let urlUserInfo = #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\?\/){2})[^\s\/?#]+@/#
+        private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
+            // Scan the existing record; no escape-depth buffer is retained. A depth cap
+            // here would leave deeper encodings unmatched and expose their credentials.
+            #/((?::|^|^[ \t]*=|[\s,"'(<\[{\u{0060}]|(?:^|[\s,"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
+        }
+        let urlUserInfo = Regex {
+            urlAuthorityPrefix
+            #/[^\s\/?#]+@/#
+        }
+        let partialURLAuthority = #/(?:^[ \t]*=|^|[\s,:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
+        let incompleteURLUserInfo = Regex {
+            urlAuthorityPrefix
+            #/[^\s\/?#]*$/#
+        }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
         /// `clientSecret`. Those need a name in front of the label word, and the names come from
@@ -111,19 +133,21 @@ extension Redactor {
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ ._-]?)?(?:passwords?|passphrases?|passwds?|secrets?|tokens?|credentials?|api[ ._-]?keys?|private[ ._-]?keys?|secret[ ._-]?keys?|secret[ ._-]?access[ ._-]?keys?|access[ ._-]?key[ ._-]?secrets?)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
-                #/(^|[^A-Za-z0-9])(?:\\?["'])?/#
+                #/(^|[^A-Za-z0-9])(?:\\*["'])?/#
                 Capture { secretName }
-                #/(?:\\?["'])?\s*[:=]\s*/#
+                #/(?:\\*["'])?\s*[:=]\s*/#
             }
         }
+        // A quote only bounds a value at a real sibling/frame or end-of-record boundary.
+        // Whitespace alone cannot prove closure; ambiguous fragments remain part of the value.
         let labeledSecret = Regex {
             secretLabel
             Capture {
-                #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*/#
+                #/"(?:[^"\\]|\\.)*"(?=[ \t]*(?:$|[,;\]})>]))|'(?:[^'\\]|\\.)*'(?=[ \t]*(?:$|[,;\]})>]))|\S[^\r\n]*/#
             }
         }.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
@@ -138,30 +162,33 @@ extension Redactor {
         /// word `token` in a sentence. The value is one argv word, or a quoted one, rather than
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
+        private static var credentialOptionName: Regex<Substring> {
+            Regex { ChoiceOf { secretName; #/(?:device|user)[_.-]?codes?/# } }
+        }
         let secretOption = Regex {
             #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])/#
             Capture {
-                #/--?[A-Za-z0-9_-]*/#
-                secretName
+                #/--?[A-Za-z0-9_.-]*/#
+                credentialOptionName
             }
-            #/([ \t]+|=)(?=\S)/#
+            #/([ \t]*[=:][ \t]*|[ \t]+)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])--?[A-Za-z0-9_-]*/#
-            secretName
-            #/[ \t]*(?:=[ \t]*)?$/#
+            #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])--?[A-Za-z0-9_.-]*/#
+            credentialOptionName
+            #/[ \t]*(?:[=:][ \t]*)?$/#
         }.ignoresCase()
         /// JSON/Python-style argv diagnostics retain the option as a quoted array element.
         /// Its value is the next element, possibly on a later line.
         let serializedSecretOption = Regex {
-            #/(?:\\?["'])--?[A-Za-z0-9_-]*/#
-            secretName
-            #/(?:\\?["'])[ \t]*,[ \t]*/#
+            #/(?:\\*["'])--?[A-Za-z0-9_.-]*/#
+            credentialOptionName
+            #/(?:\\*["'])[ \t]*(?:,[ \t]*|$)/#
         }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
         /// and an unquoted one runs to the end of the line the way a labeled secret's does.
-        let codeField = #/(^|[^A-Za-z0-9])(?:\\?["'])?((?:user|device)[ _-]?codes?)(?:\\?["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codeField = #/(^|[^A-Za-z0-9])(?:\\*["'])?((?:user|device)[ ._-]?codes?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
         /// The prose a CLI prints when it wants a code typed in — `Your one-time code is: …` —
         /// with the value on the same line. The value is as opaque as a field's, so all of it
         /// goes whatever its shape. The code has to be named: a line that merely contains the
@@ -170,42 +197,59 @@ extension Redactor {
         /// name in the output, so they are deliberately absent here.
         /// Imperative prompts can also delimit their opaque value with a colon or equals.
         /// Up to two instruction words may follow `code`, as in `code shown below:`.
-        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S[^\r\n]*)/#.ignoresCase()
+        let codePrompt = #/((?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ ._-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)\s*[:=]|^\s*codes?\s*[:=])\s*(?:"(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*)/#.ignoresCase()
         /// The same prompt with nothing after the delimiter: the value is on the next line. The
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
         /// nothing else on it for the word to belong to.
-        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\?["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\?["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?\s*$/#.ignoresCase()
+        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?:shown|displayed|provided|listed)\s+below)?\s*$/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D` and the `WDJB.MJHT` an RFC 8628 provider may print:
         /// runs of four to eight upper-case characters joined by single separators. Applied only
         /// on lines that mention a code (including the `user_code` and `device_code` field names
         /// of OAuth device flows), and never when the match is part of a longer hyphenated or
         /// dotted identifier such as a UUID or a reverse-DNS name.
-        let mentionsCode = #/\b(?:codes?|(?:user|device)[_-]code)\b/#.ignoresCase()
+        let mentionsCode = #/\b(?:codes?|(?:user|device)[_.-]code)\b/#.ignoresCase()
         /// The trailing exclusion covers a dot that continues the identifier as well as a letter,
         /// a digit, or a hyphen: without it `ABCD-EFGH.example.com` becomes
         /// `[redacted:device-code].example.com`, which is the longer dotted identifier this rule
         /// says it leaves alone. A dot that ends a sentence is not one, so `your code: AB12-CD34.`
         /// still loses its code.
         let deviceCode = #/(^|[^A-Za-z0-9.-])([A-Z0-9]{4,8}(?:[-.][A-Z0-9]{4,8}){1,3})(?![A-Za-z0-9-]|\.[A-Za-z0-9])/#
-        /// A prompt that names the code with no delimiter at all: `Enter the code ABC123 at the
-        /// URL shown` is the prose an RFC 8628 provider prints, and only a value that happens to
-        /// have the dotted or hyphenated shape above was removed from it. Two forms qualify: the
-        /// imperative one, which asks for the code, and a historical declaration with a copula.
-        /// Present-tense declarations also have the opaque-value rule below. Here a value has
-        /// to look like a code rather than
-        /// like the next English word: four or more characters that are all upper-case or
-        /// digits, or that carry a digit. `process exited with code 1`, `Enter the code shown
-        /// below`, and `the login code was rejected` are all left alone. The words are matched
-        /// without regard to case; the value's own alternatives are not, or every lower-case
-        /// word after the label would be a code.
-        let codePromptWithoutDelimiter = #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))\s+(?=[A-Za-z0-9._-]{4})(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])/#
+        /// Imperatives accept opaque lowercase codes as well as grouped/framed values.
+        /// Explicit "shown below" instructions retain their text and arm the next record.
+        /// Historical declarations keep the conservative uppercase/digit rule so ordinary
+        /// status prose such as "the login code was rejected" remains visible.
+        let codePromptWithoutDelimiter = Regex {
+            // Reject ordinary historical words locally, without rescanning the record prefix.
+            #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)(?!\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*[A-Za-z._-]*[a-z][A-Za-z._-]*(?![A-Za-z0-9._-]))))/#
+            #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
+            TryCapture {
+                ChoiceOf {
+                    #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n]*\]|\{[^}\r\n]*\}|\([^\)\r\n]*\)|<[^>\r\n]*>|\u{0060}[^\u{0060}\r\n]*\u{0060}|"[^"\r\n]*$|'[^'\r\n]*$/#
+                    #/\[[^\]\r\n]*$|\{[^}\r\n]*$|\([^\)\r\n]*$|<[^>\r\n]*$|\u{0060}[^\u{0060}\r\n]*$/#
+                    #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
+                    #/[A-Za-z0-9._-]+(?![A-Za-z0-9._-])/#
+                }
+            } transform: { value -> Substring? in
+                if value.first.map({ "\"'[{<(`".contains($0) }) == true { return value }
+                if value.contains(where: \.isLowercase) && !value.contains(where: \.isNumber) {
+                    let remainder = value.base[value.startIndex...]
+                    guard remainder.wholeMatch(of: #/(?:shown|displayed|provided|listed)[ \t]+below[ \t]*[:=]?[ \t]*$/#.ignoresCase()) == nil else { return nil }
+                    return value
+                }
+                // Providers may group a six-digit code as 123 456. Validate the total
+                // candidate, not each group. An eligible short EOL fragment may wrap.
+                let count = value.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count
+                return count == 4 || (count > 0 && value.base[value.endIndex...].allSatisfy(\.isWhitespace)) ? value : nil
+            }
+        }
         /// Present-tense declarations explicitly supply the code. Lowercase, short, and
         /// quoted values are opaque. Historical status prose keeps the conservative rule above.
         /// Encoded quotes span the remaining line; the value scanner preserves their suffix.
         /// A copula may end in a delimiter; without one, whitespace still bounds the word.
         /// Empty delimited declarations belong to `codePromptOnly` and keep their prompt text.
-        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\\+["'][^\r\n]*|[^\s,;]+)|\s*$)/#.ignoresCase()
+        /// Spaces can group an opaque code; a comma or semicolon bounds following prose.
+        let declarativeCodePrompt = #/((?:^|[^A-Za-z0-9])(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ ._-]?codes?\s+(?:is|are|reads|equals)(?:\s*[:=](?=\s*\S)|(?=\s|$)(?!\s*[:=])))(?:\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\\+["'][^\r\n]*|[^,;\r\n]+)|\s*$)/#.ignoresCase()
     }
 
     static let patterns = Patterns()

@@ -97,7 +97,8 @@ extension Redactor {
             // an opaque password beginning with a dash must still be removed.
             let remainder = text[match.range.upperBound...]
             let bareOption = remainder.prefixMatch(of: patterns.secretOptionOnly) != nil
-            if match.3 != "=", bareOption || remainder.prefixMatch(of: patterns.secretOption) != nil {
+            let assignment = match.3.contains("=") || match.3.contains(":")
+            if !assignment, bareOption || remainder.prefixMatch(of: patterns.secretOption) != nil {
                 result += match.0
                 cursor = match.range.upperBound
                 state.expectingSecretValue = state.expectingSecretValue || bareOption
@@ -110,9 +111,9 @@ extension Redactor {
             state.quotedValue = state.quotedValue ?? argument.quoted
             state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
             state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || argument.continuesLine
-            // Canonicalize equals to a space so the generic field rule cannot treat the
+            // Canonicalize assignment delimiters so the generic field rule cannot treat the
             // replacement and later arguments as a single unquoted passphrase.
-            let separator = match.3 == "=" ? " " : String(match.3)
+            let separator = assignment ? " " : String(match.3)
             result += "\(match.1)\(match.2)\(separator)\(marker("secret"))"
             cursor = argument.end
         }
@@ -194,6 +195,11 @@ extension Redactor {
                 }
             } else {
                 cursor = value.firstIndex(where: { $0 == "," || $0 == "]" }) ?? text.endIndex
+            }
+            if (cursor == text.endIndex || isClosedQuotedValue(value[..<cursor]))
+                && fieldExplicitlyContinues(value[..<cursor], tail: text[cursor...]) {
+                state.expectingSecretValue = true
+                state.secretValueExplicitlyContinues = true
             }
             result += marker("secret")
         }
