@@ -13,7 +13,8 @@ import Testing
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
                       #""visit https://example.com""#, #""visit https://example.com:443""#,
                       #"prefix "https://example.com""#, #"prefix "url=https://example.com""#,
-                      "prefix <url=https://example.com>", #"prefix "--url=//example.com""#])
+                      "prefix <url=https://example.com>", #"prefix "--url=//example.com""#,
+                      "{url=https://example.com}", "prefix {url=//example.com}"])
     func provenDiagnosticFramesPreservePublicAuthorities(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.redactURLContinuations(input, state: &state) == input)

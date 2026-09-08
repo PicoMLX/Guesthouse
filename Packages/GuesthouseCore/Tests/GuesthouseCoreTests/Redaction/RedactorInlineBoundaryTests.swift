@@ -2,6 +2,32 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineBoundaryTests {
+    @Test(arguments: [
+        ("--password [redacted:decoy] publicArgument", "--password [redacted:secret] publicArgument"),
+        (#"["--password", "[redacted:decoy]", "publicArgument"]"#, #"["--password", [redacted:secret], "publicArgument"]"#)
+    ])
+    func literalMarkersReceiveNoSpecialTrustOrExtraArgumentOwnership(_ input: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == expected)
+        #expect(state.quotedValue == nil && !state.expectingSecretValue && !state.secretValueExplicitlyContinues)
+        #expect(!state.expectingAuthorizationValue && !state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: ["password", "Authorization"], [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
+    func unframedTextAfterAQuotedFieldIsStillPartOfItsValue(_ label: String, _ value: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.applyPatterns(to: label + ": " + value, codeExpected: false, state: &state)
+        #expect(!output.contains("syntheticOpaque") && !output.contains("syntheticFirst") && !output.contains("decoy"))
+    }
+
+    @Test(arguments: [(#"password: "syntheticOpaque" , status: ready"#, "password: [redacted:secret] , status: ready"),
+                      (#"Authorization: "syntheticOpaque" , status: ready"#, "Authorization: [redacted:authorization] , status: ready")])
+    func realQuotedFieldSeparatorsStillPreserveSiblingDiagnostics(_ input: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == expected)
+        #expect(state.quotedValue == nil && !state.expectingSecretContinuation && !state.expectingAuthorizationValue)
+    }
+
     @Test(arguments: ["Bearer", "Basic", "Digest", "NTLM", "Negotiate", "AWS4-HMAC-SHA256"])
     func literalMarkersDoNotCompleteAnAuthorizationValue(_ scheme: String) {
         var state = Redactor.StreamState()
@@ -104,6 +130,7 @@ import Testing
     func literalMarkersDoNotEndCodePromptRecognition(_ marker: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.applyPatterns(to: "Enter the code " + marker + " ABC123", codeExpected: false, state: &state).contains("ABC123"))
+        #expect(state.expectingDeviceCodeContinuation)
     }
 
     @Test(arguments: [#"{\\"password\\":\\"synthetic\\"}"#, #"{\\"Authorization\\":\\"synthetic\\"}"#])
@@ -133,6 +160,10 @@ import Testing
         var state = Redactor.StreamState()
         let input = "{" + quote + label + quote + ":" + quote + "syntheticOpaque" + quote + "}"
         #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticOpaque"))
+        #expect(state.quotedValue == nil)
+        #expect(!state.expectingSecretValue && !state.expectingSecretContinuation && !state.secretValueExplicitlyContinues)
+        #expect(!state.expectingAuthorizationValue && !state.authorizationValueIsOnTheNextLine && !state.authorizationValueExplicitlyContinues)
+        #expect(!state.expectingDeviceCode && !state.expectingDeviceCodeContinuation)
     }
 
     @Test func delimiterSlashesCanArriveOnSeparateRecords() {
@@ -187,6 +218,7 @@ import Testing
         #expect(!state.expectingAuthorizationValue)
         #expect(!state.expectingDeviceCode)
         #expect(!state.expectingDeviceCodeContinuation)
+        #expect(state.quotedValue == nil)
     }
 
     @Test(arguments: [("password: opaqueCredential", [true, false, false]),
@@ -235,5 +267,6 @@ import Testing
     func URLPathAndQuerySlashPairsRemainOrdinary(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
     }
 }
