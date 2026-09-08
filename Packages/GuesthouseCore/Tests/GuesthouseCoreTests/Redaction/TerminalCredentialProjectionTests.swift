@@ -2,6 +2,21 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "],
+          ["\"", "'", "\\\""])
+    func restoredOpeningDelimitersAreStateEvidence(_ field: String, _ delimiter: String) {
+        let input = field + "\u{1B}" + delimiter + "syntheticFirst"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.contexts.contains(field + delimiter + "syntheticFirst"))
+    }
+
+    @Test(arguments: ["password: synthetic\u{1B}[31mValue", "password: \"synthetic\u{1B}[31mValue\"",
+                      "password: \u{1B}\"syntheticValue\""])
+    func stylingOrCompletedQuotesDoNotArmAQuotedContinuation(_ input: String) {
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.contexts.isEmpty)
+    }
+
     @Test(arguments: ["\r", "\n", "\r\n"])
     func bareRecoveredOptionsExcludePhysicalFraming(_ terminator: String) {
         let input = "\u{1B}--pass\u{1B}[31word" + terminator

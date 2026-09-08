@@ -3,6 +3,14 @@ import Foundation
 extension Redactor {
     typealias TerminalCredentialRange = (range: Range<Int>, kind: String)
 
+    /// An opening delimiter (including its escaping) supplies quote state just like a label.
+    /// Interior styling or an already-completed quoted value adds no next-record evidence.
+    static func terminalContextEnd(in text: String, valueStart: String.Index) -> String.Index {
+        let value = text[valueStart...].drop(while: { $0.isWhitespace })
+        guard let quote = unterminatedQuote(in: value, kind: "secret") else { return valueStart }
+        return value.index(value.startIndex, offsetBy: quote.escapeDepth + 1)
+    }
+
     /// A control boundary must survive when its suffix starts a separate credential.
     static func terminalHasCredentialOpener(_ suffix: Substring) -> Bool {
         suffix.prefixMatch(of: patterns.labeledSecret) != nil
@@ -80,7 +88,8 @@ extension Redactor {
                 + alternate.matches(of: patterns.pemBegin).map { ($0.range, $0.range.upperBound) }
             for (range, valueStart) in fields {
                 let lower = alternate.utf8.distance(from: alternate.startIndex, to: range.lowerBound)
-                let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: valueStart)
+                let contextEnd = terminalContextEnd(in: alternate, valueStart: valueStart)
+                let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: contextEnd)
                 if retained.contains(where: { $0.overlaps(lower..<labelEnd) }) {
                     contexts.append(alternate)
                     break
