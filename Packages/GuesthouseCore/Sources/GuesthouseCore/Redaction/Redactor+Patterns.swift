@@ -116,7 +116,7 @@ extension Redactor {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
-        let partialURLAuthority = #/(?:^|[\s:"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
+        let partialURLAuthority = #/(?:^|[\s:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#]*$/#
@@ -220,7 +220,8 @@ extension Redactor {
         /// Historical declarations keep the conservative uppercase/digit rule so ordinary
         /// status prose such as "the login code was rejected" remains visible.
         let codePromptWithoutDelimiter = Regex {
-            #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))/#
+            // Reject ordinary historical words locally, without rescanning the record prefix.
+            #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)(?!\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*[A-Za-z._-]*[a-z][A-Za-z._-]*(?![A-Za-z0-9._-]))))/#
             #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
             TryCapture {
                 ChoiceOf {
@@ -232,8 +233,6 @@ extension Redactor {
             } transform: { value -> Substring? in
                 if value.first.map({ "\"'[<(`".contains($0) }) == true { return value }
                 if value.contains(where: \.isLowercase) && !value.contains(where: \.isNumber) {
-                    let prefix = value.base[..<value.startIndex]
-                    guard prefix.contains(#/(?:^|[^A-Za-z0-9])(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*$/#) else { return nil }
                     let remainder = value.base[value.startIndex...]
                     guard remainder.wholeMatch(of: #/(?:shown|displayed|provided|listed)[ \t]+below[ \t]*[:=]?[ \t]*$/#.ignoresCase()) == nil else { return nil }
                     return value
