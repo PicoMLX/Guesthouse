@@ -83,4 +83,22 @@ struct DiagnosticLogTests {
         #expect(event.message == "Stop development Mac: Cancellation requested; completion is not yet confirmed.")
         #expect(event.recoveryMessage == "Wait for the operation to stop, then inspect its outcome.")
     }
+
+    @Test func confirmedCancellationHasATerminalExplanation() throws {
+        let event = DiagnosticEvent(operation: .deleteEnvironment, outcome: .canceled, operationID: Self.operationID)
+        #expect(event.message == "Delete development Mac: Cancellation confirmed; partial changes may remain.")
+        #expect(event.recoveryMessage == "Inspect any partial changes before starting another operation.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
+
+    @Test(arguments: [
+        (DiagnosticEvent.Operation.preflight, "Run Check this Mac again and review the host requirements in Settings."),
+        (.verifyRuntime, "Open Repair and inspect the runtime installation before trying again."),
+        (.exportDiagnostics, "Check the selected export location and available disk space before exporting again."),
+        (.githubSignIn, "Open Accounts and check sign-in status before trying again.")
+    ], [DiagnosticFailure.timedOut, .processFailed, .outcomeUnknown])
+    func recoveryFitsTheOperation(_ example: (DiagnosticEvent.Operation, String), _ failure: DiagnosticFailure) {
+        let event = DiagnosticEvent(operation: example.0, outcome: .failed(failure), operationID: Self.operationID)
+        #expect(event.recoveryMessage == example.1)
+    }
 }

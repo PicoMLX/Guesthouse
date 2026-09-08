@@ -8,6 +8,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case preflight, verifyRuntime, createEnvironment, startEnvironment, stopEnvironment
         case inspectEnvironment, connectSSH, importXcode, checkTools, codexSignIn, githubSignIn
         case synchronizeRepositories, testWorkspace, publishChanges, exportDiagnostics
+        case deleteEnvironment, exportWork, openConsole, repairEnvironment, updateGuest
 
         public var title: String {
             switch self {
@@ -26,12 +27,19 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
             case .testWorkspace: "Test workspace"
             case .publishChanges: "Publish changes"
             case .exportDiagnostics: "Export diagnostics"
+            case .deleteEnvironment: "Delete development Mac"
+            case .exportWork: "Export work"
+            case .openConsole: "Open development Mac console"
+            case .repairEnvironment: "Repair development Mac"
+            case .updateGuest: "Update development Mac"
             }
         }
     }
 
     public enum Outcome: Codable, Hashable, Sendable {
         case started, succeeded, cancellationRequested
+        /// Emit only after cancellation/termination is confirmed, not when it is requested.
+        case canceled
         case failed(DiagnosticFailure)
     }
 
@@ -59,6 +67,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .started: detail = "Started."
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
+        case .canceled: detail = "Cancellation confirmed; partial changes may remain."
         case .failed(let failure): detail = failure.message
         }
         return operation.title + ": " + detail
@@ -67,9 +76,32 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
 
     public var recoveryMessage: String? {
         switch outcome {
-        case .failed(let failure): failure.recoveryMessage
+        case .failed(let failure): recovery(for: failure)
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
+        case .canceled: "Inspect any partial changes before starting another operation."
         case .started, .succeeded: nil
+        }
+    }
+
+    private func recovery(for failure: DiagnosticFailure) -> String {
+        guard [.timedOut, .processFailed, .outcomeUnknown].contains(failure) else {
+            return failure.recoveryMessage
+        }
+        switch operation {
+        case .preflight:
+            return "Run Check this Mac again and review the host requirements in Settings."
+        case .verifyRuntime:
+            return "Open Repair and inspect the runtime installation before trying again."
+        case .exportDiagnostics:
+            return "Check the selected export location and available disk space before exporting again."
+        case .codexSignIn, .githubSignIn:
+            return "Open Accounts and check sign-in status before trying again."
+        case .exportWork:
+            return "Inspect the export destination and the development Mac before trying again."
+        case .synchronizeRepositories, .testWorkspace, .publishChanges:
+            return "Inspect the workspace and any remote changes before trying the operation again."
+        default:
+            return failure.recoveryMessage
         }
     }
 }
