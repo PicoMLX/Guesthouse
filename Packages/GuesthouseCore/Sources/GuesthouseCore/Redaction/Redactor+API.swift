@@ -181,11 +181,15 @@ extension Redactor {
         let valueContinues = Self.valueStartsOnNextLine(text[...])
         let explicitlyContinues = Self.valueExplicitlyContinues(text[...])
         if authorizationContinuation {
-            let wholeValueQuote = Self.unterminatedQuote(in: text[...], kind: "authorization")
+            // This concealed record also consumes any co-armed secret value. Its own
+            // trailing labels may arm fresh contexts below, after the old value is spent.
+            state.expectingSecretValue = false
+            state.secretValueExplicitlyContinues = false
+            let wholeValueQuote = Self.unterminatedAuthorizationQuote(in: text[...])
             state.quotedValue = wholeValueQuote
-            let commaContinues = text.last(where: { !$0.isWhitespace }) == ","
-            state.authorizationValueIsOnTheNextLine = valueContinues || commaContinues
-            state.authorizationValueExplicitlyContinues = explicitlyContinues || commaContinues
+            let parameterContinues = Self.authorizationParameterContinues(text[...])
+            state.authorizationValueIsOnTheNextLine = valueContinues || parameterContinues
+            state.authorizationValueExplicitlyContinues = explicitlyContinues || parameterContinues
             state.expectingAuthorizationValue = authorizationFoldWasEstablished || closedValueTail == nil || valueContinues
             Self.armPendingContexts(from: closedValueTail ?? text, state: &state)
             if wholeValueQuote == nil || authorizationFoldWasEstablished {

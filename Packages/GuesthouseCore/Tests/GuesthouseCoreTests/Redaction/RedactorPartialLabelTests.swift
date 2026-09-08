@@ -2,6 +2,31 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: [("Bas", "ic\tdXNlcjpwYXNz", "basic\tdXNlcjpwYXNz"),
+                      ("Bea", "rer\topaque", "bearer\topaque"),
+                      ("AWS4-HMAC-S", "HA256 Credential=opaque", "aws4-hmac-sHA256 Credential=opaque")])
+    func splitSchemesKeepTheirFullPrefixAndHorizontalWhitespace(_ first: String, _ second: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(state.pendingCredentialLabel == first.lowercased())
+        #expect(Redactor.restoringCredentialLabel(in: second, state: &state) == expected)
+    }
+
+    @Test(arguments: [#"["--password", opaque\, "--verbose"]"#, #"["--password", opaque\]"#])
+    func serializedDelimitersCannotArmPhysicalContinuation(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.redactSerializedOptions(input, state: &state).contains("opaque"))
+        #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
+    }
+
+    @Test(arguments: ["Bearer [redacted:jwt] synthetic", "Bearer [redacted:jwt] [redacted:secret] synthetic"])
+    func markerSeparatedBearerSpansKeepTheirInteriorWhole(_ first: String) throws {
+        let result = Redactor.renderings(of: first + "\u{1B}[31mCredential")
+        let span = try #require(Redactor.terminalCredentialSpans(in: result.joined).first { $0.kind == "bearer-token" })
+        #expect(String(result.joined[span.range]).hasSuffix("syntheticCredential"))
+        #expect(result.spliced == result.joined)
+    }
+
     @Test(arguments: [("--cl", "ient-secret opaque", "--client-secret opaque"),
                       ("--access-k", "ey-secret opaque", "--access-key-secret opaque"),
                       ("cod", "e: ABCD-EFGH", "code: ABCD-EFGH"),
@@ -13,7 +38,7 @@ import Testing
         #expect(Redactor.restoringCredentialLabel(in: second, state: &state) == expected)
     }
 
-    @Test(arguments: ["https:\\/\\", "https:\\", "/\\", "url=https:\\/\\"])
+    @Test(arguments: ["https:\\/\\", "https:\\", "/\\", "url=https:\\/\\", "url:https:/", "url:https:\\/\\"])
     func trailingSlashEscapesRemainAnIncompleteAuthority(_ input: String) {
         #expect(input.firstMatch(of: Redactor.patterns.partialURLAuthority) != nil)
     }

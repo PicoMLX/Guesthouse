@@ -196,7 +196,8 @@ extension Redactor {
             } else {
                 cursor = value.firstIndex(where: { $0 == "," || $0 == "]" }) ?? text.endIndex
             }
-            if fieldExplicitlyContinues(value[..<cursor], tail: text[cursor...]) {
+            if (cursor == text.endIndex || isClosedQuotedValue(value[..<cursor]))
+                && fieldExplicitlyContinues(value[..<cursor], tail: text[cursor...]) {
                 state.expectingSecretValue = true
                 state.secretValueExplicitlyContinues = true
             }
