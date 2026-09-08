@@ -2,6 +2,39 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test func boundaryPreservingWrappedKeysConcealEveryFragment() {
+        let output = Redactor().redact(lines: ["filename\u{0}sk-abcdefgh", "ijklmnopqrstuvwx", "; Finished"]).map(\.text)
+        #expect(!output.joined().contains("abcdefgh"))
+        #expect(!output.joined().contains("ijklmnopqrstuvwx"))
+        #expect(output.last == "; Finished")
+    }
+
+    @Test(arguments: [#"device_code: "[redacted:decoy]" syntheticOpaque"#, #"user_code: 'syntheticFirst' syntheticOpaque"#])
+    func quotedDeviceCodeFragmentsCannotReleaseTheRemainingValue(_ input: String) {
+        let output = Redactor().redact(lines: [input, " syntheticTail", "; Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic") && !output.joined().contains("decoy"))
+        #expect(output.last == "; Finished")
+    }
+
+    @Test(arguments: [("<", ">"), ("{", "}"), ("`", "`"), ("\"", "\"")])
+    func framedHostOnlyURLsMayCloseOnAnotherRecord(_ opener: String, _ closer: String) {
+        let input = ["prefix " + opener + "https:/", "/example.com" + closer, "Finished"]
+        #expect(Redactor().redact(lines: input).map(\.text) == input)
+    }
+
+    @Test(arguments: [
+        ([#"{"pass\u0077ord":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"\u0061ccess_token":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"device_\u0063ode":"abcd"}"#], "abcd"),
+        ([#"{"\u0041uthorization":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord":"#, #""syntheticOpaque"}"#], "syntheticOpaque")
+    ])
+    func encodedStructuredNamesCannotExposeTheirValues(_ records: [String], _ secret: String) {
+        let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
+        #expect(!output.joined().contains(secret))
+        #expect(output.last == "; Finished")
+    }
+
     @Test(arguments: ["abcdef", "abcDEF", "abc.def"])
     func lowercaseImperativeCodesRemainConcealed(_ value: String) {
         #expect(Redactor().redact(lines: ["Enter the code " + value, "Finished"]).map(\.text)
@@ -10,7 +43,8 @@ import Testing
 
     @Test(arguments: [["--g", "ithub-token syntheticOpaque"], ["--ve", "ndor-password syntheticOpaque"],
                       ["gh  ", "p_syntheticOpaque"], ["github_pa\t", "t_syntheticOpaque"],
-                      ["https://user:syntheticFirst", "syntheticMiddle@syntheticStill", "syntheticLast@example.com/path"]])
+                      ["https://user:syntheticFirst", "syntheticMiddle@syntheticStill", "syntheticLast@example.com/path"],
+                      ["prefix `/", "/user:syntheticOpaque@example.com/path`"]])
     func qualifierPaddingAndUserinfoFragmentsRemainConcealed(_ records: [String]) {
         let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
         #expect(!output.joined().contains("synthetic"))
@@ -33,6 +67,7 @@ import Testing
     func promptPluralAndURLBoundariesKeepCredentialsConcealed(_ records: [String]) {
         let output = Redactor().redact(lines: records + ["Finished"]).map(\.text)
         #expect(!output.joined().contains("synthetic") && !output.joined().contains("ABC"))
+        #expect(!output.joined().contains("EFGH"))
         #expect(output.last == "Finished")
     }
 
@@ -135,7 +170,9 @@ import Testing
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
                       #""visit https://example.com""#, #""visit https://example.com:443""#,
                       #"prefix "url=https://example.com""#, "prefix <url=https://example.com>", "{url=https://example.com}",
-                      "prefix `https://example.com`", "prefix `//example.com`"])
+                      "prefix `https://example.com`", "prefix `//example.com`",
+                      "prefix <https://example.com>, status=ok", "prefix <https://example.com>,status=ok",
+                      "prefix `https://example.com`,status=ok"])
     func completeURLDiagnosticsDoNotQuarantineTheNextRecord(_ input: String) {
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
     }
