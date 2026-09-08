@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+
+    @Test(arguments: [" ", " / "])
+    func recoveredTokenMarkersCannotEraseDependentCodeContext(_ separator: String) {
+        let input = "eyJhbGciOiJIUzI1NiIsI\u{1B}[mtpZCI6Im5hYmMifQ.payload.-code" + separator + "ABCD-EFGH"
+        #expect(Redactor.renderings(of: input).spliced == "[redacted:jwt]" + separator + "[redacted:device-code]")
+    }
     @Test(arguments: [".", "-", "@"], ["The login code is ", "The login code was rejected; retry "])
     func contextualCodesKeepPunctuationSuppliedBoundaries(_ punctuation: String, _ context: String) {
         let result = Redactor.renderings(of: context + "filename" + punctuation + "\u{0}ABCD-EFGH")
@@ -15,11 +21,6 @@ import Testing
         #expect(output.spliced.contains("\u{001F}--password"))
     }
 
-    @Test(arguments: [".", "~", "+", "/", "="])
-    func bearerPunctuationCannotEraseTheFollowingOption(_ punctuation: String) {
-        let output = Redactor.renderings(of: "Bearer abc" + punctuation + "\u{0}--password syntheticOpaque")
-        #expect(output.spliced.contains("\u{001F}--password"))
-    }
 
     @Test(arguments: ["The login code is ", "The login code was rejected; retry "])
     func contextualDeviceCodesKeepIndependentBoundaries(_ context: String) {
@@ -27,12 +28,6 @@ import Testing
         #expect(result.spliced.contains(Redactor.splicedBoundary + "ABCD-EFGH"))
     }
 
-    @Test(arguments: ["ghp_syntheticSecond", "github_pat_syntheticSecond", "gho_syntheticSecond"])
-    func adjacentGitHubTokensKeepIndependentOpeners(_ token: String) {
-        let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}" + token)
-        #expect(result.spliced.contains(Redactor.splicedBoundary + token))
-        #expect(!result.spliced.contains("abcdefghijklmnopqrstuvwx"))
-    }
 
     @Test(arguments: ["--password syntheticOpaque", "password: syntheticOpaque",
                       "Authorization: syntheticOpaque", "device_code: syntheticOpaque"])

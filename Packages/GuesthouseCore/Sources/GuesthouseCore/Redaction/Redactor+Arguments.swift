@@ -31,6 +31,33 @@ extension Redactor {
         return closingQuoteEnd(in: afterSlashes.dropFirst(), for: quoted) == nil ? quoted : nil
     }
 
+    /// The option may live in a quoted command inside a diagnostic container.
+    /// Skip completed strings; only the quote still open at the option can own its end.
+    private static func enclosingCommandQuote(in prefix: Substring) -> StreamState.QuotedValue? {
+        var cursor = prefix.startIndex
+        while cursor < prefix.endIndex {
+            let start = cursor
+            var slashes = 0
+            while cursor < prefix.endIndex, prefix[cursor] == "\\" {
+                slashes += 1
+                prefix.formIndex(after: &cursor)
+            }
+            guard cursor < prefix.endIndex else { break }
+            let delimiter = prefix[cursor]
+            let before = start == prefix.startIndex ? nil : prefix[prefix.index(before: start)]
+            prefix.formIndex(after: &cursor)
+            guard delimiter == "\"" || delimiter == "'",
+                  before == nil || before?.isWhitespace == true
+                    || before.map({ "=:([{,".contains($0) }) == true else { continue }
+            let quoted = StreamState.QuotedValue(delimiter: delimiter,
+                escapeDepth: slashes.isMultiple(of: 2) ? 0 : slashes, kind: "secret",
+                singleQuotesAreLiteral: delimiter == "'" && slashes == 0)
+            guard let end = closingQuoteEnd(in: prefix[cursor...], for: quoted) else { return quoted }
+            cursor = end
+        }
+        return nil
+    }
+
     static func closingQuoteEnd(in value: Substring, for quoted: StreamState.QuotedValue) -> String.Index? {
         var slashes = 0
         for index in value.indices {
@@ -72,7 +99,7 @@ extension Redactor {
                 state.expectingSecretValue = state.expectingSecretValue || bareOption
                 continue
             }
-            var outer = unterminatedQuote(in: text[..<match.2.startIndex], kind: "secret")
+            var outer = enclosingCommandQuote(in: text[..<match.2.startIndex])
             if outer?.delimiter == "'", outer?.escapeDepth == 0 { outer?.singleQuotesAreLiteral = true }
             let argument = secretArgument(in: text, from: match.range.upperBound, outerQuote: outer)
             state.quotedValue = state.quotedValue ?? argument.quoted
