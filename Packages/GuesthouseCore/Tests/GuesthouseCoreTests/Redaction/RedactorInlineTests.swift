@@ -2,6 +2,16 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: [#"Digest username="syntheticFirst"#, #"AWS4-HMAC-SHA256 Credential="syntheticFirst"#,
+                      #"Authorization: Digest username="syntheticFirst"#])
+    func openAuthorizationParametersKeepTheirQuoteAndEnclosingFold(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticFirst"))
+        #expect(state.quotedValue?.delimiter == "\"")
+        #expect(state.quotedValue?.kind == "authorization")
+        #expect(state.quotedValue?.enclosingAuthorizationFold == true)
+    }
+
     @Test(arguments: ["Enter the code AB12CD34", "Your code is AB12CD34"])
     func codePromptBackslashesOutsideTheValueStillContinue(_ prompt: String) {
         var state = Redactor.StreamState()
