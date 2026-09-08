@@ -16,9 +16,6 @@ extension Redactor {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     func redact(line: String, state: inout StreamState) -> RedactedLine {
-        if let restored = Self.restoringCredentialLabel(in: line, state: &state) {
-            return redact(line: restored, state: &state)
-        }
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
@@ -29,7 +26,18 @@ extension Redactor {
         // they removed leaks whichever the other would have found. The boundary rendering goes
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
-        let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        var stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        // Consume terminal controls once, before restoring physical label fragments.
+        // Replaying raw text would let hidden OSC payload consume a label or prepend
+        // that label inside a still-pending CSI command. Keep both visible readings.
+        var boundaryLabelState = state
+        if let restored = Self.restoringCredentialLabel(in: stripped.joined, state: &state) {
+            stripped.joined = restored
+        }
+        if let restored = Self.restoringCredentialLabel(in: stripped.spliced, state: &boundaryLabelState) {
+            stripped.spliced = restored
+        }
+        state.pendingCredentialLabel = state.pendingCredentialLabel ?? boundaryLabelState.pendingCredentialLabel
         var recoveredContexts = StreamState()
         for reading in stripped.contexts {
             var start = reading.startIndex
