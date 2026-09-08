@@ -6,9 +6,10 @@ extension Redactor {
         #/\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\]/#
     }
     /// RFC 8259 strings can encode URL delimiters as Unicode escapes. Decode only a
-    /// bounded, closed string, scan once, and re-encode only when it contains userinfo.
+    /// bounded, closed string, inspect at most three string layers, and re-encode
+    /// only when sanitization changes it. Deeper encoded structure fails closed.
     /// No decoded payload is retained in stream state or emitted without sanitization.
-    private static func redactEncodedURLStrings(_ input: String, state: inout StreamState) -> String {
+    private static func redactEncodedURLStrings(_ input: String, state: inout StreamState, depth: Int = 0) -> String {
         let closedString = #/"(?:[^"\\\r\n]|\\[^\r\n])*"/#
         var text = input
         if state.pendingEncodedURLString {
@@ -31,9 +32,13 @@ extension Redactor {
             guard encoded.utf8.prefix(8193).count <= 8192,
                   let decoded = try? JSONDecoder().decode(String.self, from: Data(encoded.utf8))
             else { return "\"" + marker("encoded-value") + "\"" }
-            guard decoded.contains(patterns.urlUserInfo) else { return String(encoded) }
             var context = StreamState()
-            let sanitized = redactURLContinuations(decoded, state: &context, decodeStrings: false)
+            let nested: String
+            if decoded.contains(#"\u"#) {
+                nested = depth < 2 ? redactEncodedURLStrings(decoded, state: &context, depth: depth + 1) : marker("encoded-value")
+            } else { nested = decoded }
+            let sanitized = redactURLContinuations(nested, state: &context, decodeStrings: false)
+            guard sanitized != decoded else { return String(encoded) }
             let encoder = JSONEncoder()
             encoder.outputFormatting = .withoutEscapingSlashes
             guard let data = try? encoder.encode(sanitized) else { return "\"" + marker("userinfo") + "\"" }
@@ -44,7 +49,9 @@ extension Redactor {
         if let partial = text.firstMatch(of: #/"(?:[^"\\\r\n]|\\[^\r\n])*\\?$/#),
            text[..<partial.range.lowerBound].reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2),
            !text.matches(of: closedString).contains(where: { $0.range.contains(partial.range.lowerBound) }),
-           partial.0.contains(#"\u"#) || partial.0.hasSuffix("\\") {
+           partial.0.contains(#"\u"#) || partial.0.hasSuffix("\\")
+            || (partial.0.dropFirst().wholeMatch(of: #/[A-Za-z][A-Za-z0-9+.-]*:?/#) != nil
+                && text[..<partial.range.lowerBound].contains(#/(?:^|[:=])[ \t]*$/#)) {
             // Before an escape completes, even a URI's scheme/colon can be hidden.
             // Quarantine incomplete encoded strings; only a closing quote proves an end.
             state.pendingEncodedURLString = true
