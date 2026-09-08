@@ -60,6 +60,7 @@ extension Redactor {
             scanned = escape.range.upperBound
         }
         joined += text[scanned...]
+        let tokenRanges = terminalCredentialSpans(in: joined).map(\.range)
         // Adjacent controls share one offset. Inspect surviving neighbors only after every
         // escape is removed, so a neighboring control cannot hide a credential's boundary.
         boundaryOffsets = boundaryOffsets.filter { offset in
@@ -68,6 +69,7 @@ extension Redactor {
             return (joined[..<boundary].last.map(isTokenCharacter) == true
                 && suffix.first.map(isTokenCharacter) == true)
                 || suffix.prefixMatch(of: #/(?:\\*\/){2}/#) != nil
+                || tokenRanges.contains { $0.lowerBound < boundary && boundary < $0.upperBound }
         }
         let recovery = recoveredCredentialRanges(in: text, joined: joined, priorPrefixes: priorPrefixes)
         var recovered = recovery.ranges
@@ -77,7 +79,6 @@ extension Redactor {
         // prefix. Closing the boundary afterwards cannot recover the remaining suffix. Keep
         // recognized tokens whole in both readings, while retaining boundaries before tokens
         // that need them, such as `filename<control>sk-...`.
-        let tokenRanges = terminalCredentialSpans(in: joined).map(\.range)
         func byteRange(_ range: Range<String.Index>) -> Range<Int> {
             let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: range.lowerBound)
             let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: range.upperBound)
