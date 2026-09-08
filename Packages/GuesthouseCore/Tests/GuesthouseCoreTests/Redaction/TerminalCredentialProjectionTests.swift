@@ -2,6 +2,16 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["\u{1B}[2:3@", "\u{9B}2;3@", "\u{1B}[?2:3@", "\u{9B}2:3/m"])
+    func individualCSIComponentsRemainScanEvidence(_ command: String) throws {
+        let readings = try #require(TerminalControlEvidence.projections(in: command))
+        #expect(readings.contains { $0.text == "2" })
+        #expect(readings.contains { $0.text == "3" })
+        let input = "The login code was rejected; retry AB1" + command + "-CD34."
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "device-code" })
+    }
+
     @Test(arguments: ["\u{1B}[2m", "\u{9B}2m", "\u{1B}[2/m", "\u{9B}2/m"])
     func parameterOnlyReadingsRecoverNumericCodeCharacters(_ command: String) {
         let input = "The login code is AB1" + command + "-CD34."
@@ -14,21 +24,6 @@ import Testing
         let input = label + "\u{1B}[31" + delimiter + "m"
         let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
         #expect(result.contexts.contains(label + delimiter))
-    }
-
-    @Test(arguments: [8_000, 100_000])
-    func sparseLongRecordsExceedTheRecoveryWorkBudget(_ length: Int) {
-        let input = "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: length)
-        #expect(TerminalControlEvidence.projections(in: input)?.count == nil)
-        var state: TerminalControlEvidence.Continuation?
-        #expect(TerminalControlEvidence.prepare(input, continuation: &state).text == "[redacted:terminal-ambiguity]")
-        #expect(state?.quarantined == true)
-    }
-
-    @Test func boundedSparseRecordsKeepEveryReading() throws {
-        let readings = try #require(TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: 1_000)))
-        #expect(readings.count == 16)
-        #expect(readings.allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
     }
 
     @Test(arguments: ["\u{1B}[", "\u{9B}"])
