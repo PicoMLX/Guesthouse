@@ -51,7 +51,7 @@ extension Redactor {
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))(?:[ \t]+\S+){0,3}?[ \t]+((?i:c|co|cod|code|codes))[ \t]*$/#) {
             return promptPrefix(prompt.1, prompt.2)
         }
-        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ _-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ ._-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
             return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
         }
         // Compare provider stems with field suffixes; neither may steal a longer prefix.
