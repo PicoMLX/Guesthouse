@@ -3,6 +3,18 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: ["http", "https", "ssh", "git", "ftp", "ftps", "ws", "wss"]
+        .flatMap { scheme in (1...scheme.count).map { (scheme, $0) } })
+    func everyKnownSchemePrefixQuarantinesAnEncodedContinuation(_ scheme: String, _ split: Int) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.redactURLContinuations("\"" + scheme.prefix(split), state: &state) == "[redacted:encoded-value]")
+        #expect(state.pendingEncodedURLString)
+        let tail = String(scheme.dropFirst(split)) + #"\u003a\u002f\u002fuser:syntheticOpaque\u0040example.com""#
+        #expect(Redactor.redactURLContinuations(tail, state: &state) == "[redacted:encoded-value]")
+        #expect(!state.pendingEncodedURLString && !state.expectingURLUserInfo)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
     @Test(arguments: [#"{"url":""#, #"{"uri":""#, #"url = ""#])
     func emptyURLValuesQuarantineTheFirstEncodedAuthority(_ first: String) {
         var state = Redactor.StreamState()
@@ -128,6 +140,7 @@ import Testing
     }
 
     @Test(arguments: [#"{"url":"https:\u002f\u002fexample.com/path"}"#,
+                      #"{"url":"https:\u002f\u002fexample.com"}"#, #""https:\u002f\u002fexample.com:443""#,
                       #"{"name":"pass\u0077ord"}"#, #"{"message":"ordinary \u0040 character"}"#])
     func nonCredentialUnicodeStringsKeepTheirOriginalEncoding(_ input: String) {
         var state = Redactor.StreamState()
@@ -208,6 +221,7 @@ import Testing
     }
 
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
+                      "https://[::1]", "https://[2001:db8::1]:443", "https://[fe80::1%en0]",
                       #""visit https://example.com""#, #""visit https://example.com:443""#,
                       #"prefix "https://example.com""#, #"prefix "url=https://example.com""#,
                       "prefix <url=https://example.com>", #"prefix "--url=//example.com""#,
