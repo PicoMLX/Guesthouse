@@ -126,7 +126,12 @@ enum TerminalControlEvidence {
         var remaining = text[...]
         while let escape = remaining.firstMatch(of: TerminalControlGrammar.escape) {
             let literal = remaining[..<escape.range.lowerBound]
-            let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) })).sorted()
+            // A CSI parameter/subparameter can be the swallowed credential fragment.
+            // Enumerate each numeric component; never silently truncate this evidence.
+            let components = body(of: escape.0, reading: .parameterOnly)
+                .split(whereSeparator: { !("0"..."9").contains($0) }).map(String.init)
+            let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + components)).sorted()
+            guard bodies.count <= maximumAlternatives else { return nil }
             // Most controls (including C0/C1 and opaque strings) have one empty reading.
             // Mutate those projections in place: copying/hashing each growing prefix is quadratic.
             if bodies == [""] {

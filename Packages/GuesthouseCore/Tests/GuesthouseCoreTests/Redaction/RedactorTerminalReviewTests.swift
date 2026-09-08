@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["@", ".", ")", "💻"], ["\u{0}", "\u{1B}[31m"])
+    func ordinaryPunctuationRetainsAnIndependentCredentialBoundary(_ punctuation: String, _ control: String) {
+        let output = Redactor.renderings(of: "contact" + punctuation + control + "--password syntheticOpaque")
+        #expect(output.spliced.contains("\u{001F}--password"))
+    }
+
     @Test(arguments: [".", "~", "+", "/", "="])
     func bearerPunctuationCannotEraseTheFollowingOption(_ punctuation: String) {
         let output = Redactor.renderings(of: "Bearer abc" + punctuation + "\u{0}--password syntheticOpaque")

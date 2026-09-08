@@ -70,6 +70,7 @@ extension Redactor {
                 && suffix.first.map(isTokenCharacter) == true)
                 || suffix.prefixMatch(of: #/(?:\\*\/){2}/#) != nil
                 || tokenRanges.contains { $0.lowerBound < boundary && boundary < $0.upperBound }
+                || terminalHasCredentialOpener(suffix)
         }
         let recovery = recoveredCredentialRanges(in: text, joined: joined, priorPrefixes: priorPrefixes)
         var recovered = recovery.ranges

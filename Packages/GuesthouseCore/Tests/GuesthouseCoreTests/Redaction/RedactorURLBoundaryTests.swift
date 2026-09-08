@@ -1,7 +1,7 @@
 import Testing
 @testable import GuesthouseCore
 
-@Suite struct RedactorURLContinuationTests {
+@Suite struct RedactorURLBoundaryTests {
     @Test(arguments: [("https:/", "/user:syntheticOpaque@host/path"), ("https:", "//user:syntheticOpaque@host/path"),
                       ("/", "/user:syntheticOpaque@host/path"), ("url=https:\\/", "\\/user:syntheticOpaque@host/path")])
     func partialAuthorityDelimitersRetainUserinfo(_ parts: (String, String)) {
@@ -112,3 +112,4 @@ import Testing
         #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
     }
 }
+
