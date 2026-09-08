@@ -2,6 +2,14 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPhysicalLineStateTests {
+
+    @Test(arguments: [["--pass\u{1B}]", "word\u{07}", "word syntheticSecret"],
+                      ["pass\u{1B}[31", "word:", "syntheticSecret"]])
+    func restoreLabelsOnlyAfterStatefulTerminalPreparation(_ lines: [String]) {
+        let output = Redactor().redact(lines: lines + ["status: ready"]).map(\.text)
+        #expect(!output.joined().contains("syntheticSecret"))
+        #expect(output.last == "status: ready")
+    }
     @Test(arguments: [("Authorization: Custom first", "authorization"), ("password: first", "secret")],
           ["\"", "'", "\\\""])
     func nestedQuoteClosurePreservesTheOuterFold(field: (String, String), quote: String) {

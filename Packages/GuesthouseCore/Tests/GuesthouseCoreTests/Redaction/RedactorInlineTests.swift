@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: ["Enter the code AB12CD34", "Your code is AB12CD34"])
+    func codePromptBackslashesOutsideTheValueStillContinue(_ prompt: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: prompt + " \\", codeExpected: false, state: &state)
+        #expect(state.expectingDeviceCode)
+    }
     @Test(arguments: [("[AB", "]"), ("(AB", ")"), ("<AB", ">"), ("`AB", "`")])
     func unfinishedCodeFramesRetainTheirClosingDelimiter(_ value: String, _ closer: Character) {
         var state = Redactor.StreamState()
