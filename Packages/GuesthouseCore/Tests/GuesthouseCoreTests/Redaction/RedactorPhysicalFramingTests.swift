@@ -21,7 +21,7 @@ import Testing
         #expect(pending == nil)
     }
 
-    @Test func AClosedPEMBlockCanBeFollowedByAnotherOpener() {
+    @Test func aClosedPEMBlockCanBeFollowedByAnotherOpener() {
         var pending: String? = "PRIVATE KEY"
         let line = "-----END PRIVATE KEY----- middle -----BEGIN RSA PRIVATE KEY-----synthetic"
         #expect(Redactor.redactPEMBlocks(line, label: &pending) == "[redacted:private-key] middle [redacted:private-key]")
@@ -29,14 +29,14 @@ import Testing
     }
 
     @Test(arguments: ["eyJhbGciOiJIUzI1NiJ9", "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA", "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA."])
-    func IncompleteJOSECandidatesKeepTheirOriginalStart(_ token: String) throws {
+    func incompleteJOSECandidatesKeepTheirOriginalStart(_ token: String) throws {
         let input = "prefix " + token + " \t"
         let start = try #require(Redactor.incompleteJWTStartAtLineEnd(in: input))
         #expect(String(input[start...]) == token + " \t")
     }
 
     @Test(arguments: ["Finished", "prefix e30.payload", "eyJhbGciOiJIUzI1NiJ9.payload; status=ok"])
-    func OrdinaryOrTerminatedRecordsDoNotBecomeIncompleteJOSEHeaders(_ input: String) {
+    func ordinaryOrTerminatedRecordsDoNotBecomeIncompleteJOSEHeaders(_ input: String) {
         #expect(Redactor.incompleteJWTStartAtLineEnd(in: input) == nil)
     }
 }
