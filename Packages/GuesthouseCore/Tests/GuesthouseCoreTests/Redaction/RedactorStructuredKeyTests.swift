@@ -27,6 +27,8 @@ import Testing
     }
 
     @Test(arguments: [
+        (#"{"password\u0020":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),
+        (#"{"\u0020password":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),
         (#"{"pass\uXXXXord":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),
         (#"{"password\n":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),
         (#"{"pass\uD800word":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#)
