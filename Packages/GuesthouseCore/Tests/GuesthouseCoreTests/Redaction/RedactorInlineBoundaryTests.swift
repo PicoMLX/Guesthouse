@@ -11,6 +11,7 @@ import Testing
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == expected)
         #expect(state.quotedValue == nil && !state.expectingSecretValue && !state.secretValueExplicitlyContinues)
         #expect(!state.expectingAuthorizationValue && !state.authorizationValueIsOnTheNextLine)
+        #expect(!state.expectingSecretContinuation)
     }
 
     @Test(arguments: [("password", true, false), ("Authorization", false, true), ("device_code", false, false)], [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
@@ -21,6 +22,9 @@ import Testing
         #expect(state.expectingSecretContinuation == field.1)
         #expect(state.expectingAuthorizationValue == field.2)
         #expect(state.expectingDeviceCodeContinuation == (field.0 == "device_code"))
+        #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
+        #expect(!state.authorizationValueIsOnTheNextLine && !state.authorizationValueExplicitlyContinues)
+        #expect(!state.expectingDeviceCode)
     }
 
     @Test(arguments: ["HMAC-SHA256", "ECDSA-SHA512", "RSA-SHA256", "PBKDF2-HMAC-SHA256", "CHACHA20-POLY1305"])
@@ -28,13 +32,14 @@ import Testing
         var state = Redactor.StreamState()
         let input = "process exited with code " + algorithm
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!state.expectingDeviceCode && !state.expectingDeviceCodeContinuation)
         #expect(!Redactor.applyPatterns(to: "device_code: " + algorithm, codeExpected: false, state: &state).contains(algorithm))
     }
 
     @Test(arguments: ["HMAC-SHA256", "ECDSA-SHA512", "CHACHA20-POLY1305"])
     func pendingCodeShapeMatchingDoesNotPreserveAlgorithms(_ value: String) {
         var state = Redactor.StreamState()
-        #expect(!Redactor.applyPatterns(to: value, codeExpected: true, state: &state).contains(value))
+        #expect(Redactor.applyPatterns(to: value, codeExpected: true, state: &state) == "[redacted:device-code]")
     }
 
     @Test(arguments: [(#"password: "syntheticOpaque" , status: ready"#, "password: [redacted:secret] , status: ready"),
@@ -86,7 +91,7 @@ import Testing
     func apparentFramesCannotReleaseAValidUserinfoContinuation(frame: (String, String), authority: String) {
         var state = Redactor.StreamState()
         let first = Redactor.applyPatterns(to: frame.0 + "https://" + authority + frame.1, codeExpected: false, state: &state)
-        #expect(!first.contains(authority))
+        #expect(first == frame.0 + "https://[redacted:userinfo]")
         #expect(state.expectingURLUserInfo)
         #expect(Redactor.applyPatterns(to: "@example.com/path", codeExpected: false, state: &state)
                 == "[redacted:userinfo]@example.com/path")
@@ -224,6 +229,8 @@ import Testing
         var state = Redactor.StreamState()
         let input = "[" + quote + "--password" + quote + ", " + quote + "opaqueCredential" + quote + "]"
         #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("opaqueCredential"))
+        #expect(state.quotedValue == nil && !state.expectingSecretValue)
+        #expect(!state.expectingSecretContinuation && !state.secretValueExplicitlyContinues)
     }
 
     @Test(arguments: ["password", "Authorization", "device_code"], [")", ">"])
@@ -278,8 +285,21 @@ import Testing
         #expect(!result.contains("syntheticSecond"))
     }
 
+    @Test func ambiguousCommaAuthoritiesAreConcealedEvenInsideQueries() {
+        var state = Redactor.StreamState()
+        // A comma + network-path authority may be a diagnostic-list separator or
+        // a nested URL in a query. Neither interpretation proves its userinfo public.
+        let input = "https://example.com/path?next=,//user:ordinary@host"
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+            == "https://example.com/path?next=,//[redacted:userinfo]")
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "/path", codeExpected: false, state: &state) == "[redacted:userinfo]/path")
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
     @Test(arguments: ["https://example.com/path//user:ordinary@host",
-                      "https://example.com/path?next=,//user:ordinary@host",
+                      "https://example.com/path?next=path//user:ordinary@host",
                       "urls=[https://example.com/path//user:ordinary@host]"])
     func URLPathAndQuerySlashPairsRemainOrdinary(_ input: String) {
         var state = Redactor.StreamState()

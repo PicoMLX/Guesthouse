@@ -2,6 +2,23 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: [("sk-abcdefgh", "ijklmnopqrstuvwx"), ("ghp_abcdefgh", "ijklmnopqrstuvwx"),
+                      ("eyJhbGciOiJIUzI1NiJ9.", "cGF5bG9hZA.c2ln")], ["\r", "\n", "\r\n"])
+    func retainedTerminatorsCannotBreakWrappedCredentialDetection(_ parts: (String, String), _ terminator: String) {
+        let output = Redactor().redact(lines: [parts.0 + terminator, parts.1, "; Finished"]).map(\.text)
+        #expect(!output.joined().contains(parts.0) && !output.joined().contains(parts.1))
+        #expect(output[0].hasSuffix(terminator) && output[2] == "; Finished")
+    }
+
+    @Test(arguments: ["your", "one-time", "one time", "one_time", "onetime", "verification", "activation",
+                      "confirmation", "pairing", "login", "security", "authorization", "auth", "access", "user", "device"]
+        .flatMap { qualifier in (1...qualifier.count).map { (qualifier, $0) } })
+    func everyPromptQualifierSplitConcealsThePhysicalValue(_ qualifier: String, _ split: Int) {
+        let input = [String(qualifier.prefix(split)), String(qualifier.dropFirst(split)) + " code is syntheticOpaque", "; Finished"]
+        let output = Redactor().redact(lines: input).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque") && output[2] == "; Finished")
+    }
+
     @Test func boundaryPreservingWrappedKeysConcealEveryFragment() {
         let output = Redactor().redact(lines: ["filename\u{0}sk-abcdefgh", "ijklmnopqrstuvwx", "; Finished"]).map(\.text)
         #expect(!output.joined().contains("abcdefgh"))
@@ -23,7 +40,25 @@ import Testing
     }
 
     @Test(arguments: [
+        ([#"{"pass\u0077ord: syntheticOpaque}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord"#, #":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"url":"https\u00"#, #"3a\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#], "syntheticOpaque"),
         ([#"{"pass\u0077ord":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord\":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord""#, #":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord""# + "\r\n", #":"syntheticOpaque"}"#], "syntheticOpaque"),
+        (["[https:/", "/[2001:db8::1],//user:syntheticOpaque@example.com]"], "syntheticOpaque"),
+        ([#"{"url":"https://user:syntheticOpaque\u0040example.com/path"}"#], "syntheticOpaque"),
+        ([#"{"url":"https:\u002f"#, #"\u002fuser:syntheticOpaque\u0040example.com"}"#], "syntheticOpaque"),
+        ([#"{"url":"https:\u002f"#, #"\u002fuser:syntheticFirst\"#, #""syntheticSecond@example.com/path"}"#], "synthetic"),
+        (["api.key: syntheticOpaque"], "syntheticOpaque"),
+        (["device.code: syntheticOpaque"], "syntheticOpaque"),
+        (["one-time cod", "e is syntheticOpaque"], "syntheticOpaque"),
+        (["one time co", "de is syntheticOpaque"], "syntheticOpaque"),
+        (["one_time code", " is syntheticOpaque"], "syntheticOpaque"),
+        (["onetime c", "ode is syntheticOpaque"], "syntheticOpaque"),
+        (["url", "=//user:syntheticOpaque@example.com/path"], "syntheticOpaque"),
+        (["--github.", "token syntheticOpaque"], "syntheticOpaque"),
         ([#"{"password\u0020":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"\u0020password":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"\u0061ccess_token":"syntheticOpaque"}"#], "syntheticOpaque"),
@@ -31,7 +66,7 @@ import Testing
         ([#"{"\u0041uthorization":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"pass\u0077ord":"#, #""syntheticOpaque"}"#], "syntheticOpaque")
     ])
-    func encodedStructuredNamesCannotExposeTheirValues(_ records: [String], _ secret: String) {
+    func structuredNamesAndURLListsCannotExposeTheirValues(_ records: [String], _ secret: String) {
         let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
         #expect(!output.joined().contains(secret))
         #expect(output.last == "; Finished")
@@ -183,10 +218,13 @@ import Testing
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
     }
 
-    @Test(arguments: ["[https://user:sec,ret@example.com]", "[//user:sec,ret@one.example,//other:opaque@two.example]"])
-    func commaUserinfoRemainsConcealedInURLLists(_ input: String) {
+    @Test(arguments: [
+        ("[https://user:sec,ret@example.com]", "[https://[redacted:userinfo]@example.com]"),
+        ("[//user:sec,ret@one.example,//other:opaque@two.example]", "[//[redacted:userinfo]@one.example,//[redacted:userinfo]@two.example]")
+    ])
+    func commaUserinfoRemainsConcealedInURLLists(_ input: String, _ expected: String) {
         let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
-        #expect(!output[0].contains("sec,ret") && !output[0].contains("opaque"))
+        #expect(output[0] == expected)
         #expect(output[1] == "Finished")
     }
 
@@ -274,6 +312,8 @@ import Testing
             "syntheticOpaque", "Finished"
         ]).map(\.text)
         #expect(!output.joined().contains("payload"))
+        #expect(!output.joined().contains("eyJhbGciOiJIUzI1NiIsI"))
+        #expect(!output.joined().contains("mtpZCI6Im5hYmMifQ"))
         #expect(!output.joined().contains("syntheticOpaque"))
         #expect(output[2] == "Finished")
     }

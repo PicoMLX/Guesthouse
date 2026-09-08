@@ -20,6 +20,11 @@ import Testing
 
     @Test(arguments: [("Enter the cod", "e ABCD-EFGH", "enter code ABCD-EFGH"),
                       ("Enter the co", "de ABC123", "enter code ABC123"),
+                      ("one-time cod", "e is opaque", "one-time code is opaque"),
+                      ("one time co", "de is opaque", "one time code is opaque"),
+                      ("one_time code", " is opaque", "one_time code is opaque"),
+                      ("onetime c", "ode is opaque", "onetime code is opaque"),
+                      ("device.co", "de: opaque", "device.code: opaque"),
                       ("Your code", " is opaque", "your code is opaque")])
     func splitPromptsRetainOnlyTheirRecognizedInstruction(_ first: String, _ next: String, _ expected: String) {
         var state = Redactor.StreamState()
@@ -27,7 +32,20 @@ import Testing
         #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == expected)
     }
 
-    @Test(arguments: ["tokens", "passwords", "secrets", "api_keys", "clientSecrets", "private_keys"])
+    @Test(arguments: ["your", "one-time", "one time", "one_time", "onetime", "verification", "activation",
+                      "confirmation", "pairing", "login", "security", "authorization", "auth", "access", "user", "device"]
+        .flatMap { qualifier in (1...qualifier.count).map { (qualifier, $0) } })
+    func everyQualifierSplitRestoresARecognizablePrompt(_ qualifier: String, _ split: Int) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: String(qualifier.prefix(split)))
+        let prefix = try #require(state.pendingCredentialLabel)
+        #expect(prefix.count <= 48 && !prefix.contains("opaque"))
+        let restored = try #require(Redactor.restoringCredentialLabel(
+            in: String(qualifier.dropFirst(split)) + " code is opaque", state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.declarativeCodePrompt).flatMap { $0.2.map(String.init) } == "opaque")
+    }
+
+    @Test(arguments: ["tokens", "passwords", "secrets", "api_keys", "api.key", "clientSecrets", "private_keys"])
     func pluralCredentialFieldsUseTheSharedVocabulary(_ label: String) {
         #expect((label + ": opaque").firstMatch(of: Redactor.patterns.labeledSecret).map { String($0.3) } == "opaque")
         #expect(Redactor.partialCredentialLabel(in: label) == label.lowercased())
@@ -39,6 +57,7 @@ import Testing
     }
 
     @Test(arguments: [("private k", "ey: opaque", "private key: opaque"),
+                      ("api.k", "ey: opaque", "api.key: opaque"),
                       ("request authoriz", "ation: opaque", "request authorization: opaque"),
                       ("secret access k", "ey: opaque", "secret access key: opaque"),
                       ("signing", "Secret: opaque", "signingSecret: opaque")])
@@ -101,7 +120,7 @@ import Testing
         #expect(Redactor.restoringCredentialLabel(in: second, state: &state) == expected)
     }
 
-    @Test(arguments: [#"["--password", opaque\, "--verbose"]"#, #"["--password", opaque\]"#])
+    @Test(arguments: [#"["--password", opaque\, "--verbose"]"#, #"["--password", opaque\]"#, #"["--github.token", opaque\]"#, #"["--api.key", opaque\]"#])
     func serializedDelimitersCannotArmPhysicalContinuation(_ input: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.redactSerializedOptions(input, state: &state).contains("opaque"))
@@ -117,6 +136,8 @@ import Testing
     }
 
     @Test(arguments: [("--cl", "ient-secret opaque", "--client-secret opaque"),
+                      ("--github.to", "ken opaque", "--token opaque"),
+                      ("--api.k", "ey opaque", "--api.key opaque"),
                       ("--device-co", "de opaque", "--device-code opaque"),
                       ("--access-k", "ey-secret opaque", "--access-key-secret opaque"),
                       ("cod", "e: ABCD-EFGH", "code: ABCD-EFGH"),
@@ -133,11 +154,11 @@ import Testing
         #expect(input.firstMatch(of: Redactor.patterns.partialURLAuthority) != nil)
     }
 
-    @Test(arguments: [" = ", " : ", "= ", ": ", "\t=\t", "=", ":"])
-    func spacedOptionAssignmentsConsumeTheValueNotTheDelimiter(_ separator: String) {
+    @Test(arguments: [" = ", " : ", "= ", ": ", "\t=\t", "=", ":"], ["--password", "--github.token", "--api.key"])
+    func spacedOptionAssignmentsConsumeTheValueNotTheDelimiter(_ separator: String, _ option: String) {
         var state = Redactor.StreamState()
-        let input = "run --password" + separator + "syntheticOpaque --verbose"
-        #expect(Redactor.redactSecretOptions(input, state: &state) == "run --password [redacted:secret] --verbose")
+        let input = "run " + option + separator + "syntheticOpaque --verbose"
+        #expect(Redactor.redactSecretOptions(input, state: &state) == "run " + option + " [redacted:secret] --verbose")
         #expect(!state.expectingSecretValue && state.quotedValue == nil)
     }
 

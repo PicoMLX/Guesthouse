@@ -46,7 +46,7 @@ import Testing
         #expect(prompt.contains(Redactor.patterns.codePromptOnly))
     }
 
-    @Test(arguments: ["abcdef", "abcDEF", "abc.def", "a"])
+    @Test(arguments: ["abcdef", "abcDEF", "abc.def", "a", "{ABC123}", "{abcdef}", "{ABC123"])
     func imperativePromptsAcceptLowercaseOpaqueCodes(_ value: String) throws {
         let match = try #require(("Enter the code " + value).firstMatch(of: Redactor.patterns.codePromptWithoutDelimiter))
         #expect(match.2 == value)

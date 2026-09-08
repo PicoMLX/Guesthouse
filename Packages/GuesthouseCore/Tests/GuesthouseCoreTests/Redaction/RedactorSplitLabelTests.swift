@@ -51,6 +51,7 @@ import Testing
     @Test func pendingTerminalPrefixesDoNotEmitAUsableDeviceCode() {
         let output = Redactor().redact(lines: ["AB12-CD34 is your co\u{1B}[31", "mde", "Finished"]).map(\.text)
         #expect(!output.joined().contains("AB12-CD34"))
+        #expect(!output.joined().contains("AB12") && !output.joined().contains("CD34"))
         #expect(output[2] == "Finished")
     }
 
@@ -143,7 +144,7 @@ import Testing
     ])
     func parameterizedAuthorizationOwnsEveryCommaContinuation(_ lines: [String]) {
         let output = Redactor().redact(lines: lines + ["status: ready"]).map(\.text)
-        #expect(!output.joined().contains("synthetic"))
+        #expect(!output.joined().contains("synthetic") && !output.joined().contains("Mufasa"))
         #expect(output[1] == "[redacted:authorization]" && output[2] == "[redacted:authorization]")
         #expect(output.last == "status: ready")
     }
