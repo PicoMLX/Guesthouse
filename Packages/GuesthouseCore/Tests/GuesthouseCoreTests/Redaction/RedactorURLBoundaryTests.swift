@@ -112,4 +112,3 @@ import Testing
         #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
     }
 }
-

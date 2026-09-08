@@ -61,6 +61,7 @@ import Testing
         let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
         #expect(output.contains("[redacted:"))
         #expect(!output.contains("dXNl") && !output.contains("first") && !output.contains("abcdefgh"))
+        #expect(!output.contains("sample"))
         #expect(state.expectingAuthorizationValue)
         #expect(state.authorizationValueIsOnTheNextLine)
         #expect(state.authorizationValueExplicitlyContinues)
@@ -69,7 +70,8 @@ import Testing
     @Test(arguments: [#"["--password", ""\"#, #"["--password", "first" \"#])
     func serializedQuotedFragmentsRetainTheirContinuationTail(_ input: String) {
         var state = Redactor.StreamState()
-        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output.contains("[redacted:secret]") && !output.contains("first"))
         #expect(state.expectingSecretValue && state.secretValueExplicitlyContinues)
     }
 
