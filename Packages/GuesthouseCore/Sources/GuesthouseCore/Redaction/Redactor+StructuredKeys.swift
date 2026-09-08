@@ -6,9 +6,12 @@ extension Redactor {
     /// Decode at most 1024 bytes and never retain decoded names or value bytes in state.
     static func normalizingStructuredCredentialKeys(in input: String) -> String {
         let strings = input.matches(of: #/"(?:[^"\\]|\\.)*"/#)
-        return input.replacing(#/((?:^|[{\[,])\s*)(\\*)("(?:[^"]|"(?!\s*[:=]))*"|"(?:[^":=]|"(?!\s*[:=]))*)(?=\s*[:=]|[ \t]*$)/#) { match in
+        return input.replacing(#/((?:^|[{\[,])\s*)(\\*)("(?:(?!\\*"\s*[:=])(?:[^"\\]|\\.))*\\*"|"(?:(?!\\*"\s*[:=])(?:[^"\\:=]|\\.))*\\*)(?=\s*[:=]|[ \t]*$)/#) { match in
             // A brace/comma inside a serialized value is not an outer field boundary.
-            guard !strings.contains(where: { $0.range.lowerBound < match.range.lowerBound && $0.range.contains(match.range.lowerBound) }) else { return String(match.0) }
+            guard !strings.contains(where: {
+                ($0.range.lowerBound < match.range.lowerBound && $0.range.contains(match.range.lowerBound))
+                    || ($0.range.lowerBound == match.range.lowerBound && $0.range.upperBound > match.range.upperBound)
+            }) else { return String(match.0) }
             let framing = String(match.2)
             var encoded = String(match.3)
             func key(_ name: String) -> String { String(match.1) + framing + "\"" + name + framing + "\"" }

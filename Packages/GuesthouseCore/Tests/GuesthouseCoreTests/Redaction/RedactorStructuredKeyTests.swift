@@ -53,6 +53,12 @@ import Testing
         #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == input)
     }
 
+    @Test(arguments: [#"["--password", \"#, #"["--password", opaque\"#,
+                      #"["--password", "first" \"#, #""\"{\\\"password\\\":\"""#])
+    func serializedArgumentsAndEncodedValuesAreNotFieldKeys(_ input: String) {
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == input)
+    }
+
     @Test(arguments: [
         (#"{"pass\u0077ord: syntheticOpaque}"#, #"{"secret": syntheticOpaque}"#),
         (#"{"pass\u0077ord"#, #"{"secret""#),
