@@ -2,6 +2,26 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: [("Enter the cod", "e ABCD-EFGH", "enter code ABCD-EFGH"),
+                      ("Enter the co", "de ABC123", "enter code ABC123"),
+                      ("Your code", " is opaque", "your code is opaque")])
+    func splitPromptsRetainOnlyTheirRecognizedInstruction(_ first: String, _ next: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == expected)
+    }
+
+    @Test(arguments: ["tokens", "passwords", "secrets", "api_keys", "clientSecrets", "private_keys"])
+    func pluralCredentialFieldsUseTheSharedVocabulary(_ label: String) {
+        #expect((label + ": opaque").firstMatch(of: Redactor.patterns.labeledSecret).map { String($0.3) } == "opaque")
+        #expect(Redactor.partialCredentialLabel(in: label) == label.lowercased())
+    }
+
+    @Test(arguments: ["https://user:part@", "url=//user:part@"])
+    func aTerminalAtSignCannotProveUserinfoIsComplete(_ input: String) {
+        #expect(input.firstMatch(of: Redactor.patterns.incompleteURLUserInfo) != nil)
+    }
+
     @Test(arguments: [("private k", "ey: opaque", "private key: opaque"),
                       ("request authoriz", "ation: opaque", "request authorization: opaque"),
                       ("secret access k", "ey: opaque", "secret access key: opaque")])
