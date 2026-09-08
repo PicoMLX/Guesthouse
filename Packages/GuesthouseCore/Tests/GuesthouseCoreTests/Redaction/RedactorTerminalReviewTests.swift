@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["The login code is ", "The login code was rejected; retry "])
+    func contextualDeviceCodesKeepIndependentBoundaries(_ context: String) {
+        let result = Redactor.renderings(of: context + "ghp_abcdefghijklmnopqrstuvwx\u{0}ABCD-EFGH")
+        #expect(result.spliced.contains(Redactor.splicedBoundary + "ABCD-EFGH"))
+    }
+
     @Test(arguments: ["ghp_syntheticSecond", "github_pat_syntheticSecond", "gho_syntheticSecond"])
     func adjacentGitHubTokensKeepIndependentOpeners(_ token: String) {
         let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}" + token)
