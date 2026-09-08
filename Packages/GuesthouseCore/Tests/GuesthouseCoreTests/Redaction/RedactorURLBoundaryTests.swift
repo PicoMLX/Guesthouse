@@ -47,7 +47,10 @@ import Testing
         let first = Redactor.applyPatterns(to: "URL (https://user:first(partial)", codeExpected: false, state: &state)
         #expect(!first.contains("first(partial"))
         #expect(Redactor.applyPatterns(to: "opaque@example.com", codeExpected: false, state: &state)
-                == "[redacted:userinfo]@example.com")
+                == "[redacted:userinfo]")
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "@real.example/path", codeExpected: false, state: &state)
+                == "[redacted:userinfo]@real.example/path")
     }
 
     @Test(arguments: [("\"", "\""), ("<", ">")], ["https://", "//", #"https:\/\/"#])
@@ -92,7 +95,10 @@ import Testing
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: "cloning https://user:", codeExpected: false, state: &state)
         #expect(Redactor.applyPatterns(to: "opaque@example.com", codeExpected: false, state: &state)
-                == "[redacted:userinfo]@example.com")
+                == "[redacted:userinfo]")
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "@real.example/path", codeExpected: false, state: &state)
+                == "[redacted:userinfo]@real.example/path")
     }
 
     @Test(arguments: ["/path", "?query=public", "#fragment"])
