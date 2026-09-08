@@ -19,7 +19,7 @@ extension Redactor {
     private static let sensitiveOptionPrefixes: Set<String> = {
         let words = ["password", "passphrase", "passwd", "secret", "token", "credential"].flatMap { [$0, $0 + "s"] }
             + ["api key", "private key", "secret key", "secret access key", "access key secret", "device code", "user code", "device codes", "user codes"]
-                .flatMap { name in ["", "-", "_"].map { name.replacingOccurrences(of: " ", with: $0) } }
+                .flatMap { name in ["", "-", "_", "."].map { name.replacingOccurrences(of: " ", with: $0) } }
         return Set(words.flatMap { word in (1..<word.count).map { String(word.prefix($0)) } })
     }()
 
@@ -30,7 +30,7 @@ extension Redactor {
             let word = keyword.lowercased()
             return verb.lowercased() + separator + word + (word == "code" || word == "codes" ? " " : "")
         }
-        if let option = text.firstMatch(of: #/(?:^|[\s\u{001F}"'\[({<:=\u{0060},;])(--?[A-Za-z0-9_-]*)[ \t]*$/#) {
+        if let option = text.firstMatch(of: #/(?:^|[\s\u{001F}"'\[({<:=\u{0060},;])(--?[A-Za-z0-9_.-]*)[ \t]*$/#) {
             let name = String(option.1).lowercased()
             guard name.wholeMatch(of: patterns.secretOptionOnly) == nil else { return nil }
             if name == "-" || name == "--" { return name }
@@ -42,7 +42,7 @@ extension Redactor {
             let tail = String(name.suffix(48))
             for start in tail.indices where tail[start].isLetter {
                 let suffix = String(tail[start...])
-                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" }) { return "--" + suffix }
+                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && $0 != "." }) { return "--" + suffix }
             }
             // The vendor is irrelevant; only the option-name boundary is needed.
             return "--"
@@ -66,16 +66,16 @@ extension Redactor {
         }).max(by: { $0.count < $1.count })
         // Keep bounded multiword names and ignore a completed label's quote wrapper.
         // No value has begun before the assignment delimiter; quote depth is not value state.
-        if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_ \t-]{0,47})(?:\\*["'])?\\*[ \t]*$/#) {
+        if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_. \t-]{0,47})(?:\\*["'])?\\*[ \t]*$/#) {
             let prefix = header.1.trimmingCharacters(in: .whitespaces).lowercased()
             // A whole scheme prefix is stronger evidence than an incidental field suffix.
             if authorizationSchemes.contains(where: { $0.hasPrefix(prefix) && $0 != prefix }) { return prefix }
             // Whole-field matching also starts after a vendor's separator. Retain the
             // longest recognized suffix at those same boundaries, never the vendor bytes.
-            for start in prefix.indices where start == prefix.startIndex || "-_ \t".contains(prefix[prefix.index(before: start)]) {
+            for start in prefix.indices where start == prefix.startIndex || "-_. \t".contains(prefix[prefix.index(before: start)]) {
                 let suffix = String(prefix[start...])
                 if authorizationSchemes.contains(where: { $0.hasPrefix(suffix) && $0 != suffix }) { return suffix }
-                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }) {
+                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && $0 != "." && !$0.isWhitespace }) {
                     return (providerPrefix?.count ?? 0) > suffix.count ? providerPrefix : suffix
                 }
             }
@@ -96,14 +96,14 @@ extension Redactor {
         // An unknown qualifier carries only an option boundary across more name fragments.
         // It must not inject synthetic dashes into ordinary visible diagnostics.
         if prefix == "--", partialCredentialLabel(in: combined) == "--",
-           combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil {
+           combined.wholeMatch(of: #/--?[A-Za-z0-9_.-]+[ \t]*/#) != nil {
             state.pendingCredentialLabel = "--"
             return nil
         }
         if partialCredentialLabel(in: combined).map({ successor in
             successor.hasPrefix(prefix) || (prefix.hasPrefix("-")
-                && combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil
-                && credentialFieldPrefixes.contains(combined.lowercased().filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }))
+                && combined.wholeMatch(of: #/--?[A-Za-z0-9_.-]+[ \t]*/#) != nil
+                && credentialFieldPrefixes.contains(combined.lowercased().filter { $0 != "-" && $0 != "_" && $0 != "." && !$0.isWhitespace }))
         }) == true
             || combined.prefixMatch(of: patterns.secretOption) != nil
             || combined.wholeMatch(of: patterns.secretOptionOnly) != nil
