@@ -49,6 +49,8 @@ struct Redactor: Sendable {
         var expectingDeviceCodeContinuation = false
         /// An authority with a password delimiter reached a physical boundary before its @.
         var expectingURLUserInfo = false
+        /// Only escape parity is retained, never URL credential bytes.
+        var urlHasTrailingEscape = false
         /// Missing authority slashes across physical records; no credential bytes are stored.
         var pendingURLSlashes = 0
         /// A bounded, structural option/cookie name split across physical records.
@@ -78,6 +80,7 @@ struct Redactor: Sendable {
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
         state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || scanned.expectingDeviceCodeContinuation
         state.expectingURLUserInfo = state.expectingURLUserInfo || scanned.expectingURLUserInfo
+        state.urlHasTrailingEscape = state.urlHasTrailingEscape || scanned.urlHasTrailingEscape
         let slashCounts = [state.pendingURLSlashes, scanned.pendingURLSlashes].filter { $0 > 0 }
         state.pendingURLSlashes = slashCounts.min() ?? 0
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
