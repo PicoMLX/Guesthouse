@@ -217,7 +217,7 @@ extension Redactor {
             text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
         }
         if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
-            state.pendingURLSlashes = partial.0.hasSuffix("/") ? 1 : 2
+            state.pendingURLSlashes = partial.0.reversed().drop(while: { $0 == "\\" }).first == "/" ? 1 : 2
         }
         return text.replacing(patterns.incompleteURLUserInfo) { match in
             if hasCompleteURLFrame(in: text, prefixEnd: match.1.endIndex) { return String(match.0) }
