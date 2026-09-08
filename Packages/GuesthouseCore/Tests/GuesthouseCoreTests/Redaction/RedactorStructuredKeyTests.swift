@@ -2,6 +2,29 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorStructuredKeyTests {
+    @Test(arguments: ["\r", "\n", "\r\n"])
+    func physicalTerminatorsInsideEncodedKeysFailClosed(_ terminator: String) {
+        let input = #"{"pass\u0077"# + terminator + #"word":"syntheticOpaque"}"#
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == #"{"secret":"syntheticOpaque"}"#)
+    }
+
+    @Test(arguments: [
+        (#""pass\u0077ord":"syntheticOpaque""#, #""password":"syntheticOpaque""#),
+        (#"\"pass\u0077ord\":\"syntheticOpaque\""#, #"\"password\":\"syntheticOpaque\""#),
+        (#"{"pass\u0077ord"="syntheticOpaque"}"#, #"{"password"="syntheticOpaque"}"#)
+    ])
+    func encodedKeyFramingSharesTheDownstreamFieldDelimiters(_ input: String, _ expected: String) {
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == expected)
+    }
+
+    @Test(arguments: [1, 2, 16, 256])
+    func escapedKeyFramesPreserveTheirOriginalDepth(_ depth: Int) {
+        let quote = String(repeating: "\\", count: depth) + "\""
+        let input = quote + #"pass\u0077ord"# + quote + ":" + quote + "syntheticOpaque" + quote
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input)
+            == quote + "password" + quote + ":" + quote + "syntheticOpaque" + quote)
+    }
+
     @Test(arguments: [
         (#"{"pass\u0077ord""#, #"{"password""#),
         ("{\r\n  " + #""pass\u0077ord": "syntheticOpaque""# + "\r\n}", "{\r\n  " + #""password": "syntheticOpaque""# + "\r\n}"),
