@@ -18,16 +18,25 @@ extension Redactor {
             return "\"secret\":" + input[input.index(after: delimiter)...]
         }
         let strings = input.matches(of: #/"(?:[^"\\]|\\.)*"/#)
+        var stringIndex = strings.startIndex
         return input.replacing(#/((?:^|[{\[,])\s*)(\\*)("(?:(?!\\*"\s*[:=])(?:[^"\\]|\\.))*\\*"|"(?:(?!\\*"\s*[:=])(?:[^"\\:=]|\\.))*\\*)(?=\s*[:=]|[ \t]*$)/#) { match in
+            guard match.3.contains("\\") else { return String(match.0) }
+            // Both scans visit monotonically increasing ranges. Advance each string
+            // at most once instead of rescanning every earlier value for every field.
+            while stringIndex < strings.endIndex, strings[stringIndex].range.upperBound <= match.range.lowerBound {
+                strings.formIndex(after: &stringIndex)
+            }
             // A brace/comma inside a serialized value is not an outer field boundary.
-            guard !strings.contains(where: {
-                ($0.range.lowerBound < match.range.lowerBound && $0.range.contains(match.range.lowerBound))
-                    || ($0.range.lowerBound == match.range.lowerBound && $0.range.upperBound > match.range.upperBound)
-            }) else { return String(match.0) }
+            if stringIndex < strings.endIndex {
+                let range = strings[stringIndex].range
+                if (range.lowerBound < match.range.lowerBound && range.contains(match.range.lowerBound))
+                    || (range.lowerBound == match.range.lowerBound && range.upperBound > match.range.upperBound) {
+                    return String(match.0)
+                }
+            }
             let framing = String(match.2)
             var encoded = String(match.3)
             func key(_ name: String) -> String { String(match.1) + framing + "\"" + name + framing + "\"" }
-            guard encoded.contains("\\") else { return String(match.0) }
             if encoded.last != "\"", input[match.range.upperBound...].allSatisfy(\.isWhitespace) {
                 state.pendingEncodedCredentialKey = true
             }
