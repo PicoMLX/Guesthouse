@@ -85,11 +85,12 @@ import Testing
         #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("opaqueCredential"))
     }
 
-    @Test(arguments: ["Enter the code ABCD EFGH", "Paste the code 1234 5678"])
-    func groupedImperativeCodesDoNotReleaseTheirFinalGroup(_ input: String) {
+    @Test(arguments: [("Enter the code ABCD EFGH", "Enter the code [redacted:device-code]"),
+                      ("Paste the code 1234 5678", "Paste the code [redacted:device-code]")])
+    func groupedImperativeCodesDoNotReleaseTheirFinalGroup(_ input: String, _ expected: String) {
         var state = Redactor.StreamState()
         let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
-        #expect(!output.contains("EFGH") && !output.contains("5678"))
+        #expect(output == expected)
     }
 
     @Test(arguments: [("Basic", false), ("Basic \\", true), (" basic \t\\ ", true)])
@@ -116,13 +117,15 @@ import Testing
         #expect(!state.secretValueExplicitlyContinues)
     }
 
-    @Test(arguments: ["password:", "Authorization:", "device_code:", "Your code is:"],
+    @Test(arguments: [("password:", "password: [redacted:secret]"),
+                      ("Authorization:", "Authorization: [redacted:authorization]"),
+                      ("device_code:", "device_code: [redacted:device-code]"),
+                      ("Your code is:", "Your code is: [redacted:device-code]")],
           [#"""opaqueCredential"#, #"'first'opaqueCredential"#, #"""opaqueCredential"unfinished"#])
-    func adjacentQuotedFragmentsRemainOneSensitiveValue(label: String, value: String) {
+    func adjacentQuotedFragmentsRemainOneSensitiveValue(label: (String, String), value: String) {
         var state = Redactor.StreamState()
-        let output = Redactor.applyPatterns(to: label + " " + value, codeExpected: false, state: &state)
-        #expect(!output.contains("opaqueCredential"))
-        #expect(!output.contains("unfinished"))
+        let output = Redactor.applyPatterns(to: label.0 + " " + value, codeExpected: false, state: &state)
+        #expect(output == label.1)
     }
 
     @Test(arguments: ["Your code is", "Your one-time code is", "Your verification code is"],
