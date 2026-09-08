@@ -39,7 +39,7 @@ extension Redactor {
         /// name. Basic is recognized only when the Base64 decodes to a user/password separator;
         /// Digest must start with an authentication parameter assignment, not ordinary prose.
         private static var basicValue: Regex<(Substring, Substring, Substring)> {
-            #/(basic[ \t]+)([A-Za-z0-9+\/]{2,}={0,2})(?![A-Za-z0-9+\/=])/#
+            #/(basic[ \t]+)([A-Za-z0-9+\/]+={0,2})(?![A-Za-z0-9+\/=])/#
         }
         let basicCredentialSpan = basicValue.ignoresCase()
         let basicAuthorization = Regex {
@@ -60,6 +60,7 @@ extension Redactor {
             #/(?:ntlm|negotiate)[ \t]+[A-Za-z0-9+\/_-]{8,}={0,2}|aws4-hmac-sha256[ \t]+(?=(?:credential|signedheaders|signature)\s*=)[^\r\n]+/#
         }
         let specializedCredentialSpan = specializedValue.ignoresCase()
+        let partialIntegratedAuthorization = #/(^|[^A-Za-z0-9])((?:ntlm|negotiate))[ \t]+[A-Za-z0-9+\/_-]{1,7}[ \t]*$/#.ignoresCase()
         let specializedAuthorization = Regex {
             #/(^|[^A-Za-z0-9])/#
             specializedValue
@@ -73,9 +74,9 @@ extension Redactor {
         /// than the concatenation. The API-key rule below keeps its boundary, because `sk-` is
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
-        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*/#
+        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*|(?:ghp|gho|ghu|ghs|ghr|github_pat)$/#
         /// At line end a boundary-delimited bare `sk-` conservatively arms wrapped-key redaction.
-        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
+        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)(?:_|$)|github_pat(?:_|$)|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
         let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
@@ -107,7 +108,7 @@ extension Redactor {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
-        let partialURLAuthority = #/(?:^|[\s"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|\\*\/)$/#
+        let partialURLAuthority = #/(?:^|[\s"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/(?!\[)[^\s\/?#@]*$/#
@@ -174,7 +175,7 @@ extension Redactor {
         let serializedSecretOption = Regex {
             #/(?:\\*["'])--?[A-Za-z0-9_-]*/#
             credentialOptionName
-            #/(?:\\*["'])[ \t]*,[ \t]*/#
+            #/(?:\\*["'])[ \t]*(?:,[ \t]*|$)/#
         }.ignoresCase()
         /// The explicit code fields of an OAuth device flow. Their values are opaque and their
         /// shape is the provider's choice, so the whole value goes, not just a `XXXX-XXXX` one,
@@ -219,13 +220,14 @@ extension Redactor {
         /// word after the label would be a code.
         let codePromptWithoutDelimiter = Regex {
             #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))/#
-            #/\s+/#
+            #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
             TryCapture {
                 #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
             } transform: { value -> Substring? in
                 // Providers may group a six-digit code as 123 456. Validate the total
-                // candidate, not each group; short diagnostic fragments remain visible.
-                value.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count == 4 ? value : nil
+                // candidate, not each group. An eligible short EOL fragment may wrap.
+                let count = value.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count
+                return count == 4 || (count > 0 && value.base[value.endIndex...].allSatisfy(\.isWhitespace)) ? value : nil
             }
         }
         /// Present-tense declarations explicitly supply the code. Lowercase, short, and
