@@ -77,6 +77,7 @@ import Testing
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
         #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
+        #expect(state.quotedValue == nil)
     }
 
     @Test(arguments: [#"[\"--password\", \"opaqueCredential\"]"#, #"[\'--password\', \'opaqueCredential\']"#])
