@@ -1,6 +1,7 @@
 import Foundation
 
 extension Redactor {
+    private static let imperativeVerbs = ["enter", "type", "paste", "copy", "input"]
     private static let credentialFieldPrefixes: Set<String> = {
         let secrets = ["password", "passphrase", "passwd", "secret", "token", "credential", "api key", "private key", "secret key", "secret access key", "access key secret"]
             .flatMap { [$0, $0 + "s"] }
@@ -8,7 +9,7 @@ extension Redactor {
         let qualifiers = ["your", "one time", "verification", "activation", "confirmation", "pairing", "login", "security", "authorization", "auth", "access", "user", "device"]
         let names = ["authorization", "proxy authorization", "request authorization", "cookie", "cookies", "set cookie", "set cookies", "request cookie", "request cookies", "device code", "user code", "device codes", "user codes", "code", "codes"]
             + qualifiers.flatMap { [$0 + " code", $0 + " codes"] }
-            + secrets + modifiers.flatMap { modifier in secrets.map { modifier + $0 } }
+            + imperativeVerbs + secrets + modifiers.flatMap { modifier in secrets.map { modifier + $0 } }
         // Canonical comparison accepts camel case and mixed separators without enumerating
         // every separator combination. The retained prefix still keeps its original spelling.
         let fields = names.map { $0.replacingOccurrences(of: " ", with: "") }
@@ -70,6 +71,7 @@ extension Redactor {
         // No value has begun before the assignment delimiter; quote depth is not value state.
         if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_. \t-]{0,47})(?:\\*["'])?\\*[ \t]*$/#) {
             let prefix = header.1.trimmingCharacters(in: .whitespaces).lowercased()
+            if imperativeVerbs.contains(prefix) { return prefix + " " }
             // A whole scheme prefix is stronger evidence than an incidental field suffix.
             if authorizationSchemes.contains(where: { $0.hasPrefix(prefix) && $0 != prefix }) { return prefix }
             // Whole-field matching also starts after a vendor's separator. Retain the
@@ -90,10 +92,16 @@ extension Redactor {
     /// The physical API supplies normalized joined/spliced readings; preserve their
     /// internal boundary markers in the restored output rather than replaying raw controls.
     static func restoringCredentialLabel(in line: String, state: inout StreamState) -> String? {
-        guard let prefix = state.pendingCredentialLabel else { return nil }
+        guard var prefix = state.pendingCredentialLabel else { return nil }
         let visible = stripTerminalEscapes(line).drop(while: \.isWhitespace)
         guard !visible.isEmpty else { return nil }
         state.pendingCredentialLabel = nil
+        // The prompt helper adds a separator after "code". It is still a singular
+        // stem until the next record rules out the bounded plural continuation.
+        if prefix.hasSuffix("code "), visible.first?.lowercased() == "s",
+           visible.dropFirst().first.map({ $0.isWhitespace || ":=\"'\\".contains($0) }) ?? true {
+            prefix.removeLast()
+        }
         let combined = prefix + visible
         // An unknown qualifier carries only an option boundary across more name fragments.
         // It must not inject synthetic dashes into ordinary visible diagnostics.
