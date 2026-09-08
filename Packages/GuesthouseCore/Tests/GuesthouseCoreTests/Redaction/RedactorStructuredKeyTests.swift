@@ -3,6 +3,13 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorStructuredKeyTests {
+    @Test(arguments: [1, 128, 2_048])
+    func transportEscapedRecordsNormalizeWithoutRescanningUnclosedQuotes(_ count: Int) {
+        let input = Array(repeating: #"\"pass\u0077ord\":\"opaque\""#, count: count).joined(separator: ", ")
+        let expected = Array(repeating: #"\"password\":\"opaque\""#, count: count).joined(separator: ", ")
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == expected)
+    }
+
     @Test(arguments: [
         (#""pass\u0077ord:"syntheticOpaque""#, #""secret":"syntheticOpaque""#),
         (#"{'pass\u0077ord':'syntheticOpaque'}"#, #"{'password':'syntheticOpaque'}"#),
