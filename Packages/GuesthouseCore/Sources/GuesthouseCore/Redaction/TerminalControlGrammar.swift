@@ -67,8 +67,8 @@ enum TerminalControlGrammar {
         return prepare(line, pending: &pending, commandSuffix: &commandSuffix)
     }
 
-    /// Evidence callers retain at most 64 parameter/intermediate scalars. Opaque string
-    /// payloads are never retained. The grammar-only overload still needs just its class.
+    /// A 65th parameter/intermediate scalar signals overflow to evidence callers; they
+    /// quarantine before trusting the truncated body. Opaque payloads are never retained.
     static func prepare(_ line: String, pending: inout Pending?, commandSuffix: inout String) -> String {
         // A physical record may still carry its framing. Preserve it separately so it
         // cannot make an unfinished control body look like an ordinary field value.
@@ -111,8 +111,8 @@ enum TerminalControlGrammar {
         switch pending {
         case .csi, .escape:
             // Introducers and ignored controls are outside the printable command body.
-            let body = last.0.unicodeScalars.filter { (0x20...0x3F).contains($0.value) }
-            commandSuffix = String(String.UnicodeScalarView(body.suffix(64)))
+            let body = last.0.unicodeScalars.lazy.filter { (0x20...0x3F).contains($0.value) }
+            commandSuffix = String(String.UnicodeScalarView(body.prefix(65)))
         case .osc, .other, nil: break
         }
         return (pending == nil ? text : String(text[..<last.range.lowerBound])) + framing

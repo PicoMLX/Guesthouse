@@ -31,6 +31,37 @@ extension Redactor {
         return closingQuoteEnd(in: afterSlashes.dropFirst(), for: quoted) == nil ? quoted : nil
     }
 
+    /// The option may live in a quoted command inside a diagnostic container.
+    /// Retain nested enclosures so the innermost open quote owns the option's end.
+    private static func enclosingCommandQuote(in prefix: Substring) -> StreamState.QuotedValue? {
+        var cursor = prefix.startIndex
+        var quotes: [StreamState.QuotedValue] = []
+        while cursor < prefix.endIndex {
+            let start = cursor
+            var slashes = 0
+            while cursor < prefix.endIndex, prefix[cursor] == "\\" {
+                slashes += 1
+                prefix.formIndex(after: &cursor)
+            }
+            guard cursor < prefix.endIndex else { break }
+            let delimiter = prefix[cursor]
+            let before = start == prefix.startIndex ? nil : prefix[prefix.index(before: start)]
+            prefix.formIndex(after: &cursor)
+            if let open = quotes.last, delimiter == open.delimiter,
+               quoteCloses(depth: open.escapeDepth, slashes: slashes) {
+                quotes.removeLast()
+                continue
+            }
+            guard delimiter == "\"" || delimiter == "'",
+                  before == nil || before?.isWhitespace == true
+                    || before.map({ "=:([{,".contains($0) }) == true else { continue }
+            let quoted = StreamState.QuotedValue(delimiter: delimiter,
+                escapeDepth: slashes.isMultiple(of: 2) ? 0 : slashes, kind: "secret")
+            quotes.append(quoted)
+        }
+        return quotes.last
+    }
+
     static func closingQuoteEnd(in value: Substring, for quoted: StreamState.QuotedValue) -> String.Index? {
         var slashes = 0
         for index in value.indices {
@@ -72,7 +103,10 @@ extension Redactor {
                 state.expectingSecretValue = state.expectingSecretValue || bareOption
                 continue
             }
-            let argument = secretArgument(in: text, from: match.range.upperBound)
+            // Diagnostic wrappers can escape apostrophes; literal shell-single-quote
+            // semantics apply only to an argument's own quotes, not to this container.
+            let outer = enclosingCommandQuote(in: text[..<match.2.startIndex])
+            let argument = secretArgument(in: text, from: match.range.upperBound, outerQuote: outer)
             state.quotedValue = state.quotedValue ?? argument.quoted
             state.expectingSecretValue = state.expectingSecretValue || argument.continuesLine
             state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || argument.continuesLine
@@ -85,7 +119,8 @@ extension Redactor {
         return result + text[cursor...]
     }
 
-    static func secretArgument(in text: String, from start: String.Index) -> (end: String.Index, quoted: StreamState.QuotedValue?, continuesLine: Bool) {
+    static func secretArgument(in text: String, from start: String.Index,
+                               outerQuote: StreamState.QuotedValue? = nil) -> (end: String.Index, quoted: StreamState.QuotedValue?, continuesLine: Bool) {
         var cursor = start
         var quote: Character?
         var quoteEscapeDepth = 0
@@ -101,6 +136,11 @@ extension Redactor {
             guard cursor < text.endIndex else {
                 continuesLine = !escapeDepth.isMultiple(of: 2)
                 break
+            }
+            // A surrounding command's closing quote is a boundary, not a new argument quote.
+            if quote == nil, let outerQuote, text[cursor] == outerQuote.delimiter,
+               outerQuote.singleQuotesAreLiteral || quoteCloses(depth: outerQuote.escapeDepth, slashes: escapeDepth) {
+                return (escapeStart, nil, false)
             }
             if let delimiter = quote {
                 // Unlike serialized diagnostic strings, shell single quotes have no escapes.
@@ -124,7 +164,7 @@ extension Redactor {
         return (text.endIndex, quote.map {
             .init(delimiter: $0, escapeDepth: quoteEscapeDepth, kind: "secret",
                   singleQuotesAreLiteral: $0 == "'" && quoteEscapeDepth == 0)
-        }, continuesLine)
+        } ?? outerQuote, continuesLine)
     }
 
     static func redactSerializedOptions(_ text: String, state: inout StreamState) -> String {
