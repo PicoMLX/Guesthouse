@@ -51,6 +51,9 @@ extension Redactor {
            !text.matches(of: closedString).contains(where: { $0.range.contains(partial.range.lowerBound) }),
            partial.0.contains(#"\u"#) || partial.0.hasSuffix("\\")
             || (partial.0.dropFirst().wholeMatch(of: #/[A-Za-z][A-Za-z0-9+.-]*:?/#) != nil
+                && (partial.0.hasSuffix(":")
+                    || ["http", "https", "ssh", "git", "ftp", "ftps", "ws", "wss"].contains(partial.0.dropFirst().lowercased())
+                    || text[..<partial.range.lowerBound].contains(#/(?:^|[^A-Za-z0-9])(?i:url|uri)["']?[ \t]*[:=][ \t]*$/#))
                 && text[..<partial.range.lowerBound].contains(#/(?:^|[:=])[ \t]*$/#)) {
             // Before an escape completes, even a URI's scheme/colon can be hidden.
             // Quarantine incomplete encoded strings; only a closing quote proves an end.
