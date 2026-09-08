@@ -41,8 +41,9 @@ extension Redactor {
         // A Unicode escape can hide every authority delimiter. Until this quoted
         // URL closes, emit a marker per record and retain only escape parity.
         if let partial = text.firstMatch(of: #/"(?:[^"\\\r\n]|\\[^\r\n])*\\?$/#),
-           partial.0.contains(#"\u"#),
-           partial.0.contains(#/[A-Za-z][A-Za-z0-9+.-]*(?::|\\u003[aA])|\\u002[fF]/#) {
+           partial.0.contains(#"\u"#) || partial.0.hasSuffix("\\") {
+            // Before an escape completes, even a URI's scheme/colon can be hidden.
+            // Quarantine incomplete encoded strings; only a closing quote proves an end.
             state.pendingEncodedURLString = true
             state.encodedURLHasTrailingEscape = !partial.0.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
             text = String(text[..<partial.range.lowerBound]) + marker("encoded-value")
