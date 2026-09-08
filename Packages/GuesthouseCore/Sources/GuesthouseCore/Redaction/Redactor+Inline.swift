@@ -11,7 +11,10 @@ extension Redactor {
 
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState,
                               prepareQuotedValues: Bool = true) -> String {
-        let input = normalizingStructuredCredentialKeys(in: input)
+        let keyedInput = normalizingStructuredCredentialKeys(in: input, state: &state)
+        // Decode URL structure before generic quoted-value protection hides the
+        // outer string behind a placeholder. Each decoder retains only framing bits.
+        let input = redactEncodedURLStrings(keyedInput, state: &state)
         let p = patterns
         state.pendingCredentialLabel = partialCredentialLabel(in: input) ?? state.pendingCredentialLabel
         let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
@@ -28,7 +31,7 @@ extension Redactor {
             ? applyPatterns(to: protected.text, codeExpected: codeExpected, state: &originalURLContext, prepareQuotedValues: false)
             : protected.text
         defer { mergePendingContexts(from: originalURLContext, into: &state) }
-        var text = redactURLContinuations(original, state: &state)
+        var text = redactURLContinuations(original, state: &state, decodeStrings: false)
         // Continuation state uses the original field, never its replacement marker.
         text = text.replacing(p.authorizationHeader) { match in
             let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
