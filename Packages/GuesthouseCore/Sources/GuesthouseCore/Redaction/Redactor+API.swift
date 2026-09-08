@@ -107,7 +107,8 @@ extension Redactor {
         }
         let incompleteJWT = Self.incompleteJWTStartAtLineEnd(in: stripped.joined) != nil
             || Self.incompleteJWTStartAtLineEnd(in: stripped.spliced) != nil
-        let tokenAtLineEnd = incompleteJWT ? "jwt" : stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+        let tokenAtLineEnd = incompleteJWT ? "jwt" : (stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+            ?? stripped.spliced.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd))
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
         if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
             state.wrappedTokenKind = nil
