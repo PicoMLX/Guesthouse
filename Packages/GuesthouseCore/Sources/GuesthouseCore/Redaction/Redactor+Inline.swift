@@ -158,6 +158,7 @@ extension Redactor {
 
     private static func retainDeviceCodeContext(_ value: Substring, tail: Substring, state: inout StreamState) {
         let explicit = fieldExplicitlyContinues(value, tail: tail)
+            || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
         state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let frames: [Character: Character] = ["[": "]", "(": ")", "<": ">", "`": "`"]
