@@ -40,15 +40,18 @@ extension Redactor {
             // The vendor is irrelevant; only the option-name boundary is needed.
             if name.hasSuffix("-") || name.hasSuffix("_") { return "--" }
         }
-        if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_-]{0,47})[ \t]*$/#) {
-            let prefix = String(header.1).lowercased()
+        // Keep bounded multiword names and ignore a completed label's quote wrapper.
+        // No value has begun before the assignment delimiter; quote depth is not value state.
+        if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_ \t-]{0,47})(?:\\*["'])?\\*[ \t]*$/#) {
+            let prefix = header.1.trimmingCharacters(in: .whitespaces).lowercased()
             // A whole scheme prefix is stronger evidence than an incidental field suffix.
             if authorizationSchemes.contains(where: { $0.hasPrefix(prefix) && $0 != prefix }) { return prefix }
             // Whole-field matching also starts after a vendor's separator. Retain the
             // longest recognized suffix at those same boundaries, never the vendor bytes.
-            for start in prefix.indices where start == prefix.startIndex || "-_".contains(prefix[prefix.index(before: start)]) {
+            for start in prefix.indices where start == prefix.startIndex || "-_ \t".contains(prefix[prefix.index(before: start)]) {
                 let suffix = String(prefix[start...])
-                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" }) { return suffix }
+                if authorizationSchemes.contains(where: { $0.hasPrefix(suffix) && $0 != suffix }) { return suffix }
+                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }) { return suffix }
             }
         }
         let tail = String(text.suffix(11))
@@ -74,7 +77,8 @@ extension Redactor {
         let combined = prefix + visible
         if partialCredentialLabel(in: combined).map({ successor in
             successor.hasPrefix(prefix) || (prefix.hasPrefix("-")
-                && combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil)
+                && combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil
+                && credentialFieldPrefixes.contains(combined.lowercased().filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }))
         }) == true
             || combined.prefixMatch(of: patterns.secretOption) != nil
             || combined.wholeMatch(of: patterns.secretOptionOnly) != nil
