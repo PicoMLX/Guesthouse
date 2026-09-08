@@ -51,6 +51,8 @@ struct Redactor: Sendable {
         var expectingURLUserInfo = false
         /// Missing authority slashes across physical records; no credential bytes are stored.
         var pendingURLSlashes = 0
+        /// A bounded, structural option/cookie name split across physical records.
+        var pendingCredentialLabel: String?
         /// A distinctive token prefix reached a line boundary; payload may continue after it.
         var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
@@ -66,6 +68,7 @@ struct Redactor: Sendable {
     static func marker(_ kind: String) -> String { "[redacted:\(kind)]" }
 
     static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
+        state.pendingCredentialLabel = state.pendingCredentialLabel ?? scanned.pendingCredentialLabel
         state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
         state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
         state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || scanned.authorizationValueExplicitlyContinues

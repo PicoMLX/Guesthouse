@@ -2,6 +2,44 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: [("--pass", "word syntheticOpaque"), ("Set-Coo", "kie: session=syntheticOpaque")])
+    func restoredLabelsExposeTheCompleteCredentialToInlineMatching(_ first: String, _ second: String) throws {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: first, codeExpected: false, state: &state)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: second, state: &state))
+        #expect(state.pendingCredentialLabel == nil)
+        #expect(!Redactor.applyPatterns(to: restored, codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
+    @Test(arguments: [#""AB""#, #""""#, "'a'", #"'AB'"#])
+    func completedQuotedCodesDoNotAwaitAnotherValue(_ value: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: "Enter the code " + value, codeExpected: false, state: &state)
+        #expect(!state.expectingDeviceCode && !state.expectingDeviceCodeContinuation && state.quotedValue == nil)
+    }
+
+    @Test(arguments: [("--pass", "--pass"), ("run --github-to", "--to"), ("--api-", "--api-"), ("Set-Coo", "set-coo"), ("Co", "co")])
+    func pendingLabelStateContainsOnlyBoundedStructure(_ input: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(state.pendingCredentialLabel == expected)
+        #expect(Redactor.partialCredentialLabel(in: "--" + String(repeating: "vendor", count: 10_000) + "-pass") == "--pass")
+    }
+
+    @Test(arguments: [#"Digest username="Mufasa","#, "AWS4-HMAC-SHA256 Credential=syntheticFirst,"])
+    func parameterCommasArmAnUnindentedAuthorizationValue(_ input: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: [#""ABC123""#, "'ABC123'", "[ABC123]", "(ABC123)", "<ABC123>"])
+    func framedDelimiterlessCodesRemainOpaque(_ value: String) {
+        var state = Redactor.StreamState()
+        let result = Redactor.applyPatterns(to: "Enter the code " + value + " at the URL shown", codeExpected: false, state: &state)
+        #expect(result == "Enter the code [redacted:device-code] at the URL shown")
+    }
+
     @Test(arguments: ["Digest user", "AWS4-HMAC-SHA256 Cred"])
     func partialParameterNamesArmAuthorization(_ input: String) {
         var state = Redactor.StreamState()
