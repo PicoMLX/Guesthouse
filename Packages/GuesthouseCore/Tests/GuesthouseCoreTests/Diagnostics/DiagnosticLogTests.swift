@@ -127,4 +127,22 @@ struct DiagnosticLogTests {
         ].joined(separator: "\n")
         #expect(log.text == expected)
     }
+
+    @Test(arguments: [
+        (DiagnosticEvent.Operation.downloadGuestImage, "Download macOS image: The downloaded artifact failed verification."),
+        (.downloadRuntime, "Download runtime: The downloaded artifact failed verification.")
+    ])
+    func failedDownloadsHaveArtifactSpecificRecovery(_ example: (DiagnosticEvent.Operation, String)) throws {
+        let event = DiagnosticEvent(operation: example.0, outcome: .failed(.verificationFailed), operationID: Self.operationID)
+        #expect(event.message == example.1)
+        #expect(event.recoveryMessage == "Use Repair to download a verified replacement from the trusted source. Preserve the existing development Mac and do not bypass verification.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
+
+    @Test(arguments: [DiagnosticEvent.Operation.downloadGuestImage, .downloadRuntime],
+          [DiagnosticFailure.timedOut, .processFailed, .outcomeUnknown])
+    func incompleteDownloadsDoNotAssumeAnInstalledRuntime(_ operation: DiagnosticEvent.Operation, _ failure: DiagnosticFailure) {
+        let event = DiagnosticEvent(operation: operation, outcome: .failed(failure), operationID: Self.operationID)
+        #expect(event.recoveryMessage == "Open Repair and inspect the download's current state before resuming it.")
+    }
 }

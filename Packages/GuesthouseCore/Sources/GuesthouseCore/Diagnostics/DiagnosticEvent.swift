@@ -86,7 +86,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
         case .canceled: detail = "Cancellation confirmed; partial changes may remain."
-        case .failed(let failure): detail = failure.message
+        case .failed(let failure):
+            detail = failure == .verificationFailed && isDownload
+                ? "The downloaded artifact failed verification." : failure.message
         }
         return operation.title + ": " + detail
             + (exitStatus.map { " Exit status: \($0)." } ?? "")
@@ -102,15 +104,22 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         }
     }
 
+    private var isDownload: Bool { operation == .downloadRuntime || operation == .downloadGuestImage }
+
     private func recovery(for failure: DiagnosticFailure) -> String {
+        if failure == .verificationFailed, isDownload {
+            return "Use Repair to download a verified replacement from the trusted source. Preserve the existing development Mac and do not bypass verification."
+        }
         guard [.timedOut, .processFailed, .outcomeUnknown].contains(failure) else {
             return failure.recoveryMessage
         }
         switch operation {
         case .preflight:
             return "Run Check this Mac again and review the host requirements in Settings."
-        case .verifyRuntime, .downloadRuntime, .downloadGuestImage:
+        case .verifyRuntime:
             return "Open Repair and inspect the runtime installation before trying again."
+        case .downloadRuntime, .downloadGuestImage:
+            return "Open Repair and inspect the download's current state before resuming it."
         case .exportDiagnostics:
             return "Check the selected export location and available disk space before exporting again."
         case .codexSignIn, .githubSignIn, .codexSignOut, .githubSignOut:
