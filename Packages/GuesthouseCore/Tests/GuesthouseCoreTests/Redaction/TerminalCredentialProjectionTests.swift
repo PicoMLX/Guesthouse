@@ -193,7 +193,7 @@ import Testing
     @Test func priorPrefixEvidenceProjectsOntoOnlyTheCurrentRecord() throws {
         let input = "\u{1B}[31k-abcdefghijklmnop"
         let joined = TerminalControlGrammar.normalize(input)
-        let span = try #require(Redactor.recoveredCredentialRanges(in: input, joined: joined, priorPrefixes: ["s"]).ranges.first)
+        let span = try #require(Redactor.recoveredCredentialRanges(in: input, joined: joined, priorPrefixes: [.init(text: "s")]).ranges.first)
         #expect(span.kind == "api-key")
         #expect(span.range == 0..<joined.utf8.count)
     }

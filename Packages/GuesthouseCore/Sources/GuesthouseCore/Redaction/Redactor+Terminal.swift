@@ -49,7 +49,7 @@ extension Redactor {
     /// Joined text repairs interrupted labels; spliced text preserves control-supplied token
     /// boundaries and conceals recovered token spans. Scan-only contexts retain restored field
     /// evidence for the state-aware caller. Ordinary lines have identical visible readings.
-    static func renderings(of text: String, priorPrefixes: [String] = []) -> (joined: String, spliced: String, contexts: [String]) {
+    static func renderings(of text: String, priorPrefixes: [TerminalControlEvidence.Prefix] = []) -> (joined: String, spliced: String, contexts: [String]) {
         if priorPrefixes.isEmpty, text.firstMatch(of: patterns.terminalEscape) == nil { return (text, text, []) }
         func isTokenCharacter(_ character: Character) -> Bool {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
@@ -96,10 +96,14 @@ extension Redactor {
             return lower..<upper
         }
         var ordinaryRanges = tokenRanges
+        var contexts = recovery.contexts
         // A JOSE segment can spell a field/prompt name. Its marker must not hide that name
         // while leaving the independently recognized value outside the recovered token.
         ordinaryRanges += joined.matches(of: patterns.authorizationHeader).map(\.range)
         ordinaryRanges += joined.matches(of: patterns.labeledSecret).map(\.range)
+        ordinaryRanges += joined.matches(of: patterns.secretLabelOnly).map(\.range)
+        ordinaryRanges += joined.matches(of: patterns.secretOptionOnly).map(\.range)
+        ordinaryRanges += joined.matches(of: patterns.codePromptOnly).map(\.range)
         ordinaryRanges += joined.matches(of: patterns.codeField).map(\.range)
         ordinaryRanges += joined.matches(of: patterns.codePrompt).map(\.range)
         ordinaryRanges += joined.matches(of: patterns.codePromptWithoutDelimiter).map(\.range)
@@ -111,6 +115,11 @@ extension Redactor {
             let end = tail.range(of: "-----END \(begin.1)-----")?.upperBound ?? joined.endIndex
             return begin.range.lowerBound..<end
         }
+        // Markers can erase an ordinary label just as surely as a recovered one. Preserve
+        // its unmasked scan-only context before expansion, including bare next-record labels.
+        if ordinaryRanges.dropFirst(tokenRanges.count).contains(where: { range in
+            recovered.contains { $0.range.overlaps(byteRange(range)) }
+        }) { contexts.append(joined) }
         recovered = expandingRecoveredRanges(recovered, through: ordinaryRanges.map(byteRange))
         // Removing a contextual word inside a recovered token also removes the reason
         // the later scanner would conceal independent code-shaped values on this record.
@@ -180,6 +189,6 @@ extension Redactor {
             redacted += marker(span.kind)
             scanned = upper
         }
-        return (joined, redacted + spliced[scanned...], recovery.contexts)
+        return (joined, redacted + spliced[scanned...], contexts)
     }
 }
