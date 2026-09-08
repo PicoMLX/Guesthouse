@@ -4,7 +4,7 @@ extension Redactor {
     private static let credentialFieldPrefixes: Set<String> = {
         let secrets = ["password", "passphrase", "passwd", "secret", "token", "credential", "credentials", "api key", "private key", "secret key", "secret access key", "access key secret"]
         let modifiers = ["access", "refresh", "auth", "client", "app", "session", "user", "bearer", "private", "shared", "signing", "master", "id", "current", "new", "old", "previous", "confirm", "confirmation"]
-        let names = ["authorization", "proxy authorization", "request authorization", "cookie", "cookies", "set cookie", "set cookies", "request cookie", "request cookies", "device code", "user code", "device codes", "user codes"]
+        let names = ["authorization", "proxy authorization", "request authorization", "cookie", "cookies", "set cookie", "set cookies", "request cookie", "request cookies", "device code", "user code", "device codes", "user codes", "code", "codes"]
             + secrets + modifiers.flatMap { modifier in secrets.map { modifier + $0 } }
         // Canonical comparison accepts camel case and mixed separators without enumerating
         // every separator combination. The retained prefix still keeps its original spelling.
@@ -29,6 +29,13 @@ extension Redactor {
             if name == "-" || name == "--" { return name }
             if let suffix = sensitiveOptionPrefixes.filter({ name.hasSuffix($0) }).max(by: { $0.count < $1.count }) {
                 return "--" + suffix
+            }
+            // A split may occur inside a modifier (for example --cl / ient-secret).
+            // Keep the option boundary, not a field-only prefix without its dashes.
+            let tail = String(name.suffix(48))
+            for start in tail.indices where tail[start].isLetter {
+                let suffix = String(tail[start...])
+                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" }) { return "--" + suffix }
             }
             // The vendor is irrelevant; only the option-name boundary is needed.
             if name.hasSuffix("-") || name.hasSuffix("_") { return "--" }
@@ -69,6 +76,7 @@ extension Redactor {
             || combined.prefixMatch(of: patterns.labeledSecret) != nil
             || combined.wholeMatch(of: patterns.secretLabelOnly) != nil
             || combined.prefixMatch(of: patterns.codeField) != nil
+            || combined.prefixMatch(of: patterns.codePrompt) != nil
             || combined.wholeMatch(of: patterns.codePromptOnly) != nil
             || combined.prefixMatch(of: patterns.githubToken) != nil
             || combined.prefixMatch(of: patterns.apiKey) != nil
