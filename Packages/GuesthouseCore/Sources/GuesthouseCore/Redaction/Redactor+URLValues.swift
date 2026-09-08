@@ -8,6 +8,12 @@ extension Redactor {
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
     static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
+        defer {
+            if !input.allSatisfy(\.isWhitespace) {
+                state.urlHasTrailingEscape = state.expectingURLUserInfo
+                    && !input.reversed().drop(while: \.isWhitespace).prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
+            }
+        }
         // A comma separates URLs only when the next element starts another authority.
         // Otherwise it may be part of the current URI's userinfo (or path/query).
         var text = input.replacing(URLDiagnosticList) { match in
@@ -42,8 +48,16 @@ extension Redactor {
         if state.expectingURLUserInfo {
             let value = text.drop(while: \.isWhitespace)
             guard !value.isEmpty else { return text }
-            let frameClosers = ">}\"`"
-            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) || frameClosers.contains($0) }) ?? text.endIndex
+            let frameClosers = ">]}\"`"
+            var escaped = state.urlHasTrailingEscape
+            var end = value.startIndex
+            while end < text.endIndex {
+                let character = text[end]
+                let escapedQuote = character == "\"" && escaped
+                if !escapedQuote && (character.isWhitespace || "/?#".contains(character) || frameClosers.contains(character)) { break }
+                escaped = character == "\\" ? !escaped : false
+                text.formIndex(after: &end)
+            }
             let at = text[value.startIndex..<end].lastIndex(of: "@")
             // Every @ may belong to the password until the authority is structurally closed.
             // Do not expose a provisional host suffix while another record can extend it.

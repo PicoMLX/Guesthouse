@@ -18,7 +18,7 @@ extension Redactor {
                 || label.wholeMatch(of: patterns.codePromptOnly) != nil
             else { return String(match.0) }
             // Never turn decoded control characters or quotes into new output framing.
-            let safeName = name.allSatisfy {
+            let safeName = name.first?.isWhitespace != true && name.last?.isWhitespace != true && name.allSatisfy {
                 $0.isASCII && ($0.isLetter || $0.isNumber || " _-".contains($0))
             } ? name : "secret"
             return String(match.1) + "\"" + safeName + "\""
