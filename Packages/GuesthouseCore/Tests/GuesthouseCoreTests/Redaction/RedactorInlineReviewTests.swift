@@ -30,6 +30,7 @@ import Testing
     func shortGroupedDiagnosticProseDoesNotBecomeAPendingCode(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!state.expectingDeviceCode && !state.expectingDeviceCodeContinuation)
     }
     @Test(arguments: [#"args: "--password opaqueCredential""#, #"["--password opaqueCredential"]"#,
                       "(--password opaqueCredential)", "{--token opaqueCredential}", "<--password opaqueCredential>"])

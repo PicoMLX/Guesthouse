@@ -151,6 +151,7 @@ import Testing
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == "Basic [redacted:authorization]")
         #expect(state.expectingAuthorizationValue)
+        #expect(state.authorizationValueIsOnTheNextLine)
     }
 
     @Test func missingBearerValueArmsAuthorizationState() {
