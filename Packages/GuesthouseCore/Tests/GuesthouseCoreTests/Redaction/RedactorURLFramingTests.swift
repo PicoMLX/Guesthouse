@@ -2,6 +2,16 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [["https://user:syntheticFirst@", "syntheticSecond@example.com/path"],
+                      ["https://user:syntheticFirst@", "syntheticMiddle@", "syntheticSecond@example.com/path"]])
+    func intermediateAtSignsRetainUserinfoAcrossRecords(_ records: [String]) {
+        var state = Redactor.StreamState()
+        let output = records.map { Redactor.redactURLContinuations($0, state: &state) }.joined()
+        #expect(!output.contains("synthetic"))
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
     @Test(arguments: [("[https://user:sec,ret@example.com]", "[https://[redacted:userinfo]@example.com]"),
                       ("[//user:sec,ret@one.example,//other:opaque@two.example]", "[//[redacted:userinfo]@one.example,//[redacted:userinfo]@two.example]")])
     func commasInsideUserinfoAreNotListSeparators(_ input: String, _ expected: String) {
