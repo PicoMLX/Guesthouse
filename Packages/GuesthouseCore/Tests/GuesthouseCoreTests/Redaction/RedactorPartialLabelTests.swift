@@ -20,6 +20,11 @@ import Testing
 
     @Test(arguments: [("Enter the cod", "e ABCD-EFGH", "enter code ABCD-EFGH"),
                       ("Enter the co", "de ABC123", "enter code ABC123"),
+                      ("one-time cod", "e is opaque", "one-time code is opaque"),
+                      ("one time co", "de is opaque", "one time code is opaque"),
+                      ("one_time code", " is opaque", "one_time code is opaque"),
+                      ("onetime c", "ode is opaque", "onetime code is opaque"),
+                      ("device.co", "de: opaque", "device.code: opaque"),
                       ("Your code", " is opaque", "your code is opaque")])
     func splitPromptsRetainOnlyTheirRecognizedInstruction(_ first: String, _ next: String, _ expected: String) {
         var state = Redactor.StreamState()

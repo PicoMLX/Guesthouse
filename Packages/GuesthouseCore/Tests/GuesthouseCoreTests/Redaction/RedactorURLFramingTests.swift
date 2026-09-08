@@ -3,6 +3,40 @@ import Testing
 
 @Suite struct RedactorURLFramingTests {
     @Test(arguments: [
+        [#"{"url":"https:\u002f"#, #"\u002fuser:syntheticOpaque\u0040example.com"}"#],
+        [#"{"url":"https:\u002f"#, #"\u002fuser:syntheticFirst\"#, #""syntheticSecond@example.com/path"}"#],
+        [#"{"url":"https\u003a\u002f"#, #"\u002Fuser:syntheticOpaque\u0040example.com/path"}"#]
+    ])
+    func incompleteUnicodeURLStringsRetainOnlyFramingBits(_ records: [String]) {
+        var state = Redactor.StreamState()
+        let output = records.map { Redactor.redactURLContinuations($0, state: &state) }.joined()
+        #expect(!output.contains("synthetic"))
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: ["/path", "?query=value", "#fragment"])
+    func continuedHostOnlyAuthoritiesEndAtEveryURLTerminator(_ terminator: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.redactURLContinuations("https:/", state: &state)
+        let next = "/example.com" + terminator
+        #expect(Redactor.redactURLContinuations(next, state: &state) == next)
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [["url", "=//user:syntheticOpaque@example.com/path"],
+                      ["url", "=/", "/user:syntheticOpaque@example.com/path"]])
+    func continuedAssignmentsDoNotNeedTheirNameOnTheSameRecord(_ input: [String]) {
+        var state = Redactor.StreamState()
+        let result = input.map { Redactor.redactURLContinuations($0, state: &state) }.joined()
+        #expect(!result.contains("syntheticOpaque"))
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [
         #"{"url":"https://user:syntheticOpaque\u0040example.com/path"}"#,
         #"{"url":"https:\u002f\u002Fuser:syntheticOpaque@example.com/path"}"#,
         #"{"url":"https\u003a\u002f\u002fuser\u003asyntheticOpaque\u0040example.com\u002fpath"}"#
