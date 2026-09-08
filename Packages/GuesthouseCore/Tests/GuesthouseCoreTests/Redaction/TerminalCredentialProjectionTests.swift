@@ -3,6 +3,15 @@ import Testing
 
 @Suite struct TerminalCredentialProjectionTests {
 
+    @Test(arguments: ["\u{1B}[:;//m", "\u{9B}:;//m"])
+    func mixedGrammarClassesRestoreURLUserInfo(_ command: String) throws {
+        let input = "https" + command + "user:syntheticOpaque@host"
+        let readings = try #require(TerminalControlEvidence.projections(in: input))
+        #expect(readings.contains { $0.text == "https://user:syntheticOpaque@host" })
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "userinfo" })
+    }
+
     @Test(arguments: ["\u{1B}[12345672m", "\u{9B}12345672m", "\u{1B}[12;12345672m"])
     func numericComponentSuffixesRemainCredentialEvidence(_ command: String) {
         let input = "The login code was rejected; retry AB1" + command + "-CD34."
@@ -19,8 +28,6 @@ import Testing
         #expect(state.quotedValue == nil)
     }
 
-
-
     @Test(arguments: ["\u{1B}[", "\u{9B}"])
     func ambiguousLongNumericComponentsFailClosed(_ introducer: String) {
         let input = "The login code was rejected; retry " + introducer + "912345678-ABCDEFGH"
@@ -35,7 +42,6 @@ import Testing
         let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
         #expect(result.ranges.contains { $0.kind == "api-key" })
     }
-
 
     @Test(arguments: ["\u{1B}[2:3@", "\u{9B}2;3@", "\u{1B}[?2:3@", "\u{9B}2:3/m"])
     func individualCSIComponentsRemainScanEvidence(_ command: String) throws {
@@ -92,8 +98,6 @@ import Testing
         #expect(TerminalControlEvidence.prepare("syntheticNext", continuation: &state).text == "[redacted:terminal-ambiguity]")
     }
 
-
-
     @Test(arguments: ["\r", "\n", "\r\n"], ["\u{1B}[31p", "\u{9B}31p", "\u{1B}p"])
     func recoveredWrappedPrefixesExcludeRecordFraming(_ terminator: String, _ command: String) {
         let input = "gh" + command + "_" + terminator
@@ -108,15 +112,11 @@ import Testing
         #expect(result.contexts.contains(body))
     }
 
-
-
-
     @Test(arguments: ["ghp_synthetic", "--password opaque", "remote=//user:opaque@host",
                       "Authorization: opaque", "device_code: opaque", "-----BEGIN PRIVATE KEY-----"])
     func independentCredentialOpenersRemainRecognizable(_ suffix: String) {
         #expect(Redactor.terminalHasCredentialOpener(suffix[...]))
     }
-
 
     @Test(arguments: [60, 70, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
     func longPendingPEMEvidenceIsQuarantined(_ length: Int, _ command: String) {
@@ -129,9 +129,6 @@ import Testing
         #expect(continuation?.prefixes.isEmpty == true)
     }
 
-
-
-
     @Test(arguments: ["\u{1B}[@", "\u{9B}@", "\u{1B}@"],
           ["The login code is ", "The login code was rejected; retry "])
     func restoredTrailingBoundariesProtectContextualCodes(_ command: String, _ context: String) throws {
@@ -141,7 +138,6 @@ import Testing
             .ranges.first(where: { $0.kind == "device-code" }))
         #expect(String(decoding: Array(joined.utf8)[span.range], as: UTF8.self) == "AB12-CD34")
     }
-
 
     @Test(arguments: ["\u{1B}[31@", "\u{9B}31@", "\u{1B}@"],
           ["sk-abcdefghijklmnopq", "Bearer syntheticToken", "Basic dXNlcjpwYXNz"])
