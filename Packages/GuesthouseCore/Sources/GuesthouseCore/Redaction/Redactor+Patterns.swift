@@ -110,13 +110,13 @@ extension Redactor {
         private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
             // Scan the existing record; no escape-depth buffer is retained. A depth cap
             // here would leave deeper encodings unmatched and expose their credentials.
-            #/((?::|^|[\s,"'(<\[{\u{0060}]|(?:^|[\s,"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
+            #/((?::|^|^[ \t]*=|[\s,"'(<\[{\u{0060}]|(?:^|[\s,"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
         }
         let urlUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
-        let partialURLAuthority = #/(?:^|[\s,:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
+        let partialURLAuthority = #/(?:^[ \t]*=|^|[\s,:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#]*$/#
