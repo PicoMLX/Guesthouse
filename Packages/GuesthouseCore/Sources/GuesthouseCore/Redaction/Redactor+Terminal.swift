@@ -104,6 +104,15 @@ extension Redactor {
             return begin.range.lowerBound..<end
         }
         recovered = expandingRecoveredRanges(recovered, through: ordinaryRanges.map(byteRange))
+        // Removing a contextual word inside a recovered token also removes the reason
+        // the later scanner would conceal independent code-shaped values on this record.
+        if joined.matches(of: patterns.mentionsCode).contains(where: { match in
+            recovered.contains { $0.range.overlaps(byteRange(match.range)) }
+        }) {
+            recovered += joined.matches(of: patterns.deviceCode).map {
+                (byteRange($0.2.startIndex..<$0.2.endIndex), "device-code")
+            }
+        }
         let byteRanges = (tokenRanges.map(byteRange) + recovered.map(\.range)).sorted { $0.lowerBound < $1.lowerBound }
         var mergedRanges: [Range<Int>] = []
         for range in byteRanges {
