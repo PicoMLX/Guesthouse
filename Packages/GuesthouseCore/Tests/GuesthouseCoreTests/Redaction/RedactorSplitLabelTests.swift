@@ -2,6 +2,28 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorSplitLabelTests {
+
+    @Test(arguments: ["args=[", "args=[\"first\", "], ["\"", "'"])
+    func enclosingContainerCommandsReleaseAfterTheirQuote(_ prefix: String, _ quote: String) {
+        let lines = [prefix + quote + "run --password syntheticFirst", "syntheticSecond" + quote + "]", "Finished"]
+        let output = Redactor().redact(lines: lines).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: ["\u{1B}[", "\u{9B}"])
+    func ambiguousNumericComponentsQuarantineThePhysicalStream(_ introducer: String) {
+        let lines = ["The login code was rejected; retry " + introducer + "912345678-ABCDEFGH", "syntheticNext"]
+        #expect(Redactor().redact(lines: lines).map(\.text)
+            == ["[redacted:terminal-ambiguity]", "[redacted:terminal-ambiguity]"])
+    }
+
+    @Test func aRecoveredTokenCannotEraseContextForAnAdjacentCode() {
+        let input = "eyJhbGciOiJIUzI1NiIsI\u{1B}[mtpZCI6Im5hYmMifQ.payload.-code ABCD-EFGH"
+        let output = Redactor().redact(input)
+        #expect(!output.contains("payload"))
+        #expect(!output.contains("ABCD-EFGH"))
+    }
     @Test(arguments: ["\u{1B}[31/-m", "\u{9B}31/-m", "\u{1B}/-m"])
     func individualIntermediatesConcealThePhysicalAPIKey(_ command: String) {
         #expect(!Redactor().redact("sk" + command + "abcdefghijklmnopq").contains("abcdefghijklmnopq"))
