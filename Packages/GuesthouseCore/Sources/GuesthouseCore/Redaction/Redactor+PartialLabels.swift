@@ -30,12 +30,6 @@ extension Redactor {
             let word = keyword.lowercased()
             return verb.lowercased() + separator + word + (word == "code" || word == "codes" ? " " : "")
         }
-        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))(?:[ \t]+\S+){0,3}?[ \t]+((?i:c|co|cod|code|codes))[ \t]*$/#) {
-            return promptPrefix(prompt.1, prompt.2)
-        }
-        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ _-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
-            return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
-        }
         if let option = text.firstMatch(of: #/(?:^|[\s\u{001F}"'\[({<:=\u{0060},;])(--?[A-Za-z0-9_-]*)[ \t]*$/#) {
             let name = String(option.1).lowercased()
             guard name.wholeMatch(of: patterns.secretOptionOnly) == nil else { return nil }
@@ -52,6 +46,13 @@ extension Redactor {
             }
             // The vendor is irrelevant; only the option-name boundary is needed.
             if name.hasSuffix("-") || name.hasSuffix("_") { return "--" }
+        }
+        // Option syntax is stronger evidence than a prompt-like suffix inside its name.
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))(?:[ \t]+\S+){0,3}?[ \t]+((?i:c|co|cod|code|codes))[ \t]*$/#) {
+            return promptPrefix(prompt.1, prompt.2)
+        }
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ _-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
+            return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
         }
         // Keep bounded multiword names and ignore a completed label's quote wrapper.
         // No value has begun before the assignment delimiter; quote depth is not value state.
