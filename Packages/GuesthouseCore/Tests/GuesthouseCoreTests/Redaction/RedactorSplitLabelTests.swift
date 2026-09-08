@@ -3,6 +3,13 @@ import Testing
 
 @Suite struct RedactorSplitLabelTests {
 
+    @Test(arguments: [("gh", "p_syntheticOpaque"), ("gith", "ub_pat_syntheticOpaque")])
+    func shortProviderStemsRetainWrappingUntilALexicalBoundary(_ first: String, _ second: String) {
+        let output = Redactor().redact(lines: [first, second, "syntheticTail", ";", "status: ready"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output.last == "status: ready")
+    }
+
     @Test(arguments: ["\u{1B}[:;//m", "\u{9B}:;//m"])
     func mixedTerminalClassesHideURLPasswords(_ command: String) {
         #expect(!Redactor().redact("https" + command + "user:syntheticOpaque@host").contains("syntheticOpaque"))
@@ -141,6 +148,10 @@ import Testing
 
     @Test(arguments: [
         ["--pass", "word syntheticOpaque"],
+        ["Authoriz", "ation: syntheticOpaque"], ["pass", "word: syntheticOpaque"],
+        ["--github-", "token syntheticOpaque"], ["Bea", "rer syntheticOpaque"],
+        ["password", ": syntheticOpaque"], ["Authorization", ": syntheticOpaque"],
+        ["device_code", ": syntheticOpaque"],
         ["--pa", "ss", "word", "syntheticOpaque"],
         ["run --github-to", "ken syntheticOpaque"],
         ["--api-", "key=syntheticOpaque"],
