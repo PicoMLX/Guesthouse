@@ -27,7 +27,7 @@ extension Redactor {
         /// Python dictionary, or a JSON string embedded in a log line quotes it.
         /// The same match determines continuation state before replacement. An empty value
         /// arms the next line even when a logger prefixes or quotes the field name.
-        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookies?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|[^\r\n]*)/#.ignoresCase()
+        let authorizationHeader = #/(^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:(?:proxy|request)[ _-]?)?authorization|(?:(?:set|request)[ _-]?)?cookies?)(?:\\*["'])?\s*[:=]\s*("(?:[^"\\]|\\.)*"(?=[ \t]*(?:$|[,;\]})>]))|'(?:[^'\\]|\\.)*'(?=[ \t]*(?:$|[,;\]})>]))|[^\r\n]*)/#.ignoresCase()
         /// Bearer credentials outside a header line, of any length. Every token and label rule
         /// here starts at a character that cannot be part of the word rather than at `\b`:
         /// Swift's word boundary is the Unicode one, where the dot in `<token>.partial`, in
@@ -142,12 +142,12 @@ extension Redactor {
                 #/(?:\\*["'])?\s*[:=]\s*/#
             }
         }
-        // A quote only bounds the value at a real sibling/whitespace boundary. Adjacent
-        // fragments remain in the conservative unquoted-value alternative below.
+        // A quote only bounds a value at a real sibling/frame or end-of-record boundary.
+        // Whitespace alone cannot prove closure; ambiguous fragments remain part of the value.
         let labeledSecret = Regex {
             secretLabel
             Capture {
-                #/"(?:[^"\\]|\\.)*"(?=$|[\s,;\]})>])|'(?:[^'\\]|\\.)*'(?=$|[\s,;\]})>])|\S[^\r\n]*/#
+                #/"(?:[^"\\]|\\.)*"(?=[ \t]*(?:$|[,;\]})>]))|'(?:[^'\\]|\\.)*'(?=[ \t]*(?:$|[,;\]})>]))|\S[^\r\n]*/#
             }
         }.ignoresCase()
         /// The same labels with nothing after the delimiter: CLI and pretty-printed output puts
