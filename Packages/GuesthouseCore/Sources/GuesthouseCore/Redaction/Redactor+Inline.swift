@@ -36,6 +36,8 @@ extension Redactor {
             state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
+                || match.2.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .wholeMatch(of: #/(?i:Basic|Bearer|Digest|NTLM|Negotiate|AWS4-HMAC-SHA256)/#) != nil
             state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || explicit
             let header = match.0[..<match.2.startIndex].lowercased()
             let name = header.contains("set-cookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
@@ -157,7 +159,14 @@ extension Redactor {
     private static func retainDeviceCodeContext(_ value: Substring, tail: Substring, state: inout StreamState) {
         let explicit = fieldExplicitlyContinues(value, tail: tail)
         state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
-        state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(value) || explicit
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let frames: [Character: Character] = ["[": "]", "(": ")", "<": ">", "`": "`"]
+        if let opener = trimmed.first, let closer = frames[opener], !trimmed.dropFirst().contains(closer) {
+            state.quotedValue = state.quotedValue ?? .init(delimiter: closer, escapeDepth: 0, kind: "device-code")
+        }
+        let unfinishedGroup = trimmed.wholeMatch(of: #/[A-Z0-9]{1,8}(?:[-.][A-Z0-9]{1,8})*[-.]/#) != nil
+            && !trimmed.dropLast().contains(patterns.deviceCode)
+        state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(value) || explicit || unfinishedGroup
         state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || !isClosedQuotedValue(value) || explicit
     }
 
@@ -230,8 +239,10 @@ extension Redactor {
             }) == true { text.formIndex(before: &start) }
         }
         let closers: [Character: Character] = ["<": ">", "\"": "\""]
-        guard let opener = text[..<start].last, let closer = closers[opener], text.last == closer else { return false }
-        let content = text[start..<text.index(before: text.endIndex)]
+        guard let opener = text[..<start].last, let closer = closers[opener],
+              let end = text[start...].firstIndex(of: closer),
+              text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }
+        let content = text[start..<end]
         return !content.contains(opener) && !content.contains(closer)
     }
 

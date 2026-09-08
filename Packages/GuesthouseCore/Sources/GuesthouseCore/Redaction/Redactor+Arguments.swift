@@ -32,9 +32,10 @@ extension Redactor {
     }
 
     /// The option may live in a quoted command inside a diagnostic container.
-    /// Skip completed strings; only the quote still open at the option can own its end.
+    /// Retain nested enclosures so the innermost open quote owns the option's end.
     private static func enclosingCommandQuote(in prefix: Substring) -> StreamState.QuotedValue? {
         var cursor = prefix.startIndex
+        var quotes: [StreamState.QuotedValue] = []
         while cursor < prefix.endIndex {
             let start = cursor
             var slashes = 0
@@ -46,15 +47,19 @@ extension Redactor {
             let delimiter = prefix[cursor]
             let before = start == prefix.startIndex ? nil : prefix[prefix.index(before: start)]
             prefix.formIndex(after: &cursor)
+            if let open = quotes.last, delimiter == open.delimiter,
+               quoteCloses(depth: open.escapeDepth, slashes: slashes) {
+                quotes.removeLast()
+                continue
+            }
             guard delimiter == "\"" || delimiter == "'",
                   before == nil || before?.isWhitespace == true
                     || before.map({ "=:([{,".contains($0) }) == true else { continue }
             let quoted = StreamState.QuotedValue(delimiter: delimiter,
                 escapeDepth: slashes.isMultiple(of: 2) ? 0 : slashes, kind: "secret")
-            guard let end = closingQuoteEnd(in: prefix[cursor...], for: quoted) else { return quoted }
-            cursor = end
+            quotes.append(quoted)
         }
-        return nil
+        return quotes.last
     }
 
     static func closingQuoteEnd(in value: Substring, for quoted: StreamState.QuotedValue) -> String.Index? {

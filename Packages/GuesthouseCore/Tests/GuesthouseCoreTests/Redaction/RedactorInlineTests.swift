@@ -2,13 +2,44 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
-    @Test(arguments: [("--pass", "word syntheticOpaque"), ("Set-Coo", "kie: session=syntheticOpaque")])
+    @Test(arguments: [("[AB", "]"), ("(AB", ")"), ("<AB", ">"), ("`AB", "`")])
+    func unfinishedCodeFramesRetainTheirClosingDelimiter(_ value: String, _ closer: Character) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: "Enter the code " + value, codeExpected: false, state: &state)
+            == "Enter the code [redacted:device-code]")
+        #expect(state.quotedValue?.delimiter == closer && state.quotedValue?.kind == "device-code")
+    }
+
+    @Test func aTrailingDeviceCodeSeparatorAwaitsTheNextRecord() {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: "Your code is ABCD-", codeExpected: false, state: &state)
+        #expect(state.expectingDeviceCode)
+    }
+    @Test(arguments: [("--pass", "word syntheticOpaque"), ("Set-Coo", "kie: session=syntheticOpaque"),
+                      ("Authoriz", "ation: syntheticOpaque"), ("pass", "word: syntheticOpaque"),
+                      ("--github-", "token syntheticOpaque"), ("Bea", "rer syntheticOpaque"),
+                      ("password", ": syntheticOpaque"), ("device_code", ": syntheticOpaque"),
+                      ("gh", "p_syntheticOpaque"), ("gith", "ub_pat_syntheticOpaque")])
     func restoredLabelsExposeTheCompleteCredentialToInlineMatching(_ first: String, _ second: String) throws {
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: first, codeExpected: false, state: &state)
         let restored = try #require(Redactor.restoringCredentialLabel(in: second, state: &state))
         #expect(state.pendingCredentialLabel == nil)
         #expect(!Redactor.applyPatterns(to: restored, codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
+    @Test(arguments: [#"{"url":"https://example.com"}"#, #"[{"url":"https://example.com"}]"#])
+    func closedStructuredURLsKeepTheirPublicHost(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!state.expectingURLUserInfo)
+    }
+
+    @Test(arguments: ["Basic", "Bearer", "NTLM", "Negotiate", "Digest", "AWS4-HMAC-SHA256"])
+    func schemeOnlyHeadersAwaitAnUnindentedValue(_ scheme: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: "Authorization: " + scheme, codeExpected: false, state: &state)
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
     }
 
     @Test(arguments: [#""AB""#, #""""#, "'a'", #"'AB'"#])
