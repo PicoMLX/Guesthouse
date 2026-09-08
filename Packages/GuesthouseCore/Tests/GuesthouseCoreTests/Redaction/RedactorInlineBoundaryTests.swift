@@ -2,6 +2,72 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineBoundaryTests {
+    @Test(arguments: ["ghp", "gho", "ghu", "ghs", "ghr", "github_pat"])
+    func completeProviderStemsAwaitTheirUnderscore(_ stem: String) {
+        var state = Redactor.StreamState()
+        #expect(stem.contains(Redactor.patterns.wrappedTokenAtLineEnd))
+        #expect(Redactor.applyPatterns(to: stem, codeExpected: false, state: &state) == "[redacted:github-token]")
+    }
+
+    @Test(arguments: ["Basic", "Digest", "NTLM", "Negotiate", "AWS4-HMAC-SHA256"])
+    func bareAuthorizationSchemesAwaitTheirPhysicalValue(_ scheme: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: scheme, codeExpected: false, state: &state)
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: [":/", ":\\/"])
+    func colonSlashFragmentsRetainAuthorityState(_ fragment: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: fragment, codeExpected: false, state: &state)
+        #expect(state.pendingURLSlashes == 1)
+        #expect(!Redactor.applyPatterns(to: "/user:syntheticOpaque@example.com", codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
+    @Test(arguments: [("Basic d", "Basic [redacted:authorization]"),
+                      ("NTLM T", "NTLM [redacted:authorization]"),
+                      ("Negotiate Y", "Negotiate [redacted:authorization]")])
+    func shortAuthorizationPayloadsAreConcealedAndRetained(_ input: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output == expected)
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: ["Enter the code A", "Enter the code 12", "Enter the code B3"])
+    func shortPromptCandidatesAreConcealedAndRetained(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == "Enter the code [redacted:device-code]")
+        #expect(state.expectingDeviceCode)
+    }
+
+    @Test(arguments: [#"[\"--password\""#, #"["--password""#])
+    func serializedOptionsAwaitTheirSplitComma(_ input: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(state.expectingSecretValue)
+    }
+
+    @Test(arguments: ["[redacted:device-code]", "[redacted:secret] [redacted:device-code]"])
+    func literalMarkersDoNotEndCodePromptRecognition(_ marker: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: "Enter the code " + marker + " ABC123", codeExpected: false, state: &state).contains("ABC123"))
+    }
+
+    @Test(arguments: [#"{\\"password\\":\\"synthetic\\"}"#, #"{\\"Authorization\\":\\"synthetic\\"}"#])
+    func encodedFieldKeysIdentifyTheirValues(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("synthetic"))
+    }
+
+
+
+    @Test(arguments: ["Cookie: session=syntheticOpaque", "Set-Cookie: session=syntheticOpaque; HttpOnly"])
+    func cookieHeadersConcealTheWholeSessionValue(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticOpaque"))
+    }
+
     @Test func completedEncodedContainersDoNotArmAnInnerField() {
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: #""\"{\\\"password\\\":\"""#, codeExpected: false, state: &state)
@@ -63,6 +129,7 @@ import Testing
         #expect(!state.expectingSecretContinuation)
         #expect(!state.expectingAuthorizationValue)
         #expect(!state.expectingDeviceCode)
+        #expect(!state.expectingDeviceCodeContinuation)
     }
 
     @Test(arguments: ["password: opaqueCredential", "Authorization: opaqueCredential", "device_code: opaqueCredential"])
@@ -82,7 +149,7 @@ import Testing
     @Test(arguments: ["Basic dXNlcj", "Basic dXNl", "Basic dX"])
     func partialBasicAtTheRecordEndRetainsItsFold(_ input: String) {
         var state = Redactor.StreamState()
-        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("[redacted:authorization]"))
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == "Basic [redacted:authorization]")
         #expect(state.expectingAuthorizationValue)
     }
 
