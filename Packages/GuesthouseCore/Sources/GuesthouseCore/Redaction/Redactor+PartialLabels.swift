@@ -45,7 +45,7 @@ extension Redactor {
                 if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" }) { return "--" + suffix }
             }
             // The vendor is irrelevant; only the option-name boundary is needed.
-            if name.hasSuffix("-") || name.hasSuffix("_") { return "--" }
+            return "--"
         }
         // Option syntax is stronger evidence than a prompt-like suffix inside its name.
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))(?:[ \t]+\S+){0,3}?[ \t]+((?i:c|co|cod|code|codes))[ \t]*$/#) {
@@ -54,6 +54,16 @@ extension Redactor {
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ _-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
             return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
         }
+        // A provider stem is stronger evidence than an incidental field suffix (github_pa).
+        let unpadded = text.dropLast(text.reversed().prefix(while: { $0 == " " || $0 == "\t" }).count)
+        let tail = String(unpadded.suffix(11))
+        let providerPrefixes = providerStems.flatMap { stem in (1..<stem.count).map { String(stem.prefix($0)) } }
+        if let prefix = providerPrefixes.filter({ prefix in
+            guard tail.hasSuffix(prefix) else { return false }
+            if "sk-".hasPrefix(prefix), let prior = unpadded.dropLast(prefix.count).last,
+               prior.isASCII && (prior.isLetter || prior.isNumber) { return false }
+            return true
+        }).max(by: { $0.count < $1.count }) { return prefix }
         // Keep bounded multiword names and ignore a completed label's quote wrapper.
         // No value has begun before the assignment delimiter; quote depth is not value state.
         if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_ \t-]{0,47})(?:\\*["'])?\\*[ \t]*$/#) {
@@ -68,14 +78,6 @@ extension Redactor {
                 if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }) { return suffix }
             }
         }
-        let tail = String(text.suffix(11))
-        let providerPrefixes = providerStems.flatMap { stem in (1..<stem.count).map { String(stem.prefix($0)) } }
-        if let prefix = providerPrefixes.filter({ prefix in
-            guard tail.hasSuffix(prefix) else { return false }
-            if "sk-".hasPrefix(prefix), let prior = text.dropLast(prefix.count).last,
-               prior.isASCII && (prior.isLetter || prior.isNumber) { return false }
-            return true
-        }).max(by: { $0.count < $1.count }) { return prefix }
         return nil
     }
 
@@ -89,6 +91,13 @@ extension Redactor {
         guard !visible.isEmpty else { return nil }
         state.pendingCredentialLabel = nil
         let combined = prefix + visible
+        // An unknown qualifier carries only an option boundary across more name fragments.
+        // It must not inject synthetic dashes into ordinary visible diagnostics.
+        if prefix == "--", partialCredentialLabel(in: combined) == "--",
+           combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil {
+            state.pendingCredentialLabel = "--"
+            return nil
+        }
         if partialCredentialLabel(in: combined).map({ successor in
             successor.hasPrefix(prefix) || (prefix.hasPrefix("-")
                 && combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil
