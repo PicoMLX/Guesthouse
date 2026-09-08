@@ -119,7 +119,7 @@ extension Redactor {
         let partialURLAuthority = #/(?:^|[\s:"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
-            #/[^\s\/?#@]*$/#
+            #/[^\s\/?#@]*@?$/#
         }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
@@ -133,7 +133,7 @@ extension Redactor {
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:password|passphrase|passwd|secret|token|credentials?|api[ _-]?key|private[ _-]?key|secret[ _-]?key|secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?secret)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:passwords?|passphrases?|passwds?|secrets?|tokens?|credentials?|api[ _-]?keys?|private[ _-]?keys?|secret[ _-]?keys?|secret[ _-]?access[ _-]?keys?|access[ _-]?key[ _-]?secrets?)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
