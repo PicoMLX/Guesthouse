@@ -2,6 +2,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: [["Enter the cod", "e ABCD-EFGH"], ["Enter the co", "de ABC123"],
+                      ["Your code", " is syntheticOpaque"],
+                      ["https://user:syntheticFirst@", "syntheticSecond@example.com/path"],
+                      ["https://user:syntheticFirst@", "syntheticMiddle@", "syntheticSecond@example.com/path"],
+                      ["tokens: syntheticOpaque"], ["api_keys: syntheticOpaque"]])
+    func promptPluralAndURLBoundariesKeepCredentialsConcealed(_ records: [String]) {
+        let output = Redactor().redact(lines: records + ["Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic") && !output.joined().contains("ABC"))
+        #expect(output.last == "Finished")
+    }
+
     @Test(arguments: [["private k", "ey: syntheticOpaque"], ["secret access k", "ey: syntheticOpaque"],
                       [#""clientSecret""#, ": syntheticOpaque"], [#"\"clientSecret\"#, #"": syntheticOpaque"#],
                       ["prefix AWS4-HMAC-S", "HA256 Credential=syntheticOpaque"]])
