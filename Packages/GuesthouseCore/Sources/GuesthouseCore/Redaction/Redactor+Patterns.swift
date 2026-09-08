@@ -34,7 +34,14 @@ extension Redactor {
         /// `cache.<token>`, or in `payload.Authorization` is not a break, and a secret beside
         /// one would survive. The character is captured so it can be put back. A label may also
         /// start after an underscore, which names most of them: `refresh_token`, `access_token`.
-        let bearer = #/(^|[^A-Za-z0-9])(bearer\s+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9._~+\/=-]+)/#.ignoresCase()
+        private static var bearerValue: Regex<(Substring, Substring)> {
+            #/(bearer\s+(?:\[redacted:[^\]\r\n]+\][ \t]*)*[A-Za-z0-9._~+\/=-]+)/#
+        }
+        let bearerCredentialSpan = bearerValue.ignoresCase()
+        let bearer = Regex {
+            #/(^|[^A-Za-z0-9])/#
+            bearerValue
+        }.ignoresCase()
         /// A standalone authentication value can reach decoded diagnostics without its header
         /// name. Basic is recognized only when the Base64 decodes to a user/password separator;
         /// Digest must start with an authentication parameter assignment, not ordinary prose.
@@ -109,7 +116,7 @@ extension Redactor {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
-        let partialURLAuthority = #/(?:^|[\s"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
+        let partialURLAuthority = #/(?:^|[\s:"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#@]*$/#

@@ -31,8 +31,8 @@ extension Redactor {
         // Continuation state uses the original field, never its replacement marker.
         text = text.replacing(p.authorizationHeader) { match in
             let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
-                || match.2.last(where: { !$0.isWhitespace }) == ","
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
+                || authorizationParameterContinues(match.2)
+            state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.2)
             state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
@@ -79,13 +79,15 @@ extension Redactor {
             return "\(match.1)Basic \(marker("authorization"))"
         }
         text = text.replacing(p.digestAuthorization) { match in
-            if match.0.last(where: { !$0.isWhitespace }) == "," { state.authorizationValueIsOnTheNextLine = true }
+            state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.0)
+            if authorizationParameterContinues(match.0) { state.authorizationValueIsOnTheNextLine = true }
             _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)Digest \(marker("authorization"))"
         }
         text = text.replacing(p.specializedAuthorization) { match in
-            if match.0.last(where: { !$0.isWhitespace }) == "," { state.authorizationValueIsOnTheNextLine = true }
+            state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.0)
+            if authorizationParameterContinues(match.0) { state.authorizationValueIsOnTheNextLine = true }
             _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)\(marker("authorization"))"
@@ -171,6 +173,28 @@ extension Redactor {
         state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || !isClosedQuotedValue(value) || explicit
     }
 
+    /// Only known parameter assignments qualify; Base64 padding is not an assignment.
+    static func authorizationParameterContinues(_ value: Substring) -> Bool {
+        value.last(where: { !$0.isWhitespace }) == ","
+            || value.contains(#/(?:^|[\s,])(?i:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|credential|signedheaders|signature)[ \t]*=[ \t]*$/#)
+    }
+
+    /// Parameter quotes can wrap even when the enclosing authorization value is unquoted.
+    /// Keep only the delimiter/depth and enclosing fold, never parameter payload bytes.
+    static func unterminatedAuthorizationQuote(in value: Substring) -> StreamState.QuotedValue? {
+        if isClosedQuotedValue(value) { return nil }
+        if let whole = unterminatedQuote(in: value, kind: "authorization") { return whole }
+        var cursor = value.startIndex
+        while let opener = value[cursor...].firstMatch(of: #/=[ \t]*(\\*)(["'])/#) {
+            guard let delimiter = opener.2.first else { return nil }
+            let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: opener.1.count,
+                kind: "authorization", enclosingAuthorizationFold: true)
+            guard let end = closingQuoteEnd(in: value[opener.range.upperBound...], for: quoted) else { return quoted }
+            cursor = end
+        }
+        return nil
+    }
+
     private static func retainExplicitAuthorization(_ value: Substring, tail: Substring, state: inout StreamState) -> Bool {
         let explicit = valueExplicitlyContinues(value)
             || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
@@ -182,70 +206,6 @@ extension Redactor {
         return explicit
     }
 
-    /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
-    /// retracted. Only a path/query/fragment boundary proves closure (RFC 3986 §3.2).
-    private static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
-        // Commas separate unquoted elements inside diagnostic lists, not inside an
-        // ordinary URL path/query. Scan each flat list element at its own value boundary.
-        var text = input.replacing(#/\[[^\[\]\r\n]*\]/#) { match in
-            "[" + match.0.dropFirst().dropLast().split(separator: ",", omittingEmptySubsequences: false)
-                .map { $0.replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" } }.joined(separator: ",") + "]"
-        }
-        if state.pendingURLSlashes > 0 {
-            var remaining = state.pendingURLSlashes
-            state.pendingURLSlashes = 0
-            var cursor = text.drop(while: \.isWhitespace).startIndex
-            while remaining > 0 {
-                while cursor < text.endIndex, text[cursor] == "\\" { text.formIndex(after: &cursor) }
-                guard cursor < text.endIndex else { state.pendingURLSlashes = remaining; return text }
-                guard text[cursor] == "/" else { break }
-                text.formIndex(after: &cursor)
-                remaining -= 1
-            }
-            if remaining == 0 {
-                state.expectingURLUserInfo = true
-                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state)
-            }
-        }
-        if state.expectingURLUserInfo {
-            let value = text.drop(while: \.isWhitespace)
-            guard !value.isEmpty else { return text }
-            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
-            let at = text[value.startIndex..<end].lastIndex(of: "@")
-            state.expectingURLUserInfo = at == nil && end == text.endIndex
-            let stop = at ?? end
-            text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
-        }
-        if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
-            state.pendingURLSlashes = partial.0.reversed().drop(while: { $0 == "\\" }).first == "/" ? 1 : 2
-        }
-        return text.replacing(patterns.incompleteURLUserInfo) { match in
-            if hasCompleteURLFrame(in: text, prefixEnd: match.1.endIndex) { return String(match.0) }
-            state.expectingURLUserInfo = true
-            return String(match.1) + marker("userinfo")
-        }
-    }
-
-    /// Only framing outside URI userinfo's grammar can prove same-record closure.
-    /// Parentheses/apostrophes are valid sub-delimiters even when they appear paired.
-    private static func hasCompleteURLFrame(in text: String, prefixEnd: String.Index) -> Bool {
-        var start = prefixEnd
-        while start > text.startIndex, text[..<start].last.map({ "/\\".contains($0) }) == true {
-            text.formIndex(before: &start)
-        }
-        if text[..<start].last == ":" {
-            text.formIndex(before: &start)
-            while start > text.startIndex, text[..<start].last.map({
-                $0.isASCII && ($0.isLetter || $0.isNumber || "+-.".contains($0))
-            }) == true { text.formIndex(before: &start) }
-        }
-        let closers: [Character: Character] = ["<": ">", "\"": "\""]
-        guard let opener = text[..<start].last, let closer = closers[opener],
-              let end = text[start...].firstIndex(of: closer),
-              text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }
-        let content = text[start..<end]
-        return !content.contains(opener) && !content.contains(closer)
-    }
 
     static func applyDeviceCodePattern(to input: String, preserveAlgorithms: Bool = false) -> String {
         input.replacing(patterns.deviceCode) { match in

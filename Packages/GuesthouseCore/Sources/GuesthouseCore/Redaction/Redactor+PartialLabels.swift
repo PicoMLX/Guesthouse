@@ -42,13 +42,14 @@ extension Redactor {
         }
         if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_-]{0,47})[ \t]*$/#) {
             let prefix = String(header.1).lowercased()
+            // A whole scheme prefix is stronger evidence than an incidental field suffix.
+            if authorizationSchemes.contains(where: { $0.hasPrefix(prefix) && $0 != prefix }) { return prefix }
             // Whole-field matching also starts after a vendor's separator. Retain the
             // longest recognized suffix at those same boundaries, never the vendor bytes.
             for start in prefix.indices where start == prefix.startIndex || "-_".contains(prefix[prefix.index(before: start)]) {
                 let suffix = String(prefix[start...])
                 if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" }) { return suffix }
             }
-            if authorizationSchemes.contains(where: { $0.hasPrefix(prefix) && $0 != prefix }) { return prefix }
         }
         let tail = String(text.suffix(11))
         let providerPrefixes = providerStems.flatMap { stem in (1..<stem.count).map { String(stem.prefix($0)) } }
@@ -80,7 +81,10 @@ extension Redactor {
             || combined.wholeMatch(of: patterns.codePromptOnly) != nil
             || combined.prefixMatch(of: patterns.githubToken) != nil
             || combined.prefixMatch(of: patterns.apiKey) != nil
-            || authorizationSchemes.contains(where: { combined.lowercased().hasPrefix($0 + " ") }) {
+            || authorizationSchemes.contains(where: {
+                combined.lowercased().hasPrefix($0)
+                    && combined.dropFirst($0.count).first.map { $0 == " " || $0 == "\t" } == true
+            }) {
             return prefix + line.drop(while: \.isWhitespace)
         }
         let quoted = "\"" + combined
