@@ -183,10 +183,13 @@ import Testing
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
     }
 
-    @Test(arguments: ["[https://user:sec,ret@example.com]", "[//user:sec,ret@one.example,//other:opaque@two.example]"])
-    func commaUserinfoRemainsConcealedInURLLists(_ input: String) {
+    @Test(arguments: [
+        ("[https://user:sec,ret@example.com]", "[https://[redacted:userinfo]@example.com]"),
+        ("[//user:sec,ret@one.example,//other:opaque@two.example]", "[//[redacted:userinfo]@one.example,//[redacted:userinfo]@two.example]")
+    ])
+    func commaUserinfoRemainsConcealedInURLLists(_ input: String, _ expected: String) {
         let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
-        #expect(!output[0].contains("sec,ret") && !output[0].contains("opaque"))
+        #expect(output[0] == expected)
         #expect(output[1] == "Finished")
     }
 
@@ -274,6 +277,8 @@ import Testing
             "syntheticOpaque", "Finished"
         ]).map(\.text)
         #expect(!output.joined().contains("payload"))
+        #expect(!output.joined().contains("eyJhbGciOiJIUzI1NiIsI"))
+        #expect(!output.joined().contains("mtpZCI6Im5hYmMifQ"))
         #expect(!output.joined().contains("syntheticOpaque"))
         #expect(output[2] == "Finished")
     }
