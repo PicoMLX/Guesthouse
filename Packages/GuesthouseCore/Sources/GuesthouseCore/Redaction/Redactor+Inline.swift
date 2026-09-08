@@ -12,6 +12,7 @@ extension Redactor {
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState,
                               prepareQuotedValues: Bool = true) -> String {
         let p = patterns
+        state.pendingCredentialLabel = partialCredentialLabel(in: input) ?? state.pendingCredentialLabel
         let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
@@ -30,6 +31,7 @@ extension Redactor {
         // Continuation state uses the original field, never its replacement marker.
         text = text.replacing(p.authorizationHeader) { match in
             let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
+                || match.2.last(where: { !$0.isWhitespace }) == ","
             state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
             state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
@@ -75,11 +77,13 @@ extension Redactor {
             return "\(match.1)Basic \(marker("authorization"))"
         }
         text = text.replacing(p.digestAuthorization) { match in
+            if match.0.last(where: { !$0.isWhitespace }) == "," { state.authorizationValueIsOnTheNextLine = true }
             _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)Digest \(marker("authorization"))"
         }
         text = text.replacing(p.specializedAuthorization) { match in
+            if match.0.last(where: { !$0.isWhitespace }) == "," { state.authorizationValueIsOnTheNextLine = true }
             _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)\(marker("authorization"))"
@@ -119,7 +123,8 @@ extension Redactor {
         text = text.replacing(p.codePromptWithoutDelimiter) { match in
             retainDeviceCodeContext(match.0.dropFirst(match.1.count), tail: text[match.range.upperBound...], state: &state)
             state.expectingDeviceCode = state.expectingDeviceCode
-                || (match.2.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count < 4
+                || (match.2.first.map({ $0.isLetter || $0.isNumber }) == true
+                    && match.2.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count < 4
                     && text[match.range.upperBound...].allSatisfy(\.isWhitespace))
             return "\(match.1) \(marker("device-code"))"
         }
