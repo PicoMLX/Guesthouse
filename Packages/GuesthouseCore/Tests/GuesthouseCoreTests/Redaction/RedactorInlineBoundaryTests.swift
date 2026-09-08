@@ -155,10 +155,11 @@ import Testing
         #expect(state.expectingDeviceCodeContinuation)
     }
 
-    @Test(arguments: [#"{\\"password\\":\\"synthetic\\"}"#, #"{\\"Authorization\\":\\"synthetic\\"}"#])
-    func encodedFieldKeysIdentifyTheirValues(_ input: String) {
+    @Test(arguments: [(#"{\\"password\\":\\"synthetic\\"}"#, "{password: [redacted:secret]}"),
+                      (#"{\\"Authorization\\":\\"synthetic\\"}"#, "{Authorization: [redacted:authorization]}")])
+    func encodedFieldKeysIdentifyTheirValues(_ input: String, _ expected: String) {
         var state = Redactor.StreamState()
-        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("synthetic"))
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == expected)
     }
 
 

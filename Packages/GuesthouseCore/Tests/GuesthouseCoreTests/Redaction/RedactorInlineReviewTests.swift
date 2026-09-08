@@ -91,10 +91,11 @@ import Testing
         #expect(!state.expectingSecretContinuation)
     }
 
-    @Test(arguments: [#"[\"--password\", \"opaqueCredential\"]"#, #"[\'--password\', \'opaqueCredential\']"#])
-    func encodedOptionLabelsRetainTheirAdjacentCredential(_ input: String) {
+    @Test(arguments: [(#"[\"--password\", \"opaqueCredential\"]"#, #"[\"--password\", [redacted:secret]]"#),
+                      (#"[\'--password\', \'opaqueCredential\']"#, #"[\'--password\', [redacted:secret]]"#)])
+    func encodedOptionLabelsRetainTheirAdjacentCredential(_ input: String, _ expected: String) {
         var state = Redactor.StreamState()
-        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("opaqueCredential"))
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == expected)
     }
 
     @Test(arguments: [("Enter the code ABCD EFGH", "Enter the code [redacted:device-code]"),
