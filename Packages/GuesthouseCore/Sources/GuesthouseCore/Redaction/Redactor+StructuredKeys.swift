@@ -17,32 +17,45 @@ extension Redactor {
             state.pendingEncodedCredentialKey = false
             return "\"secret\":" + input[input.index(after: delimiter)...]
         }
-        let strings = input.matches(of: #/"(?:[^"\\]|\\.)*"/#)
+        let strings = input.matches(of: #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/#)
         var stringIndex = strings.startIndex
-        return input.replacing(#/((?:^|[{\[,])\s*)(\\*)("(?:(?!\\*"\s*[:=])(?:[^"\\]|\\.))*\\*"|"(?:(?!\\*"\s*[:=])(?:[^"\\:=]|\\.))*\\*)(?=\s*[:=]|[ \t]*$)/#) { match in
+        return input.replacing(#/((?:^|[^A-Za-z0-9\\:=])\s*)(\\*)("(?:(?!\\*"\s*[:=])(?:[^"\\]|\\.))*\\*"|"(?:(?!\\*"\s*[:=])(?:[^"'\\:=]|\\.))*\\*|'(?:(?!\\*'\s*[:=])(?:[^'\\]|\\.))*\\*'|'(?:(?!\\*'\s*[:=])(?:[^'"\\:=]|\\.))*\\*)(?=\s*[:=]|[ \t]*$)/#) { match in
             guard match.3.contains("\\") else { return String(match.0) }
+            let quote = String(match.3.prefix(1))
+            let keyStart = match.3.startIndex
+            let content = match.3.dropFirst().dropLast(match.3.hasSuffix(quote) ? 1 : 0)
+            if content.contains(#/^--[^"' \t]+\\*["'][ \t]*,/#) { return String(match.0) }
             // Both scans visit monotonically increasing ranges. Advance each string
             // at most once instead of rescanning every earlier value for every field.
-            while stringIndex < strings.endIndex, strings[stringIndex].range.upperBound <= match.range.lowerBound {
+            while stringIndex < strings.endIndex, strings[stringIndex].range.upperBound <= keyStart {
                 strings.formIndex(after: &stringIndex)
             }
             // A brace/comma inside a serialized value is not an outer field boundary.
             if stringIndex < strings.endIndex {
                 let range = strings[stringIndex].range
-                if (range.lowerBound < match.range.lowerBound && range.contains(match.range.lowerBound))
-                    || (range.lowerBound == match.range.lowerBound && range.upperBound > match.range.upperBound) {
+                if (range.lowerBound < keyStart && range.contains(keyStart))
+                    || (range.lowerBound == keyStart && range.upperBound > match.range.upperBound
+                        && content.contains(where: { "\"'".contains($0) })) {
                     return String(match.0)
                 }
             }
             let framing = String(match.2)
             var encoded = String(match.3)
-            func key(_ name: String) -> String { String(match.1) + framing + "\"" + name + framing + "\"" }
-            if encoded.last != "\"", input[match.range.upperBound...].allSatisfy(\.isWhitespace) {
+            func key(_ name: String) -> String { String(match.1) + framing + quote + name + framing + quote }
+            if !encoded.hasSuffix(quote), input[match.range.upperBound...].allSatisfy(\.isWhitespace) {
                 state.pendingEncodedCredentialKey = true
             }
             // The framing backslashes are transport quoting, not part of the JSON name.
-            if !framing.isEmpty, encoded.hasSuffix(framing + "\"") {
-                encoded = String(encoded.dropLast(framing.count + 1)) + "\""
+            if !framing.isEmpty, encoded.hasSuffix(framing + quote) {
+                encoded = String(encoded.dropLast(framing.count + 1)) + quote
+            }
+            // Single-quoted diagnostics share JSON's Unicode escapes. Normalize only
+            // the bounded name; unsupported/malformed quoting still fails closed.
+            guard encoded.utf8.prefix(1025).count <= 1024 else { return key("secret") }
+            if quote == "'" {
+                guard encoded.hasSuffix("'") else { return key("secret") }
+                encoded = "\"" + encoded.dropFirst().dropLast().replacingOccurrences(of: "\\'", with: "'")
+                    .replacingOccurrences(of: "\"", with: "\\\"") + "\""
             }
             guard encoded.utf8.prefix(1025).count <= 1024,
                   let name = try? JSONDecoder().decode(String.self, from: Data(encoded.utf8))

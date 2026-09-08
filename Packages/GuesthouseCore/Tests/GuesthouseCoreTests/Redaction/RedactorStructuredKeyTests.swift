@@ -3,6 +3,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorStructuredKeyTests {
+    @Test(arguments: [
+        (#""pass\u0077ord:"syntheticOpaque""#, #""secret":"syntheticOpaque""#),
+        (#"{'pass\u0077ord':'syntheticOpaque'}"#, #"{'password':'syntheticOpaque'}"#),
+        (#"INFO "pass\u0077ord":"syntheticOpaque""#, #"INFO "password":"syntheticOpaque""#),
+        (#"INFO 'pass\u0077ord'='syntheticOpaque'"#, #"INFO 'password'='syntheticOpaque'"#),
+        (#"'pass\u0077ord:'syntheticOpaque'"#, #"'secret':'syntheticOpaque'"#)
+    ])
+    func diagnosticAndMalformedKeyBoundariesNormalize(_ input: String, _ expected: String) {
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == expected)
+    }
+
     @Test(arguments: [1, 128, 2_048])
     func wideRecordsPreserveValuesAndNormalizeEveryEncodedKey(_ count: Int) {
         let prefix = (0..<count).map { "\"field\($0)\":\"visible\",\"pass\\u0077ord\":\"opaque\"" }.joined(separator: ",")
@@ -75,7 +86,14 @@ import Testing
         #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == input)
     }
 
-    @Test(arguments: [#"["--password", \"#, #"["--password", opaque\"#,
+    @Test(arguments: [#"{'na\u006de':'visible'}"#, #"{'message':'INFO "pass\\u0077ord":"visible"'}"#,
+                      #"{"message":"INFO 'pass\\u0077ord':'visible'"}"#])
+    func singleQuotedKeysAndNestedValueFramesRemainDistinct(_ input: String) {
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == input)
+    }
+
+    @Test(arguments: [#"[\"--password\", \"opaqueCredential\"]"#, #"[\'--password\', \'opaqueCredential\']"#,
+                      #"["--password", \"#, #"["--password", opaque\"#,
                       #"["--password", "first" \"#, #""\"{\\\"password\\\":\"""#])
     func serializedArgumentsAndEncodedValuesAreNotFieldKeys(_ input: String) {
         #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == input)
