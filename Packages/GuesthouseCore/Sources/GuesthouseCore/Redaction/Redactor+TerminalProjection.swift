@@ -14,23 +14,27 @@ extension Redactor {
 
     /// A control boundary must survive when its suffix starts a separate credential.
     static func terminalHasCredentialOpener(_ suffix: Substring) -> Bool {
-        suffix.prefixMatch(of: patterns.labeledSecret) != nil
-            || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
-            || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
+        terminalHasFieldOpener(suffix)
             || suffix.prefixMatch(of: patterns.bearer) != nil
             || suffix.prefixMatch(of: patterns.basicAuthorization) != nil
             || suffix.prefixMatch(of: patterns.digestAuthorization) != nil
             || suffix.prefixMatch(of: patterns.specializedAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.apiKey) != nil
+            || suffix.prefixMatch(of: patterns.distinctiveAPIKey) != nil
+            || suffix.prefixMatch(of: patterns.githubToken) != nil
+            || suffix.prefixMatch(of: patterns.urlUserInfo) != nil
+    }
+
+    private static func terminalHasFieldOpener(_ suffix: Substring) -> Bool {
+        suffix.prefixMatch(of: patterns.labeledSecret) != nil
+            || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
+            || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
             || suffix.prefixMatch(of: patterns.codeField) != nil
             || suffix.prefixMatch(of: patterns.codePrompt) != nil
             || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
             || suffix.prefixMatch(of: patterns.declarativeCodePrompt) != nil
             || suffix.prefixMatch(of: patterns.codePromptOnly) != nil
             || suffix.prefixMatch(of: patterns.pemBegin) != nil
-            || suffix.prefixMatch(of: patterns.apiKey) != nil
-            || suffix.prefixMatch(of: patterns.distinctiveAPIKey) != nil
-            || suffix.prefixMatch(of: patterns.githubToken) != nil
-            || suffix.prefixMatch(of: patterns.urlUserInfo) != nil
             || suffix.prefixMatch(of: patterns.secretOption) != nil
             || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil
     }
@@ -47,7 +51,7 @@ extension Redactor {
 
     /// Recover command finals as scan-only evidence, never as visible output. Token ranges
     /// can be masked here; opaque field contexts need the caller's quote/private-key state.
-    static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [String])
+    static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [TerminalControlEvidence.Prefix])
         -> (ranges: [TerminalCredentialRange], contexts: [String]) {
         var recovered: [TerminalCredentialRange] = []
         var contexts: [String] = []
@@ -68,6 +72,27 @@ extension Redactor {
             let offsets = projection.offsets
             let retained = projection.retained
             let boundaries = projection.boundaries
+            var fieldContext = ""
+            var fieldCursor = alternate.startIndex
+            // A boundary from an earlier physical record is absent from the joined text.
+            // Replay its suffix so short and complete wrapped keys retain their stream state.
+            for boundary in boundaries.sorted() where boundary > 0 && boundary < alternate.utf8.count {
+                let start = alternate.utf8.index(alternate.utf8.startIndex, offsetBy: boundary)
+                let suffix = alternate[start...]
+                // Supply only actual recorded boundaries before recognized fields. Other
+                // boundaries stay joined so controls inside a label cannot break it again.
+                // Build one bounded context per projection, not a copy of every suffix.
+                if terminalHasFieldOpener(suffix) {
+                    fieldContext += alternate[fieldCursor..<start] + " "
+                    fieldCursor = start
+                }
+                if suffix.hasPrefix("sk-"), suffix.prefixMatch(of: patterns.wrappedTokenAtLineEnd) != nil {
+                    contexts.append(String(suffix))
+                }
+            }
+            if fieldCursor != alternate.startIndex {
+                contexts.append(fieldContext + alternate[fieldCursor...])
+            }
             // Short recognizable prefixes still own a possible next-record continuation.
             let content = alternate
             if content.contains(patterns.wrappedTokenAtLineEnd)
