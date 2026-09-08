@@ -32,7 +32,7 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         case .unsupportedHost:
             "Open Settings and check the supported Mac architecture, macOS release and resource requirements."
         case .timedOut, .processFailed, .outcomeUnknown:
-            "Inspect the development Mac's current state before trying the operation again."
+            "Inspect this operation's current state before trying it again."
         case .connectionFailed:
             "Check that the development Mac is running and its SSH connection is available."
         case .authenticationRequired:
@@ -46,11 +46,11 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         case .permissionDenied:
             "Review the access requested by this operation in Settings."
         case .insufficientDiskSpace:
-            "Free disk space, then check the environment before retrying."
+            "Free disk space, then inspect this operation's current state before resuming."
         case .verificationFailed:
             "Use Repair to inspect the resource or connection used by this operation; do not bypass verification."
         case .invalidResponse:
-            "Check tool compatibility in Repair and inspect the environment before retrying."
+            "Check tool compatibility in Repair and inspect this operation's current state before retrying."
         }
     }
 }

@@ -120,6 +120,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     private var isDownload: Bool { operation == .downloadRuntime || operation == .downloadGuestImage }
 
     private func recovery(for failure: DiagnosticFailure) -> String {
+        if failure == .insufficientDiskSpace, isDownload {
+            return "Free disk space, then use Repair to inspect the staged download before resuming it."
+        }
         if failure == .verificationFailed, operation == .importXcode {
             return "Use Repair to inspect the failed import, then select a trusted, stable Xcode bundle and import it again. Preserve the existing installation until verification succeeds; do not bypass signature checks."
         }
