@@ -42,13 +42,18 @@ extension Redactor {
         if state.expectingURLUserInfo {
             let value = text.drop(while: \.isWhitespace)
             guard !value.isEmpty else { return text }
-            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
+            let frameClosers = ">}\"`"
+            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) || frameClosers.contains($0) }) ?? text.endIndex
             let at = text[value.startIndex..<end].lastIndex(of: "@")
             // Every @ may belong to the password until the authority is structurally closed.
             // Do not expose a provisional host suffix while another record can extend it.
             state.expectingURLUserInfo = end == text.endIndex
             let stop = state.expectingURLUserInfo ? end : (at ?? end)
-            text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+            // A non-userinfo frame closer also bounds a host-only continuation.
+            // Apostrophes/parentheses remain possible password bytes, not closers.
+            if at != nil || end == text.endIndex || !frameClosers.contains(text[end]) {
+                text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+            }
         }
         if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
             state.pendingURLSlashes = partial.0.reversed().drop(while: { $0 == "\\" }).first == "/" ? 1 : 2
@@ -86,16 +91,14 @@ extension Redactor {
         if quotedRecord.first == "\"", quotedRecord.startIndex < start,
            let end = closingQuoteEnd(in: quotedRecord.dropFirst(),
                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")),
-           prefixEnd < end, text[end...].allSatisfy(\.isWhitespace) { return true }
+           prefixEnd < end { return true }
         if text[..<start].last == "\"" {
-            guard let end = closingQuoteEnd(in: text[start...],
-                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) else { return false }
-            return text[end...].allSatisfy { $0.isWhitespace || "]})>".contains($0) }
+            return closingQuoteEnd(in: text[start...],
+                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) != nil
         }
         let closers: [Character: Character] = ["<": ">", "{": "}", "`": "`"]
         guard let opener = text[..<start].last, let closer = closers[opener],
-              let end = text[start...].firstIndex(of: closer),
-              text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }
+              let end = text[start...].firstIndex(of: closer) else { return false }
         let content = text[start..<end]
         return !content.contains(opener) && !content.contains(closer)
     }

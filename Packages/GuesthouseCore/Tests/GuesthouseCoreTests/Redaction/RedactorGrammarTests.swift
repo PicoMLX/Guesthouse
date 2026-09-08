@@ -73,6 +73,7 @@ import Testing
     @Test(arguments: [
         "process exited with code 1",
         "the login code was rejected", "error code: 42",
+        String(repeating: "login code was rejected ", count: 1024),
     ])
     func diagnosticProseDoesNotBecomeACodePrompt(input: String) {
         #expect(!input.contains(Redactor.patterns.codePrompt))
