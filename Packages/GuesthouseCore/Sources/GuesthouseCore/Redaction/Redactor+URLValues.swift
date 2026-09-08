@@ -37,7 +37,7 @@ extension Redactor {
             if decoded.contains(#"\u"#) {
                 nested = depth < 2 ? redactEncodedURLStrings(decoded, state: &context, depth: depth + 1) : marker("encoded-value")
             } else { nested = decoded }
-            let sanitized = redactURLContinuations(nested, state: &context, decodeStrings: false)
+            let sanitized = redactURLContinuations(nested, state: &context, decodeStrings: false, closedStringBoundary: true)
             guard sanitized != decoded else { return String(encoded) }
             let encoder = JSONEncoder()
             encoder.outputFormatting = .withoutEscapingSlashes
@@ -54,7 +54,7 @@ extension Redactor {
                 && text[..<partial.range.lowerBound].contains(#/(?:^|[^A-Za-z0-9])(?i:url|uri)["']?[ \t]*[:=][ \t]*$/#))
             || (partial.0.dropFirst().wholeMatch(of: #/[A-Za-z][A-Za-z0-9+.-]*:?/#) != nil
                 && (partial.0.hasSuffix(":")
-                    || ["http", "https", "ssh", "git", "ftp", "ftps", "ws", "wss"].contains(partial.0.dropFirst().lowercased())
+                    || ["http", "https", "ssh", "git", "ftp", "ftps", "ws", "wss"].contains(where: { $0.hasPrefix(partial.0.dropFirst().lowercased()) })
                     || text[..<partial.range.lowerBound].contains(#/(?:^|[^A-Za-z0-9])(?i:url|uri)["']?[ \t]*[:=][ \t]*$/#))
                 && text[..<partial.range.lowerBound].contains(#/(?:^|[:=])[ \t]*$/#)) {
             // Before an escape completes, even a URI's scheme/colon can be hidden.
@@ -69,7 +69,7 @@ extension Redactor {
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
     static func redactURLContinuations(_ input: String, state: inout StreamState, decodeStrings: Bool = true,
-                                       authorityStartsHere: Bool = false) -> String {
+                                       authorityStartsHere: Bool = false, closedStringBoundary: Bool = false) -> String {
         let input = decodeStrings ? redactEncodedURLStrings(input, state: &state) : input
         defer {
             if !input.allSatisfy(\.isWhitespace) {
@@ -104,7 +104,7 @@ extension Redactor {
             }
             if remaining == 0 {
                 state.expectingURLUserInfo = true
-                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings, authorityStartsHere: true)
+                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings, authorityStartsHere: true, closedStringBoundary: closedStringBoundary)
             }
         }
         if state.expectingURLUserInfo {
@@ -137,7 +137,9 @@ extension Redactor {
             state.pendingURLSlashes = partial.0.reversed().drop(while: { $0 == "\\" }).first == "/" ? 1 : 2
         }
         return text.replacing(patterns.incompleteURLUserInfo) { match in
-            if hasCompleteURLFrame(in: text, prefixEnd: match.1.endIndex) { return String(match.0) }
+            // JSON decoding removes the outer closing quote, but not its proof that
+            // this authority ends here. Userinfo has already been sanitized above.
+            if closedStringBoundary || hasCompleteURLFrame(in: text, prefixEnd: match.1.endIndex) { return String(match.0) }
             state.expectingURLUserInfo = true
             return String(match.1) + marker("userinfo")
         }
@@ -146,6 +148,9 @@ extension Redactor {
     /// Only framing outside URI userinfo's grammar can prove same-record closure.
     /// Parentheses/apostrophes are valid sub-delimiters even when they appear paired.
     private static func hasCompleteURLFrame(in text: String, prefixEnd: String.Index) -> Bool {
+        // A complete bracketed IPv6 host is not userinfo: brackets cannot extend
+        // an RFC authority's username/password. Require the entire remaining host.
+        if text[prefixEnd...].wholeMatch(of: #/\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(?:%[A-Za-z0-9_.-]+)?\](?::[0-9]+)?/#) != nil { return true }
         var start = prefixEnd
         while start > text.startIndex, text[..<start].last.map({ "/\\".contains($0) }) == true {
             text.formIndex(before: &start)
