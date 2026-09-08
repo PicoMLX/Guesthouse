@@ -105,7 +105,7 @@ extension Redactor {
                 let fragment = String(continuation.0)
                 // Once wrapping began, even the final signature/tag may wrap again.
                 // Segment count is not a terminator; retain state until a lexical boundary.
-                state.wrappedTokenKind = continuation.range.upperBound == text.endIndex ? kind : nil
+                state.wrappedTokenKind = text[continuation.range.upperBound...].allSatisfy { $0 == " " || $0 == "\t" } ? kind : nil
                 // Detect and retain every ordinary redaction BEFORE masking the continuation.
                 // Otherwise replacing `password` first destroys the evidence that its value
                 // must be removed. Future state alone cannot protect this line's value.

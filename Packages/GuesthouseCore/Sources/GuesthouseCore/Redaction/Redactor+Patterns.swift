@@ -75,14 +75,14 @@ extension Redactor {
         /// than the concatenation. The API-key rule below keeps its boundary, because `sk-` is
         /// three ordinary letters and dropping it there would redact `risk-averse-...`.
         /// Even a short fragment is sensitive once its distinctive prefix is present.
-        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*|(?:ghp|gho|ghu|ghs|ghr|github_pat)$/#
+        let githubToken = #/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]*|(?:ghp|gho|ghu|ghs|ghr|github_pat)(?=[ \t]*$)/#
         /// At line end a boundary-delimited bare `sk-` conservatively arms wrapped-key redaction.
-        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)(?:_|$)|github_pat(?:_|$)|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*$/#
+        let wrappedTokenAtLineEnd = #/(?:^|[^A-Za-z0-9]|(?=(?:ghp|gho|ghu|ghs|ghr)_|github_pat_|sk-(?:proj|svcacct|ant)-))((?:ghp|gho|ghu|ghs|ghr)(?:_|(?=[ \t]*$))|github_pat(?:_|(?=[ \t]*$))|sk-(?:(?:proj|svcacct|ant)-)?)[A-Za-z0-9_-]*(?=[ \t]*$)/#
         let tokenContinuation = #/^[ \t]*[A-Za-z0-9_-]+/#
         /// Distinctive project/provider prefixes survive filename concatenation. A generic
         /// `sk-` still needs its boundary so ordinary hyphenated words such as `risk-averse`
         /// remain intact.
-        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-(?:[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]*$))/#
+        let apiKey = #/(^|[^A-Za-z0-9]|(?=sk-(?:proj|svcacct|ant)-))(sk-(?:[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]*(?=[ \t]*$)))/#
         let distinctiveAPIKey = #/sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]*/#
         /// JSON Web Tokens, matched structurally: Base64URL segments (the last may be empty) of
         /// which one decodes to a JSON object, whitespace allowed. More than three segments are
