@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorGrammarReviewTests {
+    @Test(arguments: ["=//user:opaque@example.com", " =//user:opaque@example.com", "=\\/\\/user:opaque@example.com"])
+    func assignedNetworkPathAtRecordStartRetainsItsUserinfo(_ input: String) throws {
+        let match = try #require(input.firstMatch(of: Redactor.patterns.urlUserInfo))
+        #expect(String(match.0).hasSuffix("user:opaque@"))
+    }
+
     @Test(arguments: ["Authorization:opaque", "Proxy-Authorization:opaque", "\"Authorization\":\"opaque\""])
     func authorizationDelimitersBoundLabelsWithoutWhitespace(input: String) {
         #expect(input.contains(Redactor.patterns.authorizationHeader))

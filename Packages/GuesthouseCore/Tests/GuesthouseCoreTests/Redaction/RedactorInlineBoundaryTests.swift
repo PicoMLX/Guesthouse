@@ -167,6 +167,7 @@ import Testing
     func cookieHeadersConcealTheWholeSessionValue(_ input: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("syntheticOpaque"))
+        #expect(state.expectingAuthorizationValue)
     }
 
     @Test func completedEncodedContainersDoNotArmAnInnerField() {
@@ -283,6 +284,8 @@ import Testing
         let result = Redactor.applyPatterns(to: "urls=[//user:syntheticFirst@host,//user:syntheticSecond@host]", codeExpected: false, state: &state)
         #expect(!result.contains("syntheticFirst"))
         #expect(!result.contains("syntheticSecond"))
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
     }
 
     @Test func ambiguousCommaAuthoritiesAreConcealedEvenInsideQueries() {
