@@ -285,8 +285,21 @@ import Testing
         #expect(!result.contains("syntheticSecond"))
     }
 
+    @Test func ambiguousCommaAuthoritiesAreConcealedEvenInsideQueries() {
+        var state = Redactor.StreamState()
+        // A comma + network-path authority may be a diagnostic-list separator or
+        // a nested URL in a query. Neither interpretation proves its userinfo public.
+        let input = "https://example.com/path?next=,//user:ordinary@host"
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+            == "https://example.com/path?next=,//[redacted:userinfo]")
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "/path", codeExpected: false, state: &state) == "/path")
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
     @Test(arguments: ["https://example.com/path//user:ordinary@host",
-                      "https://example.com/path?next=,//user:ordinary@host",
+                      "https://example.com/path?next=path//user:ordinary@host",
                       "urls=[https://example.com/path//user:ordinary@host]"])
     func URLPathAndQuerySlashPairsRemainOrdinary(_ input: String) {
         var state = Redactor.StreamState()
