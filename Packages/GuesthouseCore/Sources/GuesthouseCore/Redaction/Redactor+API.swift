@@ -16,6 +16,13 @@ extension Redactor {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     func redact(line: String, state: inout StreamState) -> RedactedLine {
+        // End-of-record recognizers inspect content, not retained transport framing.
+        // Remove every trailing terminator in one step so recursive depth stays bounded.
+        let terminatorCount = line.reversed().prefix { $0 == "\r" || $0 == "\n" || $0 == "\r\n" }.count
+        if terminatorCount > 0 {
+            let content = redact(line: String(line.dropLast(terminatorCount)), state: &state)
+            return RedactedLine(content.text + line.suffix(terminatorCount))
+        }
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
