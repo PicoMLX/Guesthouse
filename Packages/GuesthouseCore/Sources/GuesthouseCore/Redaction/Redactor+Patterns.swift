@@ -110,7 +110,7 @@ extension Redactor {
         private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
             // Scan the existing record; no escape-depth buffer is retained. A depth cap
             // here would leave deeper encodings unmatched and expose their credentials.
-            #/((?::|^|[\s"'(<\[{\u{0060}]|(?:^|[\s"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
+            #/((?::|^|[\s,"'(<\[{\u{0060}]|(?:^|[\s,"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
         }
         let urlUserInfo = Regex {
             urlAuthorityPrefix
@@ -133,7 +133,7 @@ extension Redactor {
         /// One vocabulary shared by inline fields, bare labels, and command options.
         /// Explicit private-key labels are sensitive even when the value is not PEM.
         private static var secretName: Regex<Substring> {
-            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ _-]?)?(?:passwords?|passphrases?|passwds?|secrets?|tokens?|credentials?|api[ _-]?keys?|private[ _-]?keys?|secret[ _-]?keys?|secret[ _-]?access[ _-]?keys?|access[ _-]?key[ _-]?secrets?)/#
+            #/(?:(?:access|refresh|auth|client|app|session|user|bearer|private|shared|signing|master|id|current|new|old|previous|confirm|confirmation)[ ._-]?)?(?:passwords?|passphrases?|passwds?|secrets?|tokens?|credentials?|api[ ._-]?keys?|private[ ._-]?keys?|secret[ ._-]?keys?|secret[ ._-]?access[ ._-]?keys?|access[ ._-]?key[ ._-]?secrets?)/#
         }
         private static var secretLabel: Regex<(Substring, Substring, Substring)> {
             Regex {
@@ -163,25 +163,25 @@ extension Redactor {
         /// the rest of the line: an echoed command line carries the options after it, and
         /// `--token abc --verbose` must keep its second option.
         private static var credentialOptionName: Regex<Substring> {
-            Regex { ChoiceOf { secretName; #/(?:device|user)[_-]?codes?/# } }
+            Regex { ChoiceOf { secretName; #/(?:device|user)[_.-]?codes?/# } }
         }
         let secretOption = Regex {
             #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])/#
             Capture {
-                #/--?[A-Za-z0-9_-]*/#
+                #/--?[A-Za-z0-9_.-]*/#
                 credentialOptionName
             }
             #/([ \t]*[=:][ \t]*|[ \t]+)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
-            #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])--?[A-Za-z0-9_-]*/#
+            #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])--?[A-Za-z0-9_.-]*/#
             credentialOptionName
             #/[ \t]*(?:[=:][ \t]*)?$/#
         }.ignoresCase()
         /// JSON/Python-style argv diagnostics retain the option as a quoted array element.
         /// Its value is the next element, possibly on a later line.
         let serializedSecretOption = Regex {
-            #/(?:\\*["'])--?[A-Za-z0-9_-]*/#
+            #/(?:\\*["'])--?[A-Za-z0-9_.-]*/#
             credentialOptionName
             #/(?:\\*["'])[ \t]*(?:,[ \t]*|$)/#
         }.ignoresCase()
@@ -225,13 +225,13 @@ extension Redactor {
             #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
             TryCapture {
                 ChoiceOf {
-                    #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n]*\]|\([^\)\r\n]*\)|<[^>\r\n]*>|\u{0060}[^\u{0060}\r\n]*\u{0060}|"[^"\r\n]*$|'[^'\r\n]*$/#
-                    #/\[[^\]\r\n]*$|\([^\)\r\n]*$|<[^>\r\n]*$|\u{0060}[^\u{0060}\r\n]*$/#
+                    #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n]*\]|\{[^}\r\n]*\}|\([^\)\r\n]*\)|<[^>\r\n]*>|\u{0060}[^\u{0060}\r\n]*\u{0060}|"[^"\r\n]*$|'[^'\r\n]*$/#
+                    #/\[[^\]\r\n]*$|\{[^}\r\n]*$|\([^\)\r\n]*$|<[^>\r\n]*$|\u{0060}[^\u{0060}\r\n]*$/#
                     #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
                     #/[A-Za-z0-9._-]+(?![A-Za-z0-9._-])/#
                 }
             } transform: { value -> Substring? in
-                if value.first.map({ "\"'[<(`".contains($0) }) == true { return value }
+                if value.first.map({ "\"'[{<(`".contains($0) }) == true { return value }
                 if value.contains(where: \.isLowercase) && !value.contains(where: \.isNumber) {
                     let remainder = value.base[value.startIndex...]
                     guard remainder.wholeMatch(of: #/(?:shown|displayed|provided|listed)[ \t]+below[ \t]*[:=]?[ \t]*$/#.ignoresCase()) == nil else { return nil }

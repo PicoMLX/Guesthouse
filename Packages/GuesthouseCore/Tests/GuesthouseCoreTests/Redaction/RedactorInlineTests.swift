@@ -2,6 +2,17 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: [
+        "run --github.token syntheticOpaque", #"["--github.token", "syntheticOpaque"]"#,
+        #"{"api.key":"syntheticOpaque"}"#, "api.key: syntheticOpaque",
+        "https://user:syntheticFirst@one/path,//user:syntheticSecond@two/path",
+        #"{"url":"https://user:syntheticOpaque\u0040example.com/path"}"#
+    ])
+    func qualifiedFieldsAndEncodedURLValuesCannotExposeCredentials(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("synthetic"))
+    }
+
     @Test(arguments: ["Digest username=", #"Digest username="closed", response="#,
                       "AWS4-HMAC-SHA256 Credential=", "Authorization: Digest username="])
     func terminalAuthorizationAssignmentsRequireTheNextValue(_ input: String) {
@@ -36,7 +47,7 @@ import Testing
         _ = Redactor.applyPatterns(to: prompt + " \\", codeExpected: false, state: &state)
         #expect(state.expectingDeviceCode)
     }
-    @Test(arguments: [("[AB", "]"), ("(AB", ")"), ("<AB", ">"), ("`AB", "`")])
+    @Test(arguments: [("[AB", "]"), ("{AB", "}"), ("(AB", ")"), ("<AB", ">"), ("`AB", "`")])
     func unfinishedCodeFramesRetainTheirClosingDelimiter(_ value: String, _ closer: Character) {
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: "Enter the code " + value, codeExpected: false, state: &state)
@@ -51,7 +62,8 @@ import Testing
     }
     @Test(arguments: [("--pass", "word syntheticOpaque"), ("Set-Coo", "kie: session=syntheticOpaque"),
                       ("Authoriz", "ation: syntheticOpaque"), ("pass", "word: syntheticOpaque"),
-                      ("--github-", "token syntheticOpaque"), ("Bea", "rer syntheticOpaque"),
+                      ("--github-", "token syntheticOpaque"), ("--github.", "token syntheticOpaque"),
+                      ("api.k", "ey: syntheticOpaque"), ("Bea", "rer syntheticOpaque"),
                       ("password", ": syntheticOpaque"), ("device_code", ": syntheticOpaque"),
                       ("gh", "p_syntheticOpaque"), ("gith", "ub_pat_syntheticOpaque"),
                       ("clientSec", "ret: syntheticOpaque"), ("refreshTo", "ken: syntheticOpaque"),
@@ -101,7 +113,7 @@ import Testing
         #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
     }
 
-    @Test(arguments: [#""ABC123""#, "'ABC123'", "[ABC123]", "(ABC123)", "<ABC123>"])
+    @Test(arguments: [#""ABC123""#, "'ABC123'", "[ABC123]", "{ABC123}", "(ABC123)", "<ABC123>"])
     func framedDelimiterlessCodesRemainOpaque(_ value: String) {
         var state = Redactor.StreamState()
         let result = Redactor.applyPatterns(to: "Enter the code " + value + " at the URL shown", codeExpected: false, state: &state)
@@ -124,7 +136,7 @@ import Testing
         #expect(state.expectingAuthorizationValue)
     }
 
-    @Test(arguments: ["password", "Authorization", "device_code"], ["\"", "\\\""])
+    @Test(arguments: ["password", "api.key", "Authorization", "device_code"], ["\"", "\\\""])
     func completeFieldsBoundInlineOwnership(label: String, quote: String) {
         var state = Redactor.StreamState()
         let input = label + ": " + quote + "synthetic" + quote + ", status: ready"
