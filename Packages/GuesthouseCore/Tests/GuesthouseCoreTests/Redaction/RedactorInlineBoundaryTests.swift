@@ -87,6 +87,7 @@ import Testing
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == "Enter the code [redacted:device-code]")
         #expect(state.expectingDeviceCode)
+        #expect(state.expectingDeviceCodeContinuation)
     }
 
     @Test(arguments: [#"[\"--password\""#, #"["--password""#])
