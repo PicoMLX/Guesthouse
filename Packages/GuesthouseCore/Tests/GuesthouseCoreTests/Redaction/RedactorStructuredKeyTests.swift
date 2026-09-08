@@ -31,6 +31,8 @@ import Testing
     }
 
     @Test(arguments: [
+        (#"{"pass\u0077ord: syntheticOpaque}"#, #"{"secret": syntheticOpaque}"#),
+        (#"{"pass\u0077ord"#, #"{"secret""#),
         (#"{"pass\u0077ord\":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),
         (#"{"password\u0020":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),
         (#"{"\u0020password":"syntheticOpaque"}"#, #"{"secret":"syntheticOpaque"}"#),

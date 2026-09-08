@@ -5,7 +5,9 @@ extension Redactor {
         let secrets = ["password", "passphrase", "passwd", "secret", "token", "credential", "api key", "private key", "secret key", "secret access key", "access key secret"]
             .flatMap { [$0, $0 + "s"] }
         let modifiers = ["access", "refresh", "auth", "client", "app", "session", "user", "bearer", "private", "shared", "signing", "master", "id", "current", "new", "old", "previous", "confirm", "confirmation"]
+        let qualifiers = ["your", "one time", "verification", "activation", "confirmation", "pairing", "login", "security", "authorization", "auth", "access", "user", "device"]
         let names = ["authorization", "proxy authorization", "request authorization", "cookie", "cookies", "set cookie", "set cookies", "request cookie", "request cookies", "device code", "user code", "device codes", "user codes", "code", "codes"]
+            + qualifiers.flatMap { [$0 + " code", $0 + " codes"] }
             + secrets + modifiers.flatMap { modifier in secrets.map { modifier + $0 } }
         // Canonical comparison accepts camel case and mixed separators without enumerating
         // every separator combination. The retained prefix still keeps its original spelling.
