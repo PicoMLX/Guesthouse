@@ -3,6 +3,29 @@ import Testing
 
 /// Extended terminal regressions accompany the bounded implementation stack.
 @Suite struct RedactorTerminalExtendedTests {
+    @Test func excessiveDistinctCSIComponentsQuarantineRatherThanTruncate() {
+        let command = "\u{1B}[" + (1...65).map(String.init).joined(separator: ";") + "@"
+        #expect(TerminalControlEvidence.projections(in: command)?.count == nil)
+        var state: TerminalControlEvidence.Continuation?
+        #expect(TerminalControlEvidence.prepare(command, continuation: &state).text == "[redacted:terminal-ambiguity]")
+        #expect(state?.quarantined == true)
+    }
+
+    @Test(arguments: [8_000, 100_000])
+    func sparseLongRecordsExceedTheRecoveryWorkBudget(_ length: Int) {
+        let input = "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: length)
+        #expect(TerminalControlEvidence.projections(in: input)?.count == nil)
+        var state: TerminalControlEvidence.Continuation?
+        #expect(TerminalControlEvidence.prepare(input, continuation: &state).text == "[redacted:terminal-ambiguity]")
+        #expect(state?.quarantined == true)
+    }
+
+    @Test func boundedSparseRecordsKeepEveryReading() throws {
+        let readings = try #require(TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: 1_000)))
+        #expect(readings.count == 16)
+        #expect(readings.allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
+    }
+
     @Test(arguments: [2_000, 4_000, 8_000])
     func formerlySlowDenseRecordsExceedTheExplicitControlBudget(_ count: Int) {
         #expect(TerminalControlEvidence.projections(in: String(repeating: "a\u{0}", count: count))?.count == nil)
@@ -60,3 +83,4 @@ import Testing
     }
 
 }
+
