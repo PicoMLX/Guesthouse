@@ -47,7 +47,7 @@ public struct DiagnosticLog: Sendable {
         let header = "Guesthouse structured diagnostics. Raw process and authentication output excluded."
         let lines = records.map { record in
             let event = record.event
-            return "[\(event.operationID)] "
+            return "\(record.recordedAt.ISO8601Format()) [\(event.operationID)] "
                 + (event.environmentID.map { "environment=\($0) " } ?? "")
                 + event.message
                 + (event.recoveryMessage.map { " Recovery: " + $0 } ?? "")
