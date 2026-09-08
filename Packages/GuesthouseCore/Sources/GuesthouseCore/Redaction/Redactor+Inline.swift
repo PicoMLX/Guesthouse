@@ -40,10 +40,15 @@ extension Redactor {
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
-        if text.wholeMatch(of: #/[ \t]*(?i:Basic|Bearer)[ \t]*(?:\\[ \t]*)?/#) != nil {
+        if text.wholeMatch(of: #/[ \t]*(?i:Basic|Bearer|Digest|NTLM|Negotiate|AWS4-HMAC-SHA256)[ \t]*(?:\\[ \t]*)?/#) != nil {
             state.expectingAuthorizationValue = true
             state.authorizationValueIsOnTheNextLine = true
             state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
+        }
+        text = text.replacing(p.partialIntegratedAuthorization) { match in
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            return "\(match.1)\(match.2) \(marker("authorization"))"
         }
         text = text.replacing(p.bearer) { match in
             _ = retainExplicitAuthorization(match.2, tail: text[match.range.upperBound...], state: &state)
@@ -56,6 +61,8 @@ extension Redactor {
             let partialAtEnd = text[match.range.upperBound...].allSatisfy(\.isWhitespace)
             guard isBasicCredential(match.3) || explicit || partialAtEnd else { return String(match.0) }
             state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine
+                || (partialAtEnd && !isBasicCredential(match.3))
             return "\(match.1)Basic \(marker("authorization"))"
         }
         text = text.replacing(p.digestAuthorization) { match in
@@ -102,6 +109,9 @@ extension Redactor {
         }
         text = text.replacing(p.codePromptWithoutDelimiter) { match in
             retainDeviceCodeContext(match.0.dropFirst(match.1.count), tail: text[match.range.upperBound...], state: &state)
+            state.expectingDeviceCode = state.expectingDeviceCode
+                || (match.2.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count < 4
+                    && text[match.range.upperBound...].allSatisfy(\.isWhitespace))
             return "\(match.1) \(marker("device-code"))"
         }
         text = text.replacing(p.declarativeCodePrompt) { match in

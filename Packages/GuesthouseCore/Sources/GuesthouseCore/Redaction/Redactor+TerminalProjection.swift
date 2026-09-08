@@ -3,6 +3,14 @@ import Foundation
 extension Redactor {
     typealias TerminalCredentialRange = (range: Range<Int>, kind: String)
 
+    /// An opening delimiter (including its escaping) supplies quote state just like a label.
+    /// Interior styling or an already-completed quoted value adds no next-record evidence.
+    static func terminalContextEnd(in text: String, valueStart: String.Index) -> String.Index {
+        let value = text[valueStart...].drop(while: { $0.isWhitespace })
+        guard let quote = unterminatedQuote(in: value, kind: "secret") else { return valueStart }
+        return value.index(value.startIndex, offsetBy: quote.escapeDepth + 1)
+    }
+
     /// A control boundary must survive when its suffix starts a separate credential.
     static func terminalHasCredentialOpener(_ suffix: Substring) -> Bool {
         suffix.prefixMatch(of: patterns.labeledSecret) != nil
@@ -54,7 +62,8 @@ extension Redactor {
             return ([(0..<joined.utf8.count, "terminal-ambiguity")], [])
         }
         for projection in projections where !projection.retained.isEmpty {
-            let alternate = projection.text
+            // Matching and replay use content only; projection offsets still address the framed record.
+            let alternate = String(TerminalControlEvidence.contentBeforeTerminator(projection.text))
             let offsets = projection.offsets
             let retained = projection.retained
             let boundaries = projection.boundaries
@@ -62,8 +71,10 @@ extension Redactor {
                 contexts.append(alternate)
             }
             // Short recognizable prefixes still own a possible next-record continuation.
-            if alternate.contains(patterns.wrappedTokenAtLineEnd) && !joined.contains(patterns.wrappedTokenAtLineEnd) {
-                contexts.append(alternate)
+            let content = alternate
+            if content.contains(patterns.wrappedTokenAtLineEnd)
+                && !TerminalControlEvidence.contentBeforeTerminator(joined).contains(patterns.wrappedTokenAtLineEnd) {
+                contexts.append(content)
             }
             // A restored label can identify an opaque value with no recognizable token shape.
             let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
@@ -80,7 +91,8 @@ extension Redactor {
                 + alternate.matches(of: patterns.pemBegin).map { ($0.range, $0.range.upperBound) }
             for (range, valueStart) in fields {
                 let lower = alternate.utf8.distance(from: alternate.startIndex, to: range.lowerBound)
-                let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: valueStart)
+                let contextEnd = terminalContextEnd(in: alternate, valueStart: valueStart)
+                let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: contextEnd)
                 if retained.contains(where: { $0.overlaps(lower..<labelEnd) }) {
                     contexts.append(alternate)
                     break
@@ -109,9 +121,8 @@ extension Redactor {
                 // The first retained byte may be the trailing separator that makes a
                 // credential recognizable, not a byte inside the credential itself.
                 let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound <= upper
-                let restoredBoundary = span.needsBoundary && (boundaries.contains(lower)
-                    || (recognizedStarts.contains(span.range.lowerBound) && retainedIndex > 0
-                        && retained[retainedIndex - 1].upperBound == lower))
+                let restoredBoundary = (span.needsBoundary && boundaries.contains(lower))
+                    || (retainedIndex > 0 && retained[retainedIndex - 1].upperBound == lower)
                 if offsets[lower] < offsets[upper], touchesEvidence || restoredBoundary || (span.kind == "device-code" && restoredCodeContext) {
                     while ordinaryIndex < ordinary.count, ordinary[ordinaryIndex].range.lowerBound <= offsets[lower] {
                         let known = ordinary[ordinaryIndex]

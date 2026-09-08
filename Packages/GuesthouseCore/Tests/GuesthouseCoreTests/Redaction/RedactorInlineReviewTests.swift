@@ -18,8 +18,16 @@ import Testing
                 == "Enter the code [redacted:device-code], then continue")
     }
 
-    @Test(arguments: ["Enter the code 1 2", "Enter the code A B", "Enter the code shown below"])
-    func shortGroupedDiagnosticsDoNotInventACompleteCode(_ input: String) {
+    @Test(arguments: ["Enter the code 1 2", "Enter the code A B"])
+    func shortGroupedEndOfRecordCandidatesRemainPending(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == "Enter the code [redacted:device-code]")
+        #expect(state.expectingDeviceCode)
+    }
+
+    @Test(arguments: ["Enter the code shown below", "Enter the code A B then continue",
+                      "Enter the code 1 2 then continue"])
+    func shortGroupedDiagnosticProseDoesNotBecomeAPendingCode(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
     }

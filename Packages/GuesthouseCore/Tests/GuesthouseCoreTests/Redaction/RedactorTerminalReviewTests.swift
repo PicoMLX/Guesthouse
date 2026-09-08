@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: ["The login code is ", "The login code was rejected; retry "])
+    func contextualDeviceCodesKeepIndependentBoundaries(_ context: String) {
+        let result = Redactor.renderings(of: context + "ghp_abcdefghijklmnopqrstuvwx\u{0}ABCD-EFGH")
+        #expect(result.spliced.contains(Redactor.splicedBoundary + "ABCD-EFGH"))
+    }
+
     @Test(arguments: ["ghp_syntheticSecond", "github_pat_syntheticSecond", "gho_syntheticSecond"])
     func adjacentGitHubTokensKeepIndependentOpeners(_ token: String) {
         let result = Redactor.renderings(of: "ghp_abcdefghijklmnopqrstuvwx\u{0}" + token)
@@ -30,13 +36,13 @@ import Testing
     }
 
     @Test(arguments: [60, 64, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
-    func longPendingOptionsPreserveTheirStructuralOpener(_ length: Int, _ command: String) {
+    func longPendingOptionsQuarantineRatherThanTruncateTheirOpener(_ length: Int, _ command: String) {
         var open: Redactor.StreamState.ControlString?
         _ = Redactor.stripTerminalEscapes("--" + String(repeating: "x", count: length) + "pass" + command,
                                          openControlString: &open)
         let second = Redactor.stripTerminalEscapes("word syntheticOpaque", openControlString: &open)
-        #expect(second.contexts.contains(where: { $0.hasPrefix("--") && $0.hasSuffix("password syntheticOpaque") }))
-        #expect(open == nil)
+        #expect(second.joined == "[redacted:terminal-ambiguity]")
+        #expect(open?.quarantined == true)
     }
 
     @Test(arguments: ["remote=", "url=", "--remote="])
