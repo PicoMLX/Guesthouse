@@ -111,6 +111,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     private var isDownload: Bool { operation == .downloadRuntime || operation == .downloadGuestImage }
 
     private func recovery(for failure: DiagnosticFailure) -> String {
+        if failure == .connectionFailed, isDownload {
+            return "Check Internet access and the trusted download source, then inspect the staged download in Repair before resuming. Do not bypass TLS or verification checks."
+        }
         if failure == .insufficientDiskSpace, isDownload {
             return "Free disk space, then use Repair to inspect the staged download before resuming it."
         }

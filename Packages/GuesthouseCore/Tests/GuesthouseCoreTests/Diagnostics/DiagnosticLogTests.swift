@@ -169,4 +169,15 @@ struct DiagnosticLogTests {
         let event = DiagnosticEvent(operation: operation, outcome: .failed(.insufficientDiskSpace), operationID: Self.operationID)
         #expect(event.recoveryMessage == "Free disk space, then use Repair to inspect the staged download before resuming it.")
     }
+
+    @Test(arguments: [
+        (DiagnosticEvent.Operation.downloadRuntime, "Download runtime: The required network connection could not be established."),
+        (.downloadGuestImage, "Download macOS image: The required network connection could not be established.")
+    ])
+    func downloadConnectivityDoesNotAssumeGuestSSH(_ example: (DiagnosticEvent.Operation, String)) throws {
+        let event = DiagnosticEvent(operation: example.0, outcome: .failed(.connectionFailed), operationID: Self.operationID)
+        #expect(event.message == example.1)
+        #expect(event.recoveryMessage == "Check Internet access and the trusted download source, then inspect the staged download in Repair before resuming. Do not bypass TLS or verification checks.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
 }
