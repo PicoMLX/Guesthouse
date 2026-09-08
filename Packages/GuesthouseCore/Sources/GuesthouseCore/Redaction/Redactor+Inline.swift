@@ -164,7 +164,7 @@ extension Redactor {
             || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
         state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let frames: [Character: Character] = ["[": "]", "(": ")", "<": ">", "`": "`"]
+        let frames: [Character: Character] = ["[": "]", "{": "}", "(": ")", "<": ">", "`": "`"]
         if let opener = trimmed.first, let closer = frames[opener], !trimmed.dropFirst().contains(closer) {
             state.quotedValue = state.quotedValue ?? .init(delimiter: closer, escapeDepth: 0, kind: "device-code")
         }
