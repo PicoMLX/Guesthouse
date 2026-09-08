@@ -16,7 +16,7 @@ import Testing
         #expect(output.last == "; Finished")
     }
 
-    @Test(arguments: [("<", ">"), ("{", "}"), ("`", "`"), ("\"", "\"")])
+    @Test(arguments: [("<", ">"), ("{", "}"), ("`", "`"), ("\"", "\""), ("[", "]")])
     func framedHostOnlyURLsMayCloseOnAnotherRecord(_ opener: String, _ closer: String) {
         let input = ["prefix " + opener + "https:/", "/example.com" + closer, "Finished"]
         #expect(Redactor().redact(lines: input).map(\.text) == input)
@@ -24,6 +24,8 @@ import Testing
 
     @Test(arguments: [
         ([#"{"pass\u0077ord":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"password\u0020":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"\u0020password":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"\u0061ccess_token":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"device_\u0063ode":"abcd"}"#], "abcd"),
         ([#"{"\u0041uthorization":"syntheticOpaque"}"#], "syntheticOpaque"),
@@ -44,7 +46,11 @@ import Testing
     @Test(arguments: [["--g", "ithub-token syntheticOpaque"], ["--ve", "ndor-password syntheticOpaque"],
                       ["gh  ", "p_syntheticOpaque"], ["github_pa\t", "t_syntheticOpaque"],
                       ["https://user:syntheticFirst", "syntheticMiddle@syntheticStill", "syntheticLast@example.com/path"],
-                      ["prefix `/", "/user:syntheticOpaque@example.com/path`"]])
+                      ["prefix `/", "/user:syntheticOpaque@example.com/path`"],
+                      [#"prefix "https://user:syntheticFirst"#, #"syntheticSecond\"syntheticThird@example.com/path""#],
+                      [#"prefix "https://user:syntheticFirst\"#, #""syntheticThird@example.com/path""#],
+                      [#"[https://one.example,/"#, #"/user:syntheticOpaque@example.com]"#],
+                      [#"[https://one.example,\/"#, #"\/user:syntheticOpaque@example.com]"#]])
     func qualifierPaddingAndUserinfoFragmentsRemainConcealed(_ records: [String]) {
         let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
         #expect(!output.joined().contains("synthetic"))
