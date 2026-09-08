@@ -4,7 +4,8 @@ import Foundation
 /// byte becomes visible. Ambiguity exceeding the fixed budget quarantines the rest of a stream.
 enum TerminalControlEvidence {
     enum Reading: Int, CaseIterable, Sendable {
-        case joined, parameterless, final, intermediates, intermediateOnly, parameterDelimiter, complete
+        case joined, parameterless, final, intermediates, intermediateOnly, parameterOnly, withoutFinal
+        case parameterDelimiter, colon, equals, complete
     }
 
     static let maximumAlternatives = 64
@@ -100,6 +101,11 @@ enum TerminalControlEvidence {
             // Keep the delimiter suffix as scan-only evidence, never as visible output.
             guard prefix > 0, let delimiter = complete.firstIndex(where: { $0 == ":" || $0 == "=" }) else { return "" }
             return String(complete[delimiter...])
+        case .parameterOnly:
+            return String(String.UnicodeScalarView(complete.unicodeScalars.filter { (0x30...0x3F).contains($0.value) }))
+        case .withoutFinal: return String(complete.dropLast())
+        case .colon: return complete.contains(":") ? ":" : ""
+        case .equals: return complete.contains("=") ? "=" : ""
         case .complete: return complete
         }
     }
