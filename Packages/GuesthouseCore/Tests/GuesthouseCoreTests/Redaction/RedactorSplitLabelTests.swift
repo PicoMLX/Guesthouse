@@ -110,6 +110,7 @@ import Testing
     @Test(arguments: ["\u{1B}[2:3@", "\u{9B}2;3@", "\u{1B}[?2:3@", "\u{9B}2:3/m"])
     func CSIComponentsProtectTheVisibleCodeFragments(_ command: String) {
         let output = Redactor().redact("The login code was rejected; retry AB1" + command + "-CD34.")
+        #expect(!output.contains("AB1"))
         #expect(!output.contains("CD34"))
         #expect(output.contains("[redacted:device-code]"))
     }

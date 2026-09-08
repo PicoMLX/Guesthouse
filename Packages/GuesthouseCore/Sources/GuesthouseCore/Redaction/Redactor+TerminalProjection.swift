@@ -47,7 +47,7 @@ extension Redactor {
 
     /// Recover command finals as scan-only evidence, never as visible output. Token ranges
     /// can be masked here; opaque field contexts need the caller's quote/private-key state.
-    static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [String])
+    static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [TerminalControlEvidence.Prefix])
         -> (ranges: [TerminalCredentialRange], contexts: [String]) {
         var recovered: [TerminalCredentialRange] = []
         var contexts: [String] = []
@@ -70,6 +70,15 @@ extension Redactor {
             let boundaries = projection.boundaries
             if alternate.contains(patterns.incompleteURLUserInfo) && !joined.contains(patterns.incompleteURLUserInfo) {
                 contexts.append(alternate)
+            }
+            // A boundary from an earlier physical record is absent from the joined text.
+            // Replay its suffix so short and complete wrapped keys retain their stream state.
+            for boundary in boundaries.sorted() where boundary > 0 && boundary < alternate.utf8.count {
+                let start = alternate.utf8.index(alternate.utf8.startIndex, offsetBy: boundary)
+                let suffix = alternate[start...]
+                if suffix.hasPrefix("sk-"), suffix.prefixMatch(of: patterns.wrappedTokenAtLineEnd) != nil {
+                    contexts.append(String(suffix))
+                }
             }
             // Short recognizable prefixes still own a possible next-record continuation.
             let content = alternate

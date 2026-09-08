@@ -40,7 +40,7 @@ import Testing
                                             continuation: &continuation)
         #expect(continuation?.quarantined == true)
         #expect(continuation?.prefixes.isEmpty == true)
-        #expect(continuation?.prefixes.allSatisfy { $0.unicodeScalars.count <= 64 } == true)
+        #expect(continuation?.prefixes.allSatisfy { $0.text.unicodeScalars.count <= 64 } == true)
     }
 
     @Test(arguments: ["filename", "build_status", "ordinary diagnostic"])

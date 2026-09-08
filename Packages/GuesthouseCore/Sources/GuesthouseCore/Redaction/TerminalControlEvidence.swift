@@ -29,13 +29,26 @@ enum TerminalControlEvidence {
     }
     static let quarantineMarker = "[redacted:terminal-ambiguity]"
 
+    /// A retained reading includes the removed-control boundaries that made tokens valid.
+    /// Offsets are UTF-8 offsets in this bounded scan-only text, not in the next visible line.
+    struct Prefix: Hashable, Sendable, Comparable {
+        let text: String
+        var boundaries: Set<Int> = [0]
+
+        static func < (lhs: Self, rhs: Self) -> Bool {
+            lhs.text == rhs.text
+                ? lhs.boundaries.sorted().lexicographicallyPrecedes(rhs.boundaries.sorted())
+                : lhs.text < rhs.text
+        }
+    }
+
     struct Continuation: Hashable, Sendable {
         let pending: TerminalControlGrammar.Pending?
         /// At most 64 complete prefixes of at most 64 Unicode scalars (256 UTF-8 bytes).
-        let prefixes: [String]
+        let prefixes: [Prefix]
         let commandSuffix: String
         let quarantined: Bool
-        fileprivate init(pending: TerminalControlGrammar.Pending?, prefixes: [String],
+        fileprivate init(pending: TerminalControlGrammar.Pending?, prefixes: [Prefix],
                          commandSuffix: String, quarantined: Bool = false) {
             self.pending = pending
             self.prefixes = prefixes
@@ -51,10 +64,11 @@ enum TerminalControlEvidence {
         var retained: [Range<Int>]
         var boundaries: Set<Int> = [0]
 
-        fileprivate init(prefix: String) {
-            text = prefix
-            offsets = Array(repeating: 0, count: prefix.utf8.count + 1)
-            retained = prefix.isEmpty ? [] : [0..<prefix.utf8.count]
+        fileprivate init(prefix: Prefix) {
+            text = prefix.text
+            offsets = Array(repeating: 0, count: text.utf8.count + 1)
+            retained = text.isEmpty ? [] : [0..<text.utf8.count]
+            boundaries = prefix.boundaries
         }
 
         fileprivate mutating func append(literal: Substring) {
@@ -112,16 +126,19 @@ enum TerminalControlEvidence {
 
     /// Nil means that no safe bounded enumeration is possible. Do not silently drop
     /// alternatives: the missing reading might be the only one containing the credential.
-    static func projections(in text: String, prefixes: [String] = []) -> [Projection]? {
+    static func projections(in text: String, prefixes: [Prefix] = []) -> [Projection]? {
         guard isWithinControlBudget(text) else { return nil }
         guard prefixes.count <= maximumAlternatives,
-              prefixes.allSatisfy({ $0.utf8.prefix(257).count <= 256 }) else { return nil }
+              prefixes.allSatisfy({ prefix in
+                  let bytes = prefix.text.utf8.prefix(257).count
+                  return bytes <= 256 && prefix.boundaries.allSatisfy { (0...bytes).contains($0) }
+              }) else { return nil }
         // Charge the full possible reading before copying/hashing it. Sparse controls
         // cannot multiply a long unchanged suffix beyond this aggregate byte budget.
-        let readingBytes = max(1, text.utf8.count + (prefixes.map { $0.utf8.count }.max() ?? 0))
+        let readingBytes = max(1, text.utf8.count + (prefixes.map { $0.text.utf8.count }.max() ?? 0))
         var workRemaining = maximumProjectionWorkBytes - readingBytes * max(1, prefixes.count)
         guard workRemaining >= 0 else { return nil }
-        var results = Array(Set(prefixes.isEmpty ? [""] : prefixes)).sorted().map { Projection(prefix: $0) }
+        var results = Array(Set(prefixes.isEmpty ? [Prefix(text: "")] : prefixes)).sorted().map { Projection(prefix: $0) }
         guard results.count <= maximumAlternatives else { return nil }
         var remaining = text[...]
         while let escape = remaining.firstMatch(of: TerminalControlGrammar.escape) {
@@ -186,13 +203,13 @@ enum TerminalControlEvidence {
         return text[..<end]
     }
 
-    static func prepare(_ line: String, continuation: inout Continuation?) -> (text: String, prefixes: [String]) {
+    static func prepare(_ line: String, continuation: inout Continuation?) -> (text: String, prefixes: [Prefix]) {
         // Plain records need no alternate evidence or offset arrays, regardless of length.
         if continuation == nil, line.firstMatch(of: TerminalControlGrammar.escape) == nil { return (line, []) }
         let prefixes = continuation?.prefixes ?? []
         var pending = continuation?.pending
         var commandSuffix = continuation?.commandSuffix ?? ""
-        func quarantine() -> (text: String, prefixes: [String]) {
+        func quarantine() -> (text: String, prefixes: [Prefix]) {
             // An ambiguous opener might own unindented later records (PEM/quoted secrets).
             // Only a fresh StreamState can release this fail-closed state, never guest text.
             continuation = Continuation(pending: nil, prefixes: [], commandSuffix: "", quarantined: true)
@@ -209,7 +226,10 @@ enum TerminalControlEvidence {
             contentBeforeTerminator($0.text).unicodeScalars.prefix(65).count > 64
         }) { return quarantine() }
         continuation = pending.map { command in
-            let suffixes = readings.map { String(contentBeforeTerminator($0.text)) }
+            let suffixes = readings.map { reading in
+                let content = String(contentBeforeTerminator(reading.text))
+                return Prefix(text: content, boundaries: reading.boundaries.filter { $0 <= content.utf8.count })
+            }
             return Continuation(pending: command, prefixes: Array(Set(suffixes)).sorted(), commandSuffix: commandSuffix)
         }
         return (text, prefixes)

@@ -8,10 +8,10 @@ import Testing
     func visiblePrefixesSurviveOpaquePayloads(parts: (String, String)) throws {
         var state: TerminalControlEvidence.Continuation?
         _ = TerminalControlEvidence.prepare("s" + parts.0 + "opaque", continuation: &state)
-        #expect(try #require(state).prefixes == ["s"])
+        #expect(try #require(state).prefixes.map(\.text) == ["s"])
         #expect(TerminalControlEvidence.prepare("hidden", continuation: &state).text == "")
         let next = TerminalControlEvidence.prepare("hidden" + parts.1 + "k-proj-synthetic", continuation: &state)
-        #expect(next.prefixes.contains("s"))
+        #expect(next.prefixes.map(\.text).contains("s"))
         #expect(next.text == "k-proj-synthetic")
         #expect(state == nil)
     }
@@ -53,11 +53,11 @@ import Testing
         var state: TerminalControlEvidence.Continuation?
         let first = TerminalControlEvidence.prepare("s" + command + framing, continuation: &state)
         #expect(first.text == "s" + framing)
-        #expect(first.prefixes == [])
+        #expect(first.prefixes.map(\.text) == [])
         let pending = try #require(state)
-        #expect(pending.prefixes == ["s"])
+        #expect(pending.prefixes.map(\.text) == ["s"])
         let next = TerminalControlEvidence.prepare("k-abcdefghijklmnop", continuation: &state)
-        #expect(next.prefixes == ["s"])
+        #expect(next.prefixes.map(\.text) == ["s"])
         #expect(!next.text.hasPrefix("s"))
         #expect(state == nil)
     }
@@ -66,7 +66,7 @@ import Testing
         var state: TerminalControlEvidence.Continuation?
         _ = TerminalControlEvidence.prepare("s\u{1B}[31", continuation: &state)
         _ = TerminalControlEvidence.prepare("k\u{1B}[32", continuation: &state)
-        let prefixes = try #require(state).prefixes.sorted()
+        let prefixes = try #require(state).prefixes.map(\.text).sorted()
         #expect(prefixes == ["s", "s1", "s1k", "s3", "s31", "s31k", "s3k", "sk"])
         _ = TerminalControlEvidence.prepare(String(repeating: "1", count: 10_000), continuation: &state)
         #expect(try #require(state).quarantined)
@@ -77,7 +77,7 @@ import Testing
     func lookbehindIsBoundedInScalarsAndBytes(_ scalar: String) throws {
         var state: TerminalControlEvidence.Continuation?
         _ = TerminalControlEvidence.prepare(String(repeating: scalar, count: 10_000) + "\u{1B}[", continuation: &state)
-        let prefixes = try #require(state).prefixes
+        let prefixes = try #require(state).prefixes.map(\.text)
         #expect(state?.quarantined == true)
         #expect(prefixes.isEmpty)
         #expect(prefixes.allSatisfy { $0.unicodeScalars.count <= 64 && $0.utf8.count <= 256 })
@@ -88,17 +88,17 @@ import Testing
         var state: TerminalControlEvidence.Continuation?
         let prefix = String(repeating: scalar, count: count)
         _ = TerminalControlEvidence.prepare(prefix + "\u{1B}[", continuation: &state)
-        #expect(try #require(state).prefixes == [prefix])
+        #expect(try #require(state).prefixes.map(\.text) == [prefix])
         #expect(state?.quarantined == false)
     }
 
     @Test func controlStringsCarryOnlyVisiblePrefixesNeverTheirPayload() throws {
         var state: TerminalControlEvidence.Continuation?
         _ = TerminalControlEvidence.prepare("s\u{1B}]payload", continuation: &state)
-        #expect(try #require(state).prefixes == ["s"])
+        #expect(try #require(state).prefixes.map(\.text) == ["s"])
         let next = TerminalControlEvidence.prepare("hidden\u{7}after", continuation: &state)
         #expect(next.text == "after")
-        #expect(next.prefixes == ["s"])
+        #expect(next.prefixes.map(\.text) == ["s"])
         #expect(state == nil)
     }
 
