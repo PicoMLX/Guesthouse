@@ -2,7 +2,8 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorFinalGrammarTests {
-    @Test(arguments: ["Enter the code shown below:", "Paste this code displayed below:", "Your device code is:", "Your user code is ="])
+    @Test(arguments: ["Enter the code shown below:", "Paste this code displayed below:", "Your device code is:", "Your user code is =",
+                      "Enter the code shown below", "Paste this code displayed below"])
     func instructionsKeepTheNextOpaqueCodeSensitive(prompt: String) {
         let lines = [prompt, "", "abcd", "done"]
         let output = Redactor().redact(lines: lines).map(\.text)
@@ -23,7 +24,7 @@ import Testing
     }
 
     @Test(arguments: ["https://example.com?--remote=//folder@archive", "https://example.com/path/-r=//folder@archive",
-                      "Enter the code shown below", "device code island", "user code arguably valid"])
+                      "device code island", "user code arguably valid"])
     func nearbyOrdinaryTextDoesNotConsumeTheNextLine(input: String) {
         let lines = [input, "ordinary status"]
         #expect(Redactor().redact(lines: lines).map(\.text) == lines)

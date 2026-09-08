@@ -19,8 +19,9 @@ import Testing
         ]).map(\.text)
         #expect(!output.joined().contains("syntheticPassword"))
         #expect(!output[0].contains("syntheticFirst"))
-        #expect(output[1] == "[redacted:userinfo]@example.com")
-        #expect(output[2] == "Finished")
+        // Without a structural terminator either following record can still be userinfo.
+        #expect(output[1] == "[redacted:userinfo]")
+        #expect(output[2] == "[redacted:userinfo]")
     }
 
     @Test(arguments: [("eyJhbGciOiJIUzI1NiJ9.", "cGF5bG9hZA.c2lnbmF0dXJl"),
