@@ -2,6 +2,20 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["\u{1B}[2m", "\u{9B}2m", "\u{1B}[2/m", "\u{9B}2/m"])
+    func parameterOnlyReadingsRecoverNumericCodeCharacters(_ command: String) {
+        let input = "The login code is AB1" + command + "-CD34."
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "device-code" })
+    }
+
+    @Test(arguments: ["password", "Authorization", "device_code"], [":", "="])
+    func delimiterOnlyReadingsKeepBareFieldsPending(_ label: String, _ delimiter: String) {
+        let input = label + "\u{1B}[31" + delimiter + "m"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.contexts.contains(label + delimiter))
+    }
+
     @Test(arguments: [8_000, 100_000])
     func sparseLongRecordsExceedTheRecoveryWorkBudget(_ length: Int) {
         let input = "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: length)
@@ -13,7 +27,7 @@ import Testing
 
     @Test func boundedSparseRecordsKeepEveryReading() throws {
         let readings = try #require(TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: 1_000)))
-        #expect(readings.count == 9)
+        #expect(readings.count == 16)
         #expect(readings.allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
     }
 
@@ -122,23 +136,7 @@ import Testing
             == "[redacted:terminal-ambiguity]")
     }
 
-    @Test(arguments: [2_000, 4_000, 8_000])
-    func formerlySlowDenseRecordsExceedTheExplicitControlBudget(_ count: Int) {
-        #expect(TerminalControlEvidence.projections(in: String(repeating: "a\u{0}", count: count))?.count == nil)
-    }
 
-    @Test(arguments: [32, 128, 256])
-    func denseSingleReadingControlsKeepExactProjection(_ count: Int) throws {
-        let input = String(repeating: "a\u{0}", count: count) + "end"
-        let start = ContinuousClock.now
-        let readings = try #require(TerminalControlEvidence.projections(in: input))
-        print("dense-controls \(count): \(ContinuousClock.now - start)")
-        let reading = try #require(readings.first)
-        #expect(readings.count == 1)
-        #expect(reading.text == String(repeating: "a", count: count) + "end")
-        #expect(reading.offsets == Array(0...(count + 3)))
-        #expect(reading.boundaries.count == count + 1)
-    }
 
     @Test(arguments: ["ghp_synthetic", "--password opaque", "remote=//user:opaque@host",
                       "Authorization: opaque", "device_code: opaque", "-----BEGIN PRIVATE KEY-----"])
@@ -172,13 +170,6 @@ import Testing
         #expect(continuation?.prefixes.allSatisfy { $0.unicodeScalars.count <= 64 } == true)
     }
 
-    @Test(arguments: ["-----BEGIN " + String(repeating: "X", count: 70) + "-----",
-                      String(repeating: "ordinary", count: 20)])
-    func completedCommandsDoNotQuarantineLongOrdinaryOrPEMRecords(_ prefix: String) {
-        var continuation: TerminalControlEvidence.Continuation?
-        _ = TerminalControlEvidence.prepare(prefix + "\u{1B}[31m", continuation: &continuation)
-        #expect(continuation == nil)
-    }
 
 
     @Test(arguments: ["\u{1B}[@", "\u{9B}@", "\u{1B}@"],

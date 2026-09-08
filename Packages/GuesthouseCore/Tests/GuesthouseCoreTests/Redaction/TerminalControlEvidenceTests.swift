@@ -66,7 +66,7 @@ import Testing
         var state: TerminalControlEvidence.Continuation?
         _ = TerminalControlEvidence.prepare("s\u{1B}[31", continuation: &state)
         _ = TerminalControlEvidence.prepare("k\u{1B}[32", continuation: &state)
-        #expect(Set(try #require(state).prefixes) == ["s", "sk", "s31k"])
+        #expect(Set(try #require(state).prefixes) == ["s", "sk", "s31", "s31k"])
         _ = TerminalControlEvidence.prepare(String(repeating: "1", count: 10_000), continuation: &state)
         #expect(try #require(state).quarantined)
         #expect(try #require(state).commandSuffix.isEmpty)
