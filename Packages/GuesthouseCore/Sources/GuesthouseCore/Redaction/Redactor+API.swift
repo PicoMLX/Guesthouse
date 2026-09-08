@@ -107,7 +107,8 @@ extension Redactor {
         }
         let incompleteJWT = Self.incompleteJWTStartAtLineEnd(in: stripped.joined) != nil
             || Self.incompleteJWTStartAtLineEnd(in: stripped.spliced) != nil
-        let tokenAtLineEnd = incompleteJWT ? "jwt" : stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+        let tokenAtLineEnd = incompleteJWT ? "jwt" : (stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+            ?? stripped.spliced.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd))
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
         if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
             state.wrappedTokenKind = nil
@@ -251,27 +252,6 @@ extension Redactor {
         }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
         return output(redacted)
-    }
-
-    /// Quoted and ordinary records both advance footer-to-next-opener state.
-    private static func redactPEMBlocks(_ input: String, label: inout String?) -> String {
-        var text = input
-        if let active = label {
-            guard let footer = text.range(of: "-----END \(active)-----") else { return marker("private-key") }
-            label = nil
-            text = marker("private-key") + text[footer.upperBound...]
-        }
-        while let begin = text.firstMatch(of: patterns.pemBegin) {
-            let opened = String(begin.1)
-            if let end = text[begin.range.upperBound...].range(of: "-----END \(opened)-----") {
-                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: marker("private-key"))
-            } else {
-                label = opened
-                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: marker("private-key"))
-                break
-            }
-        }
-        return text
     }
 
     /// Redacts a single value that came from outside the app (a version string, a path, a

@@ -8,6 +8,12 @@ extension Redactor {
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
     static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
+        defer {
+            if !input.allSatisfy(\.isWhitespace) {
+                state.urlHasTrailingEscape = state.expectingURLUserInfo
+                    && !input.reversed().drop(while: \.isWhitespace).prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
+            }
+        }
         // A comma separates URLs only when the next element starts another authority.
         // Otherwise it may be part of the current URI's userinfo (or path/query).
         var text = input.replacing(URLDiagnosticList) { match in
@@ -42,13 +48,26 @@ extension Redactor {
         if state.expectingURLUserInfo {
             let value = text.drop(while: \.isWhitespace)
             guard !value.isEmpty else { return text }
-            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
+            let frameClosers = ">]}\"`"
+            var escaped = state.urlHasTrailingEscape
+            var end = value.startIndex
+            while end < text.endIndex {
+                let character = text[end]
+                let escapedQuote = character == "\"" && escaped
+                if !escapedQuote && (character.isWhitespace || "/?#".contains(character) || frameClosers.contains(character)) { break }
+                escaped = character == "\\" ? !escaped : false
+                text.formIndex(after: &end)
+            }
             let at = text[value.startIndex..<end].lastIndex(of: "@")
             // Every @ may belong to the password until the authority is structurally closed.
             // Do not expose a provisional host suffix while another record can extend it.
             state.expectingURLUserInfo = end == text.endIndex
             let stop = state.expectingURLUserInfo ? end : (at ?? end)
-            text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+            // A non-userinfo frame closer also bounds a host-only continuation.
+            // Apostrophes/parentheses remain possible password bytes, not closers.
+            if at != nil || end == text.endIndex || !frameClosers.contains(text[end]) {
+                text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+            }
         }
         if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
             state.pendingURLSlashes = partial.0.reversed().drop(while: { $0 == "\\" }).first == "/" ? 1 : 2
@@ -86,16 +105,14 @@ extension Redactor {
         if quotedRecord.first == "\"", quotedRecord.startIndex < start,
            let end = closingQuoteEnd(in: quotedRecord.dropFirst(),
                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")),
-           prefixEnd < end, text[end...].allSatisfy(\.isWhitespace) { return true }
+           prefixEnd < end { return true }
         if text[..<start].last == "\"" {
-            guard let end = closingQuoteEnd(in: text[start...],
-                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) else { return false }
-            return text[end...].allSatisfy { $0.isWhitespace || "]})>".contains($0) }
+            return closingQuoteEnd(in: text[start...],
+                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) != nil
         }
         let closers: [Character: Character] = ["<": ">", "{": "}", "`": "`"]
         guard let opener = text[..<start].last, let closer = closers[opener],
-              let end = text[start...].firstIndex(of: closer),
-              text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }
+              let end = text[start...].firstIndex(of: closer) else { return false }
         let content = text[start..<end]
         return !content.contains(opener) && !content.contains(closer)
     }

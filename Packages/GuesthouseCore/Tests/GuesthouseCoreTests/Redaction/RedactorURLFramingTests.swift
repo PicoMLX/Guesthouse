@@ -2,6 +2,41 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [
+        ([#"prefix "https://user:syntheticFirst"#, #"syntheticSecond\"syntheticThird@example.com/path""#]),
+        ([#"prefix "https://user:syntheticFirst\"#, #""syntheticThird@example.com/path""#]),
+        ([#"[https://one.example,/"#, #"/user:syntheticOpaque@example.com]"#]),
+        ([#"[https://one.example,\/"#, #"\/user:syntheticOpaque@example.com]"#])
+    ])
+    func continuedEscapedQuotesAndCompactListsConcealEveryCredential(_ records: [String]) {
+        var state = Redactor.StreamState()
+        let output = records.map { Redactor.redactURLContinuations($0, state: &state) }.joined()
+        #expect(!output.contains("synthetic"))
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [("<", ">"), ("{", "}"), ("`", "`"), ("\"", "\""), ("[", "]")])
+    func continuedHostOnlyFramesReleaseTheFollowingRecord(_ opener: String, _ closer: String) {
+        var state = Redactor.StreamState()
+        let first = "prefix " + opener + "https:/"
+        #expect(Redactor.redactURLContinuations(first, state: &state) == first)
+        #expect(state.pendingURLSlashes == 1)
+        #expect(Redactor.redactURLContinuations("/example.com" + closer, state: &state) == "/example.com" + closer)
+        #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test(arguments: [">", "}", "`", "\""])
+    func continuedFramedUserinfoStillConcealsEveryCredential(_ closer: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.redactURLContinuations("https://user:syntheticFirst", state: &state)
+        #expect(Redactor.redactURLContinuations("syntheticSecond@example.com" + closer, state: &state)
+            == "[redacted:userinfo]@example.com" + closer)
+        #expect(!state.expectingURLUserInfo)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
     @Test(arguments: [["https://user:syntheticFirst@", "syntheticSecond@example.com/path"],
                       ["https://user:syntheticFirst@", "syntheticMiddle@", "syntheticSecond@example.com/path"],
                       ["https://user:syntheticFirst", "syntheticMiddle@syntheticStill", "syntheticLast@example.com/path"],
@@ -37,12 +72,22 @@ import Testing
                       #"prefix "https://example.com""#, #"prefix "url=https://example.com""#,
                       "prefix <url=https://example.com>", #"prefix "--url=//example.com""#,
                       "{url=https://example.com}", "prefix {url=//example.com}",
-                      "prefix `https://example.com`", "prefix `//example.com`"])
+                      "prefix `https://example.com`", "prefix `//example.com`",
+                      "prefix <https://example.com>, status=ok", "prefix <https://example.com>,status=ok",
+                      "prefix `https://example.com`,status=ok"])
     func provenDiagnosticFramesPreservePublicAuthorities(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.redactURLContinuations(input, state: &state) == input)
         #expect(!state.expectingURLUserInfo && state.pendingURLSlashes == 0)
         #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
+    @Test func backtickNetworkPathCanSplitItsSlashesAcrossRecords() {
+        var state = Redactor.StreamState()
+        _ = Redactor.redactURLContinuations("prefix `/", state: &state)
+        #expect(state.pendingURLSlashes == 1)
+        #expect(!Redactor.redactURLContinuations("/user:opaque@example.com/path`", state: &state).contains("opaque"))
+        #expect(state.pendingURLSlashes == 0 && !state.expectingURLUserInfo)
     }
 
     @Test(arguments: ["https://user:opaque", "(https://user:opaque)", "'https://user:opaque'",

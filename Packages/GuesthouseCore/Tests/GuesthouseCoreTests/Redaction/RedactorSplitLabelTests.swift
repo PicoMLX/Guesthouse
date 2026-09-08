@@ -132,6 +132,7 @@ import Testing
     func splitContextsSurviveFramingAndEmptyPhysicalRecords(_ lines: [String]) {
         let output = Redactor().redact(lines: lines + ["status: done"]).map(\.text)
         #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(!output.joined().contains("syntheticFirst"))
         #expect(output.last == "status: done")
     }
 
