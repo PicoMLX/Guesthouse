@@ -42,13 +42,18 @@ extension Redactor {
         if state.expectingURLUserInfo {
             let value = text.drop(while: \.isWhitespace)
             guard !value.isEmpty else { return text }
-            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
+            let frameClosers = ">}\"`"
+            let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) || frameClosers.contains($0) }) ?? text.endIndex
             let at = text[value.startIndex..<end].lastIndex(of: "@")
             // Every @ may belong to the password until the authority is structurally closed.
             // Do not expose a provisional host suffix while another record can extend it.
             state.expectingURLUserInfo = end == text.endIndex
             let stop = state.expectingURLUserInfo ? end : (at ?? end)
-            text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+            // A non-userinfo frame closer also bounds a host-only continuation.
+            // Apostrophes/parentheses remain possible password bytes, not closers.
+            if at != nil || end == text.endIndex || !frameClosers.contains(text[end]) {
+                text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
+            }
         }
         if let partial = text.firstMatch(of: patterns.partialURLAuthority) {
             state.pendingURLSlashes = partial.0.reversed().drop(while: { $0 == "\\" }).first == "/" ? 1 : 2
