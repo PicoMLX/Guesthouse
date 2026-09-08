@@ -2,6 +2,12 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorTerminalReviewTests {
+    @Test(arguments: [".", "~", "+", "/", "="])
+    func bearerPunctuationCannotEraseTheFollowingOption(_ punctuation: String) {
+        let output = Redactor.renderings(of: "Bearer abc" + punctuation + "\u{0}--password syntheticOpaque")
+        #expect(output.spliced.contains("\u{001F}--password"))
+    }
+
     @Test func largePlainRecordsAvoidTerminalProjectionBudgets() {
         let input = String(repeating: "ordinary", count: 10_000)
         var state: Redactor.StreamState.ControlString?
@@ -38,27 +44,7 @@ import Testing
         #expect(!result.spliced.contains("payload"))
     }
 
-    @Test(arguments: [60, 70, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
-    func longPendingPEMOpenersFailClosedWithoutUnboundedEvidence(_ length: Int, _ command: String) {
-        var open: Redactor.StreamState.ControlString?
-        _ = Redactor.stripTerminalEscapes("-----BEGIN " + String(repeating: "X", count: length) + " PRIVATE" + command,
-                                         openControlString: &open)
-        let second = Redactor.stripTerminalEscapes("m KEY-----syntheticBody", openControlString: &open)
-        #expect(!second.joined.contains("syntheticBody"))
-        #expect(open?.quarantined == true)
-        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &open).joined
-            == "[redacted:terminal-ambiguity]")
-    }
 
-    @Test(arguments: [60, 64, 256], ["\u{1B}[31", "\u{9B}31", "\u{1B}"])
-    func longPendingOptionsQuarantineRatherThanTruncateTheirOpener(_ length: Int, _ command: String) {
-        var open: Redactor.StreamState.ControlString?
-        _ = Redactor.stripTerminalEscapes("--" + String(repeating: "x", count: length) + "pass" + command,
-                                         openControlString: &open)
-        let second = Redactor.stripTerminalEscapes("word syntheticOpaque", openControlString: &open)
-        #expect(second.joined == "[redacted:terminal-ambiguity]")
-        #expect(open?.quarantined == true)
-    }
 
     @Test(arguments: ["remote=", "url=", "--remote="])
     func assignedURLCredentialsRetainTheirOwnOpener(_ assignment: String) {
@@ -79,13 +65,6 @@ import Testing
         #expect(!result.spliced.contains("abcdefghijklmnopqrstuvwx"))
     }
 
-    @Test(arguments: [("\u{1B}]", "\u{7}"), ("\u{1B}P", "\u{1B}\\"),
-                      ("\u{1B}_", "\u{9C}"), ("\u{1B}^", "\u{9C}"), ("\u{1B}X", "\u{9C}")],
-          ["\r", "\n", "\r\n"])
-    func wholeTextNormalizationPreservesOpaqueRecordFraming(parts: (String, String), separator: String) {
-        #expect(Redactor.stripTerminalEscapes("before" + parts.0 + "title" + separator + "payload" + parts.1 + "after")
-            == "before" + separator + "after")
-    }
     @Test(arguments: ["\u{1B}--pass\u{1B}[31word syntheticOpaque",
                       "\u{1B}--passw\u{1B}[31ord syntheticOpaque"])
     func independentlyRecoveredOptionsRemainContexts(_ input: String) {

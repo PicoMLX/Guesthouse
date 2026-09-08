@@ -7,6 +7,8 @@ import Testing
     func assignmentDelimitedOptionsKeepTheirValueContext(_ prefix: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.applyPatterns(to: prefix + " opaqueCredential", codeExpected: false, state: &state).contains("opaqueCredential"))
+        #expect(!state.expectingSecretValue)
+        state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: prefix, codeExpected: false, state: &state)
         #expect(state.expectingSecretValue)
     }
@@ -58,6 +60,7 @@ import Testing
         let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
         #expect(output.contains("[redacted:"))
         #expect(!output.contains("dXNl") && !output.contains("first") && !output.contains("abcdefgh"))
+        #expect(state.expectingAuthorizationValue)
         #expect(state.authorizationValueIsOnTheNextLine)
         #expect(state.authorizationValueExplicitlyContinues)
     }
@@ -89,12 +92,13 @@ import Testing
         #expect(!output.contains("EFGH") && !output.contains("5678"))
     }
 
-    @Test(arguments: ["Basic", "Basic \\", " basic \t\\ "])
-    func valueLessBasicArmsTheNextRecord(_ input: String) {
+    @Test(arguments: [("Basic", false), ("Basic \\", true), (" basic \t\\ ", true)])
+    func valueLessBasicArmsTheNextRecord(_ input: String, _ explicit: Bool) {
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
         #expect(state.expectingAuthorizationValue)
         #expect(state.authorizationValueIsOnTheNextLine)
+        #expect(state.authorizationValueExplicitlyContinues == explicit)
     }
 
     @Test(arguments: [#"["--password", \"#, #"["--password", opaque\"#])

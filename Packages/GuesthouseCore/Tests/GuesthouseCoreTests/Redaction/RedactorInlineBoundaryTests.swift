@@ -120,6 +120,7 @@ import Testing
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: #""\"{\\\"password\\\":\"""#, codeExpected: false, state: &state)
         #expect(!state.expectingSecretValue && state.quotedValue == nil)
+        #expect(!state.expectingSecretContinuation)
     }
 
     @Test(arguments: ["password", "Authorization", "device_code", "Cookie", "Set-Cookie"], [2, 3, 16, 256])
@@ -151,6 +152,8 @@ import Testing
     func commandSeparatorsCannotHideOptions(_ prefix: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.applyPatterns(to: prefix + "--password opaqueCredential", codeExpected: false, state: &state).contains("opaqueCredential"))
+        #expect(!state.expectingSecretValue)
+        state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: prefix + "--password", codeExpected: false, state: &state)
         #expect(state.expectingSecretValue)
     }
