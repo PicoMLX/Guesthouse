@@ -76,6 +76,9 @@ extension Redactor {
                 && !TerminalControlEvidence.contentBeforeTerminator(joined).contains(patterns.wrappedTokenAtLineEnd) {
                 contexts.append(content)
             }
+            if incompleteJWTStartAtLineEnd(in: alternate) != nil && incompleteJWTStartAtLineEnd(in: joined) == nil {
+                contexts.append(alternate)
+            }
             // A restored label can identify an opaque value with no recognizable token shape.
             let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
                 + alternate.matches(of: patterns.authorizationHeader).map { ($0.range, $0.2.startIndex) }

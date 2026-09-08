@@ -35,6 +35,10 @@ extension Redactor {
                 start = footer.upperBound
             }
             if let quoted = state.quotedValue {
+                // A private key can open inside the quote that closes on this record.
+                var recoveredPEM: String?
+                _ = Self.redactPEMBlocks(String(reading[start...]), label: &recoveredPEM)
+                recoveredContexts.pemLabel = recoveredContexts.pemLabel ?? recoveredPEM
                 guard let end = Self.closingQuoteEnd(in: reading[...], for: quoted) else { continue }
                 start = max(start, end)
             }
@@ -99,6 +103,8 @@ extension Redactor {
             let continuationPattern = kind == "jwt" ? #/^[ \t]*[A-Za-z0-9_.-]+/# : Self.patterns.tokenContinuation
             if let continuation = text.firstMatch(of: continuationPattern) {
                 let fragment = String(continuation.0)
+                // Once wrapping began, even the final signature/tag may wrap again.
+                // Segment count is not a terminator; retain state until a lexical boundary.
                 state.wrappedTokenKind = continuation.range.upperBound == text.endIndex ? kind : nil
                 // Detect and retain every ordinary redaction BEFORE masking the continuation.
                 // Otherwise replacing `password` first destroys the evidence that its value
