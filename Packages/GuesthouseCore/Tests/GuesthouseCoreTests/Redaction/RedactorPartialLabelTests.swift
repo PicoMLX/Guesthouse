@@ -27,7 +27,7 @@ import Testing
         #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == expected)
     }
 
-    @Test(arguments: ["tokens", "passwords", "secrets", "api_keys", "clientSecrets", "private_keys"])
+    @Test(arguments: ["tokens", "passwords", "secrets", "api_keys", "api.key", "clientSecrets", "private_keys"])
     func pluralCredentialFieldsUseTheSharedVocabulary(_ label: String) {
         #expect((label + ": opaque").firstMatch(of: Redactor.patterns.labeledSecret).map { String($0.3) } == "opaque")
         #expect(Redactor.partialCredentialLabel(in: label) == label.lowercased())
@@ -39,6 +39,7 @@ import Testing
     }
 
     @Test(arguments: [("private k", "ey: opaque", "private key: opaque"),
+                      ("api.k", "ey: opaque", "api.key: opaque"),
                       ("request authoriz", "ation: opaque", "request authorization: opaque"),
                       ("secret access k", "ey: opaque", "secret access key: opaque"),
                       ("signing", "Secret: opaque", "signingSecret: opaque")])
@@ -101,7 +102,7 @@ import Testing
         #expect(Redactor.restoringCredentialLabel(in: second, state: &state) == expected)
     }
 
-    @Test(arguments: [#"["--password", opaque\, "--verbose"]"#, #"["--password", opaque\]"#])
+    @Test(arguments: [#"["--password", opaque\, "--verbose"]"#, #"["--password", opaque\]"#, #"["--github.token", opaque\]"#, #"["--api.key", opaque\]"#])
     func serializedDelimitersCannotArmPhysicalContinuation(_ input: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.redactSerializedOptions(input, state: &state).contains("opaque"))
@@ -117,6 +118,8 @@ import Testing
     }
 
     @Test(arguments: [("--cl", "ient-secret opaque", "--client-secret opaque"),
+                      ("--github.to", "ken opaque", "--token opaque"),
+                      ("--api.k", "ey opaque", "--api.key opaque"),
                       ("--device-co", "de opaque", "--device-code opaque"),
                       ("--access-k", "ey-secret opaque", "--access-key-secret opaque"),
                       ("cod", "e: ABCD-EFGH", "code: ABCD-EFGH"),
@@ -133,11 +136,11 @@ import Testing
         #expect(input.firstMatch(of: Redactor.patterns.partialURLAuthority) != nil)
     }
 
-    @Test(arguments: [" = ", " : ", "= ", ": ", "\t=\t", "=", ":"])
-    func spacedOptionAssignmentsConsumeTheValueNotTheDelimiter(_ separator: String) {
+    @Test(arguments: [" = ", " : ", "= ", ": ", "\t=\t", "=", ":"], ["--password", "--github.token", "--api.key"])
+    func spacedOptionAssignmentsConsumeTheValueNotTheDelimiter(_ separator: String, _ option: String) {
         var state = Redactor.StreamState()
-        let input = "run --password" + separator + "syntheticOpaque --verbose"
-        #expect(Redactor.redactSecretOptions(input, state: &state) == "run --password [redacted:secret] --verbose")
+        let input = "run " + option + separator + "syntheticOpaque --verbose"
+        #expect(Redactor.redactSecretOptions(input, state: &state) == "run " + option + " [redacted:secret] --verbose")
         #expect(!state.expectingSecretValue && state.quotedValue == nil)
     }
 
