@@ -2,6 +2,19 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineTests {
+    @Test(arguments: [("[AB", "]"), ("(AB", ")"), ("<AB", ">"), ("`AB", "`")])
+    func unfinishedCodeFramesRetainTheirClosingDelimiter(_ value: String, _ closer: Character) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: "Enter the code " + value, codeExpected: false, state: &state)
+            == "Enter the code [redacted:device-code]")
+        #expect(state.quotedValue?.delimiter == closer && state.quotedValue?.kind == "device-code")
+    }
+
+    @Test func aTrailingDeviceCodeSeparatorAwaitsTheNextRecord() {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: "Your code is ABCD-", codeExpected: false, state: &state)
+        #expect(state.expectingDeviceCode)
+    }
     @Test(arguments: [("--pass", "word syntheticOpaque"), ("Set-Coo", "kie: session=syntheticOpaque"),
                       ("Authoriz", "ation: syntheticOpaque"), ("pass", "word: syntheticOpaque"),
                       ("--github-", "token syntheticOpaque"), ("Bea", "rer syntheticOpaque"),
