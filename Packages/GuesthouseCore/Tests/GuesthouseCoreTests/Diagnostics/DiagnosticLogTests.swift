@@ -145,4 +145,15 @@ struct DiagnosticLogTests {
         let event = DiagnosticEvent(operation: operation, outcome: .failed(failure), operationID: Self.operationID)
         #expect(event.recoveryMessage == "Open Repair and inspect the download's current state before resuming it.")
     }
+
+    @Test(arguments: [
+        (DiagnosticEvent.Operation.pairSSH, "Pair SSH identity: The development Mac did not accept its SSH credentials."),
+        (.connectSSH, "Connect over SSH: The development Mac did not accept its SSH credentials.")
+    ])
+    func guestAuthenticationDoesNotSendUsersToProviderAccounts(_ example: (DiagnosticEvent.Operation, String)) throws {
+        let event = DiagnosticEvent(operation: example.0, outcome: .failed(.guestAuthenticationFailed), operationID: Self.operationID)
+        #expect(event.message == example.1)
+        #expect(event.recoveryMessage == "Open the development Mac console to check the guest account. Resume pairing with the correct guest-only password, or use Repair for key-based access. Keep the pinned host identity; do not bypass verification.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
 }
