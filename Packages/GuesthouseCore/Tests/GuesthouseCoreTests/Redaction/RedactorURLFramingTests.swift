@@ -2,6 +2,19 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [1, 2, 3, 4, 5])
+    func everyFirstUnicodeEscapeBoundaryIsQuarantined(_ split: Int) {
+        let escape = #"\u003a"#
+        var state = Redactor.StreamState()
+        let first = Redactor.redactURLContinuations(#"{"url":"https"# + escape.prefix(split), state: &state)
+        #expect(state.pendingEncodedURLString)
+        let next = String(escape.dropFirst(split)) + #"\u002f\u002fuser:syntheticOpaque\u0040example.com/path"}"#
+        let second = Redactor.redactURLContinuations(next, state: &state)
+        #expect(!(first + second).contains("syntheticOpaque"))
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+        #expect(Redactor.redactURLContinuations("Finished", state: &state) == "Finished")
+    }
+
     @Test(arguments: [
         [#"{"url":"https:\u002f"#, #"\u002fuser:syntheticOpaque\u0040example.com"}"#],
         [#"{"url":"https:\u002f"#, #"\u002fuser:syntheticFirst\"#, #""syntheticSecond@example.com/path"}"#],
