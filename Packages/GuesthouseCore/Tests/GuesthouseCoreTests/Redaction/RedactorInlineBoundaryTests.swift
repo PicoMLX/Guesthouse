@@ -181,7 +181,8 @@ import Testing
     @Test(arguments: ["password", "Authorization", "device_code"], [")", ">"])
     func closingFramesBoundACompletedQuotedValue(_ label: String, _ frame: String) {
         var state = Redactor.StreamState()
-        _ = Redactor.applyPatterns(to: label + ": \"opaqueCredential\"" + frame, codeExpected: false, state: &state)
+        let output = Redactor.applyPatterns(to: label + ": \"opaqueCredential\"" + frame, codeExpected: false, state: &state)
+        #expect(output.contains("[redacted:") && !output.contains("opaqueCredential"))
         #expect(!state.expectingSecretContinuation)
         #expect(!state.expectingAuthorizationValue)
         #expect(!state.expectingDeviceCode)
@@ -202,7 +203,8 @@ import Testing
     @Test(arguments: ["device_code: ABCD, password:", "Authorization: Bearer abc, password:"])
     func originalPendingSiblingsRetainTheirNextValue(_ input: String) {
         var state = Redactor.StreamState()
-        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output.contains("[redacted:") && !output.contains("ABCD") && !output.contains("abc"))
         #expect(state.expectingSecretValue)
     }
 

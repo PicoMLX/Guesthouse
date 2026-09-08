@@ -109,7 +109,8 @@ import Testing
     @Test(arguments: [#"["--password", \"#, #"["--password", opaque\"#])
     func serializedContinuationKeepsItsPendingValue(_ input: String) {
         var state = Redactor.StreamState()
-        _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        let output = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
+        #expect(output.contains("[redacted:secret]") && !output.contains("opaque"))
         #expect(state.expectingSecretValue)
         #expect(state.secretValueExplicitlyContinues)
     }
