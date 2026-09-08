@@ -55,6 +55,9 @@ struct Redactor: Sendable {
         var pendingURLSlashes = 0
         /// A bounded, structural option/cookie name split across physical records.
         var pendingCredentialLabel: String?
+        /// An incomplete encoded field name owns records until its assignment arrives.
+        /// Only this bit is retained, never arbitrary key or value bytes.
+        var pendingEncodedCredentialKey = false
         /// A distinctive token prefix reached a line boundary; payload may continue after it.
         var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
@@ -74,6 +77,7 @@ struct Redactor: Sendable {
 
     static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
         state.pendingCredentialLabel = state.pendingCredentialLabel ?? scanned.pendingCredentialLabel
+        state.pendingEncodedCredentialKey = state.pendingEncodedCredentialKey || scanned.pendingEncodedCredentialKey
         state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
         state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
         state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || scanned.authorizationValueExplicitlyContinues
