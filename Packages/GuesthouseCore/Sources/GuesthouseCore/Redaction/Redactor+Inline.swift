@@ -40,10 +40,19 @@ extension Redactor {
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
-        if text.wholeMatch(of: #/[ \t]*(?i:Basic|Bearer|Digest|NTLM|Negotiate|AWS4-HMAC-SHA256)[ \t]*(?:\\[ \t]*)?/#) != nil {
+        if text.wholeMatch(of: #/[ \t]*(?i:Basic|Bearer|Digest|NTLM|Negotiate|AWS4-HMAC-SHA256)[ \t]*(?:\[redacted:[^\]\r\n]+\][ \t]*)*(?:\\[ \t]*)?/#) != nil {
             state.expectingAuthorizationValue = true
             state.authorizationValueIsOnTheNextLine = true
             state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
+        }
+        text = text.replacing(p.partialParameterizedAuthorization) { match in
+            let names = match.2.lowercased() == "digest"
+                ? ["username", "username*", "realm", "nonce", "uri", "response", "algorithm", "cnonce", "opaque", "qop", "nc", "userhash"]
+                : ["credential", "signedheaders", "signature"]
+            guard names.contains(where: { $0.hasPrefix(match.3.lowercased()) }) else { return String(match.0) }
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            return "\(match.1)\(match.2) \(marker("authorization"))"
         }
         text = text.replacing(p.partialIntegratedAuthorization) { match in
             state.expectingAuthorizationValue = true

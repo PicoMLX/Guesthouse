@@ -2,6 +2,54 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorInlineBoundaryTests {
+    @Test(arguments: ["Bearer", "Basic", "Digest", "NTLM", "Negotiate", "AWS4-HMAC-SHA256"])
+    func literalMarkersDoNotCompleteAnAuthorizationValue(_ scheme: String) {
+        var state = Redactor.StreamState()
+        _ = Redactor.applyPatterns(to: scheme + " [redacted:decoy]", codeExpected: false, state: &state)
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: ["Digest realm", "Digest USER", "AWS4-HMAC-SHA256 Signed", "AWS4-HMAC-SHA256 Sign"])
+    func knownParameterPrefixesAwaitTheirRemainder(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state).hasSuffix("[redacted:authorization]"))
+        #expect(state.expectingAuthorizationValue && state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: ["Digest summary", "AWS4-HMAC-SHA256 guide", "Basic architecture works"])
+    func ordinarySchemeProseArmsNeitherAuthorizationFlag(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!state.expectingAuthorizationValue && !state.authorizationValueIsOnTheNextLine)
+    }
+
+    @Test(arguments: [2, 3, 16, 256])
+    func nestedSlashEscapesKeepCompleteAndContinuedUserInfoPrivate(_ depth: Int) {
+        let slash = String(repeating: "\\", count: depth) + "/"
+        let prefix = "https:" + slash + slash
+        var state = Redactor.StreamState()
+        #expect(Redactor.applyPatterns(to: prefix + "user:syntheticOpaque@example.com/path", codeExpected: false, state: &state)
+            == prefix + "[redacted:userinfo]@example.com/path")
+        #expect(!state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: prefix + "user:syntheticFirst", codeExpected: false, state: &state)
+            == prefix + "[redacted:userinfo]")
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "syntheticSecond@example.com/path", codeExpected: false, state: &state)
+            == "[redacted:userinfo]@example.com/path")
+        #expect(!state.expectingURLUserInfo)
+    }
+
+    @Test(arguments: [("(", ")"), ("'", "'")], ["user:opaque", "example.com:443"])
+    func apparentFramesCannotReleaseAValidUserinfoContinuation(frame: (String, String), authority: String) {
+        var state = Redactor.StreamState()
+        let first = Redactor.applyPatterns(to: frame.0 + "https://" + authority + frame.1, codeExpected: false, state: &state)
+        #expect(!first.contains(authority))
+        #expect(state.expectingURLUserInfo)
+        #expect(Redactor.applyPatterns(to: "@example.com/path", codeExpected: false, state: &state)
+                == "[redacted:userinfo]@example.com/path")
+        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
+    }
+
     @Test(arguments: ["ghp", "gho", "ghu", "ghs", "ghr", "github_pat"])
     func completeProviderStemsAwaitTheirUnderscore(_ stem: String) {
         var state = Redactor.StreamState()

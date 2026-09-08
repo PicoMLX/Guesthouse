@@ -11,21 +11,6 @@ import Testing
         #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
     }
 
-    @Test(arguments: [2, 3, 16, 256])
-    func nestedSlashEscapesKeepCompleteAndContinuedUserInfoPrivate(_ depth: Int) {
-        let slash = String(repeating: "\\", count: depth) + "/"
-        let prefix = "https:" + slash + slash
-        var state = Redactor.StreamState()
-        #expect(Redactor.applyPatterns(to: prefix + "user:syntheticOpaque@example.com/path", codeExpected: false, state: &state)
-            == prefix + "[redacted:userinfo]@example.com/path")
-        #expect(!state.expectingURLUserInfo)
-        #expect(Redactor.applyPatterns(to: prefix + "user:syntheticFirst", codeExpected: false, state: &state)
-            == prefix + "[redacted:userinfo]")
-        #expect(state.expectingURLUserInfo)
-        #expect(Redactor.applyPatterns(to: "syntheticSecond@example.com/path", codeExpected: false, state: &state)
-            == "[redacted:userinfo]@example.com/path")
-        #expect(!state.expectingURLUserInfo)
-    }
 
     @Test func bearerFragmentsArmAnOrdinaryFoldWithoutDemandingTheNextRecord() {
         var state = Redactor.StreamState()
@@ -36,7 +21,8 @@ import Testing
         #expect(!state.authorizationValueExplicitlyContinues)
     }
 
-    @Test(arguments: ["cloning https://opaqueCredential", "//opaqueCredential", #"url=https:\/\/opaqueCredential"#, "https://"])
+    @Test(arguments: ["cloning https://opaqueCredential", "//opaqueCredential", #"url=https:\/\/opaqueCredential"#, "https://",
+                      "https://[redacted:decoy]user:opaqueCredential", "https://[literal]user:opaqueCredential"])
     func usernameOnlyAuthorityPrefixesRetainTheirFollowingCredential(_ input: String) {
         var state = Redactor.StreamState()
         let first = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
@@ -73,16 +59,6 @@ import Testing
     }
 
     // Parentheses and apostrophes are URI sub-delimiters, not proof of closure.
-    @Test(arguments: [("(", ")"), ("'", "'")], ["user:opaque", "example.com:443"])
-    func apparentFramesCannotReleaseAValidUserinfoContinuation(frame: (String, String), authority: String) {
-        var state = Redactor.StreamState()
-        let first = Redactor.applyPatterns(to: frame.0 + "https://" + authority + frame.1, codeExpected: false, state: &state)
-        #expect(!first.contains(authority))
-        #expect(state.expectingURLUserInfo)
-        #expect(Redactor.applyPatterns(to: "@example.com/path", codeExpected: false, state: &state)
-                == "[redacted:userinfo]@example.com/path")
-        #expect(Redactor.applyPatterns(to: "Finished", codeExpected: false, state: &state) == "Finished")
-    }
 
     @Test func ambiguousBarePortsCannotReleaseAPossibleNumericPassword() {
         var state = Redactor.StreamState()
