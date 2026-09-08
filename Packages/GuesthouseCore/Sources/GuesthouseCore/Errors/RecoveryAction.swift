@@ -21,7 +21,7 @@ public enum RecoveryAction: Codable, Hashable, Sendable {
 }
 
 public enum RepairKind: String, Codable, Hashable, Sendable, CaseIterable {
-    case sshPairing, credentials, runtime, tools, xcodeComponents
+    case sshPairing, credentials, runtime, tools, xcodeComponents, download
 
     public var title: String {
         switch self {
@@ -30,6 +30,7 @@ public enum RepairKind: String, Codable, Hashable, Sendable, CaseIterable {
         case .runtime: "Repair the verified runtime installation"
         case .tools: "Check tool compatibility"
         case .xcodeComponents: "Install the required Xcode components"
+        case .download: "Download a verified replacement from the trusted source without bypassing verification"
         }
     }
 }

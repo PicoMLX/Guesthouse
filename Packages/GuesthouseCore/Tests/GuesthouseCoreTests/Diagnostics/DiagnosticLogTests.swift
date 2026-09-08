@@ -156,4 +156,11 @@ struct DiagnosticLogTests {
         #expect(event.recoveryMessage == "Open the development Mac console to check the guest account. Resume pairing with the correct guest-only password, or use Repair for key-based access. Keep the pinned host identity; do not bypass verification.")
         #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
     }
+
+    @Test func unverifiedXcodeImportOffersAStableVerifiedSource() throws {
+        let event = DiagnosticEvent(operation: .importXcode, outcome: .failed(.verificationFailed), operationID: Self.operationID)
+        #expect(event.message == "Import Xcode: The Xcode bundle failed verification.")
+        #expect(event.recoveryMessage == "Use Repair to inspect the failed import, then select a trusted, stable Xcode bundle and import it again. Preserve the existing installation until verification succeeds; do not bypass signature checks.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
 }

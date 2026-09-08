@@ -75,4 +75,45 @@ struct GuesthouseErrorTests {
         #expect(try JSONEncoder().encode(identity) == JSONEncoder().encode(Self.uuid))
         #expect(try JSONDecoder().decode(OperationID.self, from: JSONEncoder().encode(identity)) == identity)
     }
+
+    @Test(arguments: [
+        (GuesthouseError.VerificationCheck.digest, "The downloaded artifact failed its checksum verification check."),
+        (.signature, "The downloaded artifact failed its signature verification check."),
+        (.size, "The downloaded artifact failed its size verification check.")
+    ], [DiagnosticEvent.Operation.downloadGuestImage, .downloadRuntime])
+    func downloadErrorsDoNotAssumeTheArtifactIsARuntime(_ example: (GuesthouseError.VerificationCheck, String), _ operation: DiagnosticEvent.Operation) throws {
+        let error = GuesthouseError.downloadVerificationFailed(check: example.0)
+        let event = DiagnosticEvent(operation: operation, outcome: .operationFailed(error), operationID: Self.uuid)
+        #expect(error.userMessage == example.1)
+        #expect(error.recoveryActions == [.repair(.download), .cancel])
+        #expect(event.recoveryMessage == "Download a verified replacement from the trusted source without bypassing verification; Cancel")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
+
+    @Test(arguments: [
+        (GuesthouseError.InvalidRequestReason.oversized, "The request exceeds Guesthouse's supported size limit."),
+        (.pathEscapesAllowedRoot, "The request refers to a location outside the allowed workspace or environment."),
+        (.invalidVMName, "The request contains an invalid development Mac name."),
+        (.unsupportedOperation, "This version of Guesthouse does not support the requested operation."),
+        (.malformed, "The request is incomplete or has an invalid format.")
+    ])
+    func requestRejectionsUseReadableExplanations(_ example: (GuesthouseError.InvalidRequestReason, String)) {
+        #expect(GuesthouseError.invalidRequest(example.0).userMessage == example.1)
+    }
+
+    @Test(arguments: [
+        (GuesthouseError.Tool.xcode, "Xcode"), (.swift, "Swift"), (.git, "Git"),
+        (.githubCLI, "GitHub CLI"), (.codexCLI, "Codex CLI"), (.ssh, "SSH"), (.vmRuntime, "virtual machine runtime")
+    ])
+    func toolErrorsUseProductNames(_ example: (GuesthouseError.Tool, String)) {
+        #expect(GuesthouseError.toolMismatch(tool: example.0).userMessage == "The required tool (" + example.1 + ") is missing or incompatible.")
+    }
+
+    @Test(arguments: [GuesthouseError.runtimeMissing, .runtimeIncompatible, .toolMismatch(tool: .vmRuntime)])
+    func runtimeRepairDoesNotRequireAWorkingVM(_ error: GuesthouseError) {
+        #expect(error.category == .runtime)
+        #expect(error.recoveryActions == [.repair(.runtime), .cancel])
+        #expect(error.recoveryMessage == "Repair the verified runtime installation; Cancel")
+        #expect(!error.isRetryable)
+    }
 }

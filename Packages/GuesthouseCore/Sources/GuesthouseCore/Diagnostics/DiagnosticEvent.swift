@@ -88,8 +88,12 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
         case .canceled: detail = "Cancellation confirmed; partial changes may remain."
         case .failed(let failure):
-            detail = failure == .verificationFailed && isDownload
-                ? "The downloaded artifact failed verification." : failure.message
+            if failure == .verificationFailed, operation == .importXcode {
+                detail = "The Xcode bundle failed verification."
+            } else {
+                detail = failure == .verificationFailed && isDownload
+                    ? "The downloaded artifact failed verification." : failure.message
+            }
         case .operationFailed(let error): detail = error.userMessage
         }
         return operation.title + ": " + detail
@@ -110,6 +114,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     private var isDownload: Bool { operation == .downloadRuntime || operation == .downloadGuestImage }
 
     private func recovery(for failure: DiagnosticFailure) -> String {
+        if failure == .verificationFailed, operation == .importXcode {
+            return "Use Repair to inspect the failed import, then select a trusted, stable Xcode bundle and import it again. Preserve the existing installation until verification succeeds; do not bypass signature checks."
+        }
         if failure == .verificationFailed, isDownload {
             return "Use Repair to download a verified replacement from the trusted source. Preserve the existing development Mac and do not bypass verification."
         }

@@ -33,9 +33,31 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     }
     public enum Tool: String, Codable, Hashable, Sendable, CaseIterable {
         case xcode, swift, git, githubCLI, codexCLI, ssh, vmRuntime
+
+        fileprivate var displayName: String {
+            switch self {
+            case .xcode: "Xcode"
+            case .swift: "Swift"
+            case .git: "Git"
+            case .githubCLI: "GitHub CLI"
+            case .codexCLI: "Codex CLI"
+            case .ssh: "SSH"
+            case .vmRuntime: "virtual machine runtime"
+            }
+        }
     }
     public enum InvalidRequestReason: String, Codable, Hashable, Sendable, CaseIterable {
         case oversized, pathEscapesAllowedRoot, invalidVMName, unsupportedOperation, malformed
+
+        fileprivate var message: String {
+            switch self {
+            case .oversized: "The request exceeds Guesthouse's supported size limit."
+            case .pathEscapesAllowedRoot: "The request refers to a location outside the allowed workspace or environment."
+            case .invalidVMName: "The request contains an invalid development Mac name."
+            case .unsupportedOperation: "This version of Guesthouse does not support the requested operation."
+            case .malformed: "The request is incomplete or has an invalid format."
+            }
+        }
     }
     public enum Category: String, Codable, Hashable, Sendable, CaseIterable {
         case host, storage, runtime, guest, credentials, tools, workflow, ipc, user
@@ -48,6 +70,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .downloadVerificationFailed, .runtimeMissing, .runtimeIncompatible: .runtime
         case .guestNotReachable, .hostKeyChanged: .guest
         case .credentialsLocked, .loginExpired: .credentials
+        case .toolMismatch(.vmRuntime): .runtime
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
         case .vmSlotUnavailable, .operationOutcomeUnknown: .workflow
         case .unauthorizedCaller, .protocolMismatch, .invalidRequest: .ipc
@@ -68,7 +91,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .insufficientDisk(let required, let available):
             "The operation needs \(required) bytes of disk space; \(available) bytes are available."
         case .downloadVerificationFailed(let check):
-            "The runtime download failed its \(check.rawValue) verification check."
+            "The downloaded artifact failed its \(check == .digest ? "checksum" : check.rawValue) verification check."
         case .runtimeMissing:
             "The virtual machine runtime is not installed."
         case .runtimeIncompatible:
@@ -86,7 +109,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .loginExpired(.codex):
             "Your Codex sign-in on the development Mac needs to be renewed."
         case .toolMismatch(let tool):
-            "The required tool (\(tool.rawValue)) is missing or incompatible."
+            "The required tool (\(tool.displayName)) is missing or incompatible."
         case .xcodeComponentsIncomplete:
             "Xcode is missing required development components."
         case .vmSlotUnavailable(let maximum):
@@ -98,7 +121,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .protocolMismatch(let client, let service):
             "The app (protocol \(client)) and runtime (protocol \(service)) are incompatible."
         case .invalidRequest(let reason):
-            "The runtime rejected the request (\(reason.rawValue)). Inspect the environment before continuing."
+            reason.message
         case .canceled:
             "The operation was canceled; any partial changes must be inspected before retrying."
         }
@@ -109,9 +132,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost(.macOSTooOld): [.openSettings, .cancel]
         case .unsupportedHost: [.openSettings, .cancel]
         case .insufficientDisk: [.freeDiskSpace, .inspectState, .cancel]
-        case .downloadVerificationFailed: [.repair(.runtime), .cancel]
-        case .runtimeMissing: [.repair(.runtime), .cancel]
-        case .runtimeIncompatible: [.repair(.runtime), .openConsole, .exportWork, .cancel]
+        case .downloadVerificationFailed: [.repair(.download), .cancel]
+        case .runtimeMissing, .runtimeIncompatible, .toolMismatch(.vmRuntime): [.repair(.runtime), .cancel]
         case .guestNotReachable: [.inspectState, .openConsole, .cancel]
         case .hostKeyChanged: [.repair(.sshPairing), .openConsole, .exportWork, .cancel]
         case .credentialsLocked(.guestKeychain): [.openConsole, .repair(.credentials), .cancel]
