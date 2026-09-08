@@ -3,6 +3,14 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: [#"Digest username="syntheticFirst"#, #"AWS4-HMAC-SHA256 Credential="syntheticFirst"#,
+                      #"Authorization: Digest username="syntheticFirst"#, #"password: "syntheticFirst"#])
+    func ordinaryOpenCredentialQuotesRemainOwnedByTheirFieldScanner(_ input: String) {
+        var state = Redactor.StreamState()
+        #expect(Redactor.redactURLContinuations(input, state: &state) == input)
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+    }
+
     @Test func anEscapedFieldQuoteCannotOpenJSONValueQuarantine() {
         var state = Redactor.StreamState()
         let input = #"\"clientSecret\"#
