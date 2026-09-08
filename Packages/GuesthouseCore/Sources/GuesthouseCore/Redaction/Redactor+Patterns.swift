@@ -116,7 +116,7 @@ extension Redactor {
             urlAuthorityPrefix
             #/[^\s\/?#]+@/#
         }
-        let partialURLAuthority = #/(?:^|[\s:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
+        let partialURLAuthority = #/(?:^|[\s,:"'(<\[{\u{0060}])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
             #/[^\s\/?#]*$/#
