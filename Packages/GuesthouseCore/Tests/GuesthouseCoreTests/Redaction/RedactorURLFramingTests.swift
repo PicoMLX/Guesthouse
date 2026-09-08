@@ -2,6 +2,13 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test func anEscapedFieldQuoteCannotOpenJSONValueQuarantine() {
+        var state = Redactor.StreamState()
+        let input = #"\"clientSecret\"#
+        #expect(Redactor.redactURLContinuations(input, state: &state) == input)
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+    }
+
     @Test(arguments: ["password:", "Authorization:", "device_code:"])
     func aClosingValueQuoteCannotOpenEncodedURLQuarantine(_ label: String) {
         var state = Redactor.StreamState()
