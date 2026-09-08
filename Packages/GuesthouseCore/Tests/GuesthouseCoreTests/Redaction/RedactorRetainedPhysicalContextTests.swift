@@ -157,6 +157,7 @@ import Testing
     func assignmentsInsideAuthorizationFoldsRetainTheFollowingValue(_ prefix: [String]) {
         let output = Redactor().redact(lines: prefix + ["syntheticOpaque", "Finished"]).map(\.text)
         #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(!output.joined().contains("closed"))
         #expect(output.last == "Finished")
     }
 
@@ -165,6 +166,7 @@ import Testing
     func terminalAuthorizationAssignmentsConcealTheNextRecord(_ input: String) {
         let output = Redactor().redact(lines: [input, "syntheticOpaque", "Finished"]).map(\.text)
         #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(!output.joined().contains("closed"))
         #expect(output[2] == "Finished")
     }
 
