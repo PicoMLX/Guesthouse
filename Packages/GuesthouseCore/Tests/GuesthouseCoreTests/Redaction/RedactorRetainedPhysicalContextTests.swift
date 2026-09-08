@@ -2,6 +2,23 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: [("sk-abcdefgh", "ijklmnopqrstuvwx"), ("ghp_abcdefgh", "ijklmnopqrstuvwx"),
+                      ("eyJhbGciOiJIUzI1NiJ9.", "cGF5bG9hZA.c2ln")], ["\r", "\n", "\r\n"])
+    func retainedTerminatorsCannotBreakWrappedCredentialDetection(_ parts: (String, String), _ terminator: String) {
+        let output = Redactor().redact(lines: [parts.0 + terminator, parts.1, "; Finished"]).map(\.text)
+        #expect(!output.joined().contains(parts.0) && !output.joined().contains(parts.1))
+        #expect(output[0].hasSuffix(terminator) && output[2] == "; Finished")
+    }
+
+    @Test(arguments: ["your", "one-time", "one time", "one_time", "onetime", "verification", "activation",
+                      "confirmation", "pairing", "login", "security", "authorization", "auth", "access", "user", "device"]
+        .flatMap { qualifier in (1...qualifier.count).map { (qualifier, $0) } })
+    func everyPromptQualifierSplitConcealsThePhysicalValue(_ qualifier: String, _ split: Int) {
+        let input = [String(qualifier.prefix(split)), String(qualifier.dropFirst(split)) + " code is syntheticOpaque", "; Finished"]
+        let output = Redactor().redact(lines: input).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque") && output[2] == "; Finished")
+    }
+
     @Test func boundaryPreservingWrappedKeysConcealEveryFragment() {
         let output = Redactor().redact(lines: ["filename\u{0}sk-abcdefgh", "ijklmnopqrstuvwx", "; Finished"]).map(\.text)
         #expect(!output.joined().contains("abcdefgh"))
@@ -23,6 +40,9 @@ import Testing
     }
 
     @Test(arguments: [
+        ([#"{"pass\u0077ord: syntheticOpaque}"#], "syntheticOpaque"),
+        ([#"{"pass\u0077ord"#, #":"syntheticOpaque"}"#], "syntheticOpaque"),
+        ([#"{"url":"https\u00"#, #"3a\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#], "syntheticOpaque"),
         ([#"{"pass\u0077ord":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"pass\u0077ord\":"syntheticOpaque"}"#], "syntheticOpaque"),
         ([#"{"pass\u0077ord""#, #":"syntheticOpaque"}"#], "syntheticOpaque"),
