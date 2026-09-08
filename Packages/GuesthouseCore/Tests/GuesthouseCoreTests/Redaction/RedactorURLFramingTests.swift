@@ -2,6 +2,14 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorURLFramingTests {
+    @Test(arguments: ["password:", "Authorization:", "device_code:"])
+    func aClosingValueQuoteCannotOpenEncodedURLQuarantine(_ label: String) {
+        var state = Redactor.StreamState()
+        let input = label + #" "synthetic" \"#
+        #expect(Redactor.redactURLContinuations(input, state: &state) == input)
+        #expect(!state.pendingEncodedURLString && !state.encodedURLHasTrailingEscape)
+    }
+
     @Test(arguments: [1, 2, 3, 4, 5])
     func everyFirstUnicodeEscapeBoundaryIsQuarantined(_ split: Int) {
         let escape = #"\u003a"#
