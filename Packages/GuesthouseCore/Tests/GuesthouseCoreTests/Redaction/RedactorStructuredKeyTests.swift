@@ -2,6 +2,18 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorStructuredKeyTests {
+    @Test func incompleteEncodedKeysRetainOnlyAnAssignmentGateAcrossRecords() {
+        var state = Redactor.StreamState()
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: #"{"pass\u0077"#, state: &state) == #"{"secret""#)
+        #expect(state.pendingEncodedCredentialKey)
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: "or", state: &state) == "[redacted:encoded-key]")
+        #expect(state.pendingEncodedCredentialKey)
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: #"d":"syntheticOpaque"}"#, state: &state)
+            == #""secret":"syntheticOpaque"}"#)
+        #expect(!state.pendingEncodedCredentialKey)
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: "Finished", state: &state) == "Finished")
+    }
+
     @Test(arguments: ["\r", "\n", "\r\n"])
     func physicalTerminatorsInsideEncodedKeysFailClosed(_ terminator: String) {
         let input = #"{"pass\u0077"# + terminator + #"word":"syntheticOpaque"}"#
