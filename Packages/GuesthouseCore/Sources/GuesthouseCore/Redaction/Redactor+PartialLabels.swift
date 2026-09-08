@@ -62,6 +62,14 @@ extension Redactor {
            ["is", "are", "was", "were", "reads", "equals"].contains(where: { $0.hasPrefix(prompt.2.lowercased()) }) {
             return prompt.1.lowercased() + " " + prompt.2.lowercased()
         }
+        // Qualified delimited prompts permit two instruction words after the keyword.
+        // Preserve only their count, not arbitrary instruction or possible value bytes.
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access)[ ._-]?codes?)((?:[ \t]+\S+){1,2})[ \t]*$/#),
+           !prompt.0.contains(patterns.codePrompt), !prompt.0.contains(patterns.codePromptOnly),
+           !prompt.0.contains(patterns.declarativeCodePrompt) {
+            return prompt.1.lowercased() + String(repeating: " x", count: prompt.2.split(whereSeparator: \.isWhitespace).count)
+                + (text.last?.isWhitespace == true ? " " : "")
+        }
         // Retain at most three instruction-word slots, never their arbitrary bytes.
         // A final slot without whitespace can continue within the same word next time.
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))((?:[ \t]+\S+){1,3})[ \t]*$/#) {
@@ -108,9 +116,12 @@ extension Redactor {
     /// internal boundary markers in the restored output rather than replaying raw controls.
     static func restoringCredentialLabel(in line: String, state: inout StreamState) -> String? {
         guard var prefix = state.pendingCredentialLabel else { return nil }
-        let visible = stripTerminalEscapes(line).drop(while: \.isWhitespace)
+        let normalized = stripTerminalEscapes(line)
+        let visible = normalized.drop(while: \.isWhitespace)
         guard !visible.isEmpty else { return nil }
         state.pendingCredentialLabel = nil
+        // Leading whitespace completes the preceding slot instead of extending its word.
+        if prefix.hasSuffix(" x"), normalized.first?.isWhitespace == true { prefix += " " }
         // The prompt helper adds a separator after "code". It is still a singular
         // stem until the next record rules out the bounded plural continuation.
         if prefix.hasSuffix("code "), visible.first?.lowercased() == "s",
@@ -129,6 +140,9 @@ extension Redactor {
             successor.hasPrefix(prefix)
                 || (prefix.wholeMatch(of: #/(?:enter|type|paste|copy|input)(?: x){1,3}[ ]?/#) != nil
                     && successor.hasPrefix(String(prefix.prefix(while: { $0 != " " })) + " "))
+                || (prefix.firstMatch(of: #/^(.+codes?)(?: x){1,2}[ ]?$/#).map {
+                    successor.hasPrefix($0.1 + " ")
+                } == true)
                 || (prefix.hasPrefix("-")
                 && combined.wholeMatch(of: #/--?[A-Za-z0-9_.-]+[ \t]*/#) != nil
                 && credentialFieldPrefixes.contains(combined.lowercased().filter { $0 != "-" && $0 != "_" && $0 != "." && !$0.isWhitespace }))
