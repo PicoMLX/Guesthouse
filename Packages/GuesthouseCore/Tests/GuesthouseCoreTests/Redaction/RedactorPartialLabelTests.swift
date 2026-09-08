@@ -2,6 +2,16 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
+    func aQuoteWithoutAStructuralTailCannotBoundAnAuthorizationValue(_ value: String) {
+        #expect(("Authorization: " + value).firstMatch(of: Redactor.patterns.authorizationHeader).map { String($0.2) } == value)
+    }
+
+    @Test(arguments: [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
+    func aQuoteWithoutAStructuralTailCannotBoundASecretValue(_ value: String) {
+        #expect(("password: " + value).firstMatch(of: Redactor.patterns.labeledSecret).map { String($0.3) } == value)
+    }
+
     @Test func canonicalOptionSuccessorsCannotAbsorbUnrelatedWords() {
         var state = Redactor.StreamState()
         state.pendingCredentialLabel = "--cl"
