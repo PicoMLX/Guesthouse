@@ -18,11 +18,14 @@ import Testing
         #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
     }
 
-    @Test(arguments: [#"args=["--password syntheticFirst"#, #"args=["run --password syntheticFirst"#,
-                      "args=['run --password syntheticFirst"])
-    func unfinishedContainerCommandsRetainQuoteState(_ input: String) {
+    @Test(arguments: [(#"args=["--password syntheticFirst"#, Character("\"")),
+                      (#"args=["run --password syntheticFirst"#, Character("\"")),
+                      ("args=['run --password syntheticFirst", Character("'"))])
+    func unfinishedContainerCommandsRetainQuoteState(_ input: String, _ delimiter: Character) throws {
         var state = Redactor.StreamState()
         #expect(!Redactor.redactSecretOptions(input, state: &state).contains("syntheticFirst"))
-        #expect(state.quotedValue != nil)
+        let quote = try #require(state.quotedValue)
+        #expect(quote.delimiter == delimiter && quote.escapeDepth == 0 && quote.kind == "secret")
+        #expect(!quote.singleQuotesAreLiteral)
     }
 }

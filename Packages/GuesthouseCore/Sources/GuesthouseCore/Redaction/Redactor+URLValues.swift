@@ -86,7 +86,7 @@ extension Redactor {
                 for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) else { return false }
             return text[end...].allSatisfy { $0.isWhitespace || "]})>".contains($0) }
         }
-        let closers: [Character: Character] = ["<": ">"]
+        let closers: [Character: Character] = ["<": ">", "{": "}"]
         guard let opener = text[..<start].last, let closer = closers[opener],
               let end = text[start...].firstIndex(of: closer),
               text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }

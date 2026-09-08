@@ -146,6 +146,7 @@ import Testing
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: "password: [redacted:secret]", codeExpected: false, state: &state)
         #expect(state.expectingSecretContinuation)
+        #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
     }
 
     @Test func ordinaryBasicProseDoesNotAcquireAuthorizationState() {
