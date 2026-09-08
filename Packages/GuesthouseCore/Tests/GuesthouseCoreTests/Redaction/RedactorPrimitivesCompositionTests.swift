@@ -3,6 +3,10 @@ import Testing
 
 @Suite struct RedactorPrimitivesCompositionTests {
     @Test(arguments: [["Enter the supp", "lied code syntheticOpaque"],
+                      ["Your code sho", "wn below: syntheticOpaque"],
+                      ["Your code sho", "wn be", "low: syntheticOpaque"],
+                      ["Enter the", " code syntheticOpaque"],
+                      ["Enter one two", "\tcode syntheticOpaque"],
                       ["Enter the supp", "lied co", "de syntheticOpaque"],
                       ["Your code i", "s syntheticOpaque"], ["device code rea", "ds syntheticOpaque"],
                       ["Your code re", "a", "ds syntheticOpaque"],
@@ -39,6 +43,10 @@ import Testing
     }
 
     @Test(arguments: [
+        [#""htt"#, #"ps\u003a\u002f\u002fuser:syntheticOpaque\u0040example.com""#],
+        [#""pass\u0077ord:"syntheticOpaque""#],
+        [#"{'pass\u0077ord':'syntheticOpaque'}"#],
+        [#"INFO "pass\u0077ord":"syntheticOpaque""#],
         [#"{"url":""#, #"\u002f\u002fuser:syntheticOpaque\u0040example.com"}"#],
         ["[//one.example;//user:syntheticOpaque@two.example]"],
         ["--url", "=//user:syntheticOpaque@example.com/path"],
@@ -52,6 +60,12 @@ import Testing
         #expect(!output.joined().contains("synthetic") && !output.joined().contains("Opaque"))
         #expect(output.joined().contains("[redacted:"))
         #expect(output.last == "; Finished")
+    }
+
+    @Test(arguments: [#"{"url":"https:\u002f\u002fexample.com"}"#, #""https:\u002f\u002fexample.com:443""#,
+                      "https://[::1]", "https://[2001:db8::1]:443"])
+    func closedEncodedHostOnlyURLsPreserveDiagnostics(_ input: String) {
+        #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
     }
 
     @Test(arguments: ["\r", "\n", "\r\n"])
