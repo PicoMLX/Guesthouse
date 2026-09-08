@@ -118,7 +118,10 @@ import Testing
         _ = Redactor.stripTerminalEscapes("k\u{1B}[32", openControlString: &open)
         let result = Redactor.stripTerminalEscapes("-abcdefghijklmnop", openControlString: &open)
         #expect(!result.spliced.contains("bcdefghijklmnop"))
-        #expect(open == nil)
+        // Independent mixed-class readings exceed the unchanged 64-alternative budget.
+        #expect(open?.quarantined == true)
+        #expect(Redactor.stripTerminalEscapes("syntheticNext", openControlString: &open).spliced
+                == "[redacted:terminal-ambiguity]")
     }
 
     @Test(arguments: [("--pass\u{1B}word syntheticOpaque", "--password syntheticOpaque"),
