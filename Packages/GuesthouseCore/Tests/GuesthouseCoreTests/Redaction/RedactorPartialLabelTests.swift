@@ -2,6 +2,22 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test func canonicalOptionSuccessorsCannotAbsorbUnrelatedWords() {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = "--cl"
+        #expect(Redactor.restoringCredentialLabel(in: "osed status s", state: &state) == nil)
+        #expect(state.pendingCredentialLabel == nil)
+    }
+
+    @Test(arguments: [("Bas", "ic", "basic"), ("Dige", "st", "digest"),
+                      ("AWS4-HMAC-S", "HA256", "aws4-hmac-sHA256"),
+                      ("--cl", "ient-s", "--client-s")])
+    func intermediateRecordsCanCompleteSchemesOrCanonicalizeOptions(_ first: String, _ middle: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(Redactor.restoringCredentialLabel(in: middle, state: &state) == expected)
+    }
+
     @Test(arguments: [("Bas", "ic\tdXNlcjpwYXNz", "basic\tdXNlcjpwYXNz"),
                       ("Bea", "rer\topaque", "bearer\topaque"),
                       ("AWS4-HMAC-S", "HA256 Credential=opaque", "aws4-hmac-sHA256 Credential=opaque")])
