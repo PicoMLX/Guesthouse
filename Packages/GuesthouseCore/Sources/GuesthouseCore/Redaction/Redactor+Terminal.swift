@@ -42,6 +42,7 @@ extension Redactor {
     /// boundaries and conceals recovered token spans. Scan-only contexts retain restored field
     /// evidence for the state-aware caller. Ordinary lines have identical visible readings.
     static func renderings(of text: String, priorPrefixes: [String] = []) -> (joined: String, spliced: String, contexts: [String]) {
+        if priorPrefixes.isEmpty, text.firstMatch(of: patterns.terminalEscape) == nil { return (text, text, []) }
         func isTokenCharacter(_ character: Character) -> Bool {
             character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
         }
