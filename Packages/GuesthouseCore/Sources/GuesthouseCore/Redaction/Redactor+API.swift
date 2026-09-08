@@ -16,6 +16,9 @@ extension Redactor {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     func redact(line: String, state: inout StreamState) -> RedactedLine {
+        if let restored = Self.restoringCredentialLabel(in: line, state: &state) {
+            return redact(line: restored, state: &state)
+        }
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
@@ -172,8 +175,9 @@ extension Redactor {
         if authorizationContinuation {
             let wholeValueQuote = Self.unterminatedQuote(in: text[...], kind: "authorization")
             state.quotedValue = wholeValueQuote
-            state.authorizationValueIsOnTheNextLine = valueContinues
-            state.authorizationValueExplicitlyContinues = explicitlyContinues
+            let commaContinues = text.last(where: { !$0.isWhitespace }) == ","
+            state.authorizationValueIsOnTheNextLine = valueContinues || commaContinues
+            state.authorizationValueExplicitlyContinues = explicitlyContinues || commaContinues
             state.expectingAuthorizationValue = authorizationFoldWasEstablished || closedValueTail == nil || valueContinues
             Self.armPendingContexts(from: closedValueTail ?? text, state: &state)
             if wholeValueQuote == nil || authorizationFoldWasEstablished {
