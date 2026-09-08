@@ -69,7 +69,12 @@ extension Redactor {
            let end = closingQuoteEnd(in: quotedRecord.dropFirst(),
                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")),
            prefixEnd < end, text[end...].allSatisfy(\.isWhitespace) { return true }
-        let closers: [Character: Character] = ["<": ">", "\"": "\""]
+        if text[..<start].last == "\"" {
+            guard let end = closingQuoteEnd(in: text[start...],
+                for: .init(delimiter: "\"", escapeDepth: 0, kind: "userinfo")) else { return false }
+            return text[end...].allSatisfy { $0.isWhitespace || "]})>".contains($0) }
+        }
+        let closers: [Character: Character] = ["<": ">"]
         guard let opener = text[..<start].last, let closer = closers[opener],
               let end = text[start...].firstIndex(of: closer),
               text[text.index(after: end)...].allSatisfy({ $0.isWhitespace || "]})>".contains($0) }) else { return false }

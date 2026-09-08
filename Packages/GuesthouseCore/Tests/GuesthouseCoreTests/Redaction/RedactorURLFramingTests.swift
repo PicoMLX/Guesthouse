@@ -3,7 +3,8 @@ import Testing
 
 @Suite struct RedactorURLFramingTests {
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
-                      #""visit https://example.com""#, #""visit https://example.com:443""#])
+                      #""visit https://example.com""#, #""visit https://example.com:443""#,
+                      #"prefix "https://example.com""#])
     func provenDiagnosticFramesPreservePublicAuthorities(_ input: String) {
         var state = Redactor.StreamState()
         #expect(Redactor.redactURLContinuations(input, state: &state) == input)
@@ -12,7 +13,7 @@ import Testing
     }
 
     @Test(arguments: ["https://user:opaque", "(https://user:opaque)", "'https://user:opaque'",
-                      #""visit https://user:opaque\""#])
+                      #""visit https://user:opaque\""#, #"prefix "https://user:opaque\""#])
     func unprovenFramesCannotReleasePotentialUserinfo(_ input: String) {
         var state = Redactor.StreamState()
         #expect(!Redactor.redactURLContinuations(input, state: &state).contains("opaque"))
