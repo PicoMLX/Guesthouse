@@ -2,6 +2,29 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: ["abcdef", "abcDEF", "abc.def"])
+    func lowercaseImperativeCodesRemainConcealed(_ value: String) {
+        #expect(Redactor().redact(lines: ["Enter the code " + value, "Finished"]).map(\.text)
+                == ["Enter the code [redacted:device-code]", "Finished"])
+    }
+
+    @Test(arguments: [["--g", "ithub-token syntheticOpaque"], ["--ve", "ndor-password syntheticOpaque"],
+                      ["gh  ", "p_syntheticOpaque"], ["github_pa\t", "t_syntheticOpaque"],
+                      ["https://user:syntheticFirst", "syntheticMiddle@syntheticStill", "syntheticLast@example.com/path"]])
+    func qualifierPaddingAndUserinfoFragmentsRemainConcealed(_ records: [String]) {
+        let output = Redactor().redact(lines: records + ["; Finished"]).map(\.text)
+        #expect(!output.joined().contains("synthetic"))
+        #expect(output.last == "; Finished")
+    }
+
+    @Test(arguments: ["[url=//one:syntheticFirst@one.example,url=//two:syntheticSecond@two.example]",
+                      "[https://[2001:db8::1],//user:syntheticSecret@[2001:db8::2]]"])
+    func assignedAndIPv6URLListsConcealEachCredential(_ input: String) {
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output[0].contains("synthetic"))
+        #expect(output[1] == "Finished")
+    }
+
     @Test(arguments: [["Enter the cod", "e ABCD-EFGH"], ["Enter the co", "de ABC123"],
                       ["Your code", " is syntheticOpaque"],
                       ["https://user:syntheticFirst@", "syntheticSecond@example.com/path"],
@@ -110,7 +133,8 @@ import Testing
 
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
                       #""visit https://example.com""#, #""visit https://example.com:443""#,
-                      #"prefix "url=https://example.com""#, "prefix <url=https://example.com>", "{url=https://example.com}"])
+                      #"prefix "url=https://example.com""#, "prefix <url=https://example.com>", "{url=https://example.com}",
+                      "prefix `https://example.com`", "prefix `//example.com`"])
     func completeURLDiagnosticsDoNotQuarantineTheNextRecord(_ input: String) {
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
     }
