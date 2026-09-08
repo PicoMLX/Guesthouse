@@ -11,6 +11,7 @@ extension Redactor {
 
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState,
                               prepareQuotedValues: Bool = true) -> String {
+        let input = normalizingStructuredCredentialKeys(in: input)
         let p = patterns
         state.pendingCredentialLabel = partialCredentialLabel(in: input) ?? state.pendingCredentialLabel
         let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
@@ -153,7 +154,7 @@ extension Redactor {
         }
         text = protected.restoring(in: text, state: &state)
         if text.contains(p.mentionsCode) || codeExpected {
-            text = applyDeviceCodePattern(to: text)
+            text = applyDeviceCodePattern(to: text, preserveAlgorithms: !codeExpected)
         }
         return text
     }
