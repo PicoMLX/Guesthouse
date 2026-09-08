@@ -3,6 +3,24 @@ import Testing
 
 @Suite struct RedactorSplitLabelTests {
 
+    @Test(arguments: ["\u{1B}[12345672m", "\u{9B}12345672m"])
+    func parameterSuffixesConcealEveryVisibleCodeFragment(_ command: String) {
+        let output = Redactor().redact("The login code was rejected; retry AB1" + command + "-CD34.")
+        #expect(!output.contains("AB1") && !output.contains("CD34"))
+    }
+
+    @Test func pendingTerminalPrefixesDoNotEmitAUsableDeviceCode() {
+        let output = Redactor().redact(lines: ["AB12-CD34 is your co\u{1B}[31", "mde", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("AB12-CD34"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test func anEscapedDiagnosticApostropheCannotEndTheSecretEarly() {
+        let output = Redactor().redact(lines: [#"['--password synthetic\'secretTail']"#, "Finished"]).map(\.text)
+        #expect(!output[0].contains("synthetic") && !output[0].contains("secretTail"))
+        #expect(output[1] == "Finished")
+    }
+
     @Test(arguments: ["args=[", "args=[\"first\", "], ["\"", "'"])
     func enclosingContainerCommandsReleaseAfterTheirQuote(_ prefix: String, _ quote: String) {
         let lines = [prefix + quote + "run --password syntheticFirst", "syntheticSecond" + quote + "]", "Finished"]

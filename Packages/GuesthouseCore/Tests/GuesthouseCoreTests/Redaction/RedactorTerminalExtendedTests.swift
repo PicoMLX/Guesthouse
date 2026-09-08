@@ -124,7 +124,7 @@ import Testing
 
     @Test func boundedSparseRecordsKeepEveryReading() throws {
         let readings = try #require(TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: 1_000)))
-        #expect(readings.count == 16)
+        #expect(readings.count == 36)
         #expect(readings.allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
     }
 
