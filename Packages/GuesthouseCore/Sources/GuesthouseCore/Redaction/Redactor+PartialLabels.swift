@@ -2,7 +2,8 @@ import Foundation
 
 extension Redactor {
     private static let credentialFieldPrefixes: Set<String> = {
-        let secrets = ["password", "passphrase", "passwd", "secret", "token", "credential", "credentials", "api key", "private key", "secret key", "secret access key", "access key secret"]
+        let secrets = ["password", "passphrase", "passwd", "secret", "token", "credential", "api key", "private key", "secret key", "secret access key", "access key secret"]
+            .flatMap { [$0, $0 + "s"] }
         let modifiers = ["access", "refresh", "auth", "client", "app", "session", "user", "bearer", "private", "shared", "signing", "master", "id", "current", "new", "old", "previous", "confirm", "confirmation"]
         let names = ["authorization", "proxy authorization", "request authorization", "cookie", "cookies", "set cookie", "set cookies", "request cookie", "request cookies", "device code", "user code", "device codes", "user codes", "code", "codes"]
             + secrets + modifiers.flatMap { modifier in secrets.map { modifier + $0 } }
@@ -16,13 +17,25 @@ extension Redactor {
     /// Only structural label prefixes are retained, never value bytes. Canonicalizing an
     /// option to its longest sensitive suffix bounds state independently of a vendor prefix.
     private static let sensitiveOptionPrefixes: Set<String> = {
-        let words = ["password", "passphrase", "passwd", "secret", "token", "credential", "credentials"]
+        let words = ["password", "passphrase", "passwd", "secret", "token", "credential"].flatMap { [$0, $0 + "s"] }
             + ["api key", "private key", "secret key", "secret access key", "access key secret", "device code", "user code", "device codes", "user codes"]
                 .flatMap { name in ["", "-", "_"].map { name.replacingOccurrences(of: " ", with: $0) } }
         return Set(words.flatMap { word in (1..<word.count).map { String(word.prefix($0)) } })
     }()
 
     static func partialCredentialLabel(in text: String) -> String? {
+        // Retain known prompt structure, never the arbitrary instruction words between it.
+        // A completed keyword needs a canonical space before a later copula or value.
+        func promptPrefix(_ verb: Substring, _ keyword: Substring, separator: String = " ") -> String {
+            let word = keyword.lowercased()
+            return verb.lowercased() + separator + word + (word == "code" || word == "codes" ? " " : "")
+        }
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))(?:[ \t]+\S+){0,3}?[ \t]+((?i:c|co|cod|code|codes))[ \t]*$/#) {
+            return promptPrefix(prompt.1, prompt.2)
+        }
+        if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ _-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
+            return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
+        }
         if let option = text.firstMatch(of: #/(?:^|[\s\u{001F}"'\[({<:=\u{0060},;])(--?[A-Za-z0-9_-]*)[ \t]*$/#) {
             let name = String(option.1).lowercased()
             guard name.wholeMatch(of: patterns.secretOptionOnly) == nil else { return nil }
@@ -87,6 +100,8 @@ extension Redactor {
             || combined.wholeMatch(of: patterns.secretLabelOnly) != nil
             || combined.prefixMatch(of: patterns.codeField) != nil
             || combined.prefixMatch(of: patterns.codePrompt) != nil
+            || combined.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
+            || combined.prefixMatch(of: patterns.declarativeCodePrompt) != nil
             || combined.wholeMatch(of: patterns.codePromptOnly) != nil
             || combined.prefixMatch(of: patterns.githubToken) != nil
             || combined.prefixMatch(of: patterns.apiKey) != nil
