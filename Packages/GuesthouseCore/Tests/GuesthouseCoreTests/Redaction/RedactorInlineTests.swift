@@ -25,7 +25,10 @@ import Testing
                       ("Authoriz", "ation: syntheticOpaque"), ("pass", "word: syntheticOpaque"),
                       ("--github-", "token syntheticOpaque"), ("Bea", "rer syntheticOpaque"),
                       ("password", ": syntheticOpaque"), ("device_code", ": syntheticOpaque"),
-                      ("gh", "p_syntheticOpaque"), ("gith", "ub_pat_syntheticOpaque")])
+                      ("gh", "p_syntheticOpaque"), ("gith", "ub_pat_syntheticOpaque"),
+                      ("clientSec", "ret: syntheticOpaque"), ("refreshTo", "ken: syntheticOpaque"),
+                      ("sessionTo", "ken: syntheticOpaque"), ("current_secret-ac", "cess_key: syntheticOpaque"),
+                      ("sk", "-syntheticOpaque"), ("s", "k-syntheticOpaque")])
     func restoredLabelsExposeTheCompleteCredentialToInlineMatching(_ first: String, _ second: String) throws {
         var state = Redactor.StreamState()
         _ = Redactor.applyPatterns(to: first, codeExpected: false, state: &state)

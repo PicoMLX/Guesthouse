@@ -2,6 +2,31 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorRetainedPhysicalContextTests {
+    @Test(arguments: ["x\u{1B}Authorization: opaque", "x\u{1B}password: opaque",
+                      "x\u{1B}[--password opaque", "x\u{1B}device_code: opaque",
+                      "☃x\u{1B}pass\u{1B}word: opaque"])
+    func recoveredFieldBoundariesConcealTheirOpaqueValues(_ input: String) {
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output[0].contains("opaque"))
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: [("clientSec", "ret: syntheticOpaque"), ("refreshTo", "ken: syntheticOpaque"),
+                      ("sessionTo", "ken: syntheticOpaque"), ("current_secret-ac", "cess_key: syntheticOpaque")])
+    func qualifiedFieldPrefixesProtectTheFollowingValue(_ first: String, _ second: String) {
+        let output = Redactor().redact(lines: [first, second, "Finished"]).map(\.text)
+        #expect(!output.joined().contains("syntheticOpaque"))
+        #expect(output[2] == "Finished")
+    }
+
+    @Test(arguments: [("sk", "-abcdefghijklmnop"), ("s", "k-abcdefghijklmnop")])
+    func partialGenericStemsProtectAllWrappedPayload(_ first: String, _ second: String) {
+        let output = Redactor().redact(lines: [first, second, "qrstuvwxyz", ";", "Finished"]).map(\.text)
+        #expect(!output.joined().contains("abcdefghijklmnop"))
+        #expect(!output.joined().contains("qrstuvwxyz"))
+        #expect(output[4] == "Finished")
+    }
+
     @Test func recoveredTokenRetainsAnEmptyPasswordLabel() {
         let output = Redactor().redact(lines: [
             "eyJhbGciOiJIUzI1NiIsI\u{1B}[mtpZCI6Im5hYmMifQ.payload.-password:",
