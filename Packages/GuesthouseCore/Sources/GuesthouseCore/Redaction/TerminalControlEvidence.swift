@@ -142,7 +142,28 @@ enum TerminalControlEvidence {
             let suffixes = components.flatMap { component in
                 component.indices.map { String(component[$0...]) }
             } + complete.indices.map { String(complete[$0...]) }
-            let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + suffixes)).sorted()
+            var choices = Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + suffixes)
+            // Grammar classes are independent: a parameter colon can join intermediate
+            // slashes without an unrelated parameter separator or command final byte.
+            let parameters = body(of: escape.0, reading: .parameterOnly)
+            let intermediates = body(of: escape.0, reading: .intermediateOnly)
+            if !parameters.isEmpty && !intermediates.isEmpty {
+                let parameterChoices = Set(choices.map { value in
+                    String(value.filter { ("0"..."?").contains($0) })
+                })
+                let intermediateChoices = Set(choices.map { value in
+                    String(value.filter { (" "..."/").contains($0) })
+                })
+                for parameter in parameterChoices {
+                    for intermediate in intermediateChoices {
+                        for final in ["", body(of: escape.0, reading: .final)] {
+                            choices.insert(parameter + intermediate + final)
+                            guard choices.count <= maximumAlternatives else { return nil }
+                        }
+                    }
+                }
+            }
+            let bodies = choices.sorted()
             guard bodies.count <= maximumAlternatives else { return nil }
             // Most controls (including C0/C1 and opaque strings) have one empty reading.
             // Mutate those projections in place: copying/hashing each growing prefix is quadratic.
