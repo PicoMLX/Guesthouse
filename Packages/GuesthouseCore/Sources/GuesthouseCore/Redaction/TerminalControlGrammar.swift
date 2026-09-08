@@ -63,6 +63,13 @@ enum TerminalControlGrammar {
     /// class is retained, never an unbounded parameter or payload buffer. Synthetic control
     /// prefixes are consumed by the same grammar and cannot become visible text.
     static func prepare(_ line: String, pending: inout Pending?) -> String {
+        var commandSuffix = ""
+        return prepare(line, pending: &pending, commandSuffix: &commandSuffix)
+    }
+
+    /// Evidence callers retain at most 64 parameter/intermediate scalars. Opaque string
+    /// payloads are never retained. The grammar-only overload still needs just its class.
+    static func prepare(_ line: String, pending: inout Pending?, commandSuffix: inout String) -> String {
         // A physical record may still carry its framing. Preserve it separately so it
         // cannot make an unfinished control body look like an ordinary field value.
         var recordEnd = line.endIndex
@@ -79,12 +86,13 @@ enum TerminalControlGrammar {
             guard let terminator = text.firstMatch(of: end) else { return framing }
             text = String(text[terminator.range.upperBound...])
         case .csi:
-            text = "\u{1B}[" + text
+            text = "\u{1B}[" + commandSuffix + text
         case .escape(let intermediate):
-            text = (intermediate ? "\u{1B}(" : "\u{1B}") + text
+            text = "\u{1B}" + (commandSuffix.isEmpty && intermediate ? "(" : commandSuffix) + text
         case nil: break
         }
         pending = nil
+        commandSuffix = ""
         // Never discover a nested introducer by rescanning an already consumed payload.
         // Retain only the most recent match, not an array proportional to control count.
         var remaining = text[...]
@@ -99,6 +107,13 @@ enum TerminalControlGrammar {
         else if last.0.wholeMatch(of: patterns.unfinishedCSI) != nil { pending = .csi }
         else if last.0.wholeMatch(of: patterns.unfinishedEscape) != nil {
             pending = .escape(intermediate: last.0.unicodeScalars.contains { (0x20...0x2F).contains($0.value) })
+        }
+        switch pending {
+        case .csi, .escape:
+            // Introducers and ignored controls are outside the printable command body.
+            let body = last.0.unicodeScalars.filter { (0x20...0x3F).contains($0.value) }
+            commandSuffix = String(String.UnicodeScalarView(body.suffix(64)))
+        case .osc, .other, nil: break
         }
         return (pending == nil ? text : String(text[..<last.range.lowerBound])) + framing
     }
