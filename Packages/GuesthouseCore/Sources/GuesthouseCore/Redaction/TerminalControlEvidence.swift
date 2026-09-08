@@ -126,45 +126,23 @@ enum TerminalControlEvidence {
         var remaining = text[...]
         while let escape = remaining.firstMatch(of: TerminalControlGrammar.escape) {
             let literal = remaining[..<escape.range.lowerBound]
-            // A CSI parameter/subparameter can be the swallowed credential fragment.
-            // Enumerate each numeric component; never silently truncate this evidence.
-            let components = body(of: escape.0, reading: .parameterOnly)
-                .split(whereSeparator: { !("0"..."9").contains($0) }).map(String.init)
-                + body(of: escape.0, reading: .intermediateOnly).map(String.init)
-            // A long numeric component may start with unrelated command digits and end
-            // with a code group (at most eight digits). Whole-component readings cannot
-            // prove its suffix safe; quarantine rather than omit those interpretations.
-            guard components.allSatisfy({ $0.utf8.count <= 8 }) else { return nil }
-            // A credential can also start inside the command body while retaining its
-            // later delimiter/final. Bound before copying any of those suffix readings.
+            // Every ordered selection of command bytes is possible scan-only evidence:
+            // prefixes, suffixes, interior fragments, and mixed grammar classes. A whitelist
+            // silently omits valid credentials. Opaque control-string bodies remain empty.
             let complete = body(of: escape.0, reading: .complete)
             guard complete.utf8.count <= maximumAlternatives else { return nil }
-            let suffixes = components.flatMap { component in
-                component.indices.map { String(component[$0...]) }
-            } + complete.indices.map { String(complete[$0...]) }
-            var choices = Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + suffixes)
-            // Grammar classes are independent: a parameter colon can join intermediate
-            // slashes without an unrelated parameter separator or command final byte.
-            let parameters = body(of: escape.0, reading: .parameterOnly)
-            let intermediates = body(of: escape.0, reading: .intermediateOnly)
-            if !parameters.isEmpty && !intermediates.isEmpty {
-                let parameterChoices = Set(choices.map { value in
-                    String(value.filter { ("0"..."?").contains($0) })
-                })
-                let intermediateChoices = Set(choices.map { value in
-                    String(value.filter { (" "..."/").contains($0) })
-                })
-                for parameter in parameterChoices {
-                    for intermediate in intermediateChoices {
-                        for final in ["", body(of: escape.0, reading: .final)] {
-                            choices.insert(parameter + intermediate + final)
-                            guard choices.count <= maximumAlternatives else { return nil }
-                        }
-                    }
+            var choices: Set<String> = [""]
+            for character in complete {
+                let prior = choices
+                for prefix in prior {
+                    let cost = prefix.utf8.count + 1
+                    guard workRemaining >= cost else { return nil }
+                    workRemaining -= cost
+                    choices.insert(prefix + String(character))
+                    guard choices.count <= maximumAlternatives else { return nil }
                 }
             }
             let bodies = choices.sorted()
-            guard bodies.count <= maximumAlternatives else { return nil }
             // Most controls (including C0/C1 and opaque strings) have one empty reading.
             // Mutate those projections in place: copying/hashing each growing prefix is quadratic.
             if bodies == [""] {

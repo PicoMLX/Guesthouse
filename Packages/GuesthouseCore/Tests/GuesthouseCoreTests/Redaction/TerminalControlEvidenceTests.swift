@@ -67,7 +67,7 @@ import Testing
         _ = TerminalControlEvidence.prepare("s\u{1B}[31", continuation: &state)
         _ = TerminalControlEvidence.prepare("k\u{1B}[32", continuation: &state)
         let prefixes = try #require(state).prefixes.sorted()
-        #expect(prefixes == ["s", "s1", "s1k", "s31", "s31k", "sk"])
+        #expect(prefixes == ["s", "s1", "s1k", "s3", "s31", "s31k", "s3k", "sk"])
         _ = TerminalControlEvidence.prepare(String(repeating: "1", count: 10_000), continuation: &state)
         #expect(try #require(state).quarantined)
         #expect(try #require(state).commandSuffix.isEmpty)
