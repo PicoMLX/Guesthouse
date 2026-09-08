@@ -2,6 +2,24 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: [("private k", "ey: opaque", "private key: opaque"),
+                      ("request authoriz", "ation: opaque", "request authorization: opaque"),
+                      ("secret access k", "ey: opaque", "secret access key: opaque")])
+    func multiwordFieldPrefixesRetainTheirWholeSensitiveName(_ first: String, _ next: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == expected)
+    }
+
+    @Test(arguments: [(#""clientSecret""#, ": opaque"), (#"'clientSecret'"#, ": opaque"),
+                      (#"\"clientSecret\""#, ": opaque"), (#"\"clientSecret\"#, #"": opaque"#)])
+    func closedFieldQuotesDoNotDiscardThePendingAssignment(_ first: String, _ next: String) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: next, state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.labeledSecret).map { String($0.3) } == "opaque")
+    }
+
     @Test(arguments: [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
     func aQuoteWithoutAStructuralTailCannotBoundAnAuthorizationValue(_ value: String) {
         #expect(("Authorization: " + value).firstMatch(of: Redactor.patterns.authorizationHeader).map { String($0.2) } == value)
@@ -16,6 +34,14 @@ import Testing
         var state = Redactor.StreamState()
         state.pendingCredentialLabel = "--cl"
         #expect(Redactor.restoringCredentialLabel(in: "osed status s", state: &state) == nil)
+        #expect(state.pendingCredentialLabel == nil)
+    }
+
+    @Test(arguments: ["--se", "--t"])
+    func canonicalSuccessorsMustExtendTheWholeRetainedLabel(_ prefix: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = prefix
+        #expect(Redactor.restoringCredentialLabel(in: "Finished", state: &state) == nil)
         #expect(state.pendingCredentialLabel == nil)
     }
 
@@ -102,7 +128,7 @@ import Testing
         #expect(state.pendingCredentialLabel == nil)
     }
 
-    @Test(arguments: ["risk", "casks", "filenames", "ordinary diagnostic", "vendorclientSec", "vendor-clientGuide"])
+    @Test(arguments: ["risk", "casks", "filenames", "ordinary diagnostic", "vendorclientSec", "vendor-clientGuide", "public k", "private guide"])
     func genericStemPrefixesRequireTheirOwnBoundary(_ input: String) {
         #expect(Redactor.partialCredentialLabel(in: input) == nil)
     }
