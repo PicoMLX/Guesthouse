@@ -61,6 +61,7 @@ extension Redactor {
         }
         joined += text[scanned...]
         let tokenRanges = terminalCredentialSpans(in: joined).map(\.range)
+        let hasCodeContext = joined.contains(patterns.mentionsCode)
         // Adjacent controls share one offset. Inspect surviving neighbors only after every
         // escape is removed, so a neighboring control cannot hide a credential's boundary.
         boundaryOffsets = boundaryOffsets.filter { offset in
@@ -71,6 +72,7 @@ extension Redactor {
                 || suffix.prefixMatch(of: #/(?:\\*\/){2}/#) != nil
                 || tokenRanges.contains { $0.lowerBound < boundary && boundary < $0.upperBound }
                 || terminalHasCredentialOpener(suffix)
+                || (hasCodeContext && suffix.prefixMatch(of: patterns.deviceCode) != nil)
         }
         let recovery = recoveredCredentialRanges(in: text, joined: joined, priorPrefixes: priorPrefixes)
         var recovered = recovery.ranges
@@ -122,7 +124,7 @@ extension Redactor {
             if rangeIndex < mergedRanges.count, mergedRanges[rangeIndex].lowerBound < offset {
                 let boundary = joined.utf8.index(joined.utf8.startIndex, offsetBy: offset)
                 let suffix = joined[boundary...]
-                let contextualCode = joined.contains(patterns.mentionsCode)
+                let contextualCode = hasCodeContext
                     && suffix.prefixMatch(of: patterns.deviceCode) != nil
                 guard terminalHasCredentialOpener(suffix) || contextualCode else { continue }
                 // The token may have swallowed a separate label. Keep that label available

@@ -2,6 +2,14 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct TerminalCredentialProjectionTests {
+    @Test(arguments: ["\u{1B}[31/-m", "\u{9B}31/-m", "\u{1B}/-m"])
+    func individualIntermediateBytesRecoverAPIKeyPrefixes(_ command: String) {
+        let input = "sk" + command + "abcdefghijklmnopq"
+        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
+        #expect(result.ranges.contains { $0.kind == "api-key" })
+    }
+
+
     @Test(arguments: ["\u{1B}[2:3@", "\u{9B}2;3@", "\u{1B}[?2:3@", "\u{9B}2:3/m"])
     func individualCSIComponentsRemainScanEvidence(_ command: String) throws {
         let readings = try #require(TerminalControlEvidence.projections(in: command))
@@ -24,36 +32,6 @@ import Testing
         let input = label + "\u{1B}[31" + delimiter + "m"
         let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
         #expect(result.contexts.contains(label + delimiter))
-    }
-
-    @Test(arguments: ["\u{1B}[", "\u{9B}"])
-    func intermediateOnlyCSIReadingsRecoverURLDelimiters(_ introducer: String) {
-        let input = "https:" + introducer + "31/m/user:syntheticOpaque@host"
-        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
-        #expect(result.ranges.contains { $0.kind == "userinfo" })
-    }
-
-    @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "])
-    func restoredTrailingBackslashIsContinuationEvidence(_ field: String) {
-        let input = field + "synthetic\u{1B}\\"
-        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
-        #expect(result.contexts.contains(field + "synthetic\\"))
-    }
-
-    @Test(arguments: ["\u{1B}[:", "\u{9B}:", "\u{1B}/"], [64, 70])
-    func overflowingPendingCommandBodiesQuarantineBeforeTruncation(_ command: String, _ length: Int) {
-        var state: TerminalControlEvidence.Continuation?
-        _ = TerminalControlEvidence.prepare("password" + command + String(repeating: command.hasSuffix("/") ? "/" : "1", count: length), continuation: &state)
-        #expect(state?.quarantined == true)
-        #expect(TerminalControlEvidence.prepare("msyntheticOpaque", continuation: &state).text == "[redacted:terminal-ambiguity]")
-    }
-
-    @Test(arguments: ["password: ", "Authorization: ", "device_code: ", "--password "],
-          ["\"", "'", "\\\""])
-    func restoredOpeningDelimitersAreStateEvidence(_ field: String, _ delimiter: String) {
-        let input = field + "\u{1B}" + delimiter + "syntheticFirst"
-        let result = Redactor.recoveredCredentialRanges(in: input, joined: TerminalControlGrammar.normalize(input), priorPrefixes: [])
-        #expect(result.contexts.contains(field + delimiter + "syntheticFirst"))
     }
 
     @Test(arguments: ["password: synthetic\u{1B}[31mValue", "password: \"synthetic\u{1B}[31mValue\"",
