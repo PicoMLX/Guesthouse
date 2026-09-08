@@ -88,6 +88,7 @@ import Testing
         _ = Redactor.applyPatterns(to: input, codeExpected: false, state: &state)
         #expect(!state.expectingSecretValue && !state.secretValueExplicitlyContinues)
         #expect(state.quotedValue == nil)
+        #expect(!state.expectingSecretContinuation)
     }
 
     @Test(arguments: [#"[\"--password\", \"opaqueCredential\"]"#, #"[\'--password\', \'opaqueCredential\']"#])

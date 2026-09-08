@@ -1,7 +1,17 @@
+import Foundation
 import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorStructuredKeyTests {
+    @Test(arguments: [1, 128, 2_048])
+    func wideRecordsPreserveValuesAndNormalizeEveryEncodedKey(_ count: Int) {
+        let prefix = (0..<count).map { "\"field\($0)\":\"visible\",\"pass\\u0077ord\":\"opaque\"" }.joined(separator: ",")
+        let input = "{" + prefix + #", "message":"{\"pass\\u0077ord\":\"visible\"}"}"#
+        let expected = "{" + prefix.replacingOccurrences(of: #""pass\u0077ord":"opaque""#, with: #""password":"opaque""#)
+            + #", "message":"{\"pass\\u0077ord\":\"visible\"}"}"#
+        #expect(Redactor.normalizingStructuredCredentialKeys(in: input) == expected)
+    }
+
     @Test func incompleteEncodedKeysRetainOnlyAnAssignmentGateAcrossRecords() {
         var state = Redactor.StreamState()
         #expect(Redactor.normalizingStructuredCredentialKeys(in: #"{"pass\u0077"#, state: &state) == #"{"secret""#)
