@@ -3,6 +3,38 @@ import Testing
 
 @Suite struct RedactorSplitLabelTests {
 
+    @Test(arguments: ["\u{1B}[:;//m", "\u{9B}:;//m"])
+    func mixedTerminalClassesHideURLPasswords(_ command: String) {
+        #expect(!Redactor().redact("https" + command + "user:syntheticOpaque@host").contains("syntheticOpaque"))
+    }
+
+    @Test(arguments: [#"args=["run '--password syntheticOpaque' --verbose"]"#,
+                      #"args=['run "--password syntheticOpaque" --verbose']"#])
+    func nestedCommandContainersReleasePublicOutput(_ input: String) {
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output[0].contains("syntheticOpaque") && output[0].contains("--verbose"))
+        #expect(output[1] == "Finished")
+    }
+
+    @Test(arguments: ["Basic", "Bearer", "NTLM", "Negotiate", "Digest", "AWS4-HMAC-SHA256"])
+    func schemeOnlyHeadersConcealUnindentedOpaqueValues(_ scheme: String) {
+        let output = Redactor().redact(lines: ["Authorization: " + scheme, "syntheticOpaque", "status: done"]).map(\.text)
+        #expect(output[1] == "[redacted:authorization]" && output[2] == "status: done")
+    }
+
+    @Test(arguments: [("[AB", "C123]"), ("(AB", "C123)"), ("<AB", "C123>"), ("`AB", "C123`")])
+    func framedCodeFragmentsRemainPrivateUntilClosed(_ first: String, _ second: String) {
+        let output = Redactor().redact(lines: ["Enter the code " + first, second, "status: done"]).map(\.text)
+        #expect(!output[0].contains("AB") && !output[1].contains("C123"))
+        #expect(output[2] == "status: done")
+    }
+
+    @Test func anUnfinishedDeviceCodeNeedsNoIndentation() {
+        let output = Redactor().redact(lines: ["Your code is ABCD-", "EFGH", "status: done"]).map(\.text)
+        #expect(!output[0].contains("ABCD") && !output[1].contains("EFGH"))
+        #expect(output[2] == "status: done")
+    }
+
     @Test(arguments: ["\u{1B}[12345672m", "\u{9B}12345672m"])
     func parameterSuffixesConcealEveryVisibleCodeFragment(_ command: String) {
         let output = Redactor().redact("The login code was rejected; retry AB1" + command + "-CD34.")
