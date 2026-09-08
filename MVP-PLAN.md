@@ -1,5 +1,7 @@
 # Guesthouse: GUI-first MVP technical plan
 
+> Current work prioritizes Lume candidate validation and shared infrastructure under [ADR 0002](docs/decisions/0002-prioritize-lume-and-shared-infrastructure.md). Tart-specific instructions below are retained as legacy reference; new Tart-specific work is deferred. Lume is not yet an accepted provider. A separate accepted provider-selection ADR and corresponding plan/gate updates must precede formal Lume gate evidence. Shared security, lifecycle, and proof requirements remain in force.
+
 Build a native macOS app that prepares an isolated development Mac, connects it to the existing Codex desktop app, and manages multi-repository Xcode workspaces. The developer should not need Terminal, Homebrew, an SSH configuration tutorial, or a hand-written environment manifest.
 
 The proposed implementation is a sandboxed SwiftUI app with a narrowly scoped, non-sandboxed XPC runtime service around the official Tart executable and OpenSSH. GitHub CLI and Codex CLI run inside the guest. Do not build a new chat interface, fork Tart or Codex, or implement a virtualization engine for the MVP.

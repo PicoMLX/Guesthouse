@@ -1,0 +1,176 @@
+import Foundation
+
+extension Redactor {
+    typealias TerminalCredentialRange = (range: Range<Int>, kind: String)
+
+    /// An opening delimiter (including its escaping) supplies quote state just like a label.
+    /// Interior styling or an already-completed quoted value adds no next-record evidence.
+    static func terminalContextEnd(in text: String, valueStart: String.Index) -> String.Index {
+        let value = text[valueStart...].drop(while: { $0.isWhitespace })
+        if valueExplicitlyContinues(value) { return text.endIndex }
+        guard let quote = unterminatedQuote(in: value, kind: "secret") else { return valueStart }
+        return value.index(value.startIndex, offsetBy: quote.escapeDepth + 1)
+    }
+
+    /// A control boundary must survive when its suffix starts a separate credential.
+    static func terminalHasCredentialOpener(_ suffix: Substring) -> Bool {
+        terminalHasFieldOpener(suffix)
+            || suffix.prefixMatch(of: patterns.bearer) != nil
+            || suffix.prefixMatch(of: patterns.basicAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.digestAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.specializedAuthorization) != nil
+            || suffix.prefixMatch(of: patterns.apiKey) != nil
+            || suffix.prefixMatch(of: patterns.distinctiveAPIKey) != nil
+            || suffix.prefixMatch(of: patterns.githubToken) != nil
+            || suffix.prefixMatch(of: patterns.urlUserInfo) != nil
+    }
+
+    private static func terminalHasFieldOpener(_ suffix: Substring) -> Bool {
+        suffix.prefixMatch(of: patterns.labeledSecret) != nil
+            || suffix.prefixMatch(of: patterns.secretLabelOnly) != nil
+            || suffix.prefixMatch(of: patterns.authorizationHeader) != nil
+            || suffix.prefixMatch(of: patterns.codeField) != nil
+            || suffix.prefixMatch(of: patterns.codePrompt) != nil
+            || suffix.prefixMatch(of: patterns.codePromptWithoutDelimiter) != nil
+            || suffix.prefixMatch(of: patterns.declarativeCodePrompt) != nil
+            || suffix.prefixMatch(of: patterns.codePromptOnly) != nil
+            || suffix.prefixMatch(of: patterns.pemBegin) != nil
+            || suffix.prefixMatch(of: patterns.secretOption) != nil
+            || suffix.prefixMatch(of: patterns.secretOptionOnly) != nil
+    }
+
+
+    /// Boundary-free span discovery is not proof that the ordinary renderer recognizes it.
+    static func terminalRecognizedStarts(in text: String) -> Set<String.Index> {
+        Set(text.matches(of: patterns.apiKey).map { $0.2.startIndex }
+            + text.matches(of: patterns.bearer).map { $0.2.startIndex }
+            + text.matches(of: patterns.basicAuthorization).map { $0.2.startIndex }
+            + text.matches(of: patterns.digestAuthorization).map { $0.1.endIndex }
+            + text.matches(of: patterns.specializedAuthorization).map { $0.1.endIndex })
+    }
+
+    /// Recover command finals as scan-only evidence, never as visible output. Token ranges
+    /// can be masked here; opaque field contexts need the caller's quote/private-key state.
+    static func recoveredCredentialRanges(in text: String, joined: String, priorPrefixes: [TerminalControlEvidence.Prefix])
+        -> (ranges: [TerminalCredentialRange], contexts: [String]) {
+        var recovered: [TerminalCredentialRange] = []
+        var contexts: [String] = []
+        let ordinaryStarts = terminalRecognizedStarts(in: joined)
+        let ordinary = terminalCredentialSpans(in: joined)
+            .filter { !$0.needsBoundary || ordinaryStarts.contains($0.range.lowerBound) }
+            .map { span -> TerminalCredentialRange in
+            let lower = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.lowerBound)
+            let upper = joined.utf8.distance(from: joined.utf8.startIndex, to: span.range.upperBound)
+            return (lower..<upper, span.kind)
+        }.sorted { $0.range.lowerBound < $1.range.lowerBound }
+        guard let projections = TerminalControlEvidence.projections(in: text, prefixes: priorPrefixes) else {
+            return ([(0..<joined.utf8.count, "terminal-ambiguity")], [])
+        }
+        for projection in projections where !projection.retained.isEmpty {
+            // Matching and replay use content only; projection offsets still address the framed record.
+            let alternate = String(TerminalControlEvidence.contentBeforeTerminator(projection.text))
+            let offsets = projection.offsets
+            let retained = projection.retained
+            let boundaries = projection.boundaries
+            if alternate.contains(patterns.incompleteURLUserInfo) && !joined.contains(patterns.incompleteURLUserInfo) {
+                contexts.append(alternate)
+            }
+            var fieldContext = ""
+            var fieldCursor = alternate.startIndex
+            // A boundary from an earlier physical record is absent from the joined text.
+            // Replay its suffix so short and complete wrapped keys retain their stream state.
+            for boundary in boundaries.sorted() where boundary > 0 && boundary < alternate.utf8.count {
+                let start = alternate.utf8.index(alternate.utf8.startIndex, offsetBy: boundary)
+                let suffix = alternate[start...]
+                // Supply only actual recorded boundaries before recognized fields. Other
+                // boundaries stay joined so controls inside a label cannot break it again.
+                // Build one bounded context per projection, not a copy of every suffix.
+                if terminalHasFieldOpener(suffix) {
+                    fieldContext += alternate[fieldCursor..<start] + " "
+                    fieldCursor = start
+                }
+                if suffix.hasPrefix("sk-"), suffix.prefixMatch(of: patterns.wrappedTokenAtLineEnd) != nil {
+                    contexts.append(String(suffix))
+                }
+            }
+            if fieldCursor != alternate.startIndex {
+                contexts.append(fieldContext + alternate[fieldCursor...])
+            }
+            // Short recognizable prefixes still own a possible next-record continuation.
+            let content = alternate
+            if content.contains(patterns.wrappedTokenAtLineEnd)
+                && !TerminalControlEvidence.contentBeforeTerminator(joined).contains(patterns.wrappedTokenAtLineEnd) {
+                contexts.append(content)
+            }
+            if incompleteJWTStartAtLineEnd(in: alternate) != nil && incompleteJWTStartAtLineEnd(in: joined) == nil {
+                contexts.append(alternate)
+            }
+            // A restored label can identify an opaque value with no recognizable token shape.
+            let fields = alternate.matches(of: patterns.labeledSecret).map { ($0.range, $0.3.startIndex) }
+                + alternate.matches(of: patterns.authorizationHeader).map { ($0.range, $0.2.startIndex) }
+                + alternate.matches(of: patterns.codeField).map { ($0.range, $0.3.startIndex) }
+                + alternate.matches(of: patterns.secretOption).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.secretOptionOnly).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.secretLabelOnly).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.serializedSecretOption).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.codePrompt).map { ($0.range, $0.1.endIndex) }
+                + alternate.matches(of: patterns.codePromptWithoutDelimiter).map { ($0.range, $0.1.endIndex) }
+                + alternate.matches(of: patterns.declarativeCodePrompt).map { ($0.range, $0.1.endIndex) }
+                + alternate.matches(of: patterns.codePromptOnly).map { ($0.range, $0.range.upperBound) }
+                + alternate.matches(of: patterns.pemBegin).map { ($0.range, $0.range.upperBound) }
+            for (range, valueStart) in fields {
+                let lower = alternate.utf8.distance(from: alternate.startIndex, to: range.lowerBound)
+                let contextEnd = terminalContextEnd(in: alternate, valueStart: valueStart)
+                let labelEnd = alternate.utf8.distance(from: alternate.startIndex, to: contextEnd)
+                if retained.contains(where: { $0.overlaps(lower..<labelEnd) }) {
+                    contexts.append(alternate)
+                    break
+                }
+            }
+            let recognizedStarts = terminalRecognizedStarts(in: alternate)
+            // The restored evidence can be the contextual word "code", not the value itself.
+            let restoredCodeContext = !joined.contains(patterns.mentionsCode) && alternate.contains(patterns.mentionsCode)
+            var retainedIndex = 0
+            var ordinaryIndex = 0
+            var coveredEnds: [String: Int] = [:]
+            // A restored scheme delimiter proves userinfo too; redact only its value range.
+            for match in alternate.matches(of: patterns.urlUserInfo) {
+                let start = alternate.utf8.distance(from: alternate.startIndex, to: match.range.lowerBound)
+                let value = alternate.utf8.distance(from: alternate.startIndex, to: match.1.endIndex)
+                let end = alternate.utf8.distance(from: alternate.startIndex, to: match.range.upperBound)
+                if retained.contains(where: { $0.overlaps(start..<value) }), offsets[value] < offsets[end] {
+                    recovered.append((offsets[value]..<offsets[end], "userinfo"))
+                }
+            }
+            for span in terminalCredentialSpans(in: alternate).sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+                let lower = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.lowerBound)
+                let upper = alternate.utf8.distance(from: alternate.utf8.startIndex, to: span.range.upperBound)
+                guard !span.needsBoundary || boundaries.contains(lower) || recognizedStarts.contains(span.range.lowerBound) else { continue }
+                while retainedIndex < retained.count, retained[retainedIndex].upperBound <= lower { retainedIndex += 1 }
+                // The first retained byte may be the trailing separator that makes a
+                // credential recognizable, not a byte inside the credential itself.
+                let touchesEvidence = retainedIndex < retained.count && retained[retainedIndex].lowerBound <= upper
+                let restoredBoundary = (span.needsBoundary && boundaries.contains(lower))
+                    || (retainedIndex > 0 && retained[retainedIndex - 1].upperBound == lower)
+                if offsets[lower] < offsets[upper], touchesEvidence || restoredBoundary || (span.kind == "device-code" && restoredCodeContext) {
+                    while ordinaryIndex < ordinary.count, ordinary[ordinaryIndex].range.lowerBound <= offsets[lower] {
+                        let known = ordinary[ordinaryIndex]
+                        coveredEnds[known.kind] = max(coveredEnds[known.kind] ?? 0, known.range.upperBound)
+                        ordinaryIndex += 1
+                    }
+                    // Preserve the normal renderer and its labels when it already recognizes
+                    // the whole projected credential. Only additional coverage needs a marker.
+                    if span.kind != "jwt", (coveredEnds[span.kind] ?? 0) >= offsets[upper] { continue }
+                    recovered.append((offsets[lower]..<offsets[upper], span.kind))
+                }
+            }
+        }
+        var merged: [TerminalCredentialRange] = []
+        for span in recovered.sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+            if let last = merged.last, span.range.lowerBound <= last.range.upperBound {
+                merged[merged.count - 1] = (last.range.lowerBound..<max(last.range.upperBound, span.range.upperBound), last.kind)
+            } else { merged.append(span) }
+        }
+        return (merged, contexts)
+    }
+}

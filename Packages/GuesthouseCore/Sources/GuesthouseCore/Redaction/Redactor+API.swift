@@ -16,6 +16,13 @@ extension Redactor {
 
     /// Redacts one line of a stream. Pass the same `state` for every line of one stream.
     func redact(line: String, state: inout StreamState) -> RedactedLine {
+        // End-of-record recognizers inspect content, not retained transport framing.
+        // Remove every trailing terminator in one step so recursive depth stays bounded.
+        let terminatorCount = line.reversed().prefix { $0 == "\r" || $0 == "\n" || $0 == "\r\n" }.count
+        if terminatorCount > 0 {
+            let content = redact(line: String(line.dropLast(terminatorCount)), state: &state)
+            return RedactedLine(content.text + line.suffix(terminatorCount))
+        }
         // Terminal styling is dropped first so an escape sequence can never sit between a word
         // boundary and a token. Removing it joins the text on either side, which is what a label
         // split by styling needs, but it also hides the boundary every token rule requires in
@@ -26,15 +33,53 @@ extension Redactor {
         // they removed leaks whichever the other would have found. The boundary rendering goes
         // first; what it leaves is closed up again for everything below, which is the rendering
         // a label has to be read in.
-        let stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        var stripped = Self.stripTerminalEscapes(line, openControlString: &state.openControlString)
+        // Consume terminal controls once, before restoring physical label fragments.
+        // Replaying raw text would let hidden OSC payload consume a label or prepend
+        // that label inside a still-pending CSI command. Keep both visible readings.
+        var boundaryLabelState = state
+        if let restored = Self.restoringCredentialLabel(in: stripped.joined, state: &state) {
+            stripped.joined = restored
+        }
+        if let restored = Self.restoringCredentialLabel(in: stripped.spliced, state: &boundaryLabelState) {
+            stripped.spliced = restored
+        }
+        state.pendingCredentialLabel = state.pendingCredentialLabel ?? boundaryLabelState.pendingCredentialLabel
+        var recoveredContexts = StreamState()
+        for reading in stripped.contexts {
+            var start = reading.startIndex
+            if let label = state.pemLabel {
+                guard let footer = reading.range(of: "-----END \(label)-----") else { continue }
+                start = footer.upperBound
+            }
+            if let quoted = state.quotedValue {
+                // A private key can open inside the quote that closes on this record.
+                var recoveredPEM: String?
+                _ = Self.redactPEMBlocks(String(reading[start...]), label: &recoveredPEM)
+                recoveredContexts.pemLabel = recoveredContexts.pemLabel ?? recoveredPEM
+                guard let end = Self.closingQuoteEnd(in: reading[...], for: quoted) else { continue }
+                start = max(start, end)
+            }
+            // Evidence contains no terminal controls, so this replay cannot recursively
+            // invent alternate readings. Its state is for later records, not this value.
+            var scanned = StreamState()
+            _ = redact(line: String(reading[start...]), state: &scanned)
+            Self.mergePendingContexts(from: scanned, into: &recoveredContexts)
+        }
+        defer { Self.mergePendingContexts(from: recoveredContexts, into: &state) }
+        func output(_ value: String) -> RedactedLine {
+            RedactedLine(stripped.contexts.isEmpty ? value : Self.marker("secret"))
+        }
         var text = stripped.joined
         if let quoted = state.quotedValue {
+            _ = Self.redactPEMBlocks(text, label: &state.pemLabel)
             // Inspect the original normalized text: replacement markers no longer contain the
             // closing delimiter. A closing line is redacted whole, but its suffix can open a new
             // pending field. Blank/styling-only lines do not close the quoted value.
             if let end = Self.closingQuoteEnd(in: text[...], for: quoted) {
                 let tail = String(text[end...])
-                let explicitlyContinues = Self.valueExplicitlyContinues(tail[...])
+                let explicitlyContinues = tail.allSatisfy { $0.isWhitespace || $0 == "\\" }
+                    && Self.valueExplicitlyContinues(tail[...])
                 // This suffix is still on the same physical line. Scan it independently so
                 // it cannot consume a next-line value or terminate the enclosing fold.
                 var suffixState = StreamState()
@@ -49,9 +94,10 @@ extension Redactor {
                 state.authorizationValueExplicitlyContinues = state.authorizationValueIsOnTheNextLine
                 state.expectingAuthorizationValue = quoted.enclosingAuthorizationFold || state.authorizationValueIsOnTheNextLine
                 state.expectingDeviceCode = explicitlyContinues && quoted.kind == "device-code"
+                state.expectingDeviceCodeContinuation = false
                 Self.mergePendingContexts(from: suffixState, into: &state)
             }
-            return RedactedLine(text.isEmpty ? text : Self.marker(quoted.kind))
+            return output(text.isEmpty ? text : Self.marker(quoted.kind))
         }
         // What the boundary rendering armed, kept apart until this line's own pending contexts
         // have been consumed below and unioned in on the way out.
@@ -66,13 +112,19 @@ extension Redactor {
                 .replacingOccurrences(of: Self.splicedBoundary, with: "")
             Self.mergePendingContexts(from: joinedScan, into: &boundaryScan)
         }
-        let tokenAtLineEnd = stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+        let incompleteJWT = Self.incompleteJWTStartAtLineEnd(in: stripped.joined) != nil
+            || Self.incompleteJWTStartAtLineEnd(in: stripped.spliced) != nil
+        let tokenAtLineEnd = incompleteJWT ? "jwt" : (stripped.joined.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd)
+            ?? stripped.spliced.firstMatch(of: Self.patterns.wrappedTokenAtLineEnd))
             .map { $0.1.hasPrefix("sk-") ? "api-key" : "github-token" }
         if let kind = state.wrappedTokenKind, !text.allSatisfy(\.isWhitespace) {
             state.wrappedTokenKind = nil
-            if let continuation = text.firstMatch(of: Self.patterns.tokenContinuation) {
+            let continuationPattern = kind == "jwt" ? #/^[ \t]*[A-Za-z0-9_.-]+/# : Self.patterns.tokenContinuation
+            if let continuation = text.firstMatch(of: continuationPattern) {
                 let fragment = String(continuation.0)
-                state.wrappedTokenKind = continuation.range.upperBound == text.endIndex ? kind : nil
+                // Once wrapping began, even the final signature/tag may wrap again.
+                // Segment count is not a terminator; retain state until a lexical boundary.
+                state.wrappedTokenKind = text[continuation.range.upperBound...].allSatisfy { $0 == " " || $0 == "\t" } ? kind : nil
                 // Detect and retain every ordinary redaction BEFORE masking the continuation.
                 // Otherwise replacing `password` first destroys the evidence that its value
                 // must be removed. Future state alone cannot protect this line's value.
@@ -117,6 +169,9 @@ extension Redactor {
         }
         // A labeled value folds the same way a header value does, and the second half of a
         // passphrase is as usable as the first.
+        let codeContinuation = state.expectingDeviceCodeContinuation
+            && text.wholeMatch(of: Self.patterns.foldedContinuation) != nil
+        if !blankLine { state.expectingDeviceCodeContinuation = codeContinuation }
         let secretFoldWasEstablished = state.expectingSecretContinuation
             && (!state.expectingSecretValue || state.secretValueExplicitlyContinues)
         let secretContinuation = state.expectingSecretContinuation
@@ -124,25 +179,7 @@ extension Redactor {
         if !blankLine {
             state.expectingSecretContinuation = secretContinuation
         }
-        if let label = state.pemLabel {
-            guard let footer = text.range(of: "-----END \(label)-----") else {
-                return RedactedLine(Self.marker("private-key"))
-            }
-            // The block ends here; whatever follows the footer is scanned like any other text,
-            // including another block that begins on the same line.
-            state.pemLabel = nil
-            text = Self.marker("private-key") + text[footer.upperBound...]
-        }
-        while let begin = text.firstMatch(of: Self.patterns.pemBegin) {
-            let label = String(begin.1)
-            if let end = text[begin.range.upperBound...].range(of: "-----END \(label)-----") {
-                text.replaceSubrange(begin.range.lowerBound..<end.upperBound, with: Self.marker("private-key"))
-            } else {
-                state.pemLabel = label
-                text.replaceSubrange(begin.range.lowerBound..<text.endIndex, with: Self.marker("private-key"))
-                break
-            }
-        }
+        text = Self.redactPEMBlocks(text, label: &state.pemLabel)
 
         // The continuation's own text is all credential, but a PEM block it opens keeps running
         // over the lines that follow, so the block is detected above before the marker returns.
@@ -152,16 +189,21 @@ extension Redactor {
         let valueContinues = Self.valueStartsOnNextLine(text[...])
         let explicitlyContinues = Self.valueExplicitlyContinues(text[...])
         if authorizationContinuation {
-            let wholeValueQuote = Self.unterminatedQuote(in: text[...], kind: "authorization")
+            // This concealed record also consumes any co-armed secret value. Its own
+            // trailing labels may arm fresh contexts below, after the old value is spent.
+            state.expectingSecretValue = false
+            state.secretValueExplicitlyContinues = false
+            let wholeValueQuote = Self.unterminatedAuthorizationQuote(in: text[...])
             state.quotedValue = wholeValueQuote
-            state.authorizationValueIsOnTheNextLine = valueContinues
-            state.authorizationValueExplicitlyContinues = explicitlyContinues
+            let parameterContinues = Self.authorizationParameterContinues(text[...])
+            state.authorizationValueIsOnTheNextLine = valueContinues || parameterContinues
+            state.authorizationValueExplicitlyContinues = explicitlyContinues || parameterContinues
             state.expectingAuthorizationValue = authorizationFoldWasEstablished || closedValueTail == nil || valueContinues
             Self.armPendingContexts(from: closedValueTail ?? text, state: &state)
             if wholeValueQuote == nil || authorizationFoldWasEstablished {
                 state.quotedValue?.enclosingAuthorizationFold = state.expectingAuthorizationValue
             }
-            return RedactedLine(Self.marker("authorization"))
+            return output(Self.marker("authorization"))
         }
         if secretContinuation {
             let wholeValueQuote = Self.unterminatedQuote(in: text[...], kind: "secret")
@@ -173,14 +215,14 @@ extension Redactor {
             if wholeValueQuote == nil || secretFoldWasEstablished {
                 state.quotedValue?.enclosingSecretFold = state.expectingSecretContinuation
             }
-            return RedactedLine(Self.marker("secret"))
+            return output(Self.marker("secret"))
         }
 
         // A blank line carries nothing and keeps the device-code context for the next one.
         if blankLine {
-            return RedactedLine(text)
+            return output(text)
         }
-        let codeExpected = state.expectingDeviceCode
+        let codeExpected = state.expectingDeviceCode || codeContinuation
         state.expectingDeviceCode = false
         // The previous line was a label or a code prompt with no value, so this whole line is
         // the value: its shape is the provider's choice, and a device code that is not
@@ -203,14 +245,20 @@ extension Redactor {
                 if wholeValueQuote == nil || secretFoldWasEstablished {
                     state.quotedValue?.enclosingSecretFold = state.expectingSecretContinuation
                 }
-            } else if valueContinues {
-                state.expectingDeviceCode = true
+            } else {
+                state.expectingDeviceCode = state.expectingDeviceCode || valueContinues
+                state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || closedValueTail == nil || valueContinues
             }
-            return RedactedLine(Self.marker(kind))
+            return output(Self.marker(kind))
         }
-        let redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
+        var redacted = Self.applyPatterns(to: text, codeExpected: codeExpected, state: &state)
+        if let start = Self.incompleteJWTStartAtLineEnd(in: redacted) {
+            redacted.replaceSubrange(start..<redacted.endIndex, with: Self.marker("jwt"))
+        } else if incompleteJWT {
+            redacted = Self.marker("jwt")
+        }
         state.secretValueExplicitlyContinues = state.expectingSecretValue && explicitlyContinues
-        return RedactedLine(redacted)
+        return output(redacted)
     }
 
     /// Redacts a single value that came from outside the app (a version string, a path, a

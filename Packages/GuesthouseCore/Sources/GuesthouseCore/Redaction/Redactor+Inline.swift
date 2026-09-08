@@ -2,10 +2,7 @@ import Foundation
 import RegexBuilder
 
 extension Redactor {
-    /// Runs the rules over a line that is replaced whole, so a secret label or a code prompt
-    /// inside it still opens the context the next line completes. Nothing the rules produce is
-    /// used, and a context that was already open stays open: this line is the value of the fold
-    /// it continues, not the value that context is waiting for.
+    /// Scan a wholly concealed record for new contexts without clearing existing folds.
     static func armPendingContexts(from text: String, state: inout StreamState) {
         var scanned = state
         _ = applyPatterns(to: text, codeExpected: false, state: &scanned)
@@ -14,38 +11,88 @@ extension Redactor {
 
     static func applyPatterns(to input: String, codeExpected: Bool, state: inout StreamState,
                               prepareQuotedValues: Bool = true) -> String {
+        let keyedInput = normalizingStructuredCredentialKeys(in: input, state: &state)
+        // Decode URL structure before generic quoted-value protection hides the
+        // outer string behind a placeholder. Each decoder retains only framing bits.
+        let input = redactEncodedURLStrings(keyedInput, state: &state)
         let p = patterns
+        state.pendingCredentialLabel = partialCredentialLabel(in: input) ?? state.pendingCredentialLabel
         let protected = prepareQuotedValues ? protectEncodedQuotedValues(in: input) { value in
             var quotedState = StreamState()
             let sanitized = applyPatterns(to: value, codeExpected: false, state: &quotedState, prepareQuotedValues: false)
-            return (sanitized, quotedState)
+            // This encoded container is closed. Inner field fragments cannot own a
+            // later physical record; independently recognized PEM state still can.
+            var boundedState = StreamState()
+            boundedState.pemLabel = quotedState.pemLabel
+            return (sanitized, boundedState)
         } : ProtectedQuotedValues(text: input)
-        var text = protected.text
-        // Recognition and continuation state use the original field, never its replacement
-        // marker. Prefixes, quoting, and delimiters therefore cannot change the state policy.
+        var originalURLContext = StreamState()
+        let original = state.expectingURLUserInfo
+            ? applyPatterns(to: protected.text, codeExpected: codeExpected, state: &originalURLContext, prepareQuotedValues: false)
+            : protected.text
+        defer { mergePendingContexts(from: originalURLContext, into: &state) }
+        var text = redactURLContinuations(original, state: &state, decodeStrings: false)
+        // Continuation state uses the original field, never its replacement marker.
         text = text.replacing(p.authorizationHeader) { match in
             let explicit = fieldExplicitlyContinues(match.2, tail: text[match.range.upperBound...])
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.2, kind: "authorization")
+                || authorizationParameterContinues(match.2)
+            state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.2)
             state.expectingAuthorizationValue = state.expectingAuthorizationValue || !isClosedQuotedValue(match.2) || explicit
             state.authorizationValueIsOnTheNextLine =
                 state.authorizationValueIsOnTheNextLine || valueStartsOnNextLine(match.2) || explicit
+                || match.2.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .wholeMatch(of: #/(?i:Basic|Bearer|Digest|NTLM|Negotiate|AWS4-HMAC-SHA256)/#) != nil
             state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || explicit
             let header = match.0[..<match.2.startIndex].lowercased()
             let name = header.contains("set-cookie") ? "Set-Cookie" : header.contains("cookie") ? "Cookie" : "Authorization"
             return "\(match.1)\(name): \(marker("authorization"))"
         }
         // Each token rule captures the character in front of the token, which is put back.
-        text = text.replacing(p.bearer) { match in "\(match.1)Bearer \(marker("bearer-token"))" }
-        text = text.replacing(p.basicAuthorization) { match in
-            guard isBasicCredential(match.3) else { return String(match.0) }
+        if text.wholeMatch(of: #/[ \t]*(?i:Basic|Bearer|Digest|NTLM|Negotiate|AWS4-HMAC-SHA256)[ \t]*(?:\[redacted:[^\]\r\n]+\][ \t]*)*(?:\\[ \t]*)?/#) != nil {
             state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            state.authorizationValueExplicitlyContinues = valueExplicitlyContinues(text[...])
+        }
+        text = text.replacing(p.partialParameterizedAuthorization) { match in
+            let names = match.2.lowercased() == "digest"
+                ? ["username", "username*", "realm", "nonce", "uri", "response", "algorithm", "cnonce", "opaque", "qop", "nc", "userhash"]
+                : ["credential", "signedheaders", "signature"]
+            guard names.contains(where: { $0.hasPrefix(match.3.lowercased()) }) else { return String(match.0) }
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            return "\(match.1)\(match.2) \(marker("authorization"))"
+        }
+        text = text.replacing(p.partialIntegratedAuthorization) { match in
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            return "\(match.1)\(match.2) \(marker("authorization"))"
+        }
+        text = text.replacing(p.bearer) { match in
+            _ = retainExplicitAuthorization(match.2, tail: text[match.range.upperBound...], state: &state)
+            state.expectingAuthorizationValue = true
+            return "\(match.1)Bearer \(marker("bearer-token"))"
+        }
+        text = text.replacing(p.basicAuthorization) { match in
+            let explicit = retainExplicitAuthorization(match.3, tail: text[match.range.upperBound...], state: &state)
+            // A physical break may arrive before the decoded username/password colon.
+            let partialAtEnd = text[match.range.upperBound...].allSatisfy(\.isWhitespace)
+            guard isBasicCredential(match.3) || explicit || partialAtEnd else { return String(match.0) }
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine
+                || (partialAtEnd && !isBasicCredential(match.3))
             return "\(match.1)Basic \(marker("authorization"))"
         }
         text = text.replacing(p.digestAuthorization) { match in
+            state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.0)
+            if authorizationParameterContinues(match.0) { state.authorizationValueIsOnTheNextLine = true }
+            _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)Digest \(marker("authorization"))"
         }
         text = text.replacing(p.specializedAuthorization) { match in
+            state.quotedValue = state.quotedValue ?? unterminatedAuthorizationQuote(in: match.0)
+            if authorizationParameterContinues(match.0) { state.authorizationValueIsOnTheNextLine = true }
+            _ = retainExplicitAuthorization(match.0, tail: text[match.range.upperBound...], state: &state)
             state.expectingAuthorizationValue = true
             return "\(match.1)\(marker("authorization"))"
         }
@@ -58,8 +105,7 @@ extension Redactor {
         // Scan argv boundaries before generic labelled values can consume following options.
         text = redactSerializedOptions(text, state: &state)
         text = redactSecretOptions(text, state: &state)
-        // Unquoted or unfinished quoted values can fold onto the next line. A closing quote
-        // bounds a completed structured value even when the next sibling is indented.
+        // Unfinished values can fold; a closing quote bounds a completed structured value.
         var labelMayContinue = false
         // Inspect the original input too: a preceding missing-value option may otherwise
         // consume this last option before the generic rules get to see it.
@@ -74,21 +120,25 @@ extension Redactor {
         }
         state.expectingSecretContinuation = labelMayContinue
         text = text.replacing(p.codeField) { match in
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.3, kind: "device-code")
-            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.3)
-                || fieldExplicitlyContinues(match.3, tail: text[match.range.upperBound...])
+            retainDeviceCodeContext(match.3, tail: text[match.range.upperBound...], state: &state)
             return "\(match.1)\(match.2): \(marker("device-code"))"
         }
         text = text.replacing(p.codePrompt) { match in
-            state.quotedValue = state.quotedValue ?? unterminatedQuote(in: match.0.dropFirst(match.1.count), kind: "device-code")
-            state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(match.0.dropFirst(match.1.count))
+            retainDeviceCodeContext(match.0.dropFirst(match.1.count), tail: text[match.range.upperBound...], state: &state)
             let punctuation = match.0.hasSuffix(".") ? "." : ""
             return "\(match.1) \(marker("device-code"))\(punctuation)"
         }
-        text = text.replacing(p.codePromptWithoutDelimiter) { match in "\(match.1) \(marker("device-code"))" }
+        text = text.replacing(p.codePromptWithoutDelimiter) { match in
+            retainDeviceCodeContext(match.0.dropFirst(match.1.count), tail: text[match.range.upperBound...], state: &state)
+            state.expectingDeviceCode = state.expectingDeviceCode
+                || (match.2.first.map({ $0.isLetter || $0.isNumber }) == true
+                    && match.2.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count < 4
+                    && text[match.range.upperBound...].allSatisfy(\.isWhitespace))
+            return "\(match.1) \(marker("device-code"))"
+        }
         text = text.replacing(p.declarativeCodePrompt) { match in
             if let value = match.2 {
-                state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+                retainDeviceCodeContext(value, tail: text[match.range.upperBound...], state: &state)
             }
             state.expectingDeviceCode = state.expectingDeviceCode
                 || (match.2.map(valueStartsOnNextLine) ?? true)
@@ -98,19 +148,68 @@ extension Redactor {
             labelAwaitsValue = true
             return "\(match.1)\(match.2): \(marker("secret"))"
         }
-        state.expectingSecretValue = labelAwaitsValue
+        state.expectingSecretValue = labelAwaitsValue || input.contains(p.secretLabelOnly)
         // "Your one-time code is:" with the value on the next line. Only a line that asks for a
         // code arms the next one: arming on any mention of the word would replace the failure
         // that follows `process exited with code 1` with a device-code marker.
-        if text.contains(p.codePromptOnly) {
+        if text.contains(p.codePromptOnly) || input.contains(p.codePromptOnly) {
             state.expectingDeviceCode = true
         }
         text = protected.restoring(in: text, state: &state)
         if text.contains(p.mentionsCode) || codeExpected {
-            text = applyDeviceCodePattern(to: text)
+            text = applyDeviceCodePattern(to: text, preserveAlgorithms: !codeExpected)
         }
         return text
     }
+
+    private static func retainDeviceCodeContext(_ value: Substring, tail: Substring, state: inout StreamState) {
+        let explicit = fieldExplicitlyContinues(value, tail: tail)
+            || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
+        state.quotedValue = state.quotedValue ?? unterminatedQuote(in: value, kind: "device-code")
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let frames: [Character: Character] = ["[": "]", "{": "}", "(": ")", "<": ">", "`": "`"]
+        if let opener = trimmed.first, let closer = frames[opener], !trimmed.dropFirst().contains(closer) {
+            state.quotedValue = state.quotedValue ?? .init(delimiter: closer, escapeDepth: 0, kind: "device-code")
+        }
+        let unfinishedGroup = trimmed.wholeMatch(of: #/[A-Z0-9]{1,8}(?:[-.][A-Z0-9]{1,8})*[-.]/#) != nil
+            && !trimmed.dropLast().contains(patterns.deviceCode)
+        state.expectingDeviceCode = state.expectingDeviceCode || valueStartsOnNextLine(value) || explicit || unfinishedGroup
+        state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || !isClosedQuotedValue(value) || explicit
+    }
+
+    /// Only known parameter assignments qualify; Base64 padding is not an assignment.
+    static func authorizationParameterContinues(_ value: Substring) -> Bool {
+        value.last(where: { !$0.isWhitespace }) == ","
+            || value.contains(#/(?:^|[\s,])(?i:username\*?|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|credential|signedheaders|signature)[ \t]*=[ \t]*$/#)
+    }
+
+    /// Parameter quotes can wrap even when the enclosing authorization value is unquoted.
+    /// Keep only the delimiter/depth and enclosing fold, never parameter payload bytes.
+    static func unterminatedAuthorizationQuote(in value: Substring) -> StreamState.QuotedValue? {
+        if isClosedQuotedValue(value) { return nil }
+        if let whole = unterminatedQuote(in: value, kind: "authorization") { return whole }
+        var cursor = value.startIndex
+        while let opener = value[cursor...].firstMatch(of: #/=[ \t]*(\\*)(["'])/#) {
+            guard let delimiter = opener.2.first else { return nil }
+            let quoted = StreamState.QuotedValue(delimiter: delimiter, escapeDepth: opener.1.count,
+                kind: "authorization", enclosingAuthorizationFold: true)
+            guard let end = closingQuoteEnd(in: value[opener.range.upperBound...], for: quoted) else { return quoted }
+            cursor = end
+        }
+        return nil
+    }
+
+    private static func retainExplicitAuthorization(_ value: Substring, tail: Substring, state: inout StreamState) -> Bool {
+        let explicit = valueExplicitlyContinues(value)
+            || (tail.allSatisfy({ $0.isWhitespace || $0 == "\\" }) && valueExplicitlyContinues(tail))
+        if explicit {
+            state.expectingAuthorizationValue = true
+            state.authorizationValueIsOnTheNextLine = true
+            state.authorizationValueExplicitlyContinues = true
+        }
+        return explicit
+    }
+
 
     static func applyDeviceCodePattern(to input: String, preserveAlgorithms: Bool = false) -> String {
         input.replacing(patterns.deviceCode) { match in

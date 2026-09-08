@@ -4,6 +4,16 @@ import Testing
 
 /// Synthetic credentials only; every streaming case owns its state.
 @Suite struct RedactorParsingTests {
+    @Test(arguments: [("'", ""), ("\"", ""), ("'", "run "), ("\"", "run ")])
+    func outerCommandQuotesDoNotOpenANewSecret(_ quote: String, _ prefix: String) {
+        var state = Redactor.StreamState()
+        let input = quote + prefix + "--password syntheticOpaque" + quote
+        let result = Redactor.redactSecretOptions(input, state: &state)
+        #expect(result == quote + prefix + "--password [redacted:secret]" + quote)
+        #expect(state.quotedValue == nil && !state.expectingSecretValue)
+    }
+
+
     @Test(arguments: [("Zg", [UInt8(102)]), ("_w", [UInt8(255)]), ("-w", [UInt8(251)])])
     func base64URLAcceptsUnpaddedAndURLSafeSegments(input: String, bytes: [UInt8]) {
         #expect(Redactor.decodedBase64URL(input[...]) == Data(bytes))
@@ -31,15 +41,6 @@ import Testing
         #expect(Redactor.redactedJWT(input[...]) == expected)
     }
 
-    @Test(arguments: [("\u{1B}]", "\u{7}"), ("\u{1B}P", "\u{1B}\\")])
-    func controlStringsRemainHiddenUntilTheirOwnTerminator(opener: String, terminator: String) {
-        var open: Redactor.StreamState.ControlString?
-        #expect(Redactor.stripTerminalEscapes("before" + opener + "payload", openControlString: &open).joined == "before")
-        #expect(open != nil)
-        #expect(Redactor.stripTerminalEscapes("hidden", openControlString: &open).joined == "")
-        #expect(Redactor.stripTerminalEscapes(terminator + "after", openControlString: &open).joined == "after")
-        #expect(open == nil)
-    }
 
     @Test func terminalRenderingRetainsTokenBoundariesWithoutSplittingTokens() {
         let boundary = Redactor.renderings(of: "prefix\u{1B}[31mghp_demo")

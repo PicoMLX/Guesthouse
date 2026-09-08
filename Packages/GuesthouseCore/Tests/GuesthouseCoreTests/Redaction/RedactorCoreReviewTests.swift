@@ -1,6 +1,16 @@
 import Testing
 @testable import GuesthouseCore
 
+@Test(arguments: [("eyJhbGciOiJIUzI1NiJ9", ".cGF5bG9hZA.c2lnbmF0dXJl"),
+                  ("eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0", "..aXY.c3ludGhldGlj.dGFn")])
+func headerOnlyJOSERecordsRetainTheirFollowingSegments(_ parts: (String, String)) {
+    let output = Redactor().redact(lines: [parts.0, parts.1, "[status] Finished"]).map(\.text)
+    #expect(!output[0].contains("eyJ"))
+    #expect(!output[1].contains(parts.1))
+    #expect(output[2] == "[status] Finished")
+}
+
+
 @Test(arguments: [
     ["Enter the code", "reviewValue", "done"],
     ["Authorization: Bearer \\", "reviewValue", "done"],

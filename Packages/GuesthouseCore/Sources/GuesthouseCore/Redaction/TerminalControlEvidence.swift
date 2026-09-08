@@ -1,0 +1,237 @@
+import Foundation
+
+/// Scan-only terminal evidence. Every command independently chooses a reading; no recovered
+/// byte becomes visible. Ambiguity exceeding the fixed budget quarantines the rest of a stream.
+enum TerminalControlEvidence {
+    enum Reading: Int, CaseIterable, Sendable {
+        case joined, parameterless, final, intermediates, intermediateOnly, parameterOnly, withoutFinal
+        case parameterDelimiter, colon, equals, complete
+    }
+
+    static let maximumAlternatives = 64
+    static let maximumControlScalars = 256
+    static let maximumRecordBytes = 16 * 1024
+    static let maximumProjectionWorkBytes = 64 * 1024
+
+    /// One linear preflight bounds repeated regex work, including non-branching C0 records.
+    /// Tabs and CR/LF are framing/whitespace, not terminal commands.
+    static func isWithinControlBudget(_ text: String) -> Bool {
+        guard text.utf8.prefix(maximumRecordBytes + 1).count <= maximumRecordBytes else { return false }
+        var count = 0
+        for scalar in text.unicodeScalars {
+            if ((0...0x1F).contains(scalar.value) && ![9, 10, 13].contains(scalar.value))
+                || (0x7F...0x9F).contains(scalar.value) {
+                count += 1
+                if count > maximumControlScalars { return false }
+            }
+        }
+        return true
+    }
+    static let quarantineMarker = "[redacted:terminal-ambiguity]"
+
+    /// A retained reading includes the removed-control boundaries that made tokens valid.
+    /// Offsets are UTF-8 offsets in this bounded scan-only text, not in the next visible line.
+    struct Prefix: Hashable, Sendable, Comparable {
+        let text: String
+        var boundaries: Set<Int> = [0]
+
+        static func < (lhs: Self, rhs: Self) -> Bool {
+            lhs.text == rhs.text
+                ? lhs.boundaries.sorted().lexicographicallyPrecedes(rhs.boundaries.sorted())
+                : lhs.text < rhs.text
+        }
+    }
+
+    struct Continuation: Hashable, Sendable {
+        let pending: TerminalControlGrammar.Pending?
+        /// At most 64 complete prefixes of at most 64 Unicode scalars (256 UTF-8 bytes).
+        let prefixes: [Prefix]
+        let commandSuffix: String
+        let quarantined: Bool
+        fileprivate init(pending: TerminalControlGrammar.Pending?, prefixes: [Prefix],
+                         commandSuffix: String, quarantined: Bool = false) {
+            self.pending = pending
+            self.prefixes = prefixes
+            self.commandSuffix = commandSuffix
+            self.quarantined = quarantined
+        }
+    }
+
+    /// Offsets project each UTF-8 boundary back to the control-stripped visible record.
+    struct Projection: Hashable, Sendable {
+        var text: String
+        var offsets: [Int]
+        var retained: [Range<Int>]
+        var boundaries: Set<Int> = [0]
+
+        fileprivate init(prefix: Prefix) {
+            text = prefix.text
+            offsets = Array(repeating: 0, count: text.utf8.count + 1)
+            retained = text.isEmpty ? [] : [0..<text.utf8.count]
+            boundaries = prefix.boundaries
+        }
+
+        fileprivate mutating func append(literal: Substring) {
+            var count = offsets.last ?? 0
+            text += literal
+            for _ in literal.utf8 { count += 1; offsets.append(count) }
+        }
+
+        fileprivate mutating func append(body: String) {
+            boundaries.insert(offsets.count - 1)
+            guard !body.isEmpty else { return }
+            let start = offsets.count - 1
+            text += body
+            offsets.append(contentsOf: repeatElement(offsets.last ?? 0, count: body.utf8.count))
+            retained.append(start..<(offsets.count - 1))
+        }
+    }
+
+    static func body(of escape: Substring, reading: Reading) -> String {
+        guard reading != .joined else { return "" }
+        let command = String(String.UnicodeScalarView(escape.unicodeScalars.filter {
+            !((0...0x1A).contains($0.value) || (0x1C...0x1F).contains($0.value) || $0.value == 0x7F)
+        }))
+        let prefix = command.hasPrefix("\u{1B}[") ? 2 : (command.hasPrefix("\u{9B}") ? 1 : 0)
+        if prefix > 0, let final = escape.unicodeScalars.last, !(0x40...0x7E).contains(final.value) { return "" }
+        // Opaque OSC/DCS/APC/PM/SOS payloads can never become generic-command evidence.
+        let generic = command.wholeMatch(of: #/\u{1B}(?![\[\]P_^X])[ -\/]*[0-~]/#) != nil
+        guard prefix > 0 || generic else { return "" }
+        let complete = String(command.dropFirst(generic ? 1 : prefix))
+        switch reading {
+        case .joined: return ""
+        case .parameterless: return complete.count == 1 ? complete : ""
+        case .final: return String(complete.suffix(1))
+        case .intermediates:
+            // CSI parameters and intermediates are distinct grammar classes. Removing
+            // numeric parameters must not discard option punctuation such as a dash.
+            return prefix > 0 ? String(String.UnicodeScalarView(complete.unicodeScalars.filter {
+                !(0x30...0x3F).contains($0.value)
+            })) : complete
+        case .intermediateOnly:
+            return String(String.UnicodeScalarView(complete.unicodeScalars.filter { (0x20...0x2F).contains($0.value) }))
+        case .parameterDelimiter:
+            // Numeric CSI parameters may hide a field's colon or equals delimiter.
+            // Keep the delimiter suffix as scan-only evidence, never as visible output.
+            guard prefix > 0, let delimiter = complete.firstIndex(where: { $0 == ":" || $0 == "=" }) else { return "" }
+            return String(complete[delimiter...])
+        case .parameterOnly:
+            return String(String.UnicodeScalarView(complete.unicodeScalars.filter { (0x30...0x3F).contains($0.value) }))
+        case .withoutFinal: return String(complete.dropLast())
+        case .colon: return complete.contains(":") ? ":" : ""
+        case .equals: return complete.contains("=") ? "=" : ""
+        case .complete: return complete
+        }
+    }
+
+    /// Nil means that no safe bounded enumeration is possible. Do not silently drop
+    /// alternatives: the missing reading might be the only one containing the credential.
+    static func projections(in text: String, prefixes: [Prefix] = []) -> [Projection]? {
+        guard isWithinControlBudget(text) else { return nil }
+        guard prefixes.count <= maximumAlternatives,
+              prefixes.allSatisfy({ prefix in
+                  let bytes = prefix.text.utf8.prefix(257).count
+                  return bytes <= 256 && prefix.boundaries.allSatisfy { (0...bytes).contains($0) }
+              }) else { return nil }
+        // Charge the full possible reading before copying/hashing it. Sparse controls
+        // cannot multiply a long unchanged suffix beyond this aggregate byte budget.
+        let readingBytes = max(1, text.utf8.count + (prefixes.map { $0.text.utf8.count }.max() ?? 0))
+        var workRemaining = maximumProjectionWorkBytes - readingBytes * max(1, prefixes.count)
+        guard workRemaining >= 0 else { return nil }
+        var results = Array(Set(prefixes.isEmpty ? [Prefix(text: "")] : prefixes)).sorted().map { Projection(prefix: $0) }
+        guard results.count <= maximumAlternatives else { return nil }
+        var remaining = text[...]
+        while let escape = remaining.firstMatch(of: TerminalControlGrammar.escape) {
+            let literal = remaining[..<escape.range.lowerBound]
+            // Every ordered selection of command bytes is possible scan-only evidence:
+            // prefixes, suffixes, interior fragments, and mixed grammar classes. A whitelist
+            // silently omits valid credentials. Opaque control-string bodies remain empty.
+            let complete = body(of: escape.0, reading: .complete)
+            guard complete.utf8.count <= maximumAlternatives else { return nil }
+            var choices: Set<String> = [""]
+            for character in complete {
+                let prior = choices
+                for prefix in prior {
+                    let cost = prefix.utf8.count + 1
+                    guard workRemaining >= cost else { return nil }
+                    workRemaining -= cost
+                    choices.insert(prefix + String(character))
+                    guard choices.count <= maximumAlternatives else { return nil }
+                }
+            }
+            let bodies = choices.sorted()
+            // Most controls (including C0/C1 and opaque strings) have one empty reading.
+            // Mutate those projections in place: copying/hashing each growing prefix is quadratic.
+            if bodies == [""] {
+                for index in results.indices {
+                    results[index].append(literal: literal)
+                    results[index].append(body: "")
+                }
+                remaining = remaining[escape.range.upperBound...]
+                continue
+            }
+            var next: [Projection] = []
+            var seen: Set<Projection> = []
+            for var result in results {
+                result.append(literal: literal)
+                for body in bodies {
+                    guard workRemaining >= readingBytes else { return nil }
+                    workRemaining -= readingBytes
+                    var candidate = result
+                    candidate.append(body: body)
+                    if seen.insert(candidate).inserted {
+                        guard next.count < maximumAlternatives else { return nil }
+                        next.append(candidate)
+                    }
+                }
+            }
+            results = next
+            remaining = remaining[escape.range.upperBound...]
+        }
+        return results.map { result in
+            var result = result
+            result.append(literal: remaining)
+            return result
+        }
+    }
+
+    /// Terminal preparation retains physical CR/LF framing; it is not credential evidence.
+    static func contentBeforeTerminator(_ text: String) -> Substring {
+        let scalars = text.unicodeScalars
+        let end = scalars.lastIndex(where: { $0 != "\r" && $0 != "\n" })
+            .map { scalars.index(after: $0) } ?? scalars.startIndex
+        return text[..<end]
+    }
+
+    static func prepare(_ line: String, continuation: inout Continuation?) -> (text: String, prefixes: [Prefix]) {
+        // Plain records need no alternate evidence or offset arrays, regardless of length.
+        if continuation == nil, line.firstMatch(of: TerminalControlGrammar.escape) == nil { return (line, []) }
+        let prefixes = continuation?.prefixes ?? []
+        var pending = continuation?.pending
+        var commandSuffix = continuation?.commandSuffix ?? ""
+        func quarantine() -> (text: String, prefixes: [Prefix]) {
+            // An ambiguous opener might own unindented later records (PEM/quoted secrets).
+            // Only a fresh StreamState can release this fail-closed state, never guest text.
+            continuation = Continuation(pending: nil, prefixes: [], commandSuffix: "", quarantined: true)
+            return (quarantineMarker, [])
+        }
+        guard continuation?.quarantined != true, isWithinControlBudget(line) else { return quarantine() }
+        let text = TerminalControlGrammar.prepare(line, pending: &pending, commandSuffix: &commandSuffix)
+        guard commandSuffix.unicodeScalars.count <= 64 else { return quarantine() }
+        guard let readings = projections(in: text, prefixes: prefixes) else { return quarantine() }
+        // A pending command may split ANY credential opener, not just options or PEM.
+        // Never truncate structural evidence: once its bounded capacity is exceeded, quarantine
+        // this StreamState. Even apparently ordinary long prefixes can hide a later opener.
+        if pending != nil, readings.contains(where: {
+            contentBeforeTerminator($0.text).unicodeScalars.prefix(65).count > 64
+        }) { return quarantine() }
+        continuation = pending.map { command in
+            let suffixes = readings.map { reading in
+                let content = String(contentBeforeTerminator(reading.text))
+                return Prefix(text: content, boundaries: reading.boundaries.filter { $0 <= content.utf8.count })
+            }
+            return Continuation(pending: command, prefixes: Array(Set(suffixes)).sorted(), commandSuffix: commandSuffix)
+        }
+        return (text, prefixes)
+    }
+}

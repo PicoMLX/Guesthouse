@@ -15,10 +15,7 @@ struct Redactor: Sendable {
     /// removed in full.
     struct StreamState: Hashable, Sendable {
         /// Which kind of control string is open, because only an OSC also ends at BEL.
-        enum ControlString: Hashable, Sendable {
-            case osc
-            case other
-        }
+        typealias ControlString = TerminalControlEvidence.Continuation
 
         struct QuotedValue: Hashable, Sendable {
             let delimiter: Character
@@ -48,10 +45,26 @@ struct Redactor: Sendable {
         var expectingSecretContinuation = false
         /// The previous line asked for a code but carried none; the value follows on this line.
         var expectingDeviceCode = false
+        /// An unquoted code already began; only indented later records continue its value.
+        var expectingDeviceCodeContinuation = false
+        /// An authority with a password delimiter reached a physical boundary before its @.
+        var expectingURLUserInfo = false
+        /// Only escape parity is retained, never URL credential bytes.
+        var urlHasTrailingEscape = false
+        /// Missing authority slashes across physical records; no credential bytes are stored.
+        var pendingURLSlashes = 0
+        /// A bounded, structural option/cookie name split across physical records.
+        var pendingCredentialLabel: String?
+        /// An incomplete encoded field name owns records until its assignment arrives.
+        /// Only this bit is retained, never arbitrary key or value bytes.
+        var pendingEncodedCredentialKey = false
         /// A distinctive token prefix reached a line boundary; payload may continue after it.
         var wrappedTokenKind: String?
         /// Quoted values may wrap without indentation and remain sensitive until the quote closes.
         var quotedValue: QuotedValue?
+        /// An incomplete Unicode-encoded URL string retains framing bits, never payload.
+        var pendingEncodedURLString = false
+        var encodedURLHasTrailingEscape = false
         /// A terminal control string opened on an earlier line and has not been terminated yet.
         var openControlString: ControlString?
 
@@ -63,6 +76,8 @@ struct Redactor: Sendable {
     static func marker(_ kind: String) -> String { "[redacted:\(kind)]" }
 
     static func mergePendingContexts(from scanned: StreamState, into state: inout StreamState) {
+        state.pendingCredentialLabel = state.pendingCredentialLabel ?? scanned.pendingCredentialLabel
+        state.pendingEncodedCredentialKey = state.pendingEncodedCredentialKey || scanned.pendingEncodedCredentialKey
         state.expectingAuthorizationValue = state.expectingAuthorizationValue || scanned.expectingAuthorizationValue
         state.authorizationValueIsOnTheNextLine = state.authorizationValueIsOnTheNextLine || scanned.authorizationValueIsOnTheNextLine
         state.authorizationValueExplicitlyContinues = state.authorizationValueExplicitlyContinues || scanned.authorizationValueExplicitlyContinues
@@ -70,6 +85,13 @@ struct Redactor: Sendable {
         state.secretValueExplicitlyContinues = state.secretValueExplicitlyContinues || scanned.secretValueExplicitlyContinues
         state.expectingSecretContinuation = state.expectingSecretContinuation || scanned.expectingSecretContinuation
         state.expectingDeviceCode = state.expectingDeviceCode || scanned.expectingDeviceCode
+        state.expectingDeviceCodeContinuation = state.expectingDeviceCodeContinuation || scanned.expectingDeviceCodeContinuation
+        state.expectingURLUserInfo = state.expectingURLUserInfo || scanned.expectingURLUserInfo
+        state.urlHasTrailingEscape = state.urlHasTrailingEscape || scanned.urlHasTrailingEscape
+        state.pendingEncodedURLString = state.pendingEncodedURLString || scanned.pendingEncodedURLString
+        state.encodedURLHasTrailingEscape = state.encodedURLHasTrailingEscape || scanned.encodedURLHasTrailingEscape
+        let slashCounts = [state.pendingURLSlashes, scanned.pendingURLSlashes].filter { $0 > 0 }
+        state.pendingURLSlashes = slashCounts.min() ?? 0
         state.quotedValue = state.quotedValue ?? scanned.quotedValue
         if scanned.quotedValue?.enclosingAuthorizationFold == true { state.quotedValue?.enclosingAuthorizationFold = true }
         if scanned.quotedValue?.enclosingSecretFold == true { state.quotedValue?.enclosingSecretFold = true }
