@@ -20,7 +20,7 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         case .executableUnavailable: "A required tool is missing or could not be launched."
         case .permissionDenied: "Guesthouse does not have the required access."
         case .insufficientDiskSpace: "There is not enough disk space for this operation."
-        case .verificationFailed: "The runtime or connection failed its trust check."
+        case .verificationFailed: "A required integrity or trust check failed."
         case .invalidResponse: "A tool returned an unsupported or incomplete response."
         case .processFailed: "The tool reported a failure."
         case .outcomeUnknown: "The operation's outcome could not be confirmed."
@@ -48,7 +48,7 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         case .insufficientDiskSpace:
             "Free disk space, then check the environment before retrying."
         case .verificationFailed:
-            "Use Repair to inspect the runtime or SSH identity; do not bypass verification."
+            "Use Repair to inspect the resource or connection used by this operation; do not bypass verification."
         case .invalidResponse:
             "Check tool compatibility in Repair and inspect the environment before retrying."
         }
