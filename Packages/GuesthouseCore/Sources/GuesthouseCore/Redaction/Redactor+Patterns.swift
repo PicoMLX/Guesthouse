@@ -110,7 +110,7 @@ extension Redactor {
         private static var urlAuthorityPrefix: Regex<(Substring, Substring)> {
             // Scan the existing record; no escape-depth buffer is retained. A depth cap
             // here would leave deeper encodings unmatched and expose their credentials.
-            #/((?::|^|[\s"'(<\[{]|(?:^|[\s"'(<\[{])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
+            #/((?::|^|[\s"'(<\[{\u{0060}]|(?:^|[\s"'(<\[{\u{0060}])(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)(?:\\*\/){2})/#
         }
         let urlUserInfo = Regex {
             urlAuthorityPrefix
@@ -119,7 +119,7 @@ extension Redactor {
         let partialURLAuthority = #/(?:^|[\s:"'(<\[{])(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:(?:\\*\/)?|:?\\*\/)\\*$/#
         let incompleteURLUserInfo = Regex {
             urlAuthorityPrefix
-            #/[^\s\/?#@]*@?$/#
+            #/[^\s\/?#]*$/#
         }
         /// `password: hunter2`, `passphrase=...`, `token=...`, `secret: "..."`, `"api_key":"..."`,
         /// and the camel-case keys structured diagnostics use: `accessToken`, `refreshToken`,
@@ -202,7 +202,7 @@ extension Redactor {
         /// device-flow field names are included, because arming the next line has no output whose
         /// shape has to be kept. A line that is nothing but `code:` is a prompt too — there is
         /// nothing else on it for the word to belong to.
-        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?\s*$/#.ignoresCase()
+        let codePromptOnly = #/(?:(?:^|[^A-Za-z0-9])(?:\\*["'])?(?:(?:your|one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\\*["'])?(?:\s+(?!\[redacted:)\S+){0,2}?|(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?!\[redacted:)\S+){0,2}?)|^\s*codes?)\s*[:=]\s*$|(?:^|[^A-Za-z0-9])(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?(?:\s+(?:shown|displayed|provided|listed)\s+below)?\s*$/#.ignoresCase()
         /// Device codes such as `1A2B-3C4D` and the `WDJB.MJHT` an RFC 8628 provider may print:
         /// runs of four to eight upper-case characters joined by single separators. Applied only
         /// on lines that mention a code (including the `user_code` and `device_code` field names
@@ -215,17 +215,10 @@ extension Redactor {
         /// says it leaves alone. A dot that ends a sentence is not one, so `your code: AB12-CD34.`
         /// still loses its code.
         let deviceCode = #/(^|[^A-Za-z0-9.-])([A-Z0-9]{4,8}(?:[-.][A-Z0-9]{4,8}){1,3})(?![A-Za-z0-9-]|\.[A-Za-z0-9])/#
-        /// A prompt that names the code with no delimiter at all: `Enter the code ABC123 at the
-        /// URL shown` is the prose an RFC 8628 provider prints, and only a value that happens to
-        /// have the dotted or hyphenated shape above was removed from it. Two forms qualify: the
-        /// imperative one, which asks for the code, and a historical declaration with a copula.
-        /// Present-tense declarations also have the opaque-value rule below. Here a value has
-        /// to look like a code rather than
-        /// like the next English word: four or more alphanumerics across groups that are
-        /// upper-case or carry a digit. `process exited with code 1`, `Enter the code shown
-        /// below`, and `the login code was rejected` are all left alone. The words are matched
-        /// without regard to case; the value's own alternatives are not, or every lower-case
-        /// word after the label would be a code.
+        /// Imperatives accept opaque lowercase codes as well as grouped/framed values.
+        /// Explicit "shown below" instructions retain their text and arm the next record.
+        /// Historical declarations keep the conservative uppercase/digit rule so ordinary
+        /// status prose such as "the login code was rejected" remains visible.
         let codePromptWithoutDelimiter = Regex {
             #/((?:^|[^A-Za-z0-9])(?:(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)|(?i:(?:one[ _-]?time|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device)[ _-]?codes?(?:\s+(?:is|are|was|were|reads|equals))+)))/#
             #/\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*/#
@@ -234,9 +227,17 @@ extension Redactor {
                     #/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n]*\]|\([^\)\r\n]*\)|<[^>\r\n]*>|\u{0060}[^\u{0060}\r\n]*\u{0060}|"[^"\r\n]*$|'[^'\r\n]*$/#
                     #/\[[^\]\r\n]*$|\([^\)\r\n]*$|<[^>\r\n]*$|\u{0060}[^\u{0060}\r\n]*$/#
                     #/(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])(?:[ \t]+(?:[A-Z0-9._-]+|[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*)(?![A-Za-z0-9._-]))*/#
+                    #/[A-Za-z0-9._-]+(?![A-Za-z0-9._-])/#
                 }
             } transform: { value -> Substring? in
                 if value.first.map({ "\"'[<(`".contains($0) }) == true { return value }
+                if value.contains(where: \.isLowercase) && !value.contains(where: \.isNumber) {
+                    let prefix = value.base[..<value.startIndex]
+                    guard prefix.contains(#/(?:^|[^A-Za-z0-9])(?i:(?:enter|type|paste|copy|input)(?:\s+\S+){0,3}?\s+codes?)\s+(?:\[redacted:[^\]\r\n]+\][ \t]+)*$/#) else { return nil }
+                    let remainder = value.base[value.startIndex...]
+                    guard remainder.wholeMatch(of: #/(?:shown|displayed|provided|listed)[ \t]+below[ \t]*[:=]?[ \t]*$/#.ignoresCase()) == nil else { return nil }
+                    return value
+                }
                 // Providers may group a six-digit code as 123 456. Validate the total
                 // candidate, not each group. An eligible short EOL fragment may wrap.
                 let count = value.lazy.filter { $0.isLetter || $0.isNumber }.prefix(4).count
