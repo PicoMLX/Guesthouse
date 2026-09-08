@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+
+[[ $# == 5 && "$1" == test && "$2" == --package-path &&
+    "$4" == -Xswiftc && "$5" == -warnings-as-errors ]] || exit 91
+[[ "$(pwd -P)" == "${CI_HOOK_EXPECTED_ROOT}" ]] || exit 92
+printf '%s\n' "$3" >> "${CI_HOOK_INVOCATIONS}"
+if [[ "$3" == "${CI_HOOK_FAIL_PACKAGE:-}" ]]; then
+    exit 23
+fi
