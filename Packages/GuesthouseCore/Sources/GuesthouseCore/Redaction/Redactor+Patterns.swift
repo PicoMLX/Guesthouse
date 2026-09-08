@@ -164,12 +164,12 @@ extension Redactor {
                 #/--?[A-Za-z0-9_-]*/#
                 credentialOptionName
             }
-            #/([ \t]+|=)(?=\S)/#
+            #/([ \t]*[=:][ \t]*|[ \t]+)(?=\S)/#
         }.ignoresCase()
         let secretOptionOnly = Regex {
             #/(^|[\s\u{001F}"'\[({<:=\u{0060},;])--?[A-Za-z0-9_-]*/#
             credentialOptionName
-            #/[ \t]*(?:=[ \t]*)?$/#
+            #/[ \t]*(?:[=:][ \t]*)?$/#
         }.ignoresCase()
         /// JSON/Python-style argv diagnostics retain the option as a quoted array element.
         /// Its value is the next element, possibly on a later line.
