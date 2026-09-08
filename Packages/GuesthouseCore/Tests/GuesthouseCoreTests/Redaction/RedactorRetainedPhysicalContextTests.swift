@@ -59,9 +59,17 @@ import Testing
     }
 
     @Test(arguments: ["[https://one.example, https://two.example]", "urls=[//one.example, //two.example]",
-                      #""visit https://example.com""#, #""visit https://example.com:443""#])
+                      #""visit https://example.com""#, #""visit https://example.com:443""#,
+                      #"prefix "url=https://example.com""#, "prefix <url=https://example.com>"])
     func completeURLDiagnosticsDoNotQuarantineTheNextRecord(_ input: String) {
         #expect(Redactor().redact(lines: [input, "Finished"]).map(\.text) == [input, "Finished"])
+    }
+
+    @Test(arguments: ["[https://user:sec,ret@example.com]", "[//user:sec,ret@one.example,//other:opaque@two.example]"])
+    func commaUserinfoRemainsConcealedInURLLists(_ input: String) {
+        let output = Redactor().redact(lines: [input, "Finished"]).map(\.text)
+        #expect(!output[0].contains("sec,ret") && !output[0].contains("opaque"))
+        #expect(output[1] == "Finished")
     }
 
     @Test(arguments: [("--cl", "ient-secret opaque"), ("--access-k", "ey-secret opaque"),
