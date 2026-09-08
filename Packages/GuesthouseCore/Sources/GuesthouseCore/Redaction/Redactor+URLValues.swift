@@ -40,7 +40,9 @@ extension Redactor {
             guard !value.isEmpty else { return text }
             let end = value.firstIndex(where: { $0.isWhitespace || "/?#".contains($0) }) ?? text.endIndex
             let at = text[value.startIndex..<end].lastIndex(of: "@")
-            state.expectingURLUserInfo = at == nil && end == text.endIndex
+            // An @ at EOL can itself belong to a password that wraps before the real @.
+            state.expectingURLUserInfo = end == text.endIndex
+                && (at == nil || at == text.index(before: end))
             let stop = at ?? end
             text = String(text[..<value.startIndex]) + marker("userinfo") + text[stop...]
         }
