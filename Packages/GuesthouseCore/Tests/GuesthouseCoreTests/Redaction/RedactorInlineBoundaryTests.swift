@@ -184,11 +184,15 @@ import Testing
         #expect(!state.expectingDeviceCodeContinuation)
     }
 
-    @Test(arguments: ["password: opaqueCredential", "Authorization: opaqueCredential", "device_code: opaqueCredential"])
-    func originalFieldsSurviveAnActiveURLContinuation(_ input: String) {
+    @Test(arguments: [("password: opaqueCredential", [true, false, false]),
+                      ("Authorization: opaqueCredential", [false, true, false]),
+                      ("device_code: opaqueCredential", [false, false, true])])
+    func originalFieldsSurviveAnActiveURLContinuation(_ input: String, _ continuation: [Bool]) {
         var state = Redactor.StreamState()
         state.expectingURLUserInfo = true
         #expect(!Redactor.applyPatterns(to: input, codeExpected: false, state: &state).contains("opaqueCredential"))
+        #expect([state.expectingSecretContinuation, state.expectingAuthorizationValue,
+                 state.expectingDeviceCodeContinuation] == continuation)
     }
 
     @Test(arguments: ["device_code: ABCD, password:", "Authorization: Bearer abc, password:"])
