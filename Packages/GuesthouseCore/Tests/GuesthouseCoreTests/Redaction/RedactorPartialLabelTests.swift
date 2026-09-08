@@ -40,7 +40,8 @@ import Testing
 
     @Test(arguments: [("private k", "ey: opaque", "private key: opaque"),
                       ("request authoriz", "ation: opaque", "request authorization: opaque"),
-                      ("secret access k", "ey: opaque", "secret access key: opaque")])
+                      ("secret access k", "ey: opaque", "secret access key: opaque"),
+                      ("signing", "Secret: opaque", "signingSecret: opaque")])
     func multiwordFieldPrefixesRetainTheirWholeSensitiveName(_ first: String, _ next: String, _ expected: String) {
         var state = Redactor.StreamState()
         state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
