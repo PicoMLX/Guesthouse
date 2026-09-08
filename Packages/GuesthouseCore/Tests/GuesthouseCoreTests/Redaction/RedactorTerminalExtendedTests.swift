@@ -122,10 +122,12 @@ import Testing
         #expect(state?.quarantined == true)
     }
 
-    @Test func boundedSparseRecordsKeepEveryReading() throws {
-        let readings = try #require(TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: 1_000)))
-        #expect(readings.count == 64)
-        #expect(readings.allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
+    @Test(arguments: [(500, Int?(64)), (1_000, Int?.none)])
+    func boundedSparseRecordsKeepEveryReading(_ length: Int, _ expectedCount: Int?) {
+        // Sixty-four full readings of the original 1,000-byte suffix exceed 64 KiB.
+        let readings = TerminalControlEvidence.projections(in: "\u{1B}[31m\u{1B}[32m" + String(repeating: "a", count: length))
+        #expect(readings?.count == expectedCount)
+        #expect((readings ?? []).allSatisfy { $0.offsets.count == $0.text.utf8.count + 1 })
     }
 
     @Test(arguments: [2_000, 4_000, 8_000])
