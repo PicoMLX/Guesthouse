@@ -50,6 +50,12 @@ import Testing
         #expect(Redactor.partialCredentialLabel(in: "Enter " + String(repeating: "arbitrary", count: 1_000)) == "enter x")
     }
 
+    @Test(arguments: ["Enter the code: opaque", "Enter the codes: opaque", "Enter the code=opaque",
+                      "Enter the code:", "Enter the code: [redacted:device-code]"])
+    func assignedCodeValuesCannotBecomeInstructionSlots(_ input: String) {
+        #expect(Redactor.partialCredentialLabel(in: input) == nil)
+    }
+
     @Test(arguments: ["user code", "device code", "verification code", "Enter the code"])
     func pluralCodeSuffixCanFollowTheSingularStem(_ first: String) throws {
         var state = Redactor.StreamState()

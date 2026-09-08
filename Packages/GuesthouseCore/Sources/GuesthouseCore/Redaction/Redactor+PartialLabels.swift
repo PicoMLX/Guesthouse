@@ -66,7 +66,8 @@ extension Redactor {
         // A final slot without whitespace can continue within the same word next time.
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:enter|type|paste|copy|input))((?:[ \t]+\S+){1,3})[ \t]*$/#) {
             let words = prompt.2.split(whereSeparator: \.isWhitespace)
-            if !words.contains(where: { $0.lowercased() == "code" || $0.lowercased() == "codes" }) {
+            if !words.contains(where: { $0.lowercased() == "code" || $0.lowercased() == "codes" }),
+               !prompt.0.contains(patterns.codePrompt), !prompt.0.contains(patterns.codePromptOnly) {
                 return prompt.1.lowercased() + String(repeating: " x", count: words.count)
                     + (text.last?.isWhitespace == true ? " " : "")
             }
