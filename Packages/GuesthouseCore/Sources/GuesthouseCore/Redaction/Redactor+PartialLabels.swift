@@ -54,16 +54,16 @@ extension Redactor {
         if let prompt = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])((?i:your|verification|activation|confirmation|pairing|login|security|authorization|auth|access|user|device))([ _-]?)((?i:c|co|cod|code|codes))[ \t]*$/#) {
             return promptPrefix(prompt.1, prompt.3, separator: String(prompt.2))
         }
-        // A provider stem is stronger evidence than an incidental field suffix (github_pa).
+        // Compare provider stems with field suffixes; neither may steal a longer prefix.
         let unpadded = text.dropLast(text.reversed().prefix(while: { $0 == " " || $0 == "\t" }).count)
         let tail = String(unpadded.suffix(11))
         let providerPrefixes = providerStems.flatMap { stem in (1..<stem.count).map { String(stem.prefix($0)) } }
-        if let prefix = providerPrefixes.filter({ prefix in
+        let providerPrefix = providerPrefixes.filter({ prefix in
             guard tail.hasSuffix(prefix) else { return false }
             if "sk-".hasPrefix(prefix), let prior = unpadded.dropLast(prefix.count).last,
                prior.isASCII && (prior.isLetter || prior.isNumber) { return false }
             return true
-        }).max(by: { $0.count < $1.count }) { return prefix }
+        }).max(by: { $0.count < $1.count })
         // Keep bounded multiword names and ignore a completed label's quote wrapper.
         // No value has begun before the assignment delimiter; quote depth is not value state.
         if let header = text.firstMatch(of: #/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_ \t-]{0,47})(?:\\*["'])?\\*[ \t]*$/#) {
@@ -75,10 +75,12 @@ extension Redactor {
             for start in prefix.indices where start == prefix.startIndex || "-_ \t".contains(prefix[prefix.index(before: start)]) {
                 let suffix = String(prefix[start...])
                 if authorizationSchemes.contains(where: { $0.hasPrefix(suffix) && $0 != suffix }) { return suffix }
-                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }) { return suffix }
+                if credentialFieldPrefixes.contains(suffix.filter { $0 != "-" && $0 != "_" && !$0.isWhitespace }) {
+                    return (providerPrefix?.count ?? 0) > suffix.count ? providerPrefix : suffix
+                }
             }
         }
-        return nil
+        return providerPrefix
     }
 
     /// Called only at a physical record boundary. A mismatching suffix is ordinary text,
