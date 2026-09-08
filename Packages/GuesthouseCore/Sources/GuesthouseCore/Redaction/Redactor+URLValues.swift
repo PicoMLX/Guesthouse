@@ -5,9 +5,30 @@ extension Redactor {
     private static var URLDiagnosticList: Regex<Substring> {
         #/\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\]/#
     }
+    /// RFC 8259 strings can encode URL delimiters as Unicode escapes. Decode only a
+    /// bounded, closed string, scan once, and re-encode only when it contains userinfo.
+    /// No decoded payload is retained in stream state or emitted without sanitization.
+    private static func redactEncodedURLStrings(_ input: String) -> String {
+        input.replacing(#/"(?:[^"\\\r\n]|\\[^\r\n])*"/#) { match in
+            let encoded = match.0
+            guard encoded.contains(#"\u"#) else { return String(encoded) }
+            guard encoded.utf8.prefix(8193).count <= 8192,
+                  let decoded = try? JSONDecoder().decode(String.self, from: Data(encoded.utf8))
+            else { return "\"" + marker("encoded-value") + "\"" }
+            guard decoded.contains(patterns.urlUserInfo) else { return String(encoded) }
+            var context = StreamState()
+            let sanitized = redactURLContinuations(decoded, state: &context, decodeStrings: false)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            guard let data = try? encoder.encode(sanitized) else { return "\"" + marker("userinfo") + "\"" }
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
-    static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
+    static func redactURLContinuations(_ input: String, state: inout StreamState, decodeStrings: Bool = true) -> String {
+        let input = decodeStrings ? redactEncodedURLStrings(input) : input
         defer {
             if !input.allSatisfy(\.isWhitespace) {
                 state.urlHasTrailingEscape = state.expectingURLUserInfo
@@ -16,19 +37,16 @@ extension Redactor {
         }
         // A comma separates URLs only when the next element starts another authority.
         // Otherwise it may be part of the current URI's userinfo (or path/query).
-        var text = input.replacing(URLDiagnosticList) { match in
-            let list = match.0.dropFirst().dropLast()
-            func sanitized(_ element: Substring) -> String {
-                String(element).replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" }
-            }
-            var cursor = list.startIndex
-            var result = "["
-            for separator in list.matches(of: #/,(?=[ \t]*(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
-                result += sanitized(list[cursor..<separator.range.lowerBound]) + ","
-                cursor = separator.range.upperBound
-            }
-            return result + sanitized(list[cursor...]) + "]"
+        func sanitized(_ element: Substring) -> String {
+            String(element).replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" }
         }
+        var cursor = input.startIndex
+        var text = ""
+        for separator in input.matches(of: #/,(?=[ \t]*(?:(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*)?(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
+            text += sanitized(input[cursor..<separator.range.lowerBound]) + ","
+            cursor = separator.range.upperBound
+        }
+        text += sanitized(input[cursor...])
         if state.pendingURLSlashes > 0 {
             var remaining = state.pendingURLSlashes
             state.pendingURLSlashes = 0
@@ -42,7 +60,7 @@ extension Redactor {
             }
             if remaining == 0 {
                 state.expectingURLUserInfo = true
-                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state)
+                return String(text[..<cursor]) + redactURLContinuations(String(text[cursor...]), state: &state, decodeStrings: decodeStrings)
             }
         }
         if state.expectingURLUserInfo {
@@ -101,6 +119,9 @@ extension Redactor {
         if text.matches(of: URLDiagnosticList).contains(where: {
             $0.range.lowerBound < start && prefixEnd < $0.range.upperBound
         }) { return true }
+        // A continued list may have lost its opener on a preceding record. A comma
+        // authority boundary plus the terminal list closer still bounds its last element.
+        if text[..<start].last == ",", text[prefixEnd...].last == "]" { return true }
         let quotedRecord = text.drop(while: \.isWhitespace)
         if quotedRecord.first == "\"", quotedRecord.startIndex < start,
            let end = closingQuoteEnd(in: quotedRecord.dropFirst(),
