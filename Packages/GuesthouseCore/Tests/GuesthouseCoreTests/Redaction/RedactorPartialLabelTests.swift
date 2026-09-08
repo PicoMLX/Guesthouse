@@ -2,6 +2,22 @@ import Testing
 @testable import GuesthouseCore
 
 @Suite struct RedactorPartialLabelTests {
+    @Test(arguments: [("--g", "ithub-token opaque"), ("--ve", "ndor-password opaque")])
+    func unknownQualifierPrefixesKeepTheirOptionBoundary(_ first: String, _ next: String) throws {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        let restored = try #require(Redactor.restoringCredentialLabel(in: next, state: &state))
+        #expect(restored.firstMatch(of: Redactor.patterns.secretOption) != nil)
+    }
+
+    @Test(arguments: [("gh  ", "p_opaque", "ghp_opaque"),
+                      ("github_pa\t", "t_opaque", "github_pat_opaque")])
+    func providerPrefixesIgnoreOnlyHorizontalEndPadding(_ first: String, _ next: String, _ expected: String) {
+        var state = Redactor.StreamState()
+        state.pendingCredentialLabel = Redactor.partialCredentialLabel(in: first)
+        #expect(Redactor.restoringCredentialLabel(in: next, state: &state) == expected)
+    }
+
     @Test(arguments: [("Enter the cod", "e ABCD-EFGH", "enter code ABCD-EFGH"),
                       ("Enter the co", "de ABC123", "enter code ABC123"),
                       ("Your code", " is opaque", "your code is opaque")])
