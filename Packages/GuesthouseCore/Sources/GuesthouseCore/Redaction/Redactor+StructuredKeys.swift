@@ -7,7 +7,7 @@ extension Redactor {
     /// encoded keys fail closed as a secret field, keeping decoding work bounded.
     /// A key at EOL is normalized too, so bounded label replay can accept a later colon.
     static func normalizingStructuredCredentialKeys(in input: String) -> String {
-        input.replacing(#/((?:^|[{\[,])(?:[ \t]|\r\n|\r|\n)*)("(?:[^"\\\r\n]|\\[^\r\n])*\\?")(?=(?:[ \t]|\r\n|\r|\n)*:|[ \t]*$)/#) { match in
+        input.replacing(#/((?:^|[{\[,])(?:[ \t]|\r\n|\r|\n)*)("(?:[^"\\\r\n]|\\[^\r\n])*\\?"|"(?:[^"\\:\r\n]|\\[^\r\n])*\\?)(?=(?:[ \t]|\r\n|\r|\n)*:|[ \t]*$)/#) { match in
             let encoded = match.2
             guard encoded.contains("\\") else { return String(match.0) }
             guard encoded.utf8.prefix(1025).count <= 1024,
