@@ -7,7 +7,7 @@ extension Redactor {
         var spans = text.matches(of: patterns.githubToken).map { ($0.range, "github-token", false) }
         spans += text.matches(of: #/sk-[A-Za-z0-9_-]{16,}/#).map { ($0.range, "api-key", true) }
         spans += text.matches(of: patterns.distinctiveAPIKey).map { ($0.range, "api-key", false) }
-        spans += text.matches(of: #/bearer\s+[A-Za-z0-9._~+\/=-]+/#.ignoresCase()).map { ($0.range, "bearer-token", true) }
+        spans += text.matches(of: patterns.bearerCredentialSpan).map { ($0.range, "bearer-token", true) }
         spans += text.matches(of: patterns.basicCredentialSpan).compactMap { match in
             isBasicCredential(match.2) ? (match.range, "authorization", true) : nil
         }
