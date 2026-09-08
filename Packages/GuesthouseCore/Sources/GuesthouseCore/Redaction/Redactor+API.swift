@@ -181,6 +181,10 @@ extension Redactor {
         let valueContinues = Self.valueStartsOnNextLine(text[...])
         let explicitlyContinues = Self.valueExplicitlyContinues(text[...])
         if authorizationContinuation {
+            // This concealed record also consumes any co-armed secret value. Its own
+            // trailing labels may arm fresh contexts below, after the old value is spent.
+            state.expectingSecretValue = false
+            state.secretValueExplicitlyContinues = false
             let wholeValueQuote = Self.unterminatedAuthorizationQuote(in: text[...])
             state.quotedValue = wholeValueQuote
             let parameterContinues = Self.authorizationParameterContinues(text[...])
