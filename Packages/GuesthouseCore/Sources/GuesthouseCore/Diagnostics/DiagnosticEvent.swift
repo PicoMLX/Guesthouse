@@ -33,6 +33,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     public enum Outcome: Codable, Hashable, Sendable {
         case started, succeeded, cancellationRequested
         case failed(DiagnosticFailure)
+        case operationFailed(GuesthouseError)
     }
 
     public let operation: Operation
@@ -60,6 +61,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
         case .failed(let failure): detail = failure.message
+        case .operationFailed(let error): detail = error.userMessage
         }
         return operation.title + ": " + detail
             + (exitStatus.map { " Exit status: \($0)." } ?? "")
@@ -68,6 +70,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     public var recoveryMessage: String? {
         switch outcome {
         case .failed(let failure): failure.recoveryMessage
+        case .operationFailed(let error): error.recoveryMessage
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
         case .started, .succeeded: nil
         }
