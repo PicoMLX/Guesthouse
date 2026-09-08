@@ -5,6 +5,18 @@ extension Redactor {
     /// Unknown valid names keep their spelling; malformed/oversized names fail closed.
     /// Decode at most 1024 bytes and never retain decoded names or value bytes in state.
     static func normalizingStructuredCredentialKeys(in input: String) -> String {
+        var state = StreamState()
+        return normalizingStructuredCredentialKeys(in: input, state: &state)
+    }
+
+    static func normalizingStructuredCredentialKeys(in input: String, state: inout StreamState) -> String {
+        if state.pendingEncodedCredentialKey {
+            // Discard arbitrary key fragments without retaining bytes. Once an
+            // assignment arrives, the existing secret-value scanner owns its tail.
+            guard let delimiter = input.firstIndex(where: { $0 == ":" || $0 == "=" }) else { return marker("encoded-key") }
+            state.pendingEncodedCredentialKey = false
+            return "\"secret\":" + input[input.index(after: delimiter)...]
+        }
         let strings = input.matches(of: #/"(?:[^"\\]|\\.)*"/#)
         return input.replacing(#/((?:^|[{\[,])\s*)(\\*)("(?:(?!\\*"\s*[:=])(?:[^"\\]|\\.))*\\*"|"(?:(?!\\*"\s*[:=])(?:[^"\\:=]|\\.))*\\*)(?=\s*[:=]|[ \t]*$)/#) { match in
             // A brace/comma inside a serialized value is not an outer field boundary.
@@ -16,6 +28,9 @@ extension Redactor {
             var encoded = String(match.3)
             func key(_ name: String) -> String { String(match.1) + framing + "\"" + name + framing + "\"" }
             guard encoded.contains("\\") else { return String(match.0) }
+            if encoded.last != "\"", input[match.range.upperBound...].allSatisfy(\.isWhitespace) {
+                state.pendingEncodedCredentialKey = true
+            }
             // The framing backslashes are transport quoting, not part of the JSON name.
             if !framing.isEmpty, encoded.hasSuffix(framing + "\"") {
                 encoded = String(encoded.dropLast(framing.count + 1)) + "\""
