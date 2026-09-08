@@ -131,6 +131,10 @@ enum TerminalControlEvidence {
             let components = body(of: escape.0, reading: .parameterOnly)
                 .split(whereSeparator: { !("0"..."9").contains($0) }).map(String.init)
                 + body(of: escape.0, reading: .intermediateOnly).map(String.init)
+            // A long numeric component may start with unrelated command digits and end
+            // with a code group (at most eight digits). Whole-component readings cannot
+            // prove its suffix safe; quarantine rather than omit those interpretations.
+            guard components.allSatisfy({ $0.utf8.count <= 8 }) else { return nil }
             let bodies = Array(Set(Reading.allCases.map { body(of: escape.0, reading: $0) } + components)).sorted()
             guard bodies.count <= maximumAlternatives else { return nil }
             // Most controls (including C0/C1 and opaque strings) have one empty reading.
