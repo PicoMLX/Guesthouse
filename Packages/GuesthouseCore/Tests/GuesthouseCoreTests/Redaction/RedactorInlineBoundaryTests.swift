@@ -13,11 +13,28 @@ import Testing
         #expect(!state.expectingAuthorizationValue && !state.authorizationValueIsOnTheNextLine)
     }
 
-    @Test(arguments: ["password", "Authorization"], [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
-    func unframedTextAfterAQuotedFieldIsStillPartOfItsValue(_ label: String, _ value: String) {
+    @Test(arguments: [("password", true, false), ("Authorization", false, true), ("device_code", false, false)], [#""[redacted:decoy]" syntheticOpaque"#, #"'syntheticFirst' syntheticOpaque"#])
+    func unframedTextAfterAQuotedFieldIsStillPartOfItsValue(_ field: (String, Bool, Bool), _ value: String) {
         var state = Redactor.StreamState()
-        let output = Redactor.applyPatterns(to: label + ": " + value, codeExpected: false, state: &state)
+        let output = Redactor.applyPatterns(to: field.0 + ": " + value, codeExpected: false, state: &state)
         #expect(!output.contains("syntheticOpaque") && !output.contains("syntheticFirst") && !output.contains("decoy"))
+        #expect(state.expectingSecretContinuation == field.1)
+        #expect(state.expectingAuthorizationValue == field.2)
+        #expect(state.expectingDeviceCodeContinuation == (field.0 == "device_code"))
+    }
+
+    @Test(arguments: ["HMAC-SHA256", "ECDSA-SHA512", "RSA-SHA256", "PBKDF2-HMAC-SHA256", "CHACHA20-POLY1305"])
+    func incidentalAlgorithmNamesAreNotPromptedCodes(_ algorithm: String) {
+        var state = Redactor.StreamState()
+        let input = "process exited with code " + algorithm
+        #expect(Redactor.applyPatterns(to: input, codeExpected: false, state: &state) == input)
+        #expect(!Redactor.applyPatterns(to: "device_code: " + algorithm, codeExpected: false, state: &state).contains(algorithm))
+    }
+
+    @Test(arguments: ["HMAC-SHA256", "ECDSA-SHA512", "CHACHA20-POLY1305"])
+    func pendingCodeShapeMatchingDoesNotPreserveAlgorithms(_ value: String) {
+        var state = Redactor.StreamState()
+        #expect(!Redactor.applyPatterns(to: value, codeExpected: true, state: &state).contains(value))
     }
 
     @Test(arguments: [(#"password: "syntheticOpaque" , status: ready"#, "password: [redacted:secret] , status: ready"),
