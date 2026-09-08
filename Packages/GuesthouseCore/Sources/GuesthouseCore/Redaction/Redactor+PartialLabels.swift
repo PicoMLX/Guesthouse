@@ -64,13 +64,18 @@ extension Redactor {
 
     /// Called only at a physical record boundary. A mismatching suffix is ordinary text,
     /// and blank/styling-only records do not consume the pending structural prefix.
+    /// The physical API supplies normalized joined/spliced readings; preserve their
+    /// internal boundary markers in the restored output rather than replaying raw controls.
     static func restoringCredentialLabel(in line: String, state: inout StreamState) -> String? {
         guard let prefix = state.pendingCredentialLabel else { return nil }
         let visible = stripTerminalEscapes(line).drop(while: \.isWhitespace)
         guard !visible.isEmpty else { return nil }
         state.pendingCredentialLabel = nil
         let combined = prefix + visible
-        if partialCredentialLabel(in: combined)?.hasPrefix(prefix) == true
+        if partialCredentialLabel(in: combined).map({ successor in
+            successor.hasPrefix(prefix) || (prefix.hasPrefix("-")
+                && combined.wholeMatch(of: #/--?[A-Za-z0-9_-]+[ \t]*/#) != nil)
+        }) == true
             || combined.prefixMatch(of: patterns.secretOption) != nil
             || combined.wholeMatch(of: patterns.secretOptionOnly) != nil
             || combined.prefixMatch(of: patterns.authorizationHeader) != nil
@@ -81,6 +86,7 @@ extension Redactor {
             || combined.wholeMatch(of: patterns.codePromptOnly) != nil
             || combined.prefixMatch(of: patterns.githubToken) != nil
             || combined.prefixMatch(of: patterns.apiKey) != nil
+            || authorizationSchemes.contains(combined.lowercased())
             || authorizationSchemes.contains(where: {
                 combined.lowercased().hasPrefix($0)
                     && combined.dropFirst($0.count).first.map { $0 == " " || $0 == "\t" } == true
