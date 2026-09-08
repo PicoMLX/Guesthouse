@@ -40,9 +40,16 @@ import Testing
     }
 
     @Test(arguments: ["Enter the code", "Paste this code", "Copy your code",
-                      "Enter the code shown below:", "Paste this code displayed below:"])
+                      "Enter the code shown below:", "Paste this code displayed below:",
+                      "Enter the code shown below", "Paste this code displayed below"])
     func valueLessImperativePromptsRetainContext(prompt: String) {
         #expect(prompt.contains(Redactor.patterns.codePromptOnly))
+    }
+
+    @Test(arguments: ["abcdef", "abcDEF", "abc.def", "a"])
+    func imperativePromptsAcceptLowercaseOpaqueCodes(_ value: String) throws {
+        let match = try #require(("Enter the code " + value).firstMatch(of: Redactor.patterns.codePromptWithoutDelimiter))
+        #expect(match.2 == value)
     }
 
     @Test(arguments: ["Enter the code shown below:", "Paste this code displayed below:", "Code:", " Code="])
@@ -58,7 +65,7 @@ import Testing
         #expect(match.2 == "abcd")
     }
 
-    @Test(arguments: ["device code island", "user code arguably valid", "Enter the code shown below", "error code:42", "risk-averse-and-careful", "prefixsk-short", "sk- is a prefix"])
+    @Test(arguments: ["device code island", "user code arguably valid", "error code:42", "risk-averse-and-careful", "prefixsk-short", "sk- is a prefix"])
     func nearbyProseDoesNotBecomeADelimitedPrompt(input: String) {
         #expect(!input.contains(Redactor.patterns.codePrompt))
         #expect(!input.contains(Redactor.patterns.wrappedTokenAtLineEnd))
