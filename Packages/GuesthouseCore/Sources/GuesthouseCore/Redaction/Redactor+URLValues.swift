@@ -4,11 +4,20 @@ extension Redactor {
     /// An EOL authority may be userinfo whose @ arrives later; emitted bytes cannot be
     /// retracted. A path/query/fragment or proven diagnostic frame ends the authority.
     static func redactURLContinuations(_ input: String, state: inout StreamState) -> String {
-        // Commas separate unquoted elements inside diagnostic lists, not inside an
-        // ordinary URL path/query. Scan each flat list element at its own value boundary.
+        // A comma separates URLs only when the next element starts another authority.
+        // Otherwise it may be part of the current URI's userinfo (or path/query).
         var text = input.replacing(#/\[[^\[\]\r\n]*\]/#) { match in
-            "[" + match.0.dropFirst().dropLast().split(separator: ",", omittingEmptySubsequences: false)
-                .map { $0.replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" } }.joined(separator: ",") + "]"
+            let list = match.0.dropFirst().dropLast()
+            func sanitized(_ element: Substring) -> String {
+                String(element).replacing(patterns.urlUserInfo) { "\($0.1)\(marker("userinfo"))@" }
+            }
+            var cursor = list.startIndex
+            var result = "["
+            for separator in list.matches(of: #/,(?=[ \t]*(?:[A-Za-z][A-Za-z0-9+.-]*:)?(?:\\*\/){2})/#) {
+                result += sanitized(list[cursor..<separator.range.lowerBound]) + ","
+                cursor = separator.range.upperBound
+            }
+            return result + sanitized(list[cursor...]) + "]"
         }
         if state.pendingURLSlashes > 0 {
             var remaining = state.pendingURLSlashes
@@ -57,6 +66,9 @@ extension Redactor {
             while start > text.startIndex, text[..<start].last.map({
                 $0.isASCII && ($0.isLetter || $0.isNumber || "+-.".contains($0))
             }) == true { text.formIndex(before: &start) }
+        }
+        if let assignment = text[..<start].firstMatch(of: #/(?:--?)?[A-Za-z][A-Za-z0-9_.-]*[ \t]*=[ \t]*$/#) {
+            start = assignment.range.lowerBound
         }
         // The URL can be the final element of a flat diagnostic list, or part of
         // prose inside one whole-record double-quoted value. Neither frame belongs
