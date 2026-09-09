@@ -99,17 +99,27 @@ import Testing
         #expect(peer.requests.count == 1)
     }
 
-    @Test func opaqueSetupFailureIsKnownUnsentAndReleasesItsReservation() async {
+    @Test func opaqueSetupFailureIsKnownUnsentAndReleasesItsReservation() async throws {
         let calls = Mutex(0)
+        let failures = RuntimeEventRouter.lifetimeLimit + 1
+        let peer = OwnerPeer(incoming: { _ in }, dropped: {})
         let client = RuntimeClient(connect: { _, _ in
-            calls.withLock { $0 += 1 }; throw NSError(domain: "private-marker", code: 1)
+            if calls.withLock({ $0 += 1; return $0 }) <= failures {
+                throw NSError(domain: "private-marker", code: 1)
+            }
+            return peer
         })
-        for _ in 0..<70 {
+        for _ in 0..<failures {
             var iterator = client.send(Self.start).makeAsyncIterator()
             await #expect(throws: GuesthouseError.runtimeIncompatible) { try await iterator.next() }
             await client.flush()
         }
-        #expect(calls.withLock { $0 } == 70)
+        var recovered = client.send(.runtimeVersion).makeAsyncIterator()
+        await client.flush()
+        peer.answer(0, .success(.runtimeVersion(Self.info)))
+        #expect(try await recovered.next() == .runtimeVersion(Self.info))
+        #expect(calls.withLock { $0 } == failures + 1)
+        #expect(peer.requests == [.runtimeVersion])
         #expect(await client.reconciliation().0.isEmpty)
     }
 

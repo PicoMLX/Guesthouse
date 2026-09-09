@@ -72,6 +72,17 @@ import Testing
         #expect(session.sends.withLock { $0 } == 1)
     }
 
+    @Test func suppliedDeadlineBeyondTenSecondsIsTheOnlyTimeout() async {
+        let session = QuerySession([])
+        defer { session.releaseReply() }
+        // Intentionally crosses the old hidden ten-second timer; an immediate fake
+        // deadline cannot expose that competing clock. No timing-based state polling.
+        let value = await run(session, deadline: { try await ContinuousClock().sleep(for: .seconds(11)) })
+        #expect(value == .failure(.timedOut))
+        #expect(session.cancellations.withLock { $0 } == 1)
+        #expect(session.sends.withLock { $0 } == 1)
+    }
+
     @Test func cancelingAPendingCheckDisposesItWithoutWaitingForTheTimeout() async {
         let (started, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(1))
         let session = QuerySession([], didSend: { signal.yield(()); signal.finish() })

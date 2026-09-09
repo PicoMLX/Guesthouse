@@ -14,7 +14,7 @@ public final class RuntimeClient: RuntimeBackend {
     public convenience init() { self.init(connect: nil, permitsOperations: false) }
 
     init(connect: XPCRuntimeTransport.Connect?, permitsOperations: Bool = true,
-         deadline: @escaping Deadline = { try await Task.sleep(for: .seconds(10)) }) {
+         deadline: Deadline? = { try await Task.sleep(for: .seconds(10)) }) {
         let inbox = RuntimeClientInbox()
         let transport: XPCRuntimeTransport
         if let connect { transport = .init(incoming: { inbox.incoming($0) }, interrupted: { inbox.interrupted($0) }, connect: connect) }
@@ -64,14 +64,15 @@ public final class RuntimeClient: RuntimeBackend {
     func close() async { await driver.close() }
 
     private actor Driver {
-        let inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: Deadline
+        let inbox: RuntimeClientInbox, transport: XPCRuntimeTransport
+        let deadline: Deadline?
         var router = RuntimeEventRouter()
         var timers: [RuntimeRequestKey: Task<Void, Never>] = [:]
         var cancelStreams: [RuntimeRequestKey: AsyncThrowingStream<RuntimeEvent, any Error>] = [:]
         var uncertain: [RuntimeEventRouter.UncertainRequest] = []
         var inspectTargets: Set<OperationID> = []
         var admissions = 0
-        init(inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: @escaping Deadline) {
+        init(inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: Deadline?) {
             self.inbox = inbox; self.transport = transport; self.deadline = deadline
         }
         isolated deinit {
@@ -121,15 +122,17 @@ public final class RuntimeClient: RuntimeBackend {
             if request.mayMutate, request.cancellationTarget == nil, !uncertain.isEmpty || !inspectTargets.isEmpty {
                 reject(submission, .runtimeIncompatible); return
             }
-            guard router.register(key, request: request, producer: submission.producer) == .admitted else {
-                reject(submission, .invalidRequest(.tooManyInFlight)); return
+            switch router.register(key, request: request, producer: submission.producer) {
+            case .admitted: break
+            case .full: reject(submission, .invalidRequest(.tooManyInFlight)); return
+            case .retiring, .rotationRequired: reject(submission, .runtimeIncompatible); return
             }
             guard let reply = inbox.replyHandler(for: key) else {
                 _ = router.rejected(key, error: .invalidRequest(.malformed))
                 inbox.rejectedBeforeSend(key); inbox.fail(.malformedResponse); return
             }
             defer { withExtendedLifetime(reply) {} } // Keep catch's known-unsent settlement ahead of closure release.
-            timers[key] = Self.timer(inbox: inbox, key: key, deadline: deadline)
+            if let deadline { timers[key] = Self.timer(inbox: inbox, key: key, deadline: deadline) }
             do {
                 try transport.send(.init(request: request), reply: reply)
                 admissions += 1

@@ -215,15 +215,18 @@ import Testing
         let outstanding = try (0..<RuntimeEventRouter.requestLimit).map { _ in try start(&router) }
         let extra = Fixture()
         #expect(router.register(extra.key, request: .runtimeVersion, producer: extra.producer) == .full)
-        for fixture in outstanding { _ = router.rejected(fixture.key, error: .canceled) }
-        for _ in RuntimeEventRouter.requestLimit..<RuntimeEventRouter.lifetimeLimit {
+        for fixture in outstanding {
+            _ = router.rejected(fixture.key, error: .canceled)
+            _ = router.rejected(fixture.key, error: .canceled) // A duplicate cannot refund twice.
+        }
+        for _ in 0..<RuntimeEventRouter.lifetimeLimit {
             let fixture = try start(&router)
             let id = OperationID()
             _ = router.reply(.success(.accepted(id)), to: fixture.key)
             _ = router.incoming(.completed(id))
         }
         #expect(router.isIdle)
-        #expect(router.retiredCount == RuntimeEventRouter.lifetimeLimit - RuntimeEventRouter.requestLimit)
+        #expect(router.retiredCount == RuntimeEventRouter.lifetimeLimit)
         #expect(router.register(extra.key, request: .runtimeVersion, producer: extra.producer) == .rotationRequired)
         #expect(router.interrupted(.init(cause: .connectionLost)).isEmpty)
         #expect(router.retiredCount == 0)

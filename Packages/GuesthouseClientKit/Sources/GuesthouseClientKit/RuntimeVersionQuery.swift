@@ -34,7 +34,9 @@ public enum RuntimeVersionQuery {
     static func perform(connect: XPCRuntimeTransport.Connect?,
                         deadline: @escaping @Sendable () async throws -> Void) async -> Outcome {
         guard !Task.isCancelled else { return .failure(.canceled) }
-        let client = RuntimeClient(connect: connect, permitsOperations: false)
+        // This structured group owns the query's ONLY deadline and always awaits close.
+        // A second client timer could win with connectionLost instead of timedOut.
+        let client = RuntimeClient(connect: connect, permitsOperations: false, deadline: nil)
         let stream = client.send(.runtimeVersion)
         await client.flush()
         let outcome = await withTaskGroup(of: Outcome.self) { group in
