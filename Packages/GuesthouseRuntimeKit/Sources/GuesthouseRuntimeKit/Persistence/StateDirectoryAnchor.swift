@@ -7,8 +7,8 @@ import GuesthouseCore
 /// synchronous, nonescaping, and does not transfer/duplicate descriptor ownership. Never close
 /// or retain the borrowed descriptor, or suspend a transaction while using it.
 ///
-/// This read-only anchor does NOT make preparation durable, lock files, or authorize a mutation.
-/// Ancestor barriers, file-entry checks and transactional publication remain store obligations.
+/// Construction is read-only. Explicit preparation synchronization is separate from file locks,
+/// file-entry checks and transactional publication; it does not authorize a VM mutation.
 /// Namespace/protection checks are point-in-time observations, not immunity to same-user races.
 final class StateDirectoryAnchor {
     private let storage: RuntimeStorage
@@ -42,6 +42,33 @@ final class StateDirectoryAnchor {
     }
 
     deinit { closeDirectory(descriptor) }
+
+    /// Retains #57's startup barriers even for already-visible directories left by an interrupted
+    /// preparation. Call before accepting store operations; there is no cached "already durable"
+    /// flag. This flushes the state directory and its ancestry, not other managed storage areas.
+    func synchronizePreparation(
+        barrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
+    ) throws(StateStoreError) {
+        try withDescriptor { descriptor in
+            let version = try verifyCurrent()
+            let path = try Self.currentPath(storage)
+            let physical = try StateDirectoryDurability.resolve(path)
+            // Preserve the original leaf-metadata barrier before parent-entry barriers.
+            try barrier(descriptor, .stateDirectory)
+            try verifyCurrent(version: version)
+            for parent in StateDirectoryDurability.parents(lexical: path, physical: physical) {
+                try verifyCurrent(version: version)
+                guard try StateDirectoryDurability.resolve(path) == physical else {
+                    throw StateStoreError.insecureDirectory(reason: .changed)
+                }
+                try StateDirectoryDurability.synchronize(parent, barrier: barrier)
+                try verifyCurrent(version: version)
+            }
+            guard try StateDirectoryDurability.resolve(path) == physical else {
+                throw StateStoreError.insecureDirectory(reason: .changed)
+            }
+        }
+    }
 
     /// Capture immediately before a publication barrier, then pass that version afterward to
     /// refuse same-inode reattachment. Ordinary directory writes legitimately change versions;
