@@ -37,4 +37,8 @@ The numeric-version, tuple, record, manifest-entry and manifest-container change
 
 The bundled manifest deliberately has no tested or verified combinations. The original Tart seed contained placeholders, not Lume evidence; it remains available in #55's preserved branch. Only actual validation should populate the active resource. This does not waive provider-selection or hardware gates.
 
-The evaluator still needs migration before issue #14 is complete. These models do not implement probes or persistence, or certify a Lume configuration. Preserve the old PR's remaining behavior and useful tests without importing its redactor ancestry. Runtime/XPC/GUI consumers require their own integration tests and review.
+The evaluator preserves the original decision order: known blocking rule; missing, ambiguous or invalid identity; matching local connection history; exact-host bundled verification; then drift or required validation. The newest matching local record wins regardless of unrelated newer records. All matching manifest entries are considered, so overlapping host ranges cannot hide newer evidence. Only `verified` permits normal handoff.
+
+`CompatibilityState.incompatible` now carries a typed reason and recovery actions, never a raw explanation from a resource or process. Consumers must render the reason's Guesthouse-owned `userMessage`; raw decoding errors and private observations remain outside diagnostics.
+
+The Core compatibility implementation is migrated, subject to each replacement PR's CI/review gate. These models do not implement probes or persistence, or certify a Lume configuration. Runtime/XPC/GUI consumers require their own integration tests and review. Original #55 behavior and useful regressions are retained across the focused replacements; its raw-string reasons, redactor recognition checks and unverified Tart placeholders are intentionally superseded, with the original source/tests preserved in that branch.
