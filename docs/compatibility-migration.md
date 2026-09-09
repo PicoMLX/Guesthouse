@@ -10,9 +10,10 @@ Compatibility records retain exact tool versions, resolved executable locations 
 | --- | --- |
 | Host macOS version | Bounded dotted numeric `SemanticVersion` |
 | Tool versions | Bounded ASCII identifiers starting with a digit; prerelease/build punctuation allowed |
+| Provisioning scripts | Bounded ASCII version or commit identifiers; a leading letter is valid |
 | macOS and Xcode builds | Bounded ASCII alphanumeric identifiers starting with a digit |
 | Capabilities | At most 64 bounded ASCII identifiers; canonical ordering and duplicates normalized only within that limit |
-| Executable locations | Bounded absolute paths without dot components or control/format characters; Unicode and interior spaces preserved |
+| Executable locations | Bounded absolute paths with a nonempty final component, without dot components or control/format characters; Unicode and interior spaces preserved |
 | Installation/protocol counts | Exactly one Codex CLI installation and a positive runtime protocol version |
 | Connection evidence | Explicit user confirmation, or a registered status reader; this build registers none |
 

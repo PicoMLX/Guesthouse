@@ -73,12 +73,24 @@ struct ConnectionVerificationRecordTests {
         #expect(try Self.record(tuple).tuple == tuple)
     }
 
-    @Test(arguments: ["codex", "../bin/codex", "/opt/../bin/codex", "/opt/./bin/codex", "/bin/codex\u{202E}", "/bin/codex\n",
+    @Test(arguments: ["/", "//", "////", "/bin/codex/", "codex", "../bin/codex", "/opt/../bin/codex", "/opt/./bin/codex", "/bin/codex\u{202E}", "/bin/codex\n",
                       "/" + String(repeating: "é", count: 512)])
     func invalidPathsFailWithoutReturningThePath(_ path: String) {
         var tuple = CompatibilityTupleTests.tuple()
         tuple.codexCLIPath = path
         #expect(throws: CompatibilityRecordError.implausibleObservation(.codexCLIPath)) { try Self.record(tuple) }
+        tuple = CompatibilityTupleTests.tuple()
+        tuple.codexDesktopPath = path
+        #expect(throws: CompatibilityRecordError.implausibleObservation(.codexDesktopPath)) { try Self.record(tuple) }
+    }
+
+    @Test(arguments: ["abcdef0123456789abcdef0123456789abcdef0123", "b7255bd", String(repeating: "a", count: 64), "v1.2.3"])
+    func provisioningIdentityMayBeAVersionOrCommit(_ identity: String) throws {
+        var tuple = CompatibilityTupleTests.tuple()
+        tuple.provisioningScriptVersion = identity
+        let record = try Self.record(tuple)
+        #expect(record.tuple.provisioningScriptVersion == identity)
+        #expect(try ConnectionVerificationRecord.decodeHistory(from: JSONEncoder().encode([record])) == [record])
     }
 
     @Test func privateIdentityPathsArePreservedNotRedacted() throws {
