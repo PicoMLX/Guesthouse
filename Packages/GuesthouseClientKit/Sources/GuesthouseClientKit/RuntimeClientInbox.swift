@@ -26,6 +26,7 @@ final class RuntimeClientInbox: Sendable {
     typealias Reply = @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void
     private struct Reservation: Sendable {
         let context: RuntimeEventRouter.UncertainRequest
+        var firstReplyID: OperationID?
         var sendTaken = false, replyQueued = false, replyTaken = false
         var endQueued = false, endTaken = false, duplicateQueued = false, duplicateTaken = true
         var handlerIssued = false, replyWindowClosed = false
@@ -93,33 +94,40 @@ final class RuntimeClientInbox: Sendable {
     }
 
     private func replied(_ key: RuntimeRequestKey, _ result: Result<RuntimeEvent, RuntimeSessionFailure>) {
-        state.withLock { state in
+        enqueue { state in
             guard var reservation = state.requests[key] else { return }
             if reservation.replyQueued {
                 if !reservation.duplicateQueued {
-                    reservation.duplicateQueued = true; reservation.duplicateTaken = false
                     let id: OperationID?, additionalUncertainty: Bool
                     switch result {
-                    case .success(let event): id = event.routingID; additionalUncertainty = false
+                    case .success(.accepted(let accepted)): id = accepted; additionalUncertainty = false
+                    case .success: id = nil; additionalUncertainty = false
+                    // Retirement converts a late acceptance into a failure retaining its ID.
                     case .failure(let failure): id = failure.operationID; additionalUncertainty = failure.mayHaveMutated
                     }
-                    let context = reservation.context
-                    state.queue.append(.unexpectedReply(.init(key: key, environmentID: context.environmentID,
-                        cancellationTarget: context.cancellationTarget,
-                        failure: context.failure.contextualized(operationID: id, mayHaveMutated: additionalUncertainty))))
+                    if let id, id != reservation.firstReplyID {
+                        reservation.duplicateQueued = true; reservation.duplicateTaken = false
+                        let context = reservation.context
+                        state.queue.append(.unexpectedReply(.init(key: key, environmentID: context.environmentID,
+                            cancellationTarget: context.cancellationTarget,
+                            failure: context.failure.contextualized(operationID: id, mayHaveMutated: additionalUncertainty))))
+                    }
                 }
                 state.fail(.malformedResponse)
             } else {
                 reservation.replyQueued = true
+                switch result {
+                case .success(let event): reservation.firstReplyID = event.routingID
+                case .failure(let failure): reservation.firstReplyID = failure.operationID
+                }
                 state.queue.append(.reply(key, result))
             }
             state.requests[key] = reservation
         }
-        wake.yield(())
     }
 
     private func replyWindowClosed(_ key: RuntimeRequestKey) {
-        state.withLock { state in
+        enqueue { state in
             guard var reservation = state.requests[key] else { return }
             reservation.replyWindowClosed = true
             if !reservation.replyQueued {
@@ -127,24 +135,23 @@ final class RuntimeClientInbox: Sendable {
                 // invocation conservatively; known-unsent rejection must be recorded first.
                 reservation.replyQueued = true
                 state.queue.append(.reply(key, .failure(.init(cause: .connectionLost))))
+                state.fail(.connectionLost) // Do not admit more sends on a broken reply contract.
             }
             if reservation.complete { state.requests.removeValue(forKey: key) }
             else { state.requests[key] = reservation }
         }
-        wake.yield(())
     }
 
     func ended(_ key: RuntimeRequestKey, _ reason: RuntimeEventStream.Termination) {
-        state.withLock { state in
+        enqueue { state in
             guard var reservation = state.requests[key], !reservation.endQueued else { return }
             reservation.endQueued = true; state.requests[key] = reservation
             state.queue.append(.ended(key, reason))
         }
-        wake.yield(())
     }
 
     func incoming(_ event: RuntimeEvent) {
-        state.withLock { state in
+        enqueue { state in
             guard state.fault == nil else { return }
             if event.droppable, state.incomingCount >= Self.trafficLimit {
                 if state.dropped < Int.max { state.dropped += 1 }
@@ -153,24 +160,31 @@ final class RuntimeClientInbox: Sendable {
             guard state.incomingCount < Self.incomingLimit else { state.fail(.oversizedResponse); return }
             state.incomingCount += 1; state.queue.append(.incoming(event))
         }
-        wake.yield(())
     }
 
     func interrupted(_ failure: RuntimeSessionFailure) {
-        state.withLock { state in
+        enqueue { state in
             guard state.fault == nil else { return }
             guard state.interruptionCount < Self.interruptionLimit else { state.fail(.oversizedResponse); return }
             state.interruptionCount += 1
             // A generation-wide notification must not acquire one request's identity.
             state.queue.append(.interrupted(.init(cause: failure.cause)))
         }
-        wake.yield(())
     }
 
     /// Owner-side timeout/fatal error. Awaiting replies still have their reserved slots.
     func fail(_ cause: RuntimeSessionFailure.Cause) {
-        state.withLock { $0.fail(cause) }
-        wake.yield(())
+        enqueue { $0.fail(cause) }
+    }
+
+    /// Only appended work wakes the owner, never discarded traffic or bookkeeping alone.
+    private func enqueue(_ update: (inout State) -> Void) {
+        let appended = state.withLock { state in
+            let before = state.queue.count
+            update(&state)
+            return state.queue.count > before
+        }
+        if appended { wake.yield(()) }
     }
 
     /// Only after dequeuing a send that is KNOWN not to have reached native send. Marks its

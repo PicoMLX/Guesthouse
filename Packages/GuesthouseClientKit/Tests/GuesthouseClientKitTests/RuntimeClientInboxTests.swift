@@ -6,7 +6,7 @@ import Testing
 @testable import GuesthouseClientKit
 
 @Suite(.timeLimit(.minutes(1))) struct RuntimeClientInboxTests {
-    static let id = OperationID(), environment = EnvironmentID()
+    static let id = OperationID(), otherID = OperationID(), environment = EnvironmentID()
     static let traffic: [RuntimeEvent] = [
         .progress(id, .init(kind: .copying)),
         .diagnostic(.init(operation: .startEnvironment, outcome: .started, operationID: id.uuid)),
@@ -174,6 +174,28 @@ import Testing
         #expect(count == 1)
     }
 
+    @Test(arguments: traffic, [false, true])
+    func discardedCallbacksDoNotLeaveAnotherWakeup(traffic: RuntimeEvent, faulted: Bool) async throws {
+        var inbox: RuntimeClientInbox? = RuntimeClientInbox()
+        for _ in 0..<RuntimeClientInbox.trafficLimit { inbox?.incoming(traffic) }
+        if faulted { inbox?.fail(.connectionLost) }
+        var iterator = try #require(inbox).wakeups.makeAsyncIterator()
+        try #require(await iterator.next() != nil) // Consume the admitted work's coalesced signal.
+        let unknown = RuntimeRequestKey()
+        for _ in 0..<10_000 {
+            inbox?.incoming(traffic)
+            inbox?.ended(unknown, .finished)
+            if faulted {
+                inbox?.incoming(.completed(Self.id))
+                inbox?.interrupted(.init(cause: .connectionLost))
+                inbox?.fail(.connectionLost)
+            }
+        }
+        #expect(inbox?.queuedCount == RuntimeClientInbox.trafficLimit + (faulted ? 1 : 0))
+        inbox = nil // Finish deterministically; no sleep or timeout to prove absence of signals.
+        #expect(await iterator.next() == nil)
+    }
+
     @Test func concurrentEnqueueAndDrainDoNotLoseWakeupsOrReservations() async throws {
         let inbox = RuntimeClientInbox()
         let fixtures = try (0..<RuntimeClientInbox.requestLimit).map { _ in try reserve(inbox) }
@@ -222,17 +244,58 @@ import Testing
         #expect(inbox.reservationCount == 0)
     }
 
-    @Test func discardedUnansweredHandlerSettlesItsOwningReply() throws {
+    static let duplicateReplies: [(Result<RuntimeEvent, RuntimeSessionFailure>, Bool)] = [
+        (.success(.accepted(id)), false), (.success(.accepted(otherID)), true),
+        (.success(.completed(otherID)), false), (.success(.progress(otherID, .init(kind: .copying))), false),
+        (.success(.failed(otherID, .invalidRequest(.malformed))), false),
+        (.success(.diagnostic(.init(operation: .startEnvironment, outcome: .started, operationID: otherID.uuid))), false),
+        (.success(.status(.init(environmentID: environment, vm: .running, readiness: .checking, inFlightOperation: otherID))), false),
+        (.failure(.init(cause: .connectionLost, mayHaveMutated: true)), false),
+        (.failure(.init(cause: .connectionLost, operationID: id, mayHaveMutated: true)), false),
+        (.failure(.init(cause: .connectionLost, operationID: otherID, mayHaveMutated: true)), true),
+    ]
+
+    @Test(arguments: duplicateReplies, [false, true])
+    func duplicateReconciliationRequiresAnAdditionalUncertainID(
+        duplicate: (Result<RuntimeEvent, RuntimeSessionFailure>, Bool), firstFailed: Bool
+    ) throws {
+        let inbox = RuntimeClientInbox(), fixture = try reserve(inbox)
+        _ = inbox.take()
+        fixture.answer(firstFailed ? .failure(.init(cause: .connectionLost, operationID: Self.id, mayHaveMutated: true))
+                                   : .success(.accepted(Self.id)))
+        _ = inbox.take(); inbox.ended(fixture.key, .finished); _ = inbox.take()
+        fixture.answer(duplicate.0)
+        if duplicate.1 {
+            guard case .unexpectedReply(let context) = inbox.take() else { Issue.record("Missing additional identity"); return }
+            #expect(context.failure.operationID == Self.otherID && context.key === fixture.key)
+        }
+        guard case .fault(.malformedResponse) = inbox.take() else { Issue.record("Missing duplicate fault"); return }
+        #expect(inbox.take() == nil) // No uncertainty for repeated IDs or non-acceptance events.
+        fixture.releaseReply()
+        #expect(inbox.reservationCount == 0)
+    }
+
+    @Test func discardedUnansweredHandlerSettlesItsOwningReplyAndRequiresRetirement() async throws {
         let inbox = RuntimeClientInbox(), fixture = try reserve(inbox: nil)
         try #require(inbox.submit(fixture.submission) == .admitted)
         try fixture.prepareReply(inbox)
         #expect(inbox.replyHandler(for: fixture.key) == nil)
-        _ = inbox.take()
+        guard case .send(let submission) = inbox.take() else { Issue.record("Missing send"); return }
+        var router = RuntimeEventRouter()
+        try #require(router.register(submission.key, request: submission.request, producer: submission.producer) == .admitted)
         fixture.releaseReply() // No closure remains that could provide a later response.
+        #expect(inbox.terminalFailure == .connectionLost && inbox.submit(InboxFixture().submission) == .faulted)
         guard case .reply(let key, .failure(let failure)) = inbox.take() else { Issue.record("Missing failure"); return }
         #expect(key === fixture.key && failure == RuntimeSessionFailure(cause: .connectionLost))
+        #expect(router.reply(.failure(failure), to: key) == [.unknownOutcome(.init(key: key, environmentID: Self.environment,
+            cancellationTarget: nil, failure: failure.contextualized(mayHaveMutated: true)))])
+        guard case .fault(let cause) = inbox.take() else { Issue.record("Missing retirement fault"); return }
+        #expect(router.invalidate(cause) == [.retireConnection])
+        var iterator = fixture.stream.makeAsyncIterator()
+        await #expect(throws: failure.contextualized(mayHaveMutated: true)) { try await iterator.next() }
         inbox.ended(key, .finished); _ = inbox.take()
         #expect(inbox.reservationCount == 0)
+        #expect(inbox.submit(InboxFixture().submission) == .faulted)
     }
 
     @Test(arguments: [false, true])
@@ -272,6 +335,26 @@ import Testing
         #expect(inbox.reservationCount == 0)
         withExtendedLifetime(client) {}
     }
+
+    @Test func retiredDuplicateAcceptanceKeepsItsTransportFailureIdentity() throws {
+        let inbox = RuntimeClientInbox(), fixture = InboxFixture()
+        let client = XPCRuntimeTransport(incoming: { inbox.incoming($0) }, interrupted: { inbox.interrupted($0) }, connect: { incoming, dropped in
+            InboxSession(id: Self.id, terminal: false, duplicateAfterDrop: Self.otherID, incoming: incoming, dropped: dropped)
+        })
+        try #require(inbox.submit(fixture.submission) == .admitted)
+        _ = inbox.take()
+        try client.send(.init(request: fixture.submission.request), reply: #require(inbox.replyHandler(for: fixture.key)))
+        guard case .reply(_, .success(.accepted(Self.id))) = inbox.take() else { Issue.record("Missing first reply"); return }
+        guard case .interrupted = inbox.take() else { Issue.record("Missing retirement"); return }
+        // The real registry converted the second acceptance to a request-specific failure.
+        guard case .unexpectedReply(let context) = inbox.take() else { Issue.record("Lost retired acceptance ID"); return }
+        #expect(context == .init(key: fixture.key, environmentID: Self.environment, cancellationTarget: nil,
+            failure: .init(cause: .malformedResponse, operationID: Self.otherID, mayHaveMutated: true)))
+        guard case .fault(.malformedResponse) = inbox.take() else { Issue.record("Missing duplicate fault"); return }
+        inbox.ended(fixture.key, .finished); _ = inbox.take()
+        #expect(inbox.reservationCount == 0 && inbox.take() == nil)
+        withExtendedLifetime(client) {}
+    }
 }
 
 private final class InboxFixture: Sendable {
@@ -307,11 +390,14 @@ private func reserve(inbox: RuntimeClientInbox?, handler: Bool = true) throws ->
 }
 private final class InboxSession: RuntimeClientSession {
     let id: OperationID, terminal: Bool
+    let duplicateAfterDrop: OperationID?
     let incoming: @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void
     let dropped: @Sendable () -> Void
-    init(id: OperationID, terminal: Bool, incoming: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void,
+    init(id: OperationID, terminal: Bool, duplicateAfterDrop: OperationID? = nil,
+         incoming: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void,
          dropped: @escaping @Sendable () -> Void) {
         self.id = id; self.terminal = terminal; self.incoming = incoming; self.dropped = dropped
+        self.duplicateAfterDrop = duplicateAfterDrop
     }
     func activate() {}
     func cancel() { dropped() } // Synchronous reentry exercises registry cleanup outside its delivery lock.
@@ -319,5 +405,6 @@ private final class InboxSession: RuntimeClientSession {
         reply(.success(.accepted(id)))
         if terminal { incoming(.success(.completed(id))) }
         dropped()
+        if let duplicateAfterDrop { reply(.success(.accepted(duplicateAfterDrop))) }
     }
 }
