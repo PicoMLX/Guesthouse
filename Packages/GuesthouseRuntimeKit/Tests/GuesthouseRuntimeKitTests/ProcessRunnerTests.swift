@@ -117,15 +117,39 @@ import Testing
         #expect(report.timedOut && !report.outputComplete && report.descendantScopeUnproven)
     }
 
-    @Test func droppedFacadePreservesItsDeadline() async throws {
-        let fixture = try Fixture()
+    @Test(arguments: [false, true]) func droppedFacadePreservesItsDeadline(_ stopAlreadyPending: Bool) async throws {
+        var calls = OwnedChild.SystemCalls.live
+        if stopAlreadyPending {
+            calls.signal = { pid, signal in
+                signal == SIGTERM ? .delivered : OwnedChild.SystemCalls.live.signal(pid, signal)
+            }
+        }
+        let fixture = try Fixture(calls: calls)
         defer { fixture.closeWriters() }
         var run: ProcessRun? = ProcessRun(child: fixture.child, readers: fixture.readers, input: nil, grace: .zero)
         weak let facade = run
+        let began = ContinuousClock.now
         await run?.start(deadline: .now + .milliseconds(100), input: nil)
+        if stopAlreadyPending { await run?.terminate(gracePeriod: .seconds(60)) }
         run = nil
         #expect(facade == nil)
-        #expect(try await fixture.child.waitForReapedExit().get() == .signal(SIGTERM))
+        #expect(try await fixture.child.waitForReapedExit().get() == .signal(stopAlreadyPending ? SIGKILL : SIGTERM))
+        #expect(ContinuousClock.now - began < .seconds(3)) // The invocation deadline, not the fixture watchdog.
+    }
+
+    @Test func zeroExitDoesNotEraseCancellation() async throws {
+        var calls = OwnedChild.SystemCalls.live
+        // Model a child that finishes cleanly after a termination request. Do not kill it.
+        calls.signal = { _, _ in .delivered }
+        let fixture = try Fixture(calls: calls)
+        defer { fixture.closeWriters() }
+        let run = ProcessRun(child: fixture.child, readers: fixture.readers, input: nil, grace: .zero)
+        await run.start(deadline: .now + .seconds(10), input: nil)
+        await run.terminate(gracePeriod: .seconds(60))
+        fixture.closeWriters() // Actual cat receives EOF and exits zero after cancellation is recorded.
+        let report = try await run.waitForExit()
+        #expect(try report.childExit?.get() == .status(0))
+        #expect(report.canceled && !report.timedOut && report.descendantScopeUnproven)
     }
 
     @Test func concurrentTerminationShortensOneEscalation() async throws {
