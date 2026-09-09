@@ -57,10 +57,14 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
         let versions: [(CompatibilityField, String)] = [
             (.codexDesktopVersion, tuple.codexDesktopVersion), (.codexDesktopBuild, tuple.codexDesktopBuild),
             (.runtimeVersion, tuple.runtimeVersion), (.codexCLIVersion, tuple.codexCLIVersion),
-            (.githubCLIVersion, tuple.githubCLIVersion), (.provisioningScriptVersion, tuple.provisioningScriptVersion)
+            (.githubCLIVersion, tuple.githubCLIVersion)
         ]
         for (field, value) in versions where !isVersionIdentifier(value) {
             throw .implausibleObservation(field)
+        }
+        // Phase-0 records accept a script version or commit, which need not start with a digit.
+        guard isIdentifier(tuple.provisioningScriptVersion, punctuation: [43, 45, 46]) else {
+            throw .implausibleObservation(.provisioningScriptVersion)
         }
         for (field, value) in [
             (CompatibilityField.hostMacOSBuild, tuple.hostMacOSBuild),
@@ -89,7 +93,8 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
     /// verified one from another working directory, which is exactly the substitution
     /// MVP-PLAN.md §5 tracks the resolved path to catch.
     static func isResolvedPath(_ value: String) -> Bool {
-        guard isBoundedText(value, limit: maximumPathLength), value.hasPrefix("/") else { return false }
+        guard isBoundedText(value, limit: maximumPathLength), value.hasPrefix("/"),
+              !value.hasSuffix("/") else { return false }
         // `.` and `..` resolve against a working directory the record does not carry, so a path
         // holding either is not yet the one the probe was standing on.
         return !value.split(separator: "/").contains { $0 == "." || $0 == ".." }
