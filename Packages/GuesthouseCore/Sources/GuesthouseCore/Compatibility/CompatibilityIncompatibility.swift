@@ -73,6 +73,8 @@ public struct CompatibilityIncompatibility: Codable, Hashable, Sendable {
     public let xcodeBuild: String?
     public let codexCLIVersion: String?
     public let codexCLIPath: String?
+    /// An exact installation-count selector; nil leaves this dimension unconstrained.
+    public let codexCLIInstallations: Int?
     /// Matches when the observed capability list, normalized, equals this list.
     public let codexCLICapabilities: [String]?
     public let githubCLIVersion: String?
@@ -95,6 +97,7 @@ public struct CompatibilityIncompatibility: Codable, Hashable, Sendable {
         xcodeBuild: String? = nil,
         codexCLIVersion: String? = nil,
         codexCLIPath: String? = nil,
+        codexCLIInstallations: Int? = nil,
         codexCLICapabilities: [String]? = nil,
         githubCLIVersion: String? = nil,
         provisioningScriptVersion: String? = nil,
@@ -113,6 +116,7 @@ public struct CompatibilityIncompatibility: Codable, Hashable, Sendable {
         self.xcodeBuild = xcodeBuild
         self.codexCLIVersion = codexCLIVersion
         self.codexCLIPath = codexCLIPath
+        self.codexCLIInstallations = codexCLIInstallations
         self.codexCLICapabilities = codexCLICapabilities.map(CompatibilityTuple.normalize)
         self.githubCLIVersion = githubCLIVersion
         self.provisioningScriptVersion = provisioningScriptVersion
@@ -140,6 +144,7 @@ public struct CompatibilityIncompatibility: Codable, Hashable, Sendable {
             xcodeBuild: try c.decodeIfPresent(String.self, forKey: .xcodeBuild),
             codexCLIVersion: try c.decodeIfPresent(String.self, forKey: .codexCLIVersion),
             codexCLIPath: try c.decodeIfPresent(String.self, forKey: .codexCLIPath),
+            codexCLIInstallations: try c.decodeIfPresent(Int.self, forKey: .codexCLIInstallations),
             codexCLICapabilities: capabilities,
             githubCLIVersion: try c.decodeIfPresent(String.self, forKey: .githubCLIVersion),
             provisioningScriptVersion: try c.decodeIfPresent(String.self, forKey: .provisioningScriptVersion),
@@ -173,6 +178,7 @@ public struct CompatibilityIncompatibility: Codable, Hashable, Sendable {
             && check(xcodeBuild, observed.xcodeBuild)
             && check(codexCLIVersion, observed.codexCLIVersion)
             && check(codexCLIPath, observed.codexCLIPath)
+            && check(codexCLIInstallations, observed.codexCLIInstallations)
             // The rule's list is normalized at construction; an observation assembled field
             // by field need not be, and order must never decide whether a rule fires.
             && check(codexCLICapabilities, observed.codexCLICapabilities.map(CompatibilityTuple.normalize))

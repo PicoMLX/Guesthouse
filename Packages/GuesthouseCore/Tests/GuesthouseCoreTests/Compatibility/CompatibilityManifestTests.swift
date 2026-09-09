@@ -87,6 +87,43 @@ struct CompatibilityManifestTests {
         #expect(!rule.applies(to: observed))
     }
 
+    @Test(arguments: [0, 2, 3])
+    func installationCountRuleMatchesOnlyItsKnownCount(_ count: Int) throws {
+        let rule = CompatibilityIncompatibility(codexCLIInstallations: count, reason: .incompatibleComponent(.codexCLIInstallations))
+        let manifest = try CompatibilityManifest(manifestVersion: 1, tested: [], incompatibilities: [rule])
+        let decoded = try CompatibilityManifest.decode(from: JSONEncoder().encode(manifest))
+        let decodedRule = try #require(decoded.incompatibilities.first)
+        #expect(decoded == manifest)
+        #expect(decodedRule.codexCLIInstallations == count)
+        var observed = ObservedTuple(CompatibilityTupleTests.tuple())
+        observed.codexCLIInstallations = count
+        #expect(decodedRule.applies(to: observed))
+        observed.codexCLIInstallations = 1
+        #expect(!decodedRule.applies(to: observed))
+        observed.codexCLIInstallations = nil
+        #expect(!decodedRule.applies(to: observed))
+    }
+
+    @Test func omittedInstallationSelectorDoesNotAddAConstraint() throws {
+        let rule = CompatibilityIncompatibility(reason: .knownIncompatibleCombination)
+        let data = try JSONEncoder().encode(rule)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["codexCLIInstallations"] == nil)
+        let decoded = try JSONDecoder().decode(CompatibilityIncompatibility.self, from: data)
+        #expect(decoded.codexCLIInstallations == nil)
+        #expect(decoded.applies(to: ObservedTuple()))
+    }
+
+    @Test func malformedInstallationSelectorIsNotSilentlyIgnored() throws {
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.manifest())) as? [String: Any])
+        var rules = try #require(object["incompatibilities"] as? [[String: Any]])
+        rules[0]["codexCLIInstallations"] = "syntheticOpaque"
+        object["incompatibilities"] = rules
+        #expect(throws: CompatibilityManifestError.malformedManifest) {
+            try CompatibilityManifest.decode(from: JSONSerialization.data(withJSONObject: object))
+        }
+    }
+
     @Test func recoveryCannotBeRemovedButTargetedRepairIsPreserved() throws {
         for actions: [RecoveryAction] in [[], [.cancel], [.repair(.runtime)]] {
             let rule = CompatibilityIncompatibility(reason: .knownIncompatibleCombination, recoveryActions: actions)
