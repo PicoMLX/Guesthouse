@@ -48,7 +48,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         }
     }
     public enum InvalidRequestReason: String, Codable, Hashable, Sendable, CaseIterable {
-        case oversized, pathEscapesAllowedRoot, invalidVMName, unsupportedOperation, malformed
+        case oversized, pathEscapesAllowedRoot, invalidVMName, unsupportedOperation, malformed, tooManyInFlight
 
         fileprivate var message: String {
             switch self {
@@ -57,6 +57,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             case .invalidVMName: "The request contains an invalid development Mac name."
             case .unsupportedOperation: "This version of Guesthouse does not support the requested operation."
             case .malformed: "The request is incomplete or has an invalid format."
+            case .tooManyInFlight: "Guesthouse's runtime service is already handling too many requests."
             }
         }
     }
@@ -157,6 +158,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .invalidRequest(.oversized): [.reduceRequestSize, .cancel]
         case .invalidRequest(.unsupportedOperation): [.updateApp, .cancel]
         case .invalidRequest(.malformed): [.reviewRequest, .cancel]
+        case .invalidRequest(.tooManyInFlight): [.inspectState, .cancel]
         case .unauthorizedCaller: [.cancel]
         case .protocolMismatch: [.reinstallApp, .cancel]
         case .invalidRuntimeReply: [.inspectState, .updateApp, .cancel]
