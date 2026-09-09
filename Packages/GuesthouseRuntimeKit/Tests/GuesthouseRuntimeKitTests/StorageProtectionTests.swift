@@ -5,12 +5,12 @@ import Testing
 @testable import GuesthouseRuntimeKit
 
 @Suite struct StorageProtectionTests {
-    @Test func privateDirectoryPassesWithoutChangingItsContents() throws {
+    @Test(arguments: [false, true]) func privateDirectoryPassesWithoutChangingItsContents(_ directoryURL: Bool) throws {
         let fixture = try Fixture()
         let directory = try fixture.directory("storage")
         let sentinel = directory.appending(path: "unpublished-work")
         try Data("keep me".utf8).write(to: sentinel)
-        try StorageProtection.verify(directory)
+        try StorageProtection.verify(directoryURL ? URL(fileURLWithPath: directory.path, isDirectory: true) : directory)
         #expect(try Data(contentsOf: sentinel) == Data("keep me".utf8))
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["unpublished-work"])
     }
@@ -33,13 +33,15 @@ import Testing
         try StorageProtection.verify(directory) // Explicit empty ACL after fixture cleanup also passes.
     }
 
-    @Test(arguments: [false, true]) func finalLinksAreRefusedAndPreserved(_ dangling: Bool) throws {
+    @Test(arguments: [false, true], [false, true])
+    func finalLinksAreRefusedAndPreserved(_ dangling: Bool, _ directoryURL: Bool) throws {
         let fixture = try Fixture()
         let destination = fixture.root.appending(path: "target")
         if !dangling { _ = try fixture.directory("target") }
         let link = fixture.root.appending(path: "storage")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: destination)
-        #expect(throws: StorageFailure.unsafeStructure) { try StorageProtection.verify(link) }
+        let inspected = directoryURL ? URL(fileURLWithPath: link.path, isDirectory: true) : link
+        #expect(throws: StorageFailure.unsafeStructure) { try StorageProtection.verify(inspected) }
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == destination.path)
     }
 
