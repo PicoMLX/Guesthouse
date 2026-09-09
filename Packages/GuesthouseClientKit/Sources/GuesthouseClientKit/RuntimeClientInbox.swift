@@ -15,16 +15,21 @@ final class RuntimeClientInbox: Sendable {
     enum Message: Sendable {
         case send(Submission)
         case reply(RuntimeRequestKey, Result<RuntimeEvent, RuntimeSessionFailure>)
+        /// Reconcile directly: the normal router/consumer may already have finished.
+        case unexpectedReply(RuntimeEventRouter.UncertainRequest)
         case ended(RuntimeRequestKey, RuntimeEventStream.Termination)
         case incoming(RuntimeEvent), interrupted(RuntimeSessionFailure)
         /// Stops admission permanently. The owner must retire and reconcile, not replay.
         case fault(RuntimeSessionFailure.Cause)
     }
     enum Admission: Equatable, Sendable { case admitted, full, faulted }
+    typealias Reply = @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void
     private struct Reservation: Sendable {
+        let context: RuntimeEventRouter.UncertainRequest
         var sendTaken = false, replyQueued = false, replyTaken = false
         var endQueued = false, endTaken = false, duplicateQueued = false, duplicateTaken = true
-        var complete: Bool { sendTaken && replyTaken && endTaken && duplicateTaken }
+        var handlerIssued = false, replyWindowClosed = false
+        var complete: Bool { sendTaken && replyTaken && endTaken && duplicateTaken && replyWindowClosed }
     }
     private struct State: Sendable {
         var requests: [RuntimeRequestKey: Reservation] = [:]
@@ -61,7 +66,10 @@ final class RuntimeClientInbox: Sendable {
         let result = state.withLock { state in
             guard state.fault == nil else { return Admission.faulted }
             guard state.requests.count < Self.requestLimit, state.requests[submission.key] == nil else { return .full }
-            state.requests[submission.key] = Reservation()
+            let request = submission.request
+            state.requests[submission.key] = Reservation(context: .init(key: submission.key,
+                environmentID: request.environment, cancellationTarget: request.cancellationTarget,
+                failure: .init(cause: .malformedResponse, mayHaveMutated: request.mayMutate)))
             state.queue.append(.send(submission))
             return .admitted
         }
@@ -69,16 +77,36 @@ final class RuntimeClientInbox: Sendable {
         return result
     }
 
-    /// Only the request's owning transport callback, never unsolicited wire traffic.
-    /// The first reply remains enqueueable after overflow/consumer abandonment. One unexpected
-    /// duplicate is retained too, for the router's second-ID reconciliation, then ingress faults.
-    func replied(_ key: RuntimeRequestKey, _ result: Result<RuntimeEvent, RuntimeSessionFailure>) {
+    /// Transfer this closure to the owning transport call; do not retain a separate copy.
+    /// Its capture lifetime closes the duplicate window, including after the consumer finished.
+    /// Only one handler may be issued per reservation. No arbitrary timer/tombstone history.
+    /// Keep it alive through the send's catch path until any known-unsent rejection is recorded.
+    func replyHandler(for key: RuntimeRequestKey) -> Reply? {
+        let issued = state.withLock { state in
+            guard var reservation = state.requests[key], !reservation.handlerIssued, !reservation.replyQueued else { return false }
+            reservation.handlerIssued = true; state.requests[key] = reservation
+            return true
+        }
+        guard issued else { return nil }
+        let lifetime = ReplyLifetime(inbox: self, key: key)
+        return { lifetime.inbox.replied(lifetime.key, $0) }
+    }
+
+    private func replied(_ key: RuntimeRequestKey, _ result: Result<RuntimeEvent, RuntimeSessionFailure>) {
         state.withLock { state in
             guard var reservation = state.requests[key] else { return }
             if reservation.replyQueued {
                 if !reservation.duplicateQueued {
                     reservation.duplicateQueued = true; reservation.duplicateTaken = false
-                    state.queue.append(.reply(key, result))
+                    let id: OperationID?, additionalUncertainty: Bool
+                    switch result {
+                    case .success(let event): id = event.routingID; additionalUncertainty = false
+                    case .failure(let failure): id = failure.operationID; additionalUncertainty = failure.mayHaveMutated
+                    }
+                    let context = reservation.context
+                    state.queue.append(.unexpectedReply(.init(key: key, environmentID: context.environmentID,
+                        cancellationTarget: context.cancellationTarget,
+                        failure: context.failure.contextualized(operationID: id, mayHaveMutated: additionalUncertainty))))
                 }
                 state.fail(.malformedResponse)
             } else {
@@ -86,6 +114,22 @@ final class RuntimeClientInbox: Sendable {
                 state.queue.append(.reply(key, result))
             }
             state.requests[key] = reservation
+        }
+        wake.yield(())
+    }
+
+    private func replyWindowClosed(_ key: RuntimeRequestKey) {
+        state.withLock { state in
+            guard var reservation = state.requests[key] else { return }
+            reservation.replyWindowClosed = true
+            if !reservation.replyQueued {
+                // No closure remains that can supply a later reply. Settle an unanswered
+                // invocation conservatively; known-unsent rejection must be recorded first.
+                reservation.replyQueued = true
+                state.queue.append(.reply(key, .failure(.init(cause: .connectionLost))))
+            }
+            if reservation.complete { state.requests.removeValue(forKey: key) }
+            else { state.requests[key] = reservation }
         }
         wake.yield(())
     }
@@ -135,6 +179,7 @@ final class RuntimeClientInbox: Sendable {
         state.withLock { state in
             guard var reservation = state.requests[key], reservation.sendTaken, !reservation.replyQueued else { return }
             reservation.replyQueued = true; reservation.replyTaken = true
+            if !reservation.handlerIssued { reservation.replyWindowClosed = true }
             if reservation.complete { state.requests.removeValue(forKey: key) }
             else { state.requests[key] = reservation }
         }
@@ -150,10 +195,8 @@ final class RuntimeClientInbox: Sendable {
             switch message {
             case .send(let submission):
                 key = submission.key; state.requests[submission.key]?.sendTaken = true
-            case .reply(let id, _):
-                key = id
-                if state.requests[id]?.replyTaken == false { state.requests[id]?.replyTaken = true }
-                else { state.requests[id]?.duplicateTaken = true }
+            case .reply(let id, _): key = id; state.requests[id]?.replyTaken = true
+            case .unexpectedReply(let context): key = context.key; state.requests[context.key]?.duplicateTaken = true
             case .ended(let id, _): key = id; state.requests[id]?.endTaken = true
             case .incoming: key = nil; state.incomingCount -= 1
             case .interrupted: key = nil; state.interruptionCount -= 1
@@ -162,6 +205,11 @@ final class RuntimeClientInbox: Sendable {
             if let key, state.requests[key]?.complete == true { state.requests.removeValue(forKey: key) }
             return message
         }
+    }
+    private final class ReplyLifetime: Sendable {
+        let inbox: RuntimeClientInbox, key: RuntimeRequestKey
+        init(inbox: RuntimeClientInbox, key: RuntimeRequestKey) { self.inbox = inbox; self.key = key }
+        deinit { inbox.replyWindowClosed(key) } // Enqueue/bookkeeping only, even on a native callback thread.
     }
 }
 

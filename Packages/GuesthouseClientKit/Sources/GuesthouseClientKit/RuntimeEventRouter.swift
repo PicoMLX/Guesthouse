@@ -208,7 +208,7 @@ struct RuntimeEventRouter: Sendable {
     }
 }
 
-private extension RuntimeRequest {
+extension RuntimeRequest {
     var mayMutate: Bool {
         switch self { case .runtimeVersion, .environmentStatus: false; default: true }
     }
@@ -238,7 +238,7 @@ private extension RuntimeRequest {
         }
     }
 }
-private extension RuntimeEvent {
+extension RuntimeEvent {
     var routingID: OperationID? {
         switch self {
         case .accepted(let id), .progress(let id, _), .completed(let id), .failed(let id, _): id

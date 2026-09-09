@@ -19,7 +19,7 @@ import Testing
         let fixtures = try (0..<RuntimeClientInbox.requestLimit).map { _ in try reserve(inbox) }
         for _ in 0..<10_000 { inbox.incoming(traffic) }
         for fixture in fixtures {
-            inbox.replied(fixture.key, .success(.accepted(Self.id)))
+            fixture.answer(.success(.accepted(Self.id)))
             inbox.ended(fixture.key, .abandoned)
         }
         #expect(inbox.queuedCount == fixtures.count * 3 + RuntimeClientInbox.trafficLimit)
@@ -36,6 +36,9 @@ import Testing
         }
         #expect(sends == fixtures.count && replies == fixtures.count && ends == fixtures.count)
         #expect(events == RuntimeClientInbox.trafficLimit)
+        #expect(inbox.reservationCount == fixtures.count) // Callback captures still own the duplicate window.
+        #expect(inbox.submit(InboxFixture().submission) == .full)
+        for fixture in fixtures { fixture.releaseReply() }
         #expect(inbox.reservationCount == 0)
         inbox.incoming(traffic)
         #expect(inbox.queuedCount == 1) // Draining actually restores traffic capacity.
@@ -48,15 +51,16 @@ import Testing
         let fixtures = try (0..<RuntimeClientInbox.requestLimit).map { _ in try reserve(inbox) }
         let duplicate = OperationID()
         for fixture in fixtures {
-            inbox.replied(fixture.key, .success(.accepted(Self.id)))
-            inbox.replied(fixture.key, .success(.accepted(duplicate)))
+            fixture.answer(.success(.accepted(Self.id)))
+            fixture.answer(.success(.accepted(duplicate)))
             inbox.ended(fixture.key, .abandoned)
             for _ in 0..<100 {
-                inbox.replied(fixture.key, .success(.accepted(duplicate)))
+                fixture.answer(.success(.accepted(duplicate)))
                 inbox.ended(fixture.key, .abandoned)
                 inbox.incoming(.completed(Self.id))
                 inbox.interrupted(.init(cause: .connectionLost))
             }
+            fixture.releaseReply()
         }
         #expect(inbox.queuedCount == RuntimeClientInbox.queueLimit)
         #expect(inbox.terminalFailure == .malformedResponse)
@@ -65,7 +69,8 @@ import Testing
         while let message = inbox.take() {
             switch message {
             case .reply(_, .success(.accepted(let id))):
-                #expect(id == Self.id || id == duplicate); replies += 1
+                #expect(id == Self.id); replies += 1
+            case .unexpectedReply(let context): #expect(context.failure.operationID == duplicate); replies += 1
             case .fault(let cause): #expect(cause == .malformedResponse); faults += 1
             default: break
             }
@@ -78,6 +83,7 @@ import Testing
     @Test func overflowAndAbandonmentKeepTheLateOwningIdentity() throws {
         let inbox = RuntimeClientInbox(), fixture = try reserve(inbox: nil)
         try #require(inbox.submit(fixture.submission) == .admitted)
+        try fixture.prepareReply(inbox)
         _ = inbox.take()
         inbox.ended(fixture.key, .abandoned)
         _ = inbox.take()
@@ -88,7 +94,8 @@ import Testing
             if case .fault(let cause) = message { #expect(cause == .oversizedResponse); faulted = true }
         }
         #expect(faulted)
-        inbox.replied(fixture.key, .success(.accepted(Self.id)))
+        fixture.answer(.success(.accepted(Self.id)))
+        fixture.releaseReply()
         guard case .reply(let key, .success(.accepted(let id))) = inbox.take() else {
             Issue.record("Late owning acceptance was lost"); return
         }
@@ -113,6 +120,7 @@ import Testing
     @Test func deadlineFaultStillReconcilesAnAcceptanceAfterObservedFailure() async throws {
         let inbox = RuntimeClientInbox(), fixture = InboxFixture(notifying: nil)
         try #require(inbox.submit(fixture.submission) == .admitted)
+        try fixture.prepareReply(inbox)
         guard case .send(let submission) = inbox.take() else { Issue.record("Missing send"); return }
         var router = RuntimeEventRouter()
         try #require(router.register(submission.key, request: submission.request, producer: submission.producer) == .admitted)
@@ -126,16 +134,18 @@ import Testing
         inbox.ended(fixture.key, .finished)
         _ = inbox.take()
         #expect(inbox.reservationCount == 1)
-        inbox.replied(fixture.key, .success(.accepted(Self.id)))
+        fixture.answer(.success(.accepted(Self.id)))
+        fixture.releaseReply()
         guard case .reply(let key, let result) = inbox.take() else { Issue.record("Missing late acceptance"); return }
         #expect(router.reply(result, to: key) == [.unknownOutcome(.init(key: key, environmentID: Self.environment,
             cancellationTarget: nil, failure: failure.contextualized(operationID: Self.id)))])
         #expect(router.isIdle && inbox.reservationCount == 0)
     }
 
-    @Test func admissionAndKnownUnsentRejectionReleaseOnlySettledReservations() throws {
+    @Test(arguments: [false, true])
+    func admissionAndKnownUnsentRejectionReleaseOnlySettledReservations(withHandler: Bool) throws {
         let inbox = RuntimeClientInbox()
-        let fixtures = try (0..<RuntimeClientInbox.requestLimit).map { _ in try reserve(inbox) }
+        let fixtures = try (0..<RuntimeClientInbox.requestLimit).map { _ in try reserve(inbox: inbox, handler: withHandler) }
         #expect(inbox.submit(fixtures[0].submission) == .full)
         inbox.rejectedBeforeSend(fixtures[0].key) // Still queued: cannot prematurely settle it.
         #expect(inbox.reservationCount == fixtures.count)
@@ -143,25 +153,13 @@ import Testing
             guard case .send(let submission) = inbox.take() else { Issue.record("Lost send ordering"); return }
             #expect(submission.key === fixture.key)
             inbox.rejectedBeforeSend(fixture.key)
+            fixture.releaseReply()
         }
         #expect(inbox.reservationCount == fixtures.count) // Consumers still own their end slots.
         for fixture in fixtures { inbox.ended(fixture.key, .finished) }
         while inbox.take() != nil {}
         #expect(inbox.reservationCount == 0)
         #expect(inbox.submit(fixtures[0].submission) == .admitted)
-    }
-
-    @Test func concurrentCallbacksReserveExactlyOnce() throws {
-        let inbox = RuntimeClientInbox()
-        let fixtures = try (0..<RuntimeClientInbox.requestLimit).map { _ in try reserve(inbox) }
-        DispatchQueue.concurrentPerform(iterations: fixtures.count) { index in
-            let fixture = fixtures[index]
-            inbox.replied(fixture.key, .success(.accepted(Self.id)))
-            inbox.ended(fixture.key, .abandoned)
-        }
-        #expect(inbox.queuedCount == fixtures.count * 3)
-        while inbox.take() != nil {}
-        #expect(inbox.reservationCount == 0)
     }
 
     @Test func wakeupStorageIsOnePayloadFreeSignalAndFinishesOnRelease() async throws {
@@ -191,11 +189,50 @@ import Testing
         }
         defer { reader.cancel() }
         DispatchQueue.concurrentPerform(iterations: fixtures.count) { index in
-            inbox.replied(fixtures[index].key, .success(.accepted(Self.id)))
+            fixtures[index].answer(.success(.accepted(Self.id)))
             inbox.ended(fixtures[index].key, .finished)
+            fixtures[index].releaseReply()
         }
         #expect(await reader.value == fixtures.count * 3)
         #expect(inbox.reservationCount == 0 && inbox.queuedCount == 0)
+    }
+
+    @Test func completedConsumerStillRetainsTheDuplicateAcceptanceIdentity() async throws {
+        let inbox = RuntimeClientInbox(), secondID = OperationID()
+        let fixture = InboxFixture(notifying: inbox)
+        try #require(inbox.submit(fixture.submission) == .admitted)
+        try fixture.prepareReply(inbox)
+        _ = inbox.take() // Send; the owner has registered it with the router.
+        fixture.answer(.success(.accepted(Self.id)))
+        _ = inbox.take()
+        fixture.producer.reply(.accepted(Self.id)); fixture.producer.push(.completed(Self.id))
+        _ = inbox.take() // Automatic consumer-end notice; normal routing has finished.
+        var iterator = fixture.stream.makeAsyncIterator()
+        #expect(try await iterator.next() == .accepted(Self.id))
+        #expect(try await iterator.next() == .completed(Self.id))
+        #expect(try await iterator.next() == nil)
+        #expect(inbox.reservationCount == 1)
+        fixture.answer(.success(.accepted(secondID)))
+        guard case .unexpectedReply(let context) = inbox.take() else { Issue.record("Lost second identity"); return }
+        #expect(context == .init(key: fixture.key, environmentID: Self.environment, cancellationTarget: nil,
+            failure: .init(cause: .malformedResponse, operationID: secondID, mayHaveMutated: true)))
+        guard case .fault(.malformedResponse) = inbox.take() else { Issue.record("Missing duplicate fault"); return }
+        #expect(try await iterator.next() == nil) // Do not rewrite the completed consumer.
+        fixture.releaseReply()
+        #expect(inbox.reservationCount == 0)
+    }
+
+    @Test func discardedUnansweredHandlerSettlesItsOwningReply() throws {
+        let inbox = RuntimeClientInbox(), fixture = try reserve(inbox: nil)
+        try #require(inbox.submit(fixture.submission) == .admitted)
+        try fixture.prepareReply(inbox)
+        #expect(inbox.replyHandler(for: fixture.key) == nil)
+        _ = inbox.take()
+        fixture.releaseReply() // No closure remains that could provide a later response.
+        guard case .reply(let key, .failure(let failure)) = inbox.take() else { Issue.record("Missing failure"); return }
+        #expect(key === fixture.key && failure == RuntimeSessionFailure(cause: .connectionLost))
+        inbox.ended(key, .finished); _ = inbox.take()
+        #expect(inbox.reservationCount == 0)
     }
 
     @Test(arguments: [false, true])
@@ -211,11 +248,12 @@ import Testing
             switch message {
             case .send(let submission):
                 try #require(router.register(submission.key, request: submission.request, producer: submission.producer) == .admitted)
-                try client.send(.init(request: submission.request)) { inbox.replied(submission.key, $0) }
+                try client.send(.init(request: submission.request), reply: #require(inbox.replyHandler(for: submission.key)))
             case .reply(let key, let result): effects += router.reply(result, to: key)
             case .incoming(let event): effects += router.incoming(event)
             case .interrupted(let failure): effects += router.interrupted(failure)
             case .ended(let key, let reason): effects += router.consumerEnded(key, reason: reason)
+            case .unexpectedReply: Issue.record("Unexpected duplicate reply")
             case .fault: Issue.record("Unexpected fault")
             }
         }
@@ -236,22 +274,35 @@ import Testing
     }
 }
 
-private struct InboxFixture: Sendable {
-    let key = RuntimeRequestKey()
+private final class InboxFixture: Sendable {
+    let key: RuntimeRequestKey
     let producer: RuntimeEventStream
     let stream: AsyncThrowingStream<RuntimeEvent, any Error>
+    private let reply = Mutex<RuntimeClientInbox.Reply?>(nil)
     var submission: RuntimeClientInbox.Submission {
         .init(key: key, request: .startEnvironment(RuntimeClientInboxTests.environment, .init()), producer: producer)
     }
     init(notifying inbox: RuntimeClientInbox? = nil) {
-        let key = self.key
+        let key = RuntimeRequestKey(); self.key = key
         (producer, stream) = RuntimeEventStream.make(mayHaveMutated: true) { inbox?.ended(key, $0) }
+    }
+    func prepareReply(_ inbox: RuntimeClientInbox) throws {
+        let handler = try #require(inbox.replyHandler(for: key))
+        reply.withLock { $0 = handler }
+    }
+    func answer(_ result: Result<RuntimeEvent, RuntimeSessionFailure>) { reply.withLock { $0 }?(result) }
+    func releaseReply() {
+        let old = reply.withLock { value in let old = value; value = nil; return old }
+        withExtendedLifetime(old) {} // Release the callback outside the fixture lock too.
     }
 }
 private func reserve(_ inbox: RuntimeClientInbox) throws -> InboxFixture { try reserve(inbox: inbox) }
-private func reserve(inbox: RuntimeClientInbox?) throws -> InboxFixture {
+private func reserve(inbox: RuntimeClientInbox?, handler: Bool = true) throws -> InboxFixture {
     let fixture = InboxFixture()
-    if let inbox { try #require(inbox.submit(fixture.submission) == .admitted) }
+    if let inbox {
+        try #require(inbox.submit(fixture.submission) == .admitted)
+        if handler { try fixture.prepareReply(inbox) }
+    }
     return fixture
 }
 private final class InboxSession: RuntimeClientSession {
