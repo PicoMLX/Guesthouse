@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 2,
+  "manifestVersion": 1,
+  "notes": "No provider combination is approved by bundled connection evidence. Lume remains a candidate pending human validation; legacy Tart placeholders are not Lume evidence.",
+  "tested": [],
+  "incompatibilities": []
+}

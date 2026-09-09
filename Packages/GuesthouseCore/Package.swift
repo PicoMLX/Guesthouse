@@ -25,6 +25,7 @@ let package = Package(
     targets: [
         .target(
             name: "GuesthouseCore",
+            resources: [.process("Resources")],
             swiftSettings: coreSwiftSettings
         ),
         .testTarget(
