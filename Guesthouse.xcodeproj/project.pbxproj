@@ -28,6 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		CD1501540000000000000004 /* GuesthouseClientKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = GuesthouseClientKit; path = Packages/GuesthouseClientKit; sourceTree = "<group>"; };
 		CD1501510000000000000004 /* GuesthouseRuntimeKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = GuesthouseRuntimeKit; path = Packages/GuesthouseRuntimeKit; sourceTree = "<group>"; };
 		F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Guesthouse Codex VM.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8976E97304933D30071C234 /* GuesthouseTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GuesthouseTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -86,6 +87,7 @@
 				F8ACD8A93049406300550943 /* MVP-PLAN.md */,
 				921BF84465C14B2296CA65E2 /* GuesthouseCore */,
 				CD1501510000000000000004 /* GuesthouseRuntimeKit */,
+				CD1501540000000000000004 /* GuesthouseClientKit */,
 				F8976E8C304933D10071C234 /* Guesthouse */,
 				F8976E9A304933D30071C234 /* GuesthouseTests */,
 				F8976EA4304933D30071C234 /* GuesthouseUITests */,
@@ -210,6 +212,7 @@
 			packageReferences = (
 				F8ACD8A630493E2C00550943 /* XCLocalSwiftPackageReference "Packages/GuesthouseCore" */,
 				CD1501510000000000000001 /* XCLocalSwiftPackageReference "Packages/GuesthouseRuntimeKit" */,
+				CD1501540000000000000001 /* XCLocalSwiftPackageReference "Packages/GuesthouseClientKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F8976E8B304933D10071C234 /* Products */;
@@ -633,6 +636,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		CD1501540000000000000001 /* XCLocalSwiftPackageReference "Packages/GuesthouseClientKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/GuesthouseClientKit;
+		};
 		CD1501510000000000000001 /* XCLocalSwiftPackageReference "Packages/GuesthouseRuntimeKit" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/GuesthouseRuntimeKit;

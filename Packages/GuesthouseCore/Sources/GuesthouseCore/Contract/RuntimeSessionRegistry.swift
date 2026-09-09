@@ -4,6 +4,11 @@ import Synchronization
 public final class RuntimeSessionGeneration: Sendable {
     fileprivate let retirement = Mutex<RuntimeSessionFailure.Cause?>(nil)
     fileprivate init() {}
+    /// Diagnostic after retirement, never a connection-authority snapshot. Setup can fail
+    /// before a request exists; preserve its known contract cause without inventing an ID.
+    public var retirementFailure: RuntimeSessionFailure? {
+        retirement.withLock { $0.map { RuntimeSessionFailure(cause: $0) } }
+    }
 }
 
 /// In-memory client session ownership and ordered delivery (#19/#112, MVP-PLAN.md §3).

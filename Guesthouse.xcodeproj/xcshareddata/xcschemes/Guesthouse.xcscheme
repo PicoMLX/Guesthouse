@@ -49,6 +49,20 @@
                ReferencedContainer = "container:Packages/GuesthouseRuntimeKit">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "GuesthouseClientKitTests"
+               BuildableName = "GuesthouseClientKitTests"
+               BlueprintName = "GuesthouseClientKitTests"
+               ReferencedContainer = "container:Packages/GuesthouseClientKit">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -58,6 +72,16 @@
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
       <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "GuesthouseClientKitTests"
+               BuildableName = "GuesthouseClientKitTests"
+               BlueprintName = "GuesthouseClientKitTests"
+               ReferencedContainer = "container:Packages/GuesthouseClientKit">
+            </BuildableReference>
+         </TestableReference>
          <TestableReference
             skipped = "NO">
             <BuildableReference
