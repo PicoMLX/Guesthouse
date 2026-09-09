@@ -16,6 +16,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case unauthorizedCaller
     case protocolMismatch(client: Int, service: Int)
     case invalidRequest(InvalidRequestReason)
+    case invalidRuntimeReply(InvalidRuntimeReplyReason)
     case canceled
 
     public enum UnsupportedHostReason: Codable, Hashable, Sendable {
@@ -59,6 +60,9 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             }
         }
     }
+    public enum InvalidRuntimeReplyReason: String, Codable, Hashable, Sendable, CaseIterable {
+        case malformed, oversized
+    }
     public enum Category: String, Codable, Hashable, Sendable, CaseIterable {
         case host, storage, runtime, guest, credentials, tools, workflow, ipc, user
     }
@@ -73,7 +77,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .toolMismatch(.vmRuntime): .runtime
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
         case .vmSlotUnavailable, .operationOutcomeUnknown: .workflow
-        case .unauthorizedCaller, .protocolMismatch, .invalidRequest: .ipc
+        case .unauthorizedCaller, .protocolMismatch, .invalidRequest, .invalidRuntimeReply: .ipc
         case .canceled: .user
         }
     }
@@ -122,6 +126,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "The app (protocol \(client)) and runtime (protocol \(service)) are incompatible."
         case .invalidRequest(let reason):
             reason.message
+        case .invalidRuntimeReply(.malformed):
+            "Guesthouse received an invalid reply from its runtime service. An in-flight operation may still be running."
+        case .invalidRuntimeReply(.oversized):
+            "The runtime service's reply exceeds Guesthouse's supported size limit. An in-flight operation may still be running."
         case .canceled:
             "The operation was canceled; any partial changes must be inspected before retrying."
         }
@@ -151,6 +159,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .invalidRequest(.malformed): [.reviewRequest, .cancel]
         case .unauthorizedCaller: [.cancel]
         case .protocolMismatch: [.reinstallApp, .cancel]
+        case .invalidRuntimeReply: [.inspectState, .updateApp, .cancel]
         }
     }
 
