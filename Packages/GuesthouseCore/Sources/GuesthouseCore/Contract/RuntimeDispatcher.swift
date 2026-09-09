@@ -19,10 +19,10 @@ public enum RuntimeDispatcher: Sendable {
 
         public init() {}
 
-        /// Returns the number of other replies owed. Refused sessions still answer pipelined
-        /// messages until one caller claims the close; nothing is admitted after that claim.
+        /// Returns the number of other replies owed. Refusal immediately stops new admission;
+        /// only messages already counted may drain, so continued traffic cannot delay closure.
         public mutating func began() -> Int? {
-            guard !isClosing else { return nil }
+            guard refusal == nil, !isClosing else { return nil }
             inFlight += 1
             return inFlight - 1
         }

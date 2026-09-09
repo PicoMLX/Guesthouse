@@ -11,6 +11,8 @@ public final class RuntimeSessionGate: Sendable {
 
     public init() {}
 
+    /// Refusal and admission share this lock. A nil result incurs no reply obligation:
+    /// the adapter must not decode, dispatch, or call finished for that later callback.
     public func began() -> Int? { state.withLock { $0.began() } }
 
     /// Early rejection only; a snapshot cannot authorize later dispatch.

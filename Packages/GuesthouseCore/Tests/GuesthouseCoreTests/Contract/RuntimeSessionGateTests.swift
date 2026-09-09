@@ -1,4 +1,5 @@
 import Dispatch
+import Foundation
 import Synchronization
 import Testing
 @testable import GuesthouseCore
@@ -44,19 +45,50 @@ import Testing
         let gate = RuntimeSessionGate()
         let expected = RuntimeEvent.completed(OperationID())
         #expect(gate.began() == 0)
-        var lockWasHeld = false
+        let lockWasHeld = Mutex<Bool?>(nil)
+        let observed = DispatchSemaphore(value: 0)
         var registeredRequest: RuntimeRequest?
         let reply = gate.commit(.runtimeVersion) { request in
-            // Unlike a scheduling sleep, this fails deterministically if commit reads a
-            // snapshot, unlocks, and only then calls registration. It never blocks/reenters.
-            lockWasHeld = gate.state.withLockIfAvailable { _ in true } == nil
+            // A distinct native thread avoids recursively trying the nonrecursive mutex.
+            // This synchronous test holds the callback open only until the nonblocking probe
+            // completes (bounded wait, no scheduling sleeps or async-executor blocking).
+            Thread.detachNewThread {
+                let unavailable = gate.state.withLockIfAvailable { _ in true } == nil
+                lockWasHeld.withLock { $0 = unavailable }
+                observed.signal()
+            }
+            #expect(observed.wait(timeout: .now() + 5) == .success)
             registeredRequest = request
             return expected
         }
-        #expect(lockWasHeld)
+        #expect(lockWasHeld.withLock { $0 } == true)
         #expect(registeredRequest == .runtimeVersion)
         #expect(reply == expected)
         #expect(!gate.finished(), "an unrefused session stays open")
+    }
+
+    @Test func trafficAfterRefusalCannotExtendTheDrain() {
+        let gate = RuntimeSessionGate()
+        let first = RuntimeEvent.failed(OperationID(), .unauthorizedCaller)
+        #expect(gate.began() == 0)
+        #expect(gate.began() == 1)
+        gate.refuse(first)
+        let unexpectedAdmissions = Mutex(0)
+        DispatchQueue.concurrentPerform(iterations: 64) { _ in
+            if gate.began() != nil { unexpectedAdmissions.withLock { $0 += 1 } }
+        }
+        #expect(unexpectedAdmissions.withLock { $0 } == 0)
+        #expect(gate.state.withLock { $0.inFlight } == 2)
+        #expect(!gate.state.withLock { $0.isClosing }, "already counted replies must be handed over")
+        var registrations = 0
+        #expect(gate.commit(.runtimeVersion) { _ in registrations += 1; return .completed(OperationID()) } == first)
+        #expect(registrations == 0)
+        #expect(!gate.finished())
+        #expect(gate.began() == nil, "the remaining reply cannot be kept alive by new traffic")
+        #expect(gate.finished())
+        #expect(gate.state.withLock { $0.inFlight } == 0)
+        #expect(gate.state.withLock { $0.isClosing })
+        #expect(gate.began() == nil)
     }
 
     @Test func laterRefusalPreservesTheAlreadyRegisteredAnswerAndFirstRejection() {
