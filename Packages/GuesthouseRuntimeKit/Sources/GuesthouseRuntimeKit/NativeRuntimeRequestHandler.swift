@@ -3,8 +3,8 @@ import GuesthouseCore
 import XPC
 
 /// Native service ingress for #19/#20/#112 (MVP-PLAN.md §3). No listener is activated here.
-/// Only runtimeVersion is implemented: mutations stay unavailable until client retirement,
-/// streaming and unknown-outcome handling migrate together with the activation wire epoch.
+/// Only runtimeVersion is implemented: mutations stay unavailable until streaming and
+/// operation correlation/unknown-outcome handling migrate across all native consumers.
 public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     private let gate: RuntimeSessionGate
     private let authenticate: @Sendable (XPCDictionary) -> Bool

@@ -4,10 +4,9 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
 
     public init(_ rawValue: Int) { self.rawValue = rawValue }
 
-    /// Epoch 8 reserves the incompatible structured-error/event contract (ADR 0003).
-    /// Legacy branches used 1–7, including versioned replies and admission errors in 7.
-    /// Both endpoint migrations must use this epoch; this Core model activates no transport.
-    public static let current = RuntimeProtocolVersion(8)
+    /// Epoch 12 activates bounded native frames and structured diagnostics on both endpoints.
+    /// Historical prototypes used 1–11. None is a compatible production fallback (ADR 0003).
+    public static let current = RuntimeProtocolVersion(12)
 
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
     public var description: String { "protocol \(rawValue)" }
