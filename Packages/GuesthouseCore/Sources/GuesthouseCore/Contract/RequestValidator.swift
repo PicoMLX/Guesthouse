@@ -83,13 +83,16 @@ public enum RequestValidationError: Error, Hashable, Sendable {
     case protocolMismatch(client: RuntimeProtocolVersion, service: RuntimeProtocolVersion)
     case optionOutOfRange(Option)
     case invalidDisplayName, invalidBundleIdentifier, invalidHandoff, malformed
+    case invalidVMName, invalidPath, pathEscapesRoot
 
     public var guesthouseError: GuesthouseError {
         switch self {
         case .oversized: .invalidRequest(.oversized)
         case .protocolMismatch(let client, let service):
             .protocolMismatch(client: client.rawValue, service: service.rawValue)
-        case .optionOutOfRange, .invalidDisplayName, .invalidBundleIdentifier, .invalidHandoff, .malformed:
+        case .invalidVMName: .invalidRequest(.invalidVMName)
+        case .pathEscapesRoot: .invalidRequest(.pathEscapesAllowedRoot)
+        case .optionOutOfRange, .invalidDisplayName, .invalidBundleIdentifier, .invalidHandoff, .invalidPath, .malformed:
             .invalidRequest(.malformed)
         }
     }
