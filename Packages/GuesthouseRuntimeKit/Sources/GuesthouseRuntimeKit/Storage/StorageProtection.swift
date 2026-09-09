@@ -61,14 +61,18 @@ enum StorageProtection {
         }
     }
 
-    private static func path(_ url: URL) throws -> String {
-        let name = url.path(percentEncoded: false)
+    static func path(_ url: URL) throws -> String {
+        var name = url.path(percentEncoded: false)
         guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost",
               url.query == nil, url.fragment == nil, name.hasPrefix("/"),
               !name.utf8.contains(0), name.utf8.count < Int(PATH_MAX),
               !name.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else {
             throw StorageFailure.invalidLocation
         }
+        // A directory URL retains its trailing slash in this decoded representation. POSIX
+        // would follow the final symlink for "link/", even with lstat/O_NOFOLLOW. Inspect the
+        // entry itself instead, without resolving links or normalizing away rejected dots.
+        while name.count > 1 && name.hasSuffix("/") { name.removeLast() }
         return name
     }
     private static func parent(_ path: String) -> String {
