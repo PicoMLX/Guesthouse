@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		CD1501560000000000000001 /* GuesthouseClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = CD1501560000000000000002 /* GuesthouseClientKit */; };
 		CD1501550000000000000003 /* GuesthouseRuntimeKit in Frameworks */ = {isa = PBXBuildFile; productRef = CD1501550000000000000004 /* GuesthouseRuntimeKit */; };
 		F8ACD8A830493E2C00550943 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = F8ACD8A730493E2C00550943 /* GuesthouseCore */; };
 		4DF3B7691BA84C0992A05F43 /* GuesthouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9668531454184F48A8F15863 /* GuesthouseCore */; };
@@ -92,6 +93,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F8ACD8A830493E2C00550943 /* GuesthouseCore in Frameworks */,
+				CD1501560000000000000001 /* GuesthouseClientKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -170,6 +172,7 @@
 			name = Guesthouse;
 			packageProductDependencies = (
 				F8ACD8A730493E2C00550943 /* GuesthouseCore */,
+				CD1501560000000000000002 /* GuesthouseClientKit */,
 			);
 			productName = Guesthouse;
 			productReference = F8976E8A304933D10071C234 /* Guesthouse Codex VM.app */;
@@ -811,6 +814,10 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		CD1501560000000000000002 /* GuesthouseClientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GuesthouseClientKit;
+		};
 		CD1501550000000000000004 /* GuesthouseRuntimeKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = GuesthouseRuntimeKit;
