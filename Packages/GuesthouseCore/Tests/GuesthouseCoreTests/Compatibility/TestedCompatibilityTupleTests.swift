@@ -138,7 +138,10 @@ struct TestedCompatibilityTupleTests {
         #expect(decoded.verifiedAt == Date(timeIntervalSince1970: 1_700_000_001))
     }
 
-    @Test(arguments: ["syntheticOpaque", String(repeating: "1", count: 129)])
+    @Test(arguments: ["syntheticOpaque", String(repeating: "1", count: 129),
+                      "2023-11-14T22:13:20Zjunk", "2023-11-14T22:13:20.900Zjunk",
+                      "2023-11-14T22:13:20Z\n", "2023-11-14T22:13:20Z ",
+                      "prefix2023-11-14T22:13:20Z", "2023-11-14T23:13:20+01:00junk"])
     func malformedDateErrorsDoNotQuoteInput(_ text: String) throws {
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.verification())) as? [String: Any])
         object["verifiedAt"] = text
@@ -149,5 +152,13 @@ struct TestedCompatibilityTupleTests {
             #expect(!context.debugDescription.contains(text))
             #expect(context.underlyingError == nil)
         }
+    }
+
+    @Test(arguments: ["2023-11-14T22:13:20Z", "2023-11-14T22:13:20.000Z", "2023-11-14T23:13:20+01:00"])
+    func completeTimestampsRemainSupported(_ text: String) throws {
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.verification())) as? [String: Any])
+        object["verifiedAt"] = text
+        let decoded = try JSONDecoder().decode(ManifestConnectionVerification.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.verifiedAt == Date(timeIntervalSince1970: 1_700_000_000))
     }
 }
