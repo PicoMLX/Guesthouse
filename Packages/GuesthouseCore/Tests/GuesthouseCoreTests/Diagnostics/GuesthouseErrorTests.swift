@@ -27,13 +27,15 @@ struct GuesthouseErrorTests {
         let outcome = DiagnosticEvent.Outcome(error: error)
         #expect(outcome == .operationFailed(error))
         let event = DiagnosticEvent(operation: .checkTools, outcome: outcome, operationID: Self.uuid)
+        #expect(event.exitStatus == nil)
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
         #expect(event.message == "Check tools: " + error.userMessage)
         #expect(event.recoveryMessage == error.recoveryMessage)
         var log = DiagnosticLog()
-        log.append(event, recordedAt: Date(timeIntervalSince1970: 0))
+        log.append(event, recordedAt: Date(timeIntervalSince1970: 0.123))
         let json = try #require(JSONSerialization.jsonObject(with: log.jsonData()) as? [String: Any])
         #expect(json["schemaVersion"] as? Int == 2)
-        #expect(log.text.contains(error.userMessage))
+        #expect(log.text.contains("1970-01-01T00:00:00.123Z [\(Self.uuid)] Check tools: " + error.userMessage))
         #expect(log.text.contains(error.recoveryMessage))
     }
 

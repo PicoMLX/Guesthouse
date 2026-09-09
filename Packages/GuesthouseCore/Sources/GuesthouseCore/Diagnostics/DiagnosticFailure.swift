@@ -13,7 +13,7 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         switch self {
         case .unsupportedHost: "This Mac does not meet Guesthouse's supported host requirements."
         case .timedOut: "The operation timed out; its outcome may be unknown."
-        case .connectionFailed: "Guesthouse could not connect to the development Mac."
+        case .connectionFailed: "The required network connection could not be established."
         case .authenticationRequired: "Sign-in is required to continue."
         case .guestAuthenticationFailed: "The development Mac did not accept its SSH credentials."
         case .credentialsLocked: "The credentials needed for this operation are locked."
@@ -34,7 +34,7 @@ public enum DiagnosticFailure: String, CaseIterable, Codable, Error, Sendable {
         case .timedOut, .processFailed, .outcomeUnknown:
             "Inspect this operation's current state before trying it again."
         case .connectionFailed:
-            "Check that the development Mac is running and its SSH connection is available."
+            "Check network access and availability of the service used by this operation, then inspect its current state before retrying."
         case .authenticationRequired:
             "Open Accounts and sign in again."
         case .guestAuthenticationFailed:
