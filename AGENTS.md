@@ -11,6 +11,7 @@ Prioritize Lume candidate validation and shared infrastructure under [ADR 0002](
 | `Guesthouse/` | The SwiftUI app. App Sandbox and Hardened Runtime on. Product name is "Guesthouse Codex VM". | UI state is `@MainActor` (the target sets MainActor default isolation). Never launches processes. |
 | `GuesthouseRuntime/` | Embedded XPC service, non-sandboxed, Hardened Runtime on (added by issue #19). | The only place host operations run. Exposes named operations, never a generic "run a command" API. |
 | `Packages/GuesthouseCore` | Shared models, typed XPC contract, state machines, parsers, validation. | Nonisolated by default; every public type is `Sendable`. No process execution, no host mutations. |
+| `Packages/GuesthouseClientKit` | GUI-safe native XPC transport, independently testable without launching the app. | Depends only on Core/system frameworks. No RuntimeKit, process execution, provider adapters or host mutations. |
 | `Packages/GuesthouseRuntimeKit` | Process execution and provider adapters (added by issue #21); shared infrastructure and Lume candidate work are active, Tart adapters are retained. | Linked only by `GuesthouseRuntime`. The app target must never import it. |
 | `Fixtures/` | Sample app and package repositories used inside the guest VM by the phase-0 gates. | Not part of the product. Excluded from CI. |
 | `docs/phase0/` | Recorded results of the phase-0 hardware experiments. | Only filled in from a real run. Never from reasoning. |
