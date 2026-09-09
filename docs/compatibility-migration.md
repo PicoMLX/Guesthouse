@@ -33,4 +33,8 @@ Neither `CompatibilityTuple` nor `ConnectionVerificationRecord` is a `Diagnostic
 
 ## Remaining integration
 
-The numeric-version, provider-aware tuple and connection-record changes are independently reviewed prerequisites. They do not yet replace #55's compatibility manifest and evaluator, implement probes or persistence, or certify a Lume configuration. Those components must migrate before issue #14 is complete. Preserve the old PR's remaining behavior and useful tests without importing its redactor ancestry. Hardware evidence remains a separate human gate.
+The numeric-version, tuple, record, manifest-entry and manifest-container changes are independently reviewed prerequisites. The provider-aware manifest uses its own schema 2 and typed incompatibility reasons; unknown schemas and raw-string reasons are rejected. Its notes and evidence references are private resource data, not error messages or diagnostic attachments.
+
+The bundled manifest deliberately has no tested or verified combinations. The original Tart seed contained placeholders, not Lume evidence; it remains available in #55's preserved branch. Only actual validation should populate the active resource. This does not waive provider-selection or hardware gates.
+
+The evaluator still needs migration before issue #14 is complete. These models do not implement probes or persistence, or certify a Lume configuration. Preserve the old PR's remaining behavior and useful tests without importing its redactor ancestry. Runtime/XPC/GUI consumers require their own integration tests and review.
