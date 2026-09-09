@@ -74,7 +74,7 @@ import Testing
         let fixture = try start(&router, request: .runtimeVersion)
         let event: RuntimeEvent = accepted ? .accepted(Self.id) : .progress(Self.id, .init(kind: .copying))
         let failure = RuntimeSessionFailure(cause: .malformedResponse, operationID: Self.id)
-        #expect(router.reply(.success(event), to: fixture.key) == [.unknownOutcome(failure), .retireConnection])
+        #expect(router.reply(.success(event), to: fixture.key) == [unknown(fixture, failure, environment: nil), .retireConnection])
         await #expect(throws: failure) { try await collectRouting(fixture.stream) }
         #expect(router.isIdle)
     }
@@ -109,7 +109,7 @@ import Testing
         for _ in 0..<RuntimeEventRouter.pendingIDLimit { _ = router.incoming(.completed(OperationID())) }
         #expect(router.pendingIDCount == RuntimeEventRouter.pendingIDLimit)
         let failure = RuntimeSessionFailure(cause: .oversizedResponse, mayHaveMutated: true)
-        #expect(router.incoming(.completed(Self.id)) == [.retireConnection, .unknownOutcome(failure)])
+        #expect(router.incoming(.completed(Self.id)) == [.retireConnection, unknown(fixture, failure)])
         #expect(router.pendingIDCount == 0)
         #expect(router.requestCount == 1)
         let refused = Fixture()
@@ -118,7 +118,7 @@ import Testing
         #expect(router.consumerEnded(fixture.key, reason: .finished).isEmpty)
         // Even after the consumer observed failure, reconciliation learns the late identity.
         #expect(router.reply(.success(.accepted(Self.id)), to: fixture.key) == [
-            .unknownOutcome(failure.contextualized(operationID: Self.id)),
+            unknown(fixture, failure.contextualized(operationID: Self.id)),
         ])
         #expect(router.isIdle)
         #expect(router.incoming(.completed(OperationID())).isEmpty)
@@ -131,7 +131,7 @@ import Testing
         let newID = OperationID()
         _ = router.incoming(.progress(newID, .init(kind: .copying)))
         let failure = RuntimeSessionFailure(cause: .protocolMismatch(service: 11), operationID: Self.id, mayHaveMutated: true)
-        #expect(router.interrupted(.init(cause: .protocolMismatch(service: 11), operationID: OperationID())) == [.unknownOutcome(failure)])
+        #expect(router.interrupted(.init(cause: .protocolMismatch(service: 11), operationID: OperationID())) == [unknown(old, failure)])
         #expect(router.pendingIDCount == 0)
         #expect(router.requestCount == 1)
         await #expect(throws: failure) { try await collectRouting(old.stream) }
@@ -146,7 +146,7 @@ import Testing
         let fixture = try start(&router)
         #expect(router.interrupted(.init(cause: .connectionLost)).isEmpty)
         let failure = RuntimeSessionFailure(cause: .protocolMismatch(service: 11), operationID: Self.id, mayHaveMutated: true)
-        #expect(router.reply(.failure(failure), to: fixture.key) == [.unknownOutcome(failure)])
+        #expect(router.reply(.failure(failure), to: fixture.key) == [unknown(fixture, failure)])
         await #expect(throws: failure) { try await collectRouting(fixture.stream) }
         #expect(router.isIdle)
     }
@@ -177,6 +177,37 @@ import Testing
         let failure = RuntimeSessionFailure(cause: .malformedResponse, operationID: Self.id, mayHaveMutated: true)
         await #expect(throws: failure) { try await collectRouting(a.stream) }
         #expect(router.incoming(.completed(Self.id)).isEmpty)
+    }
+
+    @Test func duplicateAcceptanceRetainsBothIDsWithTheOriginalRequestContext() async throws {
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router), secondID = OperationID()
+        _ = router.reply(.success(.accepted(Self.id)), to: fixture.key)
+        let first = RuntimeSessionFailure(cause: .malformedResponse, operationID: Self.id, mayHaveMutated: true)
+        let second = RuntimeSessionFailure(cause: .malformedResponse, operationID: secondID, mayHaveMutated: true)
+        #expect(router.reply(.success(.accepted(secondID)), to: fixture.key) == [
+            unknown(fixture, second), .retireConnection, unknown(fixture, first),
+        ])
+        await #expect(throws: first) { try await collectRouting(fixture.stream) }
+        #expect(router.isIdle)
+    }
+
+    @Test func preAcceptanceFaultRetainsDistinctEnvironmentsAndCancellationTarget() async throws {
+        var router = RuntimeEventRouter()
+        let other = EnvironmentID()
+        let a = try start(&router), b = try start(&router, request: .stopEnvironment(other, .force))
+        let cancel = try start(&router, request: .cancelOperation(Self.id))
+        let failure = RuntimeSessionFailure(cause: .malformedResponse, mayHaveMutated: true)
+        let effects = router.incoming(.runtimeVersion(Self.info))
+        #expect(effects.count == 4)
+        #expect(effects.contains(.retireConnection))
+        #expect(effects.contains(unknown(a, failure)))
+        #expect(effects.contains(unknown(b, failure, environment: other)))
+        #expect(effects.contains(unknown(cancel, failure, environment: nil, cancellationTarget: Self.id)))
+        for fixture in [a, b, cancel] {
+            await #expect(throws: failure) { try await collectRouting(fixture.stream) }
+        }
+        #expect(router.requestCount == 3) // Owning replies can still supply late IDs.
     }
 
     @Test func requestAndLifetimeBudgetsAreBounded() throws {
@@ -220,4 +251,9 @@ private func collectRouting(_ stream: AsyncThrowingStream<RuntimeEvent, any Erro
     var values: [RuntimeEvent] = []
     for try await value in stream { values.append(value) }
     return values
+}
+private func unknown(_ fixture: Fixture, _ failure: RuntimeSessionFailure,
+                     environment: EnvironmentID? = RuntimeEventRouterTests.environment,
+                     cancellationTarget: OperationID? = nil) -> RuntimeEventRouter.Effect {
+    .unknownOutcome(.init(key: fixture.key, environmentID: environment, cancellationTarget: cancellationTarget, failure: failure))
 }

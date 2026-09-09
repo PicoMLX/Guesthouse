@@ -15,9 +15,17 @@ struct RuntimeEventRouter: Sendable {
     enum Effect: Equatable, Sendable {
         case cancel(OperationID), retireConnection
         /// The owner retains bounded reconciliation state even if the stream already ended.
-        case unknownOutcome(RuntimeSessionFailure)
+        case unknownOutcome(UncertainRequest)
+    }
+    /// Client-local reconciliation identity, not a raw request, wire payload or diagnostic.
+    struct UncertainRequest: Equatable, Sendable {
+        let key: RuntimeRequestKey
+        let environmentID: EnvironmentID?
+        let cancellationTarget: OperationID?
+        let failure: RuntimeSessionFailure
     }
     private struct Request: Sendable {
+        let key: RuntimeRequestKey
         let request: RuntimeRequest
         let producer: RuntimeEventStream
         var operation: OperationID?
@@ -48,7 +56,7 @@ struct RuntimeEventRouter: Sendable {
         guard !requiresRetirement else { return .retiring }
         guard admitted < Self.lifetimeLimit else { return .rotationRequired }
         guard requests.count < Self.requestLimit, requests[key] == nil else { return .full }
-        requests[key] = Request(request: request, producer: producer)
+        requests[key] = Request(key: key, request: request, producer: producer)
         admitted += 1 // Bounds retired IDs for the whole connection, not only active requests.
         return .admitted
     }
@@ -66,7 +74,15 @@ struct RuntimeEventRouter: Sendable {
     mutating func reply(_ result: Result<RuntimeEvent, RuntimeSessionFailure>,
                         to key: RuntimeRequestKey) -> [Effect] {
         guard var entry = requests[key] else { return [] }
-        guard entry.awaiting else { return fault(.malformedResponse) }
+        guard entry.awaiting else {
+            // Preserve a second possible mutation without assigning its ID to the first consumer.
+            var effects: [Effect] = []
+            if case .success(.accepted(let id)) = result, id != entry.operation {
+                effects = uncertainty(entry, .init(cause: .malformedResponse, operationID: id,
+                                                   mayHaveMutated: entry.request.mayMutate))
+            }
+            return effects + fault(.malformedResponse)
+        }
         requests.removeValue(forKey: key)
         defer { discardUnjustifiedPending() }
         switch result {
@@ -169,7 +185,11 @@ struct RuntimeEventRouter: Sendable {
     private func fail(_ entry: Request, with failure: RuntimeSessionFailure) -> [Effect] {
         let scoped = failure.contextualized(operationID: entry.operation, mayHaveMutated: entry.request.mayMutate)
         entry.producer.interrupt(scoped)
-        return scoped.outcomeUnknown ? [.unknownOutcome(scoped)] : []
+        return uncertainty(entry, scoped)
+    }
+    private func uncertainty(_ entry: Request, _ failure: RuntimeSessionFailure) -> [Effect] {
+        failure.outcomeUnknown ? [.unknownOutcome(.init(key: entry.key, environmentID: entry.request.environment,
+            cancellationTarget: entry.request.cancellationTarget, failure: failure))] : []
     }
     private mutating func fault(_ cause: RuntimeSessionFailure.Cause) -> [Effect] {
         guard !requiresRetirement else { return [] }
@@ -200,6 +220,9 @@ private extension RuntimeRequest {
         case .startEnvironment, .stopEnvironment, .importXcode: true
         case .runtimeVersion, .environmentStatus, .cancelOperation: false
         }
+    }
+    var cancellationTarget: OperationID? {
+        if case .cancelOperation(let id) = self { id } else { nil }
     }
     func acceptsReply(_ event: RuntimeEvent) -> Bool {
         if case .failed = event { return true } // Correlated service rejection, not a live registration.
