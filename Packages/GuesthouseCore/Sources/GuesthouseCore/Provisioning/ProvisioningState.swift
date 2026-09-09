@@ -153,10 +153,10 @@ public enum StageStatus: Codable, Hashable, Sendable {
     /// The user canceled. Retrying inspects actual state first.
     case canceled
     /// The operation failed in a way a retry or repair can address. Retrying inspects first.
-    /// `interrupted` is the operation whose outcome this failure did not settle — an inspection
-    /// that could not answer leaves one — so the retry's inspection stays scoped to it. A
-    /// failure the runtime reported for an operation it had finished with settles that
-    /// operation and leaves it empty.
+    /// `interrupted` is the operation whose outcome this failure did not settle. A reported
+    /// operation failure or an inspection that could not answer retains it, so retry stays
+    /// scoped. Only reconciliation that established quiescence may clear a known identity;
+    /// an error category alone never proves the operation can no longer mutate.
     case recoverableFailure(GuesthouseError, interrupted: OperationID?)
     /// The runtime refused to start the operation before doing anything; the error says why
     /// and what to do. Nothing ran, so a new start may be requested directly, and it carries
