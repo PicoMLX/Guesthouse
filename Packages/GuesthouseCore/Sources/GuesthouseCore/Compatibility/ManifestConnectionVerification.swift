@@ -39,7 +39,9 @@ public struct ManifestConnectionVerification: Codable, Hashable, Sendable {
         guard text.utf8.prefix(129).count <= 128 else {
             throw DecodingError.dataCorruptedError(forKey: .verifiedAt, in: c, debugDescription: "not a supported ISO 8601 date")
         }
-        guard let date = (try? Self.dateStyle.parse(text)) ?? (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text)) else {
+        // FormatStyle.parse may accept a valid prefix. Verification needs the entire value.
+        guard let date = text.wholeMatch(of: Self.dateStyle)?.output
+            ?? text.wholeMatch(of: Date.ISO8601FormatStyle(includingFractionalSeconds: true))?.output else {
             throw DecodingError.dataCorruptedError(forKey: .verifiedAt, in: c, debugDescription: "not an ISO 8601 date")
         }
         self.init(
