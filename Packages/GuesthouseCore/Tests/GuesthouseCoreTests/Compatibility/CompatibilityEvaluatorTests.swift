@@ -106,6 +106,20 @@ struct CompatibilityEvaluatorTests {
         #expect(try Self.evaluate(unknown, rules: [rule]) == .needsValidation(.unknownFields([.codexCLIVersion])))
     }
 
+    @Test func repairingDuplicateInstallationsClearsOnlyTheCountSpecificBlock() throws {
+        let rule = CompatibilityIncompatibility(codexCLIInstallations: 2, reason: .incompatibleComponent(.codexCLIInstallations))
+        let manifest = try CompatibilityManifest(manifestVersion: 1, tested: [], incompatibilities: [rule])
+        let decodedRules = try CompatibilityManifest.decode(from: JSONEncoder().encode(manifest)).incompatibilities
+        let history = [try Self.record()]
+        var observed = ObservedTuple(CompatibilityTupleTests.tuple())
+        observed.codexCLIInstallations = 2
+        #expect(try Self.evaluate(observed, rules: decodedRules, history: history) == .incompatible(reason: rule.reason, recoveryActions: rule.recoveryActions))
+        observed.codexCLIInstallations = 1
+        #expect(try Self.evaluate(observed, rules: decodedRules, history: history) == .verified(recordedAt: history[0].verifiedAt))
+        observed.codexCLIInstallations = nil
+        #expect(try Self.evaluate(observed, rules: decodedRules, history: history) == .needsValidation(.unknownFields([.codexCLIInstallations])))
+    }
+
     @Test func firstMatchingRuleAndItsTargetedRecoveryArePreserved() throws {
         let first = CompatibilityIncompatibility(provisioningScriptVersion: "1", reason: .incompatibleComponent(.provisioningScriptVersion), recoveryActions: [.repair(.runtime)])
         let second = CompatibilityIncompatibility(reason: .knownIncompatibleCombination)
