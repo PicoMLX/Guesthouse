@@ -177,6 +177,13 @@ final class RuntimeClientInbox: Sendable {
         enqueue { $0.fail(cause) }
     }
 
+    /// A queued owning reply beats its deadline even if the owner has not drained it yet.
+    func expireReply(_ key: RuntimeRequestKey) {
+        enqueue { state in
+            if state.requests[key]?.replyQueued == false { state.fail(.connectionLost) }
+        }
+    }
+
     /// Only appended work wakes the owner, never discarded traffic or bookkeeping alone.
     private func enqueue(_ update: (inout State) -> Void) {
         let appended = state.withLock { state in

@@ -30,6 +30,11 @@ public final class XPCRuntimeTransport: Sendable {
     }
 
     deinit {
+        retireCurrent()
+    }
+
+    /// Owner/drain only, never from a callback executing under the registry delivery lock.
+    func retireCurrent() {
         if let lease = registry.current { Self.retire(lease.generation, in: registry) }
     }
 

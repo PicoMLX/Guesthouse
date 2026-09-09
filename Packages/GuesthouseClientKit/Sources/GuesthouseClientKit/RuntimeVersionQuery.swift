@@ -1,7 +1,7 @@
 import GuesthouseCore
 
-/// One user-requested, read-only connection check. Not RuntimeBackend or a streaming inbox.
-/// Native callbacks only enqueue one bounded result; connection disposal is outside them.
+/// One user-requested, read-only check through the production RuntimeBackend owner.
+/// Native callbacks only enqueue; explicit connection cleanup finishes before returning.
 public enum RuntimeVersionQuery {
     public enum Failure: Error, Hashable, Sendable {
         case runtime(GuesthouseError), connection(RuntimeSessionFailure), timedOut, canceled
@@ -34,26 +34,19 @@ public enum RuntimeVersionQuery {
     static func perform(connect: XPCRuntimeTransport.Connect?,
                         deadline: @escaping @Sendable () async throws -> Void) async -> Outcome {
         guard !Task.isCancelled else { return .failure(.canceled) }
-        let (stream, continuation) = AsyncStream<Outcome>.makeStream(bufferingPolicy: .bufferingOldest(1))
-        let client: XPCRuntimeTransport
-        // A query consumes its correlated reply, never unsolicited pushes. Native failures
-        // retire the session and reach the pending reply; a missing reply hits the deadline.
-        if let connect { client = XPCRuntimeTransport(incoming: { _ in }, interrupted: { _ in }, connect: connect) }
-        else { client = XPCRuntimeTransport(incoming: { _ in }, interrupted: { _ in }) }
-        defer { continuation.finish(); withExtendedLifetime(client) {} }
-        do {
-            try client.queryRuntimeVersion { reply in
-                continuation.yield(result(reply))
-                continuation.finish()
-            }
-        } catch let error as GuesthouseError { return .failure(.runtime(error)) }
-        catch let error as RuntimeSessionFailure { return .failure(.connection(error)) }
-        catch { return .failure(.connection(.init(cause: .connectionLost))) }
-
-        return await withTaskGroup(of: Outcome.self) { group in
+        let client = RuntimeClient(connect: connect, permitsOperations: false)
+        let stream = client.send(.runtimeVersion)
+        await client.flush()
+        let outcome = await withTaskGroup(of: Outcome.self) { group in
             group.addTask {
-                for await value in stream { return value }
-                return .failure(.canceled)
+                do {
+                    for try await event in stream { return result(.success(event)) }
+                    return .failure(.canceled)
+                } catch let failure as RuntimeSessionFailure { return .failure(.connection(failure)) }
+                catch GuesthouseError.canceled { return .failure(.canceled) }
+                catch GuesthouseError.runtimeIncompatible { return .failure(.connection(.init(cause: .connectionLost))) }
+                catch let error as GuesthouseError { return .failure(.runtime(error)) }
+                catch { return .failure(.connection(.init(cause: .connectionLost))) }
             }
             group.addTask {
                 do { try await deadline(); return .failure(.timedOut) }
@@ -63,6 +56,8 @@ public enum RuntimeVersionQuery {
             let value = await group.next() ?? .failure(.canceled)
             return Task.isCancelled ? .failure(.canceled) : value
         }
+        await client.close()
+        return outcome
     }
 
     private static func result(_ reply: Result<RuntimeEvent, RuntimeSessionFailure>) -> Outcome {
