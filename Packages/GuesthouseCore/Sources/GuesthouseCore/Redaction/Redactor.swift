@@ -1,7 +1,8 @@
 import Foundation
 import RegexBuilder
 
-/// Removes secrets from text before it can reach a log, the GUI, or a diagnostics export.
+/// Deferred redaction experiment retained with its tests. ADR 0003 replaces the MVP logging
+/// boundary with DiagnosticEvent; do not activate or extend this parser for diagnostics.
 ///
 /// MVP-PLAN.md §3 ("Local storage"): private keys, tokens, device codes, authorization
 /// headers, and raw authentication output must never be persisted or exported. The redactor
