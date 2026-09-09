@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-[[ $# == 5 && "$1" == test && "$2" == --package-path &&
-    "$4" == -Xswiftc && "$5" == -warnings-as-errors ]] || exit 91
+[[ $# == 11 && "$1" == test && "$2" == --package-path &&
+    "$4" == -Xswiftc && "$5" == -warnings-as-errors &&
+    "$6" == -Xcc && "$7" == -Wall && "$8" == -Xcc && "$9" == -Wextra &&
+    "${10}" == -Xcc && "${11}" == -Werror ]] || exit 91
 [[ "$(pwd -P)" == "${CI_HOOK_EXPECTED_ROOT}" ]] || exit 92
 printf '%s\n' "$3" >> "${CI_HOOK_INVOCATIONS}"
 if [[ "$3" == "${CI_HOOK_FAIL_PACKAGE:-}" ]]; then
