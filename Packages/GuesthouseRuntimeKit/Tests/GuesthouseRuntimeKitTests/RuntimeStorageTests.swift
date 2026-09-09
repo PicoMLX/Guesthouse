@@ -30,14 +30,17 @@ import Testing
         }
     }
 
-    @Test(arguments: [false, true], ["Guesthouse", "Guesthouse/vms", "Guesthouse/ssh"])
-    func linksAreRefusedBeforeAnyPreparation(_ dangling: Bool, _ suffix: String) throws {
+    @Test(arguments: [(false, false), (false, true), (true, false), (true, true)],
+          ["Guesthouse", "Guesthouse/vms", "Guesthouse/ssh"])
+    func linksAreRefusedBeforeAnyPreparation(_ options: (Bool, Bool), _ suffix: String) throws {
+        let (dangling, directoryURL) = options
         let fixture = try Fixture()
         let link = fixture.base.appending(path: suffix), target = fixture.base.appending(path: "outside")
         if !dangling { try fixture.directory(target) }
         try fixture.directory(link.deletingLastPathComponent())
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
-        #expect(throws: StorageFailure.unsafeStructure) { _ = try RuntimeStorage(root: fixture.storage) }
+        let root = directoryURL ? URL(fileURLWithPath: fixture.storage.path, isDirectory: true) : fixture.storage
+        #expect(throws: StorageFailure.unsafeStructure) { _ = try RuntimeStorage(root: root) }
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == target.path)
         #expect(!FileManager.default.fileExists(atPath: fixture.storage.appending(path: "runtime").path))
         #expect(!FileManager.default.fileExists(atPath: target.appending(path: "maintenance").path))
@@ -242,6 +245,14 @@ import Testing
 
     @Test func defaultLocationIsResolvedWithoutPreparation() throws {
         #expect(try RuntimeStorage.defaultRoot().path.hasSuffix("/Library/Application Support/Guesthouse"))
+    }
+
+    @Test func directoryURLPreparesTheSamePrivateLayout() throws {
+        let fixture = try Fixture()
+        let root = URL(fileURLWithPath: fixture.storage.path, isDirectory: true)
+        let storage = try RuntimeStorage(root: root)
+        #expect(try storage.location(for: .vms) == fixture.storage.appending(path: "vms"))
+        try StorageProtection.verify(root)
     }
 
     private func backupExcluded(_ url: URL) throws -> Bool {

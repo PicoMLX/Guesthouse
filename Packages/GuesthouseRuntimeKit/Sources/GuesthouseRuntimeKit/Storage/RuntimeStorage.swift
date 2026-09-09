@@ -20,6 +20,8 @@ struct RuntimeStorage: Sendable {
 
     /// Runtime-only injection for isolated fixtures; never exposed in an XPC request.
     init(root: URL, backup: BackupWriter) throws {
+        // Use the same validated, trailing-separator-free spelling for inspection AND writes.
+        let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
         try StorageProtection.existingAncestors(of: root) // Validate the original decoded path first.
         self.root = root
         // Inspect the entire existing managed layout BEFORE changing any protection or creating
