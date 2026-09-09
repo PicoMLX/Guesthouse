@@ -13,6 +13,7 @@ final class RuntimeEventStream: Sendable {
         var operation: OperationID?
         var receivedReply = false
         var end: End?
+        var failureObserved = false
         var dropped: UInt64 = 0
         var terminated: (@Sendable (Termination) -> Void)?
     }
@@ -26,6 +27,8 @@ final class RuntimeEventStream: Sendable {
     /// The unfolding stream adds no second payload buffer; reads release actual queue slots.
     /// Cancellation may throw or end iteration (SDK behavior); only a terminal event proves
     /// an operation finished. Abandonment always notifies the owner, including before a read.
+    /// The SDK clears its unfolding closure on cancellation, releasing ConsumerLifetime even
+    /// if it skips next() and the stream itself remains retained (covered by an SDK regression).
     static func make(capacity: Int = 64, mayHaveMutated: Bool,
                      terminated: @escaping @Sendable (Termination) -> Void)
         -> (producer: RuntimeEventStream, stream: AsyncThrowingStream<RuntimeEvent, any Error>) {
@@ -95,8 +98,20 @@ final class RuntimeEventStream: Sendable {
         publish(ending: ending)
     }
 
+    /// A late owning reply can enrich an unread failure, never replace an observed outcome.
+    /// The router must retain request context for replies arriving after failure observation.
     func interrupt(_ error: RuntimeSessionFailure) {
         let ending = state.withLock { state -> Bool in
+            if case .failed(let existing) = state.end, !state.failureObserved {
+                guard existing.operationID == nil || error.operationID == nil
+                    || existing.operationID == error.operationID else { return false }
+                // Match registry semantics: ordinary cancellation can precede a precise cause.
+                let cause = existing.cause == .connectionLost ? error.cause : existing.cause
+                state.end = .failed(.init(cause: cause,
+                    operationID: existing.operationID ?? error.operationID,
+                    mayHaveMutated: existing.mayHaveMutated || error.mayHaveMutated))
+                return false // Preserve a known ID/specific cause and the single end callback.
+            }
             guard state.end == nil else { return false }
             state.end = .failed(error.contextualized(operationID: state.operation, mayHaveMutated: mayHaveMutated))
             return true
@@ -144,6 +159,7 @@ final class RuntimeEventStream: Sendable {
     private func take() -> Delivery {
         state.withLock { state in
             if !state.queue.isEmpty { return .value(state.queue.removeFirst()) }
+            if case .failed = state.end { state.failureObserved = true }
             return state.end.map(Delivery.end) ?? .wait
         }
     }

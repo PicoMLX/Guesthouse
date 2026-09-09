@@ -124,20 +124,41 @@ import Testing
     @Test func canceledBeforeFirstReadStillNotifiesTheOwner() async throws {
         let notices = Mutex<[RuntimeEventStream.Termination]>([])
         let pair = RuntimeEventStream.make(mayHaveMutated: true) { reason in notices.withLock { $0.append(reason) } }
-        let (gate, finish) = AsyncStream<Void>.makeStream()
         let task = Task {
-            for await _ in gate { break }
+            withUnsafeCurrentTask { $0?.cancel() }
+            #expect(Task.isCancelled)
             var iterator = pair.stream.makeAsyncIterator()
             return try await iterator.next()
         }
-        task.cancel()
         // The SDK can end an already-canceled unfolding iterator before invoking next().
         // No successful event is allowed, and cleanup must occur even while stream is retained.
         do { #expect(try await task.value == nil) }
         catch let error as GuesthouseError { #expect(error == .canceled) }
-        finish.finish()
         #expect(notices.withLock { $0 } == [.abandoned])
         withExtendedLifetime(pair.stream) {}
+    }
+
+    @Test func sdkCancellationReleasesTheSkippedProducerWhileStreamIsRetained() async throws {
+        let calls = Mutex(0), releases = Mutex(0)
+        let stream: AsyncThrowingStream<Int, any Error>
+        do {
+            let capture = CancellationCapture { releases.withLock { $0 += 1 } }
+            stream = AsyncThrowingStream(unfolding: {
+                calls.withLock { $0 += 1 }
+                return withExtendedLifetime(capture) { 1 }
+            })
+        }
+        #expect(releases.withLock { $0 } == 0)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            #expect(Task.isCancelled)
+            var iterator = stream.makeAsyncIterator()
+            return try await iterator.next()
+        }
+        #expect(try await task.value == nil)
+        #expect(calls.withLock { $0 } == 0)
+        #expect(releases.withLock { $0 } == 1)
+        withExtendedLifetime(stream) {}
     }
 
     @Test func concurrentProducersDoNotOverfillOrFinishTwice() async throws {
@@ -162,6 +183,28 @@ import Testing
         pair.producer.interrupt(error)
         await #expect(throws: error) { try await collect(pair.stream) }
         #expect(!error.recoveryActions.contains(.retry))
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func lateInterruptionEnrichesOnlyUnreadFailure(accepted: Bool, observed: Bool) async throws {
+        for cause in [RuntimeSessionFailure.Cause.connectionLost, .protocolMismatch(service: 11)] {
+            let notices = Mutex<[RuntimeEventStream.Termination]>([])
+            let pair = RuntimeEventStream.make(mayHaveMutated: true) { reason in notices.withLock { $0.append(reason) } }
+            if accepted { pair.producer.reply(.accepted(Self.id)) }
+            pair.producer.interrupt(.init(cause: cause))
+            var iterator = pair.stream.makeAsyncIterator()
+            if accepted { #expect(try await iterator.next() == .accepted(Self.id)) }
+            let first = RuntimeSessionFailure(cause: cause,
+                                              operationID: accepted ? Self.id : nil, mayHaveMutated: true)
+            if observed { await #expect(throws: first) { try await iterator.next() } }
+            pair.producer.interrupt(.init(cause: .protocolMismatch(service: 11), operationID: Self.id))
+            pair.producer.interrupt(.init(cause: .oversizedResponse, operationID: OperationID()))
+            let expected = observed ? first : RuntimeSessionFailure(
+                cause: .protocolMismatch(service: 11), operationID: Self.id, mayHaveMutated: true)
+            await #expect(throws: expected) { try await iterator.next() }
+            #expect(!expected.recoveryActions.contains(.retry))
+            #expect(notices.withLock { $0 } == [.finished])
+        }
     }
 
     @Test func localRejectionDoesNotInventAnOperationOrEraseAnAcceptedOne() async throws {
@@ -239,6 +282,11 @@ import Testing
 }
 
 private final class Owner: Sendable {}
+private final class CancellationCapture: Sendable {
+    let released: @Sendable () -> Void
+    init(_ released: @escaping @Sendable () -> Void) { self.released = released }
+    deinit { released() }
+}
 private func makeCapturing(_ owner: Owner)
     -> (producer: RuntimeEventStream, stream: AsyncThrowingStream<RuntimeEvent, any Error>) {
     RuntimeEventStream.make(mayHaveMutated: false) { _ in withExtendedLifetime(owner) {} }
