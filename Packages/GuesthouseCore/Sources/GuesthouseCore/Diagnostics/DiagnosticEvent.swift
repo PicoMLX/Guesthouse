@@ -56,24 +56,26 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case pending, waitingForUserAction
         /// Emit only after cancellation/termination is confirmed, not when it is requested.
         case canceled
-        case failed(DiagnosticFailure)
+        /// Process status is failure context, never an attachment to a lifecycle outcome.
+        case failed(DiagnosticFailure, exitStatus: Int32? = nil)
     }
 
     public let operation: Operation
     public let outcome: Outcome
     public let operationID: UUID
     public let environmentID: EnvironmentID?
-    public let exitStatus: Int32?
+    public var exitStatus: Int32? {
+        if case .failed(_, let status) = outcome { status } else { nil }
+    }
 
     public init(
         operation: Operation, outcome: Outcome, operationID: UUID,
-        environmentID: EnvironmentID? = nil, exitStatus: Int32? = nil
+        environmentID: EnvironmentID? = nil
     ) {
         self.operation = operation
         self.outcome = outcome
         self.operationID = operationID
         self.environmentID = environmentID
-        self.exitStatus = exitStatus
     }
 
     /// Render locally from closed enums. Decoded/guest-supplied message text is never used.
@@ -86,7 +88,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
         case .canceled: detail = "Cancellation confirmed; partial changes may remain."
-        case .failed(let failure):
+        case .failed(let failure, _):
             if failure == .verificationFailed, operation == .importXcode {
                 detail = "The Xcode bundle failed verification."
             } else {
@@ -101,7 +103,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     public var recoveryMessage: String? {
         switch outcome {
         case .waitingForUserAction: "Complete the step shown by Guesthouse, then continue."
-        case .failed(let failure): recovery(for: failure)
+        case .failed(let failure, _): recovery(for: failure)
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
         case .canceled: "Inspect any partial changes before starting another operation."
         case .pending, .started, .succeeded: nil

@@ -8,8 +8,9 @@ struct DiagnosticLogTests {
 
     @Test(arguments: DiagnosticFailure.allCases)
     func errorsRemainActionable(_ failure: DiagnosticFailure) throws {
-        let event = DiagnosticEvent(operation: .connectSSH, outcome: .failed(failure),
-                                    operationID: Self.operationID, exitStatus: 255)
+        let event = DiagnosticEvent(operation: .connectSSH, outcome: .failed(failure, exitStatus: 255),
+                                    operationID: Self.operationID)
+        #expect(event.exitStatus == 255)
         #expect(event.message == "Connect over SSH: " + failure.message + " Exit status: 255.")
         #expect(event.recoveryMessage == failure.recoveryMessage)
         #expect(!failure.recoveryMessage.isEmpty)
@@ -46,7 +47,7 @@ struct DiagnosticLogTests {
         #expect(try actual.jsonData() == control.jsonData())
     }
 
-    @Test(arguments: ["operation", "outcome", "operationID", "environmentID", "exitStatus"])
+    @Test(arguments: ["operation", "outcome", "operationID", "environmentID"])
     func arbitraryTextInTypedFieldsIsRejected(_ field: String) throws {
         let event = DiagnosticEvent(operation: .checkTools, outcome: .succeeded, operationID: Self.operationID)
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
@@ -55,11 +56,36 @@ struct DiagnosticLogTests {
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(DiagnosticEvent.self, from: data) }
     }
 
+    @Test func arbitraryTextInFailureExitStatusIsRejected() throws {
+        let data = Data(#"{"failed":{"_0":"processFailed","exitStatus":"syntheticOpaque"}}"#.utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(DiagnosticEvent.Outcome.self, from: data) }
+    }
+
+    @Test(arguments: [
+        DiagnosticEvent.Outcome.started, .succeeded, .pending, .waitingForUserAction,
+        .cancellationRequested, .canceled
+    ])
+    func nonfailureOutcomesCannotCarryExitStatuses(_ outcome: DiagnosticEvent.Outcome) throws {
+        let expected = DiagnosticEvent(operation: .checkTools, outcome: outcome, operationID: Self.operationID)
+        #expect(expected.exitStatus == nil)
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(expected)) as? [String: Any])
+        object["exitStatus"] = 9
+        let outcomeObject = try #require(object["outcome"] as? [String: Any])
+        object["outcome"] = outcomeObject.mapValues { _ in ["exitStatus": 9] }
+        let event = try JSONDecoder().decode(DiagnosticEvent.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(event == expected)
+        #expect(event.exitStatus == nil)
+        var log = DiagnosticLog()
+        log.append(event, recordedAt: Self.timestamp)
+        #expect(!log.text.contains("Exit status:"))
+        #expect(!String(decoding: try log.jsonData(), as: UTF8.self).contains("exitStatus"))
+    }
+
     @Test func boundedHistoryPreservesTheNewestEvents() {
         var log = DiagnosticLog(capacity: 2)
         for status: Int32 in [1, 2, 3] {
-            log.append(DiagnosticEvent(operation: .checkTools, outcome: .failed(.processFailed),
-                                       operationID: Self.operationID, exitStatus: status), recordedAt: Self.timestamp)
+            log.append(DiagnosticEvent(operation: .checkTools, outcome: .failed(.processFailed, exitStatus: status),
+                                       operationID: Self.operationID), recordedAt: Self.timestamp)
         }
         #expect(log.records.map(\.event.exitStatus) == [2, 3])
         #expect(log.discardedCount == 1)
@@ -118,12 +144,16 @@ struct DiagnosticLogTests {
         var log = DiagnosticLog()
         let event = DiagnosticEvent(operation: .githubSignOut, outcome: .succeeded, operationID: Self.operationID)
         log.append(event, recordedAt: Self.timestamp)
+        log.append(event, recordedAt: Date(timeIntervalSince1970: 0.123))
+        log.append(event, recordedAt: Date(timeIntervalSince1970: 0.999))
         log.append(event, recordedAt: Date(timeIntervalSince1970: 1))
         let expected = [
             "Guesthouse structured diagnostics. Raw process and authentication output excluded.",
             "Older/omitted events: 0.",
-            "1970-01-01T00:00:00Z [\(Self.operationID)] Sign out of GitHub: Succeeded.",
-            "1970-01-01T00:00:01Z [\(Self.operationID)] Sign out of GitHub: Succeeded."
+            "1970-01-01T00:00:00.000Z [\(Self.operationID)] Sign out of GitHub: Succeeded.",
+            "1970-01-01T00:00:00.123Z [\(Self.operationID)] Sign out of GitHub: Succeeded.",
+            "1970-01-01T00:00:00.999Z [\(Self.operationID)] Sign out of GitHub: Succeeded.",
+            "1970-01-01T00:00:01.000Z [\(Self.operationID)] Sign out of GitHub: Succeeded."
         ].joined(separator: "\n")
         #expect(log.text == expected)
     }

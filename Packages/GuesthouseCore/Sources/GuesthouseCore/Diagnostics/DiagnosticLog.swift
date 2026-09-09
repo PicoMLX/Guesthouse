@@ -45,9 +45,13 @@ public struct DiagnosticLog: Sendable {
 
     public var text: String {
         let header = "Guesthouse structured diagnostics. Raw process and authentication output excluded."
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
         let lines = records.map { record in
             let event = record.event
-            return "\(record.recordedAt.ISO8601Format()) [\(event.operationID)] "
+            let timestamp = formatter.string(from: record.recordedAt)
+            return "\(timestamp) [\(event.operationID)] "
                 + (event.environmentID.map { "environment=\($0) " } ?? "")
                 + event.message
                 + (event.recoveryMessage.map { " Recovery: " + $0 } ?? "")
