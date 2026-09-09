@@ -130,19 +130,20 @@ public struct ConnectionVerificationRecord: Hashable, Sendable {
         }
     }
 
-    private static func isIdentifier(_ value: String, punctuation: Set<UInt8>) -> Bool {
+    // Shared with private runtime-status admission; these are identity grammars, not redactors.
+    static func isIdentifier(_ value: String, punctuation: Set<UInt8>) -> Bool {
         guard isBoundedText(value, limit: maximumObservationLength) else { return false }
         return value.utf8.allSatisfy {
             (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || punctuation.contains($0)
         }
     }
 
-    private static func isVersionIdentifier(_ value: String) -> Bool {
+    static func isVersionIdentifier(_ value: String) -> Bool {
         guard let first = value.utf8.first, (48...57).contains(first) else { return false }
         return isIdentifier(value, punctuation: [43, 45, 46])
     }
 
-    private static func isBuildIdentifier(_ value: String) -> Bool {
+    static func isBuildIdentifier(_ value: String) -> Bool {
         guard let first = value.utf8.first, (48...57).contains(first) else { return false }
         return isIdentifier(value, punctuation: [])
     }
