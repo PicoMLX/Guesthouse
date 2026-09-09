@@ -34,7 +34,8 @@ public struct DiagnosticLog: Sendable {
     /// Export only typed records. Never attach an error description on encoding failure.
     public func jsonData() throws -> Data {
         struct Export: Encodable {
-            let schemaVersion = 1
+            // Version 2 adds domain-specific operationFailed outcomes (ADR 0003).
+            let schemaVersion = 2
             let discardedCount: UInt64
             let records: [Record]
         }

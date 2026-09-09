@@ -58,6 +58,13 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case canceled
         /// Process status is failure context, never an attachment to a lifecycle outcome.
         case failed(DiagnosticFailure, exitStatus: Int32? = nil)
+        /// Non-cancellation errors. Adapters use init(error:) to preserve terminal cancellation.
+        case operationFailed(GuesthouseError)
+
+        /// A canceled error means cancellation was confirmed, not merely requested.
+        public init(error: GuesthouseError) {
+            self = error == .canceled ? .canceled : .operationFailed(error)
+        }
     }
 
     public let operation: Operation
@@ -95,6 +102,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
                 detail = failure == .verificationFailed && isDownload
                     ? "The downloaded artifact failed verification." : failure.message
             }
+        case .operationFailed(let error): detail = error.userMessage
         }
         return operation.title + ": " + detail
             + (exitStatus.map { " Exit status: \($0)." } ?? "")
@@ -104,6 +112,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         switch outcome {
         case .waitingForUserAction: "Complete the step shown by Guesthouse, then continue."
         case .failed(let failure, _): recovery(for: failure)
+        case .operationFailed(let error): error.recoveryMessage
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
         case .canceled: "Inspect any partial changes before starting another operation."
         case .pending, .started, .succeeded: nil
