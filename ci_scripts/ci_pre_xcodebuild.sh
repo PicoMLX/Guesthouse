@@ -25,5 +25,6 @@ fi
 for manifest in "${package_manifests[@]}"; do
     package_directory="${manifest%/Package.swift}"
     printf 'Testing %s with warnings treated as errors\n' "${package_directory}"
-    swift test --package-path "${package_directory}" -Xswiftc -warnings-as-errors
+    swift test --package-path "${package_directory}" -Xswiftc -warnings-as-errors \
+        -Xcc -Wall -Xcc -Wextra -Xcc -Werror
 done
