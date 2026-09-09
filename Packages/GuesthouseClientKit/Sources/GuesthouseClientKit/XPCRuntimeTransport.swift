@@ -4,8 +4,7 @@ import Synchronization
 import XPC
 
 /// GUI-side native client migrated from #67/#68/#103 (#19/#112, MVP-PLAN.md §3).
-/// The app does not instantiate this yet. Embedding/activation must choose a fresh shared
-/// wire epoch; the current epoch remains a fixture contract, not a production handshake.
+/// Matches the embedded service's activation wire epoch. GUI query presentation is separate.
 /// All callbacks MUST only enqueue bounded, nonblocking work and must not reenter transport.
 /// There is no replay, background reconnect, process execution or raw diagnostic output.
 public final class XPCRuntimeTransport: Sendable {

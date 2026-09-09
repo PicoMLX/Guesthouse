@@ -1,6 +1,6 @@
 import Foundation
 
-/// Mandatory epoch-8 reply/push envelope. No bare-event or legacy-output fallback.
+/// Mandatory versioned reply/push envelope. No bare-event or legacy-output fallback.
 public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
     public let protocolVersion: RuntimeProtocolVersion
     public let event: RuntimeEvent
