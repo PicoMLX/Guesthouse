@@ -19,7 +19,7 @@ enum StorageFailure: Error, Equatable, Sendable, CaseIterable {
         case .protectionDrift:
             "Guesthouse storage is no longer private. Cancel and leave its contents in place; they may contain unpublished work."
         case .preparationFailed:
-            "Guesthouse could not finish preparing its private storage. Cancel and preserve the folders and any unpublished work. No storage operation has been authorized."
+            "Guesthouse could not finish preparing its private storage. Cancel and preserve the folders and any unpublished work; some storage metadata may already have changed."
         }
     }
     var recoveryActions: [RecoveryAction] { [.cancel] }
