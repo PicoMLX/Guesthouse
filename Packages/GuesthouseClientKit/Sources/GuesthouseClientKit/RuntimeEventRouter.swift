@@ -66,6 +66,7 @@ struct RuntimeEventRouter: Sendable {
         guard let entry = requests[key] else { return [] }
         guard entry.awaiting else { return fault(.malformedResponse) }
         requests.removeValue(forKey: key)
+        admitted -= 1 // Return the reservation only when the owner proves no native send occurred.
         entry.producer.rejectBeforeSend(error)
         discardUnjustifiedPending()
         return []

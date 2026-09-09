@@ -10,13 +10,13 @@ import Testing
     static let cases: [(RuntimeEvent, RuntimeVersionQuery.Outcome)] = [
         (.runtimeVersion(info), .success(info)),
         (.runtimeVersion(.init(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(11))),
-         .failure(.connection(.init(cause: .malformedResponse)))),
+         .failure(.connection(.init(cause: .protocolMismatch(service: 11))))),
         (.failed(id, .unauthorizedCaller), .failure(.runtime(.unauthorizedCaller))),
         (.accepted(id), .failure(.connection(.init(cause: .malformedResponse, operationID: id)))),
         (.completed(id), .failure(.connection(.init(cause: .malformedResponse, operationID: id)))),
         (.progress(id, .init(kind: .copying)), .failure(.connection(.init(cause: .malformedResponse, operationID: id)))),
         (.diagnostic(.init(operation: .runtimeRequest, outcome: .started, operationID: id.uuid)),
-         .failure(.connection(.init(cause: .malformedResponse)))),
+         .failure(.connection(.init(cause: .malformedResponse, operationID: id)))),
         (.status(.init(environmentID: EnvironmentID(), vm: .stopped, readiness: .checking)),
          .failure(.connection(.init(cause: .malformedResponse)))),
     ]
@@ -69,6 +69,17 @@ import Testing
         #expect(await run(session, deadline: {}) == .failure(.timedOut))
         #expect(session.cancellations.withLock { $0 } == 1)
         session.answerLate(.success(.runtimeVersion(Self.info)))
+        #expect(session.sends.withLock { $0 } == 1)
+    }
+
+    @Test func suppliedDeadlineBeyondTenSecondsIsTheOnlyTimeout() async {
+        let session = QuerySession([])
+        defer { session.releaseReply() }
+        // Intentionally crosses the old hidden ten-second timer; an immediate fake
+        // deadline cannot expose that competing clock. No timing-based state polling.
+        let value = await run(session, deadline: { try await ContinuousClock().sleep(for: .seconds(11)) })
+        #expect(value == .failure(.timedOut))
+        #expect(session.cancellations.withLock { $0 } == 1)
         #expect(session.sends.withLock { $0 } == 1)
     }
 
