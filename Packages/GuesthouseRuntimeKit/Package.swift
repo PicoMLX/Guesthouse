@@ -18,7 +18,10 @@ let package = Package(
         .target(name: "GuesthouseRuntimeAuthentication"),
         .target(
             name: "GuesthouseRuntimeKit",
-            dependencies: ["GuesthouseRuntimeAuthentication"],
+            dependencies: [
+                "GuesthouseRuntimeAuthentication",
+                .product(name: "GuesthouseCore", package: "GuesthouseCore"),
+            ],
             swiftSettings: runtimeSwiftSettings
         ),
         .testTarget(

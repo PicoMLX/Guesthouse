@@ -5,6 +5,7 @@ import Foundation
 /// IDs must come from Guesthouse's operation/environment records, not guest output.
 public struct DiagnosticEvent: Codable, Hashable, Sendable {
     public enum Operation: String, CaseIterable, Codable, Sendable {
+        case runtimeRequest
         case preflight, verifyRuntime, createEnvironment, startEnvironment, stopEnvironment
         case inspectEnvironment, connectSSH, importXcode, checkTools, codexSignIn, githubSignIn
         case synchronizeRepositories, testWorkspace, publishChanges, exportDiagnostics
@@ -15,6 +16,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
 
         public var title: String {
             switch self {
+            case .runtimeRequest: "Contact runtime service"
             case .preflight: "Check this Mac"
             case .verifyRuntime: "Verify runtime"
             case .createEnvironment: "Create development Mac"
