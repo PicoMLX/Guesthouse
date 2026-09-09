@@ -191,6 +191,9 @@ struct RuntimeEventRouter: Sendable {
         failure.outcomeUnknown ? [.unknownOutcome(.init(key: entry.key, environmentID: entry.request.environment,
             cancellationTarget: entry.request.cancellationTarget, failure: failure))] : []
     }
+    /// Owner-side inbox overflow/deadline: end consumers, but retain pending owning replies.
+    mutating func invalidate(_ cause: RuntimeSessionFailure.Cause) -> [Effect] { fault(cause) }
+
     private mutating func fault(_ cause: RuntimeSessionFailure.Cause) -> [Effect] {
         guard !requiresRetirement else { return [] }
         requiresRetirement = true; pending.removeAll()
