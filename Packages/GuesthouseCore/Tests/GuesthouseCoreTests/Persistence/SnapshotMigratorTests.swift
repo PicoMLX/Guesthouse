@@ -13,6 +13,23 @@ import Testing
         #expect(SnapshotMigrator.standard.current == EnvironmentsSnapshot.currentSchema)
     }
 
+    @Test(arguments: [UInt64(9_223_372_036_854_775_808), UInt64.max - 1, UInt64.max])
+    func currentSnapshotsKeepLargeCounterBytesAndOutstandingIdentity(counter: UInt64) throws {
+        let environment = DevelopmentEnvironment(name: "Dev", createdAt: Date(timeIntervalSince1970: 0))
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let state = ProvisioningState(stage: .first, status: .awaitingInspection(EffectToken(counter)), issuedEffects: counter)
+        let original = EnvironmentsSnapshot(environments: [environment], slots: slots, provisioning: [environment.id: state])
+        let source = try JSONEncoder().encode(original)
+        let result = try SnapshotMigrator.standard.migrate(source)
+        #expect(result.data == source)
+        #expect(result.from == EnvironmentsSnapshot.currentSchema)
+        let restored = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: result.data)
+        #expect(restored == original)
+        #expect(restored.provisioning[environment.id]?.issuedEffects == counter)
+        #expect(restored.provisioning[environment.id]?.status.pendingEffect == EffectToken(counter))
+    }
+
     @Test(arguments: [
         ("{}", SchemaVersion.unversioned),
         ("{\"schemaVersion\":1}", SchemaVersion(1)!),

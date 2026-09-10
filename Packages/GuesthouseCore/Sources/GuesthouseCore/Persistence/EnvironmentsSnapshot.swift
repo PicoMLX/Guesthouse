@@ -127,14 +127,9 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
             guard state.isConsistent else {
                 throw .inconsistentSnapshot(reason: .checkpointStage)
             }
-            // A state that has kept minting since it was read may stand one above the ceiling
-            // without being wrong — that headroom is what keeps the next transition from
-            // trapping — but the ceiling is a rule about *persisted* records, and the decoder
-            // refuses one that carries a counter above it. Writing that state would report the
-            // whole snapshot corrupt on the next launch, losing every other environment with it.
-            guard max(state.issuedEffects, state.status.pendingEffect?.value ?? 0) <= ProvisioningState.maximumIssuedEffects else {
-                throw .inconsistentSnapshot(reason: .effectCounter)
-            }
+            // ProvisioningState accepts the same full UInt64 range in memory and on disk.
+            // Exhaustion refuses new reservations, not persistence of an outstanding effect.
+            // Do not impose a second, smaller snapshot-only counter ceiling here.
         }
     }
 }
