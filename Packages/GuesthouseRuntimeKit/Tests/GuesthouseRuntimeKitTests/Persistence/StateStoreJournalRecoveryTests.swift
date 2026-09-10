@@ -124,6 +124,41 @@ import Testing
     }
 
     @Test(arguments: [
+        SelfContradiction.operationIdentity, .checkpointStage, .guestEnvironment, .hostKeyEnvironment,
+    ], [false, true])
+    func restoredRecordsMustMeetTheSameRulesAsAppend(contradiction: SelfContradiction, terminated: Bool) async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let started = Self.record(operation: .provision(stage: .sshPaired))
+        let outcome: JournalRecord.Outcome = switch contradiction {
+        case .operationIdentity: .failed(.operationOutcomeUnknown(OperationID()))
+        case .checkpointStage: .checkpoint(.guestSecured)
+        case .guestEnvironment: .failed(.guestNotReachable(EnvironmentID()))
+        case .hostKeyEnvironment: .failed(.hostKeyChanged(EnvironmentID()))
+        }
+        let inconsistent = Self.record(id: started.id, environment: started.environmentID,
+                                       operation: started.operation, outcome: outcome)
+        let line = try JSONEncoder().encode(inconsistent)
+        try #require(try JSONDecoder().decode(JournalRecord.self, from: line) == inconsistent)
+        try await store.append(started)
+        let evidence = try fixture.bytes()
+        await #expect(throws: StateStoreError.inconsistentRecord(started.id)) { try await store.append(inconsistent) }
+        #expect(try fixture.bytes() == evidence)
+        #expect(try await store.replay().records == [started])
+
+        // A restored, syntactically valid record must not bypass append's identity checks.
+        let restored = evidence + line + (terminated ? Data([0x0A]) : Data())
+        try fixture.write(restored)
+        let reopened = try await fixture.open()
+        let failure = StateStoreError.corruptJournal(line: 2)
+        await #expect(throws: failure) { try await reopened.replay() }
+        await #expect(throws: failure) { try await reopened.begin(.exportWork, for: EnvironmentID()) }
+        #expect(try fixture.bytes() == restored)
+        // Nor may the already-open store retain its formerly valid cached prefix.
+        await #expect(throws: failure) { try await store.replay() }
+        #expect(try fixture.bytes() == restored)
+    }
+
+    @Test(arguments: [
         (0, StateStoreError.corruptJournal(line: 1)), (-1, .corruptJournal(line: 1)),
         (1, .unsupportedJournalFormat(line: 1, format: 1)),
         (99, .unsupportedJournalFormat(line: 1, format: 99)),
@@ -173,6 +208,10 @@ import Testing
     enum Contradiction: Sendable {
         case orphanedOutcome, duplicateStart, concurrentStart, changedEnvironment
         case changedOperation, outcomeAfterSettlement, conflictingFailureIdentity
+    }
+
+    enum SelfContradiction: Sendable {
+        case operationIdentity, checkpointStage, guestEnvironment, hostKeyEnvironment
     }
 
     // This constructs invalid fixtures; the assertion is always the same refusal/preservation.
