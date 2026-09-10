@@ -52,21 +52,21 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
 
     public func handleIncomingRequest(_ message: XPCDictionary) -> XPCDictionary? {
         guard let others = gate.began() else { return nil }
-        // Finish every counted callback once, AFTER explicit reply handoff (or send failure).
-        // Refusal stops new admission immediately; only already counted callbacks may drain.
-        defer { if gate.finished() { cancel() } }
         let authorized = authenticate(message) // ORIGINAL, before context/header/payload access.
         let context = RawRuntimeReplyContext(receivedMessage: message)
+        let reply = RuntimeReplyObligation(
+            gate: gate, answer: { [self] event in answer(event, context: context) }, cancel: cancel
+        )
         guard authorized else {
-            answer(refusing(.unauthorizedCaller), context: context)
+            reply.finish(refusing(.unauthorizedCaller))
             return nil
         }
         // One-way messages never decode/register: no acceptance could be observed or canceled.
-        guard let context else {
-            record(.failed(OperationID(), .invalidRequest(.malformed)))
+        guard context != nil else {
+            reply.finish(.failed(OperationID(), .invalidRequest(.malformed)))
             return nil
         }
-        if let refusal = gate.refusal { answer(refusal, context: context); return nil }
+        if let refusal = gate.refusal { reply.finish(refusal); return nil }
         let decision: RuntimeDispatcher.Decision
         if let capped = RuntimeDispatcher.admit(inFlight: others, clientVersion: {
             message.withUnsafeUnderlyingDictionary { dictionary in
@@ -103,7 +103,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
             event = gate.refusal ?? refusal
         case .dispatch(let request): event = gate.commit(request, register: register)
         }
-        answer(event, context: context)
+        reply.finish(event)
         return nil // No implicit second reply/context creation.
     }
 
