@@ -88,6 +88,36 @@ private let uncertainOperation = OperationID()
         }
     }
 
+    @Test(arguments: [UInt64.max / 2, UInt64.max - 1, UInt64.max])
+    func everyLegalTransitionHandlesCounterBoundariesWithoutLosingState(issued: UInt64) throws {
+        for transition in legalTransitions {
+            let original = ProvisioningState(stage: transition.from.stage, status: transition.from.status, issuedEffects: issued)
+            let source = try JSONEncoder().encode(original)
+            let restored = try JSONDecoder().decode(ProvisioningState.self, from: source)
+            let reservesIdentity: Bool
+            if case .startRequested = transition.event {
+                reservesIdentity = true
+            } else {
+                reservesIdentity = !transition.expectedEffects.isEmpty
+            }
+            if issued == UInt64.max && reservesIdentity {
+                #expect(throws: ProvisioningTransitionError.effectCounterExhausted, Comment(rawValue: transition.name)) {
+                    try Reducer.reduce(restored, transition.event)
+                }
+                #expect(restored == original)
+                #expect(try JSONDecoder().decode(ProvisioningState.self, from: source) == original)
+            } else {
+                let result = try Reducer.reduce(restored, transition.event)
+                #expect(result.state.issuedEffects == (reservesIdentity ? issued + 1 : issued))
+                #expect(result.state.status.caseName == transition.expectedStatus)
+                #expect(try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(result.state)) == result.state)
+                if !result.effects.isEmpty {
+                    #expect(try token(of: result.effects).value == issued + 1)
+                }
+            }
+        }
+    }
+
     @Test func nothingAdvancesUntilTheCheckpointIsPersisted() {
         let writing = state(.preflight, .persistingCheckpoint(checkpoint(.preflight), operation: op, write: pending))
         #expect(throws: ProvisioningTransitionError.illegalTransition(status: .persistingCheckpoint, event: .startRequested)) {

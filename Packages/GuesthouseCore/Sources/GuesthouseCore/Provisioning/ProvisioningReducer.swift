@@ -21,17 +21,19 @@ enum ProvisioningReducer: Sendable {
     ) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
         let stage = state.stage
         var issued = state.issuedEffects
-        func mint() -> EffectToken {
-            issued += 1
-            return EffectToken(issued)
+        func mint() throws(ProvisioningTransitionError) -> EffectToken {
+            let current = ProvisioningState(stage: stage, status: state.status, issuedEffects: issued)
+            guard let token = current.nextEffectToken else { throw .effectCounterExhausted }
+            issued = token.value
+            return token
         }
         func at(_ status: StageStatus, _ effects: [ProvisioningEffect] = []) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
             (ProvisioningState(stage: stage, status: status, issuedEffects: issued), effects)
         }
         /// Mints the inspection's token once, so the status and the effect asking for it can
         /// never name different inspections.
-        func inspect(operation: OperationID? = nil) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
-            let token = mint()
+        func inspect(operation: OperationID? = nil) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
+            let token = try mint()
             let status = operation.map { StageStatus.unknownOutcome($0, inspection: token) } ?? .awaitingInspection(token)
             return at(status, [.inspectActualState(stage, token, operation: operation)])
         }
@@ -39,7 +41,7 @@ enum ProvisioningReducer: Sendable {
         /// reservation was made from so a refusal cannot orphan it.
         func reserve(_ requested: ProvisioningStage, resuming: ResumeEvidence?) throws(ProvisioningTransitionError) -> (state: ProvisioningState, effects: [ProvisioningEffect]) {
             guard requested == stage else { throw .stageMismatch(expected: stage, actual: requested) }
-            return at(.startRequested(request: mint(), resuming: resuming))
+            return try at(.startRequested(request: mint(), resuming: resuming))
         }
         /// Check the request before interpreting its reply: even an acceptance for the wrong
         /// stage must not abandon a newer reservation. Inspection-only reservations have no request identity,
@@ -57,7 +59,7 @@ enum ProvisioningReducer: Sendable {
                 // A later checkpoint is adopted: the journal is the durable truth, and pinning
                 // the saved stage would offer a start for a step the runtime already ran.
                 guard checkpoint.stage >= stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
-                let write = mint()
+                let write = try mint()
                 // Inspection settled the operation; delayed callbacks cannot abandon this write.
                 let status = StageStatus.persistingCheckpoint(checkpoint, operation: nil, write: write)
                 return (ProvisioningState(stage: checkpoint.stage, status: status, issuedEffects: issued), [.persistCheckpoint(checkpoint, write)])
@@ -72,7 +74,7 @@ enum ProvisioningReducer: Sendable {
             case .resumable(let evidence):
                 return at(.resumable(evidence))
             case .failedNeedsCleanup(let error):
-                let cleanup = mint()
+                let cleanup = try mint()
                 return at(.cleanupRequired(error, cleanup: cleanup), [.cleanUp(stage, cleanup)])
             case .failed(let error):
                 return at(.recoverableFailure(error, interrupted: nil))
@@ -95,7 +97,7 @@ enum ProvisioningReducer: Sendable {
         case (.completed, .startRequested(let requested)):
             guard let next = stage.next else { throw .alreadyReady }
             guard requested == next else { throw .stageMismatch(expected: next, actual: requested) }
-            let request = mint()
+            let request = try mint()
             return (ProvisioningState(stage: next, status: .startRequested(request: request, resuming: nil), issuedEffects: issued), [])
 
         case (.startRequested(let request, _), .operationStarted(let id, let requested, let token)):
@@ -103,7 +105,7 @@ enum ProvisioningReducer: Sendable {
             // This request has answered, so its reservation is no longer live. An acceptance
             // at the wrong stage may already be mutating. Inspect its identity across all stages
             // before reconciling the reserved stage; only that inspection can establish its stage.
-            guard requested == stage else { return inspect(operation: id) }
+            guard requested == stage else { return try inspect(operation: id) }
             return at(.inProgress(id))
 
         case (.startRequested(let request, let resuming), .startRequestRejected(let error, let token)):
@@ -114,12 +116,12 @@ enum ProvisioningReducer: Sendable {
 
         case (.startRequested(let request, _), .startRequestInterrupted(let token)):
             try requireRequest(request, token)
-            return inspect()
+            return try inspect()
 
         case (.startRequested(nil, _), .inspectionRequested):
             // A tokenless saved reservation is inspection-only. No uncorrelated callback
             // can settle it or authorize another start in its place.
-            return inspect()
+            return try inspect()
 
         case (.startRequested, .inspectionRequested):
             // The reservation stays held: the request is still live, so the runtime may still
@@ -134,7 +136,7 @@ enum ProvisioningReducer: Sendable {
             // be before the GUI reports it; refusing its checkpoint would drop a reached one.
             try requireSame(current, id)
             guard checkpoint.stage == stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
-            let write = mint()
+            let write = try mint()
             return at(.persistingCheckpoint(checkpoint, operation: current, write: write), [.persistCheckpoint(checkpoint, write)])
 
         case (.persistingCheckpoint(let pending, _, let write), .checkpointPersisted(let token, let persisted)):
@@ -157,7 +159,7 @@ enum ProvisioningReducer: Sendable {
             // abandon a live write and make its own successful callback stale.
             guard let writer else { throw .illegalTransition(status: state.status.kind, event: event.kind) }
             try requireSame(writer, id)
-            return inspect(operation: writer)
+            return try inspect(operation: writer)
 
         case (.persistingCheckpoint(_, let writer, _), .userRetried),
              (.persistingCheckpoint(_, let writer, _), .inspectionRequested):
@@ -168,7 +170,7 @@ enum ProvisioningReducer: Sendable {
             // the second (MVP-PLAN.md §3). A checkpoint restored after a relaunch is exactly
             // that case: the write is lost, the operation behind it need not be. The unscoped
             // status is left to a reconciled write, which has no operation behind it.
-            return inspect(operation: writer)
+            return try inspect(operation: writer)
 
         case (.inProgress(let current), .operationFailed(let id, let error)),
              (.needsUserAction(let current, _), .operationFailed(let id, let error)):
@@ -192,27 +194,27 @@ enum ProvisioningReducer: Sendable {
 
         case (.needsUserAction(let current, _), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return inspect(operation: id)
+            return try inspect(operation: id)
 
         case (.inProgress(let current), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return inspect(operation: id)
+            return try inspect(operation: id)
 
         case (.unknownOutcome(let current, _), .connectionInterrupted(let id)):
             try requireSame(current, id)
-            return inspect(operation: id)
+            return try inspect(operation: id)
 
         case (.unknownOutcome(let current, _), .userRetried), (.unknownOutcome(let current, _), .inspectionRequested):
             // A fresh inspection replaces the outstanding one rather than joining it: the reply
             // to the earlier one describes a state that may already be obsolete, and its token
             // is no longer accepted.
-            return inspect(operation: current)
+            return try inspect(operation: current)
 
         case (.awaitingInspection, .userRetried), (.awaitingInspection, .inspectionRequested):
             // Reissued rather than suppressed: an inspection whose request was never submitted,
             // whose reply was lost, or that was still outstanding when the app was relaunched
             // would otherwise leave no event that can produce a `reconciled` result.
-            return inspect()
+            return try inspect()
 
         case (.cleanupRequired, .userRetried):
             // The cleanup's result is unknown; inspect rather than clean up blindly again. If
@@ -225,13 +227,13 @@ enum ProvisioningReducer: Sendable {
             // this cleanup's token with an inspection and make its own `cleanupFinished` stale.
             // A coordinator that loses contact while a cleanup is pending asks for the
             // inspection by name with `inspectionRequested`, which lands in the same place.
-            return inspect()
+            return try inspect()
 
         case (.inProgress(let current), .inspectionRequested), (.needsUserAction(let current, _), .inspectionRequested):
             // The operation is still live, so its identity is carried through the inspection:
             // an unscoped one would adopt a `stillRunning` naming some other operation, or a
             // `notStarted` that permits a second mutation while this one keeps going.
-            return inspect(operation: current)
+            return try inspect(operation: current)
 
         case (.recoverableFailure(_, .some(let interrupted)), .inspectionRequested),
              (.recoverableFailure(_, .some(let interrupted)), .userRetried):
@@ -240,18 +242,18 @@ enum ProvisioningReducer: Sendable {
             // inspection stays scoped to it. An unscoped one would adopt whatever identity the
             // next answer happens to name while the first operation may still be mutating
             // (MVP-PLAN.md §3).
-            return inspect(operation: interrupted)
+            return try inspect(operation: interrupted)
 
         case (_, .inspectionRequested):
-            return inspect()
+            return try inspect()
 
         case (.recoverableFailure, .userRetried), (.canceled, .userRetried):
-            return inspect()
+            return try inspect()
 
         case (.needsUserAction(let current, _), .userActionCompleted):
             // The operation the user was asked to unblock may still be running, so the
             // inspection stays scoped to it rather than accepting whatever it reports.
-            return inspect(operation: current)
+            return try inspect(operation: current)
 
         case (.unknownOutcome(let interrupted, let inspection), .operationReconciled(let token, let operation, let outcome)):
             try requireOutstanding(inspection, token)
