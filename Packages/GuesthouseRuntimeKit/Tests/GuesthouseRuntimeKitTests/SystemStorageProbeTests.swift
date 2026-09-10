@@ -154,7 +154,8 @@ struct SystemStorageProbeTests {
                         withIntermediateDirectories: false)
                 }
             }
-            #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "appeared").path).isEmpty)
+            let contents = try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "appeared").path)
+            #expect(contents.isEmpty)
         }
     }
 
