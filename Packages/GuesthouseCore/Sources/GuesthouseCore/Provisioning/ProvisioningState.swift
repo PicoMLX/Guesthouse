@@ -36,22 +36,26 @@ public struct ProvisioningState: Hashable, Sendable {
     /// The checkpoint being worked toward, or the last one completed.
     public private(set) var stage: ProvisioningStage
     public private(set) var status: StageStatus
-    /// How many start requests and effects this state has issued. The next token is this plus
-    /// one, and the count is persisted, so a token is never reused after a relaunch either.
+    /// How many start requests and effects this state has issued. Persisted without truncation
+    /// so a token is never reused after relaunch. Use `nextEffectToken` instead of adding one.
     public private(set) var issuedEffects: UInt64
+
+    /// The full representable range is valid both in memory and on disk. Exhaustion prevents
+    /// a new reservation, not restoration or settlement of an already outstanding effect.
+    public static let maximumIssuedEffects = UInt64.max
+
+    /// The next reservation's identity, or nil when no unused identity remains. A coordinator
+    /// must refuse new effects on exhaustion and preserve the record for recovery; never wrap,
+    /// reset, or reuse a token. Construct the next state with this token before executing it.
+    public var nextEffectToken: EffectToken? {
+        guard issuedEffects < Self.maximumIssuedEffects else { return nil }
+        return EffectToken(issuedEffects + 1)
+    }
 
     /// A status that carries a checkpoint must carry one for `stage`; constructing anything
     /// else is a programming error, and decoding it is rejected. The fields are read-only
     /// afterwards: a transition constructs a new validated state, so the
     /// checkpoint-ordering invariant cannot be broken by assignment.
-    /// The largest effect counter a *persisted* state may carry. A transition mints at most one
-    /// token, so reaching this would take more transitions than a process can perform: a higher
-    /// count is a corrupt or hostile record rather than a state this package wrote, and it is
-    /// refused where it is read. A state that has been minting since it was read may stand above
-    /// the ceiling without being wrong, which is what the other half of the range is for — no
-    /// sequence of transitions can consume that headroom, so the next mint always has a token.
-    public static let maximumIssuedEffects = UInt64.max / 2
-
     public init(stage: ProvisioningStage, status: StageStatus, issuedEffects: UInt64 = 0) {
         precondition(Self.isConsistent(stage: stage, status: status), "checkpoint stage does not match \(stage.rawValue)")
         schemaVersion = Self.currentSchema
@@ -59,14 +63,7 @@ public struct ProvisioningState: Hashable, Sendable {
         self.status = status
         // The count may never trail the outstanding token, or the next effect would be minted
         // with a token a late callback from the previous one still names.
-        let count = max(issuedEffects, status.pendingEffect?.value ?? 0)
-        // Deliberately not `maximumIssuedEffects`: that ceiling is a rule about records read
-        // from disk, and a state decoded at the ceiling mints its next token one above it.
-        // Holding this initializer to the same number would trap on that first transition —
-        // the very crash the ceiling exists to prevent — so what is refused here is a count
-        // with no token left above it at all, which the ceiling's headroom puts out of reach.
-        precondition(count < UInt64.max, "effect counter \(count) leaves no token to mint")
-        self.issuedEffects = count
+        self.issuedEffects = max(issuedEffects, status.pendingEffect?.value ?? 0)
     }
 
     /// A brand-new environment: nothing has run yet.
@@ -110,9 +107,6 @@ extension ProvisioningState: Codable {
             throw DecodingError.dataCorruptedError(forKey: .status, in: container, debugDescription: "checkpoint stage does not match \(stage.rawValue)")
         }
         let issuedEffects = try container.decode(UInt64.self, forKey: .issuedEffects)
-        guard max(issuedEffects, status.pendingEffect?.value ?? 0) <= Self.maximumIssuedEffects else {
-            throw DecodingError.dataCorruptedError(forKey: .issuedEffects, in: container, debugDescription: "effect counter is beyond \(Self.maximumIssuedEffects)")
-        }
         self.init(stage: stage, status: status, issuedEffects: issuedEffects)
     }
 
