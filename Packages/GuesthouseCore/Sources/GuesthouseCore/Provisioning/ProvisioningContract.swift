@@ -170,13 +170,16 @@ public enum ProvisioningTransitionError: Error, Hashable, Sendable {
     /// plain illegal transition because `inspectState` is the one recovery that cannot work
     /// here: offering it would send the same refused event again.
     case inspectionWhileStartRequestLive
+    /// No unused persisted effect identity remains. Existing callbacks may still settle;
+    /// a new reservation must not wrap the counter or replace the preserved record.
+    case effectCounterExhausted
     /// `ready` has no next stage.
     case alreadyReady
 }
 
 extension ProvisioningTransitionError: LocalizedError {
-    /// These are programming errors in the coordinator, not user mistakes, but the user still
-    /// needs to know the environment's state is uncertain and what to do about it.
+    /// Rejected transitions are not user mistakes. Explain the boundary with fixed text,
+    /// preserving uncertain state and providing only recovery actions that remain legal.
     public var userMessage: String {
         switch self {
         case .illegalTransition, .operationMismatch, .checkpointMismatch, .staleEffect:
@@ -187,6 +190,8 @@ extension ProvisioningTransitionError: LocalizedError {
             "Guesthouse is still waiting for its runtime to answer a request to start this setup step, so it cannot check the environment yet."
         case .alreadyReady:
             "Guesthouse has recorded the final setup checkpoint. There is no later setup step."
+        case .effectCounterExhausted:
+            "Guesthouse cannot reserve another setup effect because this record has no unused effect identities."
         }
     }
 
@@ -194,6 +199,7 @@ extension ProvisioningTransitionError: LocalizedError {
         switch self {
         case .alreadyReady: "Check the environment before relying on its saved readiness."
         case .inspectionWhileStartRequestLive, .staleStartRequest: "Wait for the runtime reply. If contact is lost, preserve the environment and reconnect before inspecting."
+        case .effectCounterExhausted: "Cancel the new request and preserve the environment and its state record for recovery. Do not reset its effect counter."
         default: "Preserve the environment and check its state before starting another setup operation."
         }
     }
@@ -204,7 +210,7 @@ extension ProvisioningTransitionError: LocalizedError {
     /// The recovery actions the GUI should offer.
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .inspectionWhileStartRequestLive, .staleStartRequest: [.cancel]
+        case .inspectionWhileStartRequestLive, .staleStartRequest, .effectCounterExhausted: [.cancel]
         default: [.inspectState, .cancel]
         }
     }
