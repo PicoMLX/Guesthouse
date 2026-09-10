@@ -14,7 +14,8 @@ enum StorageVolumeProbe {
     // Darwin getattrlist(2): length, returned attribute_set_t, off_t, uuid_t, aligned
     // to four bytes. PACK_INVAL fixes offsets; the returned masks still determine validity.
     static let bufferSize = 48
-    private static let requestedVolume = UInt32(ATTR_VOL_SPACEAVAIL | ATTR_VOL_UUID | ATTR_VOL_INFO)
+    private static let requestedVolume = UInt32(ATTR_VOL_SPACEAVAIL)
+        | UInt32(ATTR_VOL_UUID) | UInt32(ATTR_VOL_INFO)
 
     /// Borrows an open directory; the caller owns its lifetime, selection and path checks.
     static func snapshot(descriptor: Int32) throws(HostProbeError) -> Snapshot {
