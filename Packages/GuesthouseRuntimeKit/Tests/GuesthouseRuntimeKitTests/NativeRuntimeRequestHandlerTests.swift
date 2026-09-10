@@ -151,6 +151,99 @@ import XPC
         #expect(fixture.trace.steps.withLock { $0 } == before)
     }
 
+    @Test func deferredReplyRetainsOriginalContextAfterNativeCallbackReturns() async throws {
+        let fixture = try Fixture(deferredReplies: true)
+        defer { fixture.cancel() }
+        let response = fixture.request(try message(.current))
+        _ = try await next(fixture.processed)
+        #expect(fixture.trace.steps.withLock { $0 } == [.authenticated, .decoded, .registered])
+        #expect(fixture.executor.pending.withLock { $0.count } == 1)
+        #expect(fixture.gate.began() == 1, "the original callback still owes its reply")
+        #expect(!fixture.gate.finished()) // Balance only this synthetic observation.
+        fixture.executor.drain()
+        #expect(try await next(response) == .runtimeVersion(version))
+        #expect(fixture.trace.steps.withLock { Array($0.suffix(3)) } == [.probed, .sendAttempt, .sent])
+        #expect(fixture.gate.began() == 0)
+        #expect(!fixture.gate.finished())
+    }
+
+    @Test func deferredWorkerCapSpansNativeSessionsWithoutClosingEither() async throws {
+        let first = try Fixture(deferredReplies: true)
+        defer { first.cancel() }
+        let second = try Fixture(deferredReplies: true, sharedWorker: first.worker)
+        defer { second.cancel() }
+        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        for fixture in [first, second, first, second] {
+            responses.append(fixture.request(try message(.current)))
+            _ = try await next(fixture.processed)
+        }
+        #expect(first.executor.pending.withLock { $0.count } == 4)
+        #expect(failure(try await next(first.request(try message(.current)))) == .invalidRequest(.tooManyInFlight))
+        _ = try await next(first.processed)
+        #expect(first.gate.refusal == nil && second.gate.refusal == nil)
+        #expect(first.executor.pending.withLock { $0.count } == 4)
+        first.executor.drain()
+        for response in responses { #expect(try await next(response) == .runtimeVersion(version)) }
+        #expect(first.trace.steps.withLock { $0.filter { $0 == .probed }.count } == 2)
+        #expect(second.trace.steps.withLock { $0.filter { $0 == .probed }.count } == 2)
+    }
+
+    @Test func terminalNativeRefusalAnswersQueuedReadsBeforeCancelWithoutProbing() async throws {
+        let fixture = try Fixture(deferredReplies: true)
+        defer { fixture.cancel() }
+        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        for _ in 0..<2 {
+            responses.append(fixture.request(try message(.current)))
+            _ = try await next(fixture.processed)
+        }
+        responses.append(fixture.request(try message(.foreignHeader)))
+        _ = try await next(fixture.processed)
+        for response in responses {
+            #expect(failure(try await next(response)) == .protocolMismatch(client: 99, service: RuntimeProtocolVersion.current.rawValue))
+        }
+        let before = fixture.trace.steps.withLock { $0 }
+        #expect(before.filter { $0 == .sent }.count == 3)
+        #expect(before.filter { $0 == .canceled }.count == 1 && before.last == .canceled)
+        fixture.executor.drain() // Canceled queue entries still consume capacity until drained.
+        #expect(fixture.trace.steps.withLock { $0 } == before)
+        #expect(!before.contains(.probed))
+        #expect(fixture.gate.began() == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func deferredEncodingOrSendFailureDrainsSiblingRepliesOnce(failSend: Bool) async throws {
+        let fixture = try Fixture(badVersion: !failSend, failSend: failSend, deferredReplies: true)
+        defer { fixture.cancel() }
+        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        for _ in 0..<3 {
+            responses.append(fixture.request(try message(.current)))
+            _ = try await next(fixture.processed)
+        }
+        fixture.executor.drain()
+        for response in responses {
+            if failSend { await #expect(throws: FixtureFailure.transport) { try await next(response) } }
+            else { #expect(failure(try await next(response)) == .invalidRuntimeReply(.malformed)) }
+        }
+        let trace = fixture.trace.steps.withLock { $0 }
+        #expect(trace.filter { $0 == .probed }.count == 1, "the remaining queued reads were refused")
+        #expect(trace.filter { $0 == .sendAttempt }.count == 3, "each original context is attempted only once")
+        #expect(trace.filter { $0 == .canceled }.count == 1 && trace.last == .canceled)
+        #expect(fixture.gate.began() == nil)
+    }
+
+    @Test func oneWayNeverPlansDeferredWorkOrConsumesTheFollowingReplyContext() async throws {
+        let fixture = try Fixture(deferredReplies: true)
+        defer { fixture.cancel() }
+        try fixture.client.send(message: try message(.current))
+        _ = try await next(fixture.processed)
+        #expect(fixture.executor.pending.withLock { $0.isEmpty })
+        #expect(fixture.trace.steps.withLock { $0 } == [.authenticated, .diagnostic])
+        let response = fixture.request(try message(.current))
+        _ = try await next(fixture.processed)
+        fixture.executor.drain()
+        #expect(try await next(response) == .runtimeVersion(version))
+    }
+
     private func message(_ shape: Shape) throws -> XPCDictionary {
         var result = XPCDictionary()
         result["protocolVersion"] = Int64(RuntimeProtocolVersion.current.rawValue)
@@ -182,7 +275,7 @@ import XPC
 }
 
 private let version = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")
-private enum Step { case authenticated, decoded, registered, diagnostic, sendAttempt, sent, canceled }
+private enum Step { case authenticated, decoded, registered, probed, diagnostic, sendAttempt, sent, canceled }
 private final class Trace: Sendable {
     let steps = Mutex<[Step]>([])
     let diagnostics = Mutex<[DiagnosticEvent]>([])
@@ -192,14 +285,22 @@ private final class Trace: Sendable {
 private final class Fixture: Sendable {
     let trace = Trace()
     let state = SessionState()
+    let gate: RuntimeSessionGate
+    let executor = DeferredExecutor()
+    let worker: RuntimeReadOnlyWorker
     let listener: XPCListener
     let client: XPCSession
     let processed: AsyncThrowingStream<Bool, any Error>
 
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
-         refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false) throws {
+         refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
+         deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
         processed = stream
+        self.gate = gate
+        let executor = executor
+        let worker = sharedWorker ?? RuntimeReadOnlyWorker(enqueue: { executor.enqueue($0) })
+        self.worker = worker
         let trace = trace, state = state
         let listener = XPCListener { request in
             request.accept { session in
@@ -210,17 +311,18 @@ private final class Fixture: Sendable {
                 let native: NativeRuntimeRequestHandler
                 if usePublicPolicy { native = NativeRuntimeRequestHandler(session: session, version: version, diagnostic: log) }
                 else {
-                    native = NativeRuntimeRequestHandler(gate: gate,
+                    native = NativeRuntimeRequestHandler(gate: gate, worker: worker,
                         authenticate: { _ in trace.record(.authenticated); return authorized },
                         decode: { bytes, count in
                             trace.record(.decoded)
                             if refuseDuringDecode { gate.refuse(.failed(OperationID(), .unauthorizedCaller)) }
                             return RuntimeDispatcher.decide(bytes, inFlight: count)
                         },
-                        register: { request in
+                        plan: { request in
                             trace.record(.registered)
-                            return NativeRuntimeRequestHandler.queryReply(request, version: badVersion
+                            let result = NativeRuntimeRequestHandler.queryReply(request, version: badVersion
                                 ? RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(99)) : version)
+                            return deferredReplies ? .readOnly { trace.record(.probed); return result } : .immediate(result)
                         },
                         send: { reply in
                             trace.record(.sendAttempt)
@@ -251,9 +353,21 @@ private final class Fixture: Sendable {
     }
 
     func cancel() {
+        // Explicitly settle/drain queued fixtures even when an earlier assertion throws.
+        // Synthetic read closures never touch the host or launch work during cleanup.
+        worker.refuse(gate, with: .failed(OperationID(), .invalidRuntimeReply(.malformed)))
+        executor.drain()
         client.cancel(reason: "test completed")
         state.accepted.withLock { $0 }?.cancel(reason: "test completed")
         listener.cancel()
+    }
+}
+
+private final class DeferredExecutor: Sendable {
+    let pending = Mutex<[@Sendable () -> Void]>([])
+    func enqueue(_ work: @escaping @Sendable () -> Void) { pending.withLock { $0.append(work) } }
+    func drain() {
+        while let work = pending.withLock({ $0.isEmpty ? nil : $0.removeFirst() }) { work() }
     }
 }
 
