@@ -18,6 +18,7 @@ private let laterCheckpoint = Checkpoint(stage: .ready, reachedAt: Date(timeInte
         (.staleEffect(expected: token, actual: nextToken), [.inspectState, .cancel]),
         (.staleStartRequest(expected: token, actual: nextToken), [.cancel]),
         (.inspectionWhileStartRequestLive, [.cancel]), (.alreadyReady, [.inspectState, .cancel]),
+        (.effectCounterExhausted, [.cancel]),
     ])
     func transitionErrorsCarryUsefulFixedTextAndLegalRecovery(error: ProvisioningTransitionError, actions: [RecoveryAction]) {
         #expect(error.errorDescription?.isEmpty == false)
@@ -38,6 +39,13 @@ private let laterCheckpoint = Checkpoint(stage: .ready, reachedAt: Date(timeInte
     @Test func finalCheckpointDoesNotPromiseLiveReadiness() {
         #expect(ProvisioningTransitionError.alreadyReady.userMessage == "Guesthouse has recorded the final setup checkpoint. There is no later setup step.")
         #expect(ProvisioningTransitionError.alreadyReady.recoveryMessage == "Check the environment before relying on its saved readiness.")
+    }
+
+    @Test func exhaustionPreservesEvidenceInsteadOfOfferingAnotherMint() {
+        let error = ProvisioningTransitionError.effectCounterExhausted
+        #expect(error.userMessage == "Guesthouse cannot reserve another setup effect because this record has no unused effect identities.")
+        #expect(error.recoveryMessage == "Cancel the new request and preserve the environment and its state record for recovery. Do not reset its effect counter.")
+        #expect(error.recoveryActions == [.cancel])
     }
 }
 
