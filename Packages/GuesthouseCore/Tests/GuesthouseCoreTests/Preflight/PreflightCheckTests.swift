@@ -21,7 +21,7 @@ struct PreflightCheckTests {
     @Test func anUnobservedHostNeverPasses() {
         let report = PreflightCheck.run(snapshot: HostProbeSnapshot())
         #expect(!report.canProceed)
-        #expect(report.results.allSatisfy(\.isBlocking))
+        #expect(report.results.allSatisfy { $0.isBlocking })
         #expect(report.result(.architecture) == .architectureUnknown)
         #expect(report.result(.macOSVersion) == .macOSUnknown)
         #expect(report.result(.memory) == .memoryUnknown)
