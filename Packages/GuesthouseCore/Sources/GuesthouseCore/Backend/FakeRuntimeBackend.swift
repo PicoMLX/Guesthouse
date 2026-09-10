@@ -82,6 +82,13 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     private var servingTicket: UInt64 = 0
     private var waiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var producerCompletion: (@Sendable (RuntimeRequest) -> Void)?
+
+    /// Internal test synchronization: observe producer cleanup without timing-based polling.
+    /// This is not a runtime event, diagnostic sink, or proof of real mutation completion.
+    func observeProducerCompletion(_ observer: @escaping @Sendable (RuntimeRequest) -> Void) {
+        producerCompletion = observer
+    }
 
     public init(delay: Duration = .zero, versionInfo: RuntimeVersionInfo = RuntimeVersionInfo(serviceVersion: "0.0.0", serviceBuild: "fake")) {
         self.delay = delay
@@ -135,6 +142,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     private func run(_ request: RuntimeRequest, ticket: UInt64, binding: Binding, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async {
         await waitForTurn(ticket)
+        defer { producerCompletion?(request) }
         record(request, at: .request(ticket))
         let scenario = binding.scenario
 
