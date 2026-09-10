@@ -5,7 +5,7 @@ import GuesthouseCore
 
 /// Runtime-only, read-only application discovery (#12, MVP-PLAN.md §§2–3).
 /// Bundle metadata is an observation, NOT signature, account or connection compatibility
-/// evidence. No application path or arbitrary plist/error text leaves this probe.
+/// evidence. No application path or arbitrary plist/error text leaves the public observation.
 public struct SystemCodexDesktopProbe: Sendable {
     // Verified from the installed application's Info.plist. Its folder/display name can
     // differ; do not assume "/Applications/Codex.app" or accept ChatGPT's com.openai.chat ID.
