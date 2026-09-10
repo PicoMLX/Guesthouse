@@ -6,7 +6,7 @@ import GuesthouseCore
 /// Closed failures only: no filesystem paths, ACL text or underlying error descriptions
 /// reach error presentation or diagnostics (ADR 0003). No repair workflow is implied.
 enum StorageFailure: Error, Equatable, Sendable, CaseIterable {
-    case invalidLocation, inspectionFailed, unsafeStructure, protectionDrift
+    case invalidLocation, inspectionFailed, unsafeStructure, protectionDrift, preparationFailed
 
     var message: String {
         switch self {
@@ -18,6 +18,8 @@ enum StorageFailure: Error, Equatable, Sendable, CaseIterable {
             "Guesthouse cannot safely use its storage hierarchy. Preserve the folders and linked destinations; they may contain unpublished work. Cancel before changing anything."
         case .protectionDrift:
             "Guesthouse storage is no longer private. Cancel and leave its contents in place; they may contain unpublished work."
+        case .preparationFailed:
+            "Guesthouse could not finish preparing its private storage. Cancel and preserve the folders and any unpublished work; some storage metadata may already have changed."
         }
     }
     var recoveryActions: [RecoveryAction] { [.cancel] }
