@@ -1,7 +1,7 @@
 import Foundation
 
 /// Typed reasons adapted from retained #61. No path or underlying error can become the
-/// message, encoded payload or recovery text (ADR 0003). The concrete probe stays in RuntimeKit.
+/// message, encoded payload or recovery text (ADR 0003). Concrete probing belongs in RuntimeKit.
 public enum HostProbeError: String, Error, Codable, Hashable, Sendable, LocalizedError, CaseIterable {
     case storageRootUnknown
     case volumeUnavailable
