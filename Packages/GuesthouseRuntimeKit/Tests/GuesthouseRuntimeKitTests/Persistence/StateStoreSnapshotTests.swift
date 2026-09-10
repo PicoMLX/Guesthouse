@@ -1,0 +1,294 @@
+import Darwin
+import Foundation
+import GuesthouseCore
+import Synchronization
+import Testing
+@testable import GuesthouseRuntimeKit
+
+/// Actual actor composition of the retained #57 snapshot contracts, not just helper tests.
+/// Every root is an isolated fixture; never call the default App Support factory here.
+@Suite(.timeLimit(.minutes(1))) struct StateStoreSnapshotTests {
+    @Test func openingAndMissingReadDoNotCreateStateFiles() async throws {
+        let fixture = try Fixture()
+        let barriers = Mutex<[StateStoreError.File]>([])
+        let store = try await fixture.open(hooks: StateStoreHooks(preparation: { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            barriers.withLock { $0.append(name) }
+        }))
+        #expect(barriers.withLock { !$0.isEmpty && $0.allSatisfy { $0 == .stateDirectory } })
+        #expect(try await store.loadSnapshot() == .empty)
+        #expect(try fixture.names().isEmpty)
+    }
+
+    @Test func snapshotRoundTripsAcrossReopeningWithExactDatesAndUUIDKeys() async throws {
+        let fixture = try Fixture(), value = try sample()
+        let store = try await fixture.open()
+        try await store.saveSnapshot(value)
+        #expect(try await store.loadSnapshot() == value)
+        let reopened = try await fixture.open()
+        #expect(try await reopened.loadSnapshot() == value)
+        let json = try #require(JSONSerialization.jsonObject(with: fixture.bytes()) as? [String: Any])
+        let provisioning = try #require(json["provisioning"] as? [String: Any])
+        #expect(Set(provisioning.keys) == [value.environments[0].id.uuid.uuidString])
+        #expect(json["schemaVersion"] as? Int == 2)
+        #expect(try fixture.mode(fixture.state) == 0o700)
+        #expect(try fixture.mode(fixture.snapshot) == 0o600)
+    }
+
+    @MainActor @Test func mainActorCallerDoesNotPerformStorageOrBarrierWork() async throws {
+        let fixture = try Fixture()
+        let visited = Mutex<Set<String>>([])
+        let barrier: StateStoreHooks.Barrier = { fd, name in
+            #expect(!Thread.isMainThread)
+            try StateFileIO.fullySynchronize(fd, name: name)
+            _ = visited.withLock { $0.insert("barrier") }
+        }
+        let store = try await StateStore.open(storage: {
+            #expect(!Thread.isMainThread)
+            _ = visited.withLock { $0.insert("factory") }
+            return try RuntimeStorage(root: fixture.root)
+        }, hooks: StateStoreHooks(preparation: barrier, permission: barrier,
+                                  snapshotFile: barrier, directory: barrier))
+        try await store.saveSnapshot(.empty)
+        #expect(try await store.loadSnapshot() == .empty)
+        #expect(visited.withLock { $0 } == ["factory", "barrier"])
+    }
+
+    @Test func failedPreparationClosesTheAnchorAndRetainsExistingBytes() async throws {
+        let fixture = try Fixture()
+        let initial = try await fixture.open()
+        try await initial.saveSnapshot(.empty)
+        let bytes = try fixture.bytes(), closed = Mutex(0)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) {
+            try await fixture.open(hooks: StateStoreHooks(preparation: { _, _ in
+                throw FixtureFailure.opaque
+            }, didCloseDirectory: { closed.withLock { $0 += 1 } }))
+        }
+        #expect(closed.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == bytes)
+    }
+
+    @Test func arbitraryFactoryErrorsBecomeClosedFailures() async {
+        await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) {
+            try await StateStore.open(storage: { throw FixtureFailure.opaque })
+        }
+    }
+
+    @Test func releasingTheStoreReleasesItsAnchorExactlyOnce() async throws {
+        let fixture = try Fixture(), closed = Mutex(0)
+        let (events, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        weak var weakStore: StateStore?
+        do {
+            let store = try await fixture.open(hooks: StateStoreHooks(didCloseDirectory: {
+                closed.withLock { $0 += 1 }
+                continuation.yield(())
+                continuation.finish()
+            }))
+            weakStore = store
+            try await store.saveSnapshot(.empty)
+        }
+        var iterator = events.makeAsyncIterator()
+        #expect(await iterator.next() != nil)
+        #expect(weakStore == nil)
+        #expect(closed.withLock { $0 } == 1)
+    }
+
+    @Test(arguments: [
+        ("{", StateStoreError.corruptSnapshot),
+        ("{}", .migrationMissing(from: .unversioned)),
+        ("{\"schemaVersion\":1}", .migrationMissing(from: SchemaVersion(1)!)),
+        ("{\"schemaVersion\":2}", .corruptSnapshot),
+        ("{\"schemaVersion\":99}", .newerSchemaVersion(found: SchemaVersion(99)!, current: SchemaVersion(2)!)),
+    ])
+    func rejectedSnapshotReadsAndSavesPreserveOriginal(raw: String, failure: StateStoreError) async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), bytes = Data(raw.utf8)
+        try fixture.write(bytes)
+        await #expect(throws: failure) { try await store.loadSnapshot() }
+        await #expect(throws: failure) { try await store.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == bytes)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
+    @Test func explicitMigrationRunsInMemoryWithoutRewritingSource() async throws {
+        let fixture = try Fixture()
+        let initial = try await fixture.open()
+        try await initial.saveSnapshot(.empty)
+        var object = try #require(JSONSerialization.jsonObject(with: fixture.bytes()) as? [String: Any])
+        object["schemaVersion"] = nil
+        let bytes = try JSONSerialization.data(withJSONObject: object)
+        try fixture.write(bytes)
+        let migrator = SnapshotMigrator(migrations: [
+            .init(from: .unversioned) { try Self.settingVersion(1, in: $0) },
+            .init(from: SchemaVersion(1)!) { try Self.settingVersion(2, in: $0) },
+        ])
+        let store = try await fixture.open(migrator: migrator)
+        #expect(try await store.loadSnapshot() == .empty)
+        #expect(try fixture.bytes() == bytes)
+    }
+
+    @Test func invalidAndUnencodableValuesCannotCreateFiles() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        await #expect(throws: StateStoreError.inconsistentSnapshot(reason: .slotsDisagree)) {
+            try await store.saveSnapshot(EnvironmentsSnapshot(environments: [DevelopmentEnvironment(name: "Dev")]))
+        }
+        let invalidDate = try sample(date: Date(timeIntervalSinceReferenceDate: .infinity))
+        await #expect(throws: StateStoreError.unencodable(name: .snapshot)) {
+            try await store.saveSnapshot(invalidDate)
+        }
+        #expect(try fixture.names().isEmpty)
+    }
+
+    @Test func permissionBarrierIsRequiredEvenForAnAlreadyRepairedRead() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try await store.saveSnapshot(.empty)
+        try #require(chmod(fixture.snapshot.path, 0o640) == 0)
+        let failed = try await fixture.open(hooks: StateStoreHooks(permission: { _, _ in
+            throw FixtureFailure.opaque
+        }))
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await failed.loadSnapshot() }
+        #expect(try fixture.mode(fixture.snapshot) == 0o600)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await failed.loadSnapshot() }
+        #expect(try await store.loadSnapshot() == .empty)
+    }
+
+    @Test func fileBarrierFailureDoesNotReplaceTheSavedSnapshot() async throws {
+        let fixture = try Fixture(), initial = try await fixture.open()
+        try await initial.saveSnapshot(sample())
+        let bytes = try fixture.bytes()
+        let failed = try await fixture.open(hooks: StateStoreHooks(snapshotFile: { _, _ in throw FixtureFailure.opaque }))
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await failed.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == bytes)
+        #expect(try fixture.names().count == 2)
+    }
+
+    @Test func failedDirectoryBarrierDoesNotImplyPublicationWasRolledBack() async throws {
+        let fixture = try Fixture()
+        let failed = try await fixture.open(hooks: StateStoreHooks(directory: { _, _ in throw FixtureFailure.opaque }))
+        await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) { try await failed.saveSnapshot(.empty) }
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: fixture.bytes()) == .empty)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
+    @Test(arguments: [(false, StateStoreError.fileUnwritable(name: .snapshot)), (true, .insecureDirectory(reason: .changed))])
+    func sameInodeReattachmentAtPublicationIsRefused(directory: Bool, failure: StateStoreError) async throws {
+        let fixture = try Fixture()
+        let target = directory ? fixture.state : fixture.snapshot, detached = fixture.base.appending(path: "detached")
+        let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            let identity = try fixture.identity(target)
+            try #require(rename(target.path, detached.path) == 0)
+            try #require(rename(detached.path, target.path) == 0)
+            try #require(try fixture.identity(target) == identity)
+        }))
+        await #expect(throws: failure) { try await store.saveSnapshot(.empty) }
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: fixture.bytes()) == .empty)
+    }
+
+    @Test func hardLinkedSnapshotIsNeverReadOrReplaced() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try await store.saveSnapshot(.empty)
+        let bytes = try fixture.bytes()
+        try #require(link(fixture.snapshot.path, fixture.state.appending(path: "alias").path) == 0)
+        await #expect(throws: StateStoreError.insecureDirectory(reason: .multipleLinks)) { try await store.loadSnapshot() }
+        await #expect(throws: StateStoreError.insecureDirectory(reason: .multipleLinks)) { try await store.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == bytes)
+    }
+
+    @Test func snapshotSymlinkIsRefusedWithoutTouchingItsTarget() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let target = fixture.base.appending(path: "other"), evidence = Data("retained fixture".utf8)
+        try evidence.write(to: target)
+        try #require(symlink(target.path, fixture.snapshot.path) == 0)
+        await #expect(throws: StateStoreError.insecureDirectory(reason: .symbolicLink)) { try await store.loadSnapshot() }
+        await #expect(throws: StateStoreError.insecureDirectory(reason: .symbolicLink)) { try await store.saveSnapshot(.empty) }
+        #expect(try Data(contentsOf: target) == evidence)
+    }
+
+    @Test func explicitlyUnsupportedDecodeKeepsItsTypedFailure() async throws {
+        let fixture = try Fixture()
+        let future = SchemaVersion(99)!
+        let store = try await fixture.open(migrator: SnapshotMigrator(current: future, migrations: []))
+        let bytes = Data("{\"schemaVersion\":99}".utf8)
+        try fixture.write(bytes)
+        await #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: future, current: SchemaVersion(2)!)) {
+            try await store.loadSnapshot()
+        }
+        #expect(try fixture.bytes() == bytes)
+    }
+
+    @Test func actorSerializesCompletePublicationsAcrossConcurrentCallers() async throws {
+        let fixture = try Fixture(), completed = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            completed.withLock { $0 += 1 }
+        }))
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<20 { group.addTask { try await store.saveSnapshot(.empty) } }
+            try await group.waitForAll()
+        }
+        #expect(completed.withLock { $0 } == 20)
+        #expect(try await store.loadSnapshot() == .empty)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
+    @Test func cancellationDoesNotReportFailureForACompletedSave() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                withUnsafeCurrentTask { $0?.cancel() }
+                try await store.saveSnapshot(.empty)
+            }
+            try await group.waitForAll()
+        }
+        #expect(try await store.loadSnapshot() == .empty)
+    }
+
+    private enum FixtureFailure: Error { case opaque }
+
+    private func sample(date: Date = Date(timeIntervalSinceReferenceDate: 800_000_000.123456789)) throws -> EnvironmentsSnapshot {
+        let environment = DevelopmentEnvironment(name: "Dev", createdAt: date)
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        return EnvironmentsSnapshot(environments: [environment], slots: slots, provisioning: [environment.id: .initial])
+    }
+
+    private static func settingVersion(_ version: Int, in data: Data) throws -> Data {
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object["schemaVersion"] = version
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+
+    private final class Fixture: Sendable {
+        let base: URL
+        var root: URL { base.appending(path: "Guesthouse") }
+        var state: URL { root.appending(path: "state") }
+        var snapshot: URL { state.appending(path: "environments.json") }
+
+        init() throws {
+            base = FileManager.default.temporaryDirectory.appending(path: "guesthouse-store-snapshots-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false,
+                                                   attributes: [.posixPermissions: 0o700])
+        }
+
+        func open(migrator: SnapshotMigrator = .standard, hooks: StateStoreHooks = StateStoreHooks()) async throws -> StateStore {
+            try await StateStore.open(storage: { try RuntimeStorage(root: self.root) }, migrator: migrator, hooks: hooks)
+        }
+        func names() throws -> [String] { try FileManager.default.contentsOfDirectory(atPath: state.path) }
+        func bytes() throws -> Data { try Data(contentsOf: snapshot) }
+        func write(_ bytes: Data) throws {
+            try bytes.write(to: snapshot)
+            try #require(chmod(snapshot.path, 0o600) == 0)
+        }
+        func mode(_ path: URL) throws -> mode_t {
+            var info = stat()
+            try #require(lstat(path.path, &info) == 0)
+            return info.st_mode & 0o7777
+        }
+        func identity(_ path: URL) throws -> StateFileIdentity {
+            var info = stat()
+            try #require(lstat(path.path, &info) == 0)
+            return StateFileIdentity(info)
+        }
+        deinit { try? FileManager.default.removeItem(at: base) }
+    }
+}
