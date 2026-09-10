@@ -34,6 +34,10 @@ enum StateSnapshotPublication {
         // A valid in-memory value is not permission to erase an unreadable saved version.
         let existing = try existingVersion(in: anchor, migrator: migrator, permissionBarrier: permissionBarrier)
         try anchor.withDescriptor { directory in
+            try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
+                try anchor.verifyCurrent(version: version)
+                try requireUnchangedSnapshot(in: directory, expected: existing)
+            })
             let name = temporaryPrefix + UUID().uuidString
             let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK
             // open(2) obtains this advisory lock atomically with creation. No unlocked
@@ -68,8 +72,8 @@ enum StateSnapshotPublication {
             try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .readSnapshot, version: published)
             try anchor.verifyCurrent(version: directoryVersion)
         }
-        // No cleanup in this component. Failed writes and other writers' temporaries remain
-        // intact for the separately verified stale-artifact collector; never delete on error.
+        // Cleanup runs only after valid preflight, before this attempt creates a temporary.
+        // Its failed write and live/unsafe/unknown files are never deleted on the error path.
     }
 
     private static func synchronize(
