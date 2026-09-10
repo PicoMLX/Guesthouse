@@ -42,27 +42,42 @@ import Testing
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: fixture) }
     }
 
-    @Test(arguments: ["-1", "true", #""1""#, "1.5", "18446744073709551615", "9223372036854775808"],
+    @Test(arguments: ["-1", "true", #""1""#, "1.5", "18446744073709551616"],
           [#"{"startRequested":{"request":TOKEN}}"#, #"{"awaitingInspection":{"_0":TOKEN}}"#])
-    func malformedOrExhaustedPendingTokensAreRefused(token: String, status: String) {
+    func malformedOrOutOfRangePendingTokensAreRefused(token: String, status: String) {
         let payload = status.replacingOccurrences(of: "TOKEN", with: token)
         #expect(throws: DecodingError.self) {
             try JSONDecoder().decode(ProvisioningState.self, from: record(issued: "0", status: payload))
         }
     }
 
-    @Test(arguments: ["-1", "true", #""1""#, "1.5", "18446744073709551615", "9223372036854775808"])
-    func malformedOrExhaustedCountersAreRefused(issued: String) {
+    @Test(arguments: ["-1", "true", #""1""#, "1.5", "18446744073709551616"])
+    func malformedOrOutOfRangeCountersAreRefused(issued: String) {
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: record(issued: issued)) }
     }
 
-    @Test func decodingRaisesTheCounterToThePendingTokenAndRetainsHeadroom() throws {
-        let restored = try JSONDecoder().decode(ProvisioningState.self, from: record(issued: "0", status: #"{"startRequested":{"request":9}}"#))
-        #expect(restored.issuedEffects == 9)
-        let ceiling = try JSONDecoder().decode(ProvisioningState.self, from: record(issued: "9223372036854775807"))
-        #expect(ceiling.issuedEffects == ProvisioningState.maximumIssuedEffects)
-        let next = ProvisioningState(stage: .first, status: .awaitingInspection(EffectToken(ceiling.issuedEffects + 1)))
-        #expect(next.issuedEffects == 9_223_372_036_854_775_808)
+    @Test(arguments: [UInt64(0), 9, UInt64.max / 2, UInt64.max / 2 + 1, UInt64.max - 1], [false, true])
+    func mintedTokensRemainDecodableAcrossCounterBoundaries(value: UInt64, promotedFromPending: Bool) throws {
+        let status = promotedFromPending ? "{\"startRequested\":{\"request\":\(value)}}" : #"{"notStarted":{}}"#
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: record(issued: promotedFromPending ? "0" : String(value), status: status))
+        #expect(restored.issuedEffects == value)
+        let token = try #require(restored.nextEffectToken)
+        #expect(token.value == value + 1)
+        let next = ProvisioningState(stage: .first, status: .awaitingInspection(token), issuedEffects: restored.issuedEffects)
+        let relaunched = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(next))
+        #expect(relaunched == next)
+        #expect(relaunched.issuedEffects == token.value)
+        #expect(relaunched.nextEffectToken == (value == UInt64.max - 1 ? nil : EffectToken(value + 2)))
+    }
+
+    @Test(arguments: [false, true])
+    func exhaustedCountersPreserveOutstandingIdentityWithoutMinting(promotedFromPending: Bool) throws {
+        let status = promotedFromPending ? "{\"awaitingInspection\":{\"_0\":\(UInt64.max)}}" : #"{"notStarted":{}}"#
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: record(issued: promotedFromPending ? "0" : String(UInt64.max), status: status))
+        #expect(restored.issuedEffects == UInt64.max)
+        #expect(restored.nextEffectToken == nil)
+        #expect(restored.status.pendingEffect == (promotedFromPending ? EffectToken(UInt64.max) : nil))
+        #expect(try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(restored)) == restored)
     }
 
     @Test(arguments: [UInt64(0), 1, 9, UInt64.max])
