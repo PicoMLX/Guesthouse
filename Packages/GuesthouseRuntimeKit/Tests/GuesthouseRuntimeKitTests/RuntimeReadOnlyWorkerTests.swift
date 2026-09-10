@@ -40,12 +40,13 @@ import Testing
         }
         func reserve(_ worker: RuntimeReadOnlyWorker, work: (@Sendable () -> RuntimeEvent)? = nil) -> RuntimeReadOnlyWorker.Ticket? {
             let probe: @Sendable () -> RuntimeEvent = work ?? { [trace] in trace.run() }
-            var ticket: RuntimeReadOnlyWorker.Ticket?
-            _ = gate.commit(.runtimeVersion) { _ in
-                ticket = worker.reserve(gate: gate, reply: reply, work: probe)
-                return trace.success // Test registration marker, not a delivered reply.
+            let registration = gate.commitRegistration(.runtimeVersion) { _ in
+                worker.reserve(gate: gate, reply: reply, work: probe)
             }
-            return ticket
+            switch registration {
+            case .registered(let ticket): return ticket
+            case .refused(let event): reply.finish(event); return nil
+            }
         }
         func reject() { reply.finish(.failed(OperationID(), .invalidRequest(.tooManyInFlight))) }
     }
@@ -67,6 +68,19 @@ import Testing
         let count = try #require(call.gate.began())
         #expect(count == 0)
         #expect(!call.gate.finished())
+    }
+
+    @Test func priorSessionRefusalPreventsReservationAndStillAnswersOnce() throws {
+        let executor = Executor()
+        let worker = RuntimeReadOnlyWorker(enqueue: { executor.enqueue($0) })
+        let call = try Call()
+        let refusal = RuntimeEvent.failed(OperationID(), .unauthorizedCaller)
+        worker.refuse(call.gate, with: refusal)
+        #expect(call.reserve(worker) == nil)
+        #expect(executor.pending.withLock { $0.isEmpty })
+        #expect(call.trace.state.withLock { $0.replies } == [refusal])
+        #expect(call.trace.state.withLock { $0.runs == 0 && $0.cancels == 1 })
+        #expect(call.gate.began() == nil)
     }
 
     @Test func admissionIsBoundedAcrossDifferentSessionsAndRejectionTransfersNothing() throws {
