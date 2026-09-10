@@ -27,6 +27,28 @@ private let laterCheckpoint = Checkpoint(stage: .ready, reachedAt: Date(timeInte
         #expect(!error.recoveryActions.contains(.retry))
     }
 
+    @Test(arguments: ProvisioningEvent.Kind.allCases)
+    func rejectedCallbacksCannotOfferInspectionOfAStartReservation(event: ProvisioningEvent.Kind) {
+        let error = ProvisioningTransitionError.illegalTransition(status: .startRequested, event: event)
+        #expect(error.recoveryActions == [.cancel])
+        #expect(error.userMessage == "Guesthouse received a status update while a setup start is reserved. It cannot check the environment until the start request is known to have settled.")
+        #expect(error.recoveryMessage == "Preserve the start reservation. Wait for the runtime reply or reconnect to recover its state before inspecting.")
+        #expect(error.errorDescription == error.userMessage)
+        #expect(error.recoverySuggestion == error.recoveryMessage)
+    }
+
+    @Test(arguments: [
+        StageStatus.Kind.notStarted, .startRejected, .inProgress, .persistingCheckpoint,
+        .completed, .canceled, .recoverableFailure, .needsUserAction, .unknownOutcome,
+        .awaitingInspection, .resumable, .cleanupRequired,
+    ])
+    func otherRejectedStatusesKeepTheirInspectionRecovery(status: StageStatus.Kind) {
+        let error = ProvisioningTransitionError.illegalTransition(status: status, event: .checkpointReached)
+        #expect(error.recoveryActions == [.inspectState, .cancel])
+        #expect(error.userMessage == "Guesthouse received a status update that does not match what it was doing. The environment's state is uncertain until it is checked.")
+        #expect(error.recoveryMessage == "Preserve the environment and check its state before starting another setup operation.")
+    }
+
     @Test func associatedIdentityDoesNotEnterDisplayText() {
         let first = ProvisioningTransitionError.operationMismatch(expected: operation, actual: otherOperation)
         let second = ProvisioningTransitionError.operationMismatch(expected: OperationID(), actual: OperationID())

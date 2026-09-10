@@ -182,6 +182,8 @@ extension ProvisioningTransitionError: LocalizedError {
     /// preserving uncertain state and providing only recovery actions that remain legal.
     public var userMessage: String {
         switch self {
+        case .illegalTransition(status: .startRequested, event: _):
+            "Guesthouse received a status update while a setup start is reserved. It cannot check the environment until the start request is known to have settled."
         case .illegalTransition, .operationMismatch, .checkpointMismatch, .staleEffect:
             "Guesthouse received a status update that does not match what it was doing. The environment's state is uncertain until it is checked."
         case .stageMismatch:
@@ -198,6 +200,7 @@ extension ProvisioningTransitionError: LocalizedError {
     public var recoveryMessage: String {
         switch self {
         case .alreadyReady: "Check the environment before relying on its saved readiness."
+        case .illegalTransition(status: .startRequested, event: _): "Preserve the start reservation. Wait for the runtime reply or reconnect to recover its state before inspecting."
         case .inspectionWhileStartRequestLive, .staleStartRequest: "Wait for the runtime reply. If contact is lost, preserve the environment and reconnect before inspecting."
         case .effectCounterExhausted: "Cancel the new request and preserve the environment and its state record for recovery. Do not reset its effect counter."
         default: "Preserve the environment and check its state before starting another setup operation."
@@ -210,6 +213,9 @@ extension ProvisioningTransitionError: LocalizedError {
     /// The recovery actions the GUI should offer.
     public var recoveryActions: [RecoveryAction] {
         switch self {
+        // A kind-only error cannot prove the reservation is inspection-only.
+        // Never let an unrelated callback release a potentially live start.
+        case .illegalTransition(status: .startRequested, event: _): [.cancel]
         case .inspectionWhileStartRequestLive, .staleStartRequest, .effectCounterExhausted: [.cancel]
         default: [.inspectState, .cancel]
         }
