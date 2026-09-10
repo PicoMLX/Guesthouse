@@ -20,6 +20,25 @@ struct RuntimeStorage: Sendable {
     init() throws { try self.init(root: Self.defaultRoot()) }
     init(root: URL) throws { try self.init(root: root, backup: Self.writeBackupExclusion) }
 
+    /// Inspection must not create folders, repair permissions or change backup metadata.
+    /// Missing root means no managed layout; an existing unsafe root remains a failure.
+    /// Individual areas still require location(for:); this is not mutation admission.
+    static func existing() throws -> RuntimeStorage? { try existing(root: defaultRoot()) }
+
+    static func existing(root: URL) throws -> RuntimeStorage? {
+        let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
+        try StorageProtection.existingAncestors(of: root)
+        var info = stat()
+        if lstat(root.path(percentEncoded: false), &info) != 0 {
+            guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
+            return nil
+        }
+        try verify(root, excluded: false)
+        return RuntimeStorage(verifiedRoot: root)
+    }
+
+    private init(verifiedRoot: URL) { root = verifiedRoot }
+
     /// Runtime-only injection for isolated fixtures; never exposed in an XPC request.
     init(root: URL, backup: BackupWriter) throws {
         // Use the same validated, trailing-separator-free spelling for inspection AND writes.

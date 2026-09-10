@@ -11,14 +11,22 @@ enum StateFileIO {
     /// Injected calls are synchronous test seams with the same return/errno contract as Darwin.
     static func readAll(
         _ descriptor: Int32, from offset: off_t, name: StateStoreError.File,
+        maximumBytes: Int? = nil,
         readBytes: (Int32, UnsafeMutableRawPointer?, Int) -> Int = Darwin.read
     ) throws(StateStoreError) -> Data {
+        if let maximumBytes, maximumBytes < 0 { throw .fileUnreadable(name: name) }
         guard lseek(descriptor, offset, SEEK_SET) >= 0 else { throw .fileUnreadable(name: name) }
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
             let count = buffer.withUnsafeMutableBytes { readBytes(descriptor, $0.baseAddress, $0.count) }
             if count > 0 {
+                guard count <= buffer.count else { throw .fileUnreadable(name: name) }
+                if let maximumBytes {
+                    guard data.count <= maximumBytes, count <= maximumBytes - data.count else {
+                        throw .fileUnreadable(name: name)
+                    }
+                }
                 data.append(contentsOf: buffer.prefix(count))
             } else if count == 0 {
                 return data

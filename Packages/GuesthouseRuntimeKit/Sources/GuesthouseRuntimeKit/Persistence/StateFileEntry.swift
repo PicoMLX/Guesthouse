@@ -20,11 +20,13 @@ extension StateDirectoryAnchor {
     /// as uncertain, and only publish cache/operation results after this entire call succeeds.
     func withFile<Result>(
         _ access: StateFileAccess,
+        protection: StateFileEntry.Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
             try StateFileEntry.withDescriptor(in: directory, access: access,
+                protection: protection,
                 permissionBarrier: permissionBarrier,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
         }
@@ -36,12 +38,18 @@ extension StateDirectoryAnchor {
 /// mid-transaction. Darwin flock(2) releases the previous lock during either conversion.
 /// This serializes cooperating stores, not arbitrary same-user namespace changes.
 enum StateFileEntry {
+    enum Protection { case prepare, verifyOnly }
+
     static func withDescriptor<Result>(
         in directory: Int32, access: StateFileAccess,
+        protection: Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier,
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
+        // Verify-only callers never open a writable/create-capable descriptor, even if a
+        // future caller accidentally pairs the policy with a journal write operation.
+        guard protection != .verifyOnly || !access.creates else { throw access.failure }
         let flags = (access.creates ? O_RDWR | O_CREAT : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         var descriptor = openat(directory, access.name, flags, 0o600)
         // Retained bounded retry for a transient missing entry during creation. No bytes are
@@ -64,14 +72,19 @@ enum StateFileEntry {
             guard StateFileIO.lock(descriptor, LOCK_EX) else { throw access.failure }
             try validateDirectory(nil)
             try requireBinding(descriptor, in: directory, access: access)
-            try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
-                synchronize: { descriptor, label in
-                    let fileVersion = try StateFileIO.version(descriptor, name: label)
-                    let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
-                    try permissionBarrier(descriptor, label)
-                    try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
-                    try validateDirectory(directoryVersion)
-                })
+            switch protection {
+            case .verifyOnly:
+                try StateFileProtection.verify(descriptor, kind: .regularFile)
+            case .prepare:
+                try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
+                    synchronize: { descriptor, label in
+                        let fileVersion = try StateFileIO.version(descriptor, name: label)
+                        let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+                        try permissionBarrier(descriptor, label)
+                        try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
+                        try validateDirectory(directoryVersion)
+                    })
+            }
             try validateDirectory(nil)
             let prepared = try verifyCurrent(descriptor, in: directory, access: access)
             let result = try body(descriptor)
