@@ -222,7 +222,9 @@ import Testing
     /// adopts whatever the inspection names and leaves the first operation unaccounted for.
     @Test(arguments: [ProvisioningEvent.userRetried, .inspectionRequested])
     func aRestoredCheckpointWriteKeepsItsOperationThroughInspection(request: ProvisioningEvent) throws {
-        let restored = state(.persistingCheckpoint(checkpoint, operation: operation, write: outstanding))
+        let saved = state(.persistingCheckpoint(checkpoint, operation: operation, write: outstanding))
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(saved))
+        #expect(restored == saved)
         let retried = try ProvisioningReducer.reduce(restored, request)
         #expect(retried.state.status == .unknownOutcome(operation, inspection: try token(of: retried.effects)))
         #expect(throws: ProvisioningTransitionError.operationMismatch(expected: operation, actual: stranger)) {
@@ -230,7 +232,10 @@ import Testing
         }
         #expect(try ProvisioningReducer.reduce(retried.state, .operationReconciled(try token(of: retried.effects), operation, .stillRunning(stage: .first))).state.status == .inProgress(operation))
         // A write reconciliation started has no operation behind it, and still inspects unscoped.
-        let reconciled = try ProvisioningReducer.reduce(state(.persistingCheckpoint(checkpoint, operation: nil, write: outstanding)), request)
+        let savedReconciled = state(.persistingCheckpoint(checkpoint, operation: nil, write: outstanding))
+        let restoredReconciled = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(savedReconciled))
+        #expect(restoredReconciled == savedReconciled)
+        let reconciled = try ProvisioningReducer.reduce(restoredReconciled, request)
         #expect(reconciled.state.status.caseName == "awaitingInspection")
     }
 }
