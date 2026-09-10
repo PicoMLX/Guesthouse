@@ -83,11 +83,18 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private var servingTicket: UInt64 = 0
     private var waiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var producerCompletion: (@Sendable (RuntimeRequest) -> Void)?
+    private var eventPause: (@Sendable () async -> Void)?
 
     /// Internal test synchronization: observe producer cleanup without timing-based polling.
     /// This is not a runtime event, diagnostic sink, or proof of real mutation completion.
     func observeProducerCompletion(_ observer: @escaping @Sendable (RuntimeRequest) -> Void) {
         producerCompletion = observer
+    }
+
+    /// Tests can hold an event boundary explicitly instead of racing the preview delay.
+    /// The injected wait must cooperate with task cancellation; no runtime behavior is enabled.
+    func setEventPause(_ pause: @escaping @Sendable () async -> Void) {
+        eventPause = pause
     }
 
     public init(delay: Duration = .zero, versionInfo: RuntimeVersionInfo = RuntimeVersionInfo(serviceVersion: "0.0.0", serviceBuild: "fake")) {
@@ -412,6 +419,10 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     private func pause() async {
+        if let eventPause {
+            await eventPause()
+            return
+        }
         guard delay > .zero else { return }
         try? await Task.sleep(for: delay)
     }
