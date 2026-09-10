@@ -4,6 +4,8 @@ import Foundation
 /// Service-only storage layout migrated from #70/#88 (MVP-PLAN.md §§3 and 9). No GUI-supplied
 /// root or provider environment adapter. Preparation is explicit; reuse only checks and never
 /// silently repairs. Paths remain point-in-time observations, not permanent filesystem leases.
+/// Repair needs read or search access to open each directory. Refuse inaccessible existing
+/// layouts before mutation; never use privileged policy changes or pathname chmod for access.
 struct RuntimeStorage: Sendable {
     enum Area: String, CaseIterable, Sendable {
         case runtime, vms, state, staging, downloads, diagnostics
@@ -72,7 +74,21 @@ struct RuntimeStorage: Sendable {
         var info = stat()
         if lstat(url.path(percentEncoded: false), &info) == 0 {
             try StorageProtection.structure(url)
+            // Check access across the whole layout before repairing earlier components.
+            let fd = try openForPreparation(url)
+            close(fd)
         } else if errno != ENOENT { throw StorageFailure.inspectionFailed }
+    }
+
+    private static func openForPreparation(_ url: URL) throws -> Int32 {
+        // O_SEARCH includes O_DIRECTORY and permits descriptor-bound metadata repair without
+        // list/read access. O_EVTONLY still needs read access without an Apple-only entitlement.
+        // Retain O_RDONLY for readable leaves lacking search permission (for example, 0400).
+        let path = url.path(percentEncoded: false)
+        var fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if fd < 0 && errno == EACCES { fd = open(path, O_SEARCH | O_NOFOLLOW | O_CLOEXEC) }
+        guard fd >= 0 else { throw StorageFailure.inspectionFailed }
+        return fd
     }
 
     private static func missingParents(of url: URL) throws -> [URL] {
@@ -97,8 +113,7 @@ struct RuntimeStorage: Sendable {
             guard mkdir(path, 0o700) == 0 || errno == EEXIST else { throw StorageFailure.preparationFailed }
         }
         let expected = try StorageProtection.structure(url)
-        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { throw StorageFailure.inspectionFailed }
+        let fd = try openForPreparation(url)
         defer { close(fd) }
         var opened = stat()
         guard fstat(fd, &opened) == 0, sameIdentity(opened, expected), opened.st_mode == expected.st_mode else {
