@@ -6,11 +6,12 @@ import GuesthouseCore
 /// Runtime-owned persistence, migrated from #57/#76 (MVP-PLAN.md §3). One owner per managed
 /// state area; the GUI sees only Core values/errors, never a root URL or borrowed descriptor.
 /// Snapshot operations are complete synchronous actor transactions: there is no suspension
-/// between validation and publication. Journal/recovery integration is still a separate step.
+/// between validation and publication. Journal append/durability integration is a separate step.
 public actor StateStore {
     private let anchor: StateDirectoryAnchor
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
+    private var journal = StateJournalCache()
     private nonisolated let queue: DispatchSerialQueue
 
     /// Native descriptor IO/flushes and advisory lock waits may block. Use Dispatch's supplied
@@ -77,6 +78,24 @@ public actor StateStore {
         try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
+
+    /// Replay never creates or truncates the journal. Torn bytes remain available for later
+    /// inspected recovery; complete invalid/unsupported records refuse the whole result.
+    /// Observing these records is not proof of their durability or any mutation's outcome.
+    public func replay() throws(StateStoreError) -> JournalReplay {
+        do {
+            let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission) {
+                try journal.refreshed($0, read: hooks.journalRead)
+            }
+            // Including missing-file resets, adoption happens only after all outer entry and
+            // directory checks. A candidate parsed before a failed post-check is not a cache.
+            journal = candidate ?? StateJournalCache()
+            return journal.replay
+        } catch {
+            journal = StateJournalCache()
+            throw error
+        }
+    }
 }
 
 /// Internal synchronous fault/lifetime seams, not a diagnostic sink or an XPC API.
@@ -87,5 +106,6 @@ struct StateStoreHooks: Sendable {
     var permission: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var snapshotFile: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var directory: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
+    var journalRead: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     var didCloseDirectory: @Sendable () -> Void = {}
 }
