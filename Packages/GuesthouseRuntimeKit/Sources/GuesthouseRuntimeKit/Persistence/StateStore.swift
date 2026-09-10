@@ -76,6 +76,15 @@ public actor StateStore {
     /// assume a failed save restored the old bytes or blindly repeat the associated operation.
     public func saveSnapshot(_ snapshot: EnvironmentsSnapshot) throws(StateStoreError) {
         try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
+            validateFirstSelection: {
+                // An empty/missing snapshot can follow a crashed operation. Existing journal
+                // evidence, including a torn first record, blocks new selection. The hook
+                // runs after pure encoding/old-state validation and before any publication.
+                let evidence = try self.replay()
+                guard evidence.records.isEmpty, !evidence.truncatedTail else {
+                    throw StateStoreError.storageSelectionChanged
+                }
+            },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
 

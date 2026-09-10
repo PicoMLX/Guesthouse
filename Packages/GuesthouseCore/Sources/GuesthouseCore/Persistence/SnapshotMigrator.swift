@@ -38,9 +38,9 @@ public struct SnapshotMigrator: Sendable {
         ambiguousVersion = ambiguous
     }
 
-    /// No prototype-to-format-2 transform is shipped. Older records may carry incompatible
-    /// raw error/resume data; refuse them and preserve the original, rather than re-stamping
-    /// their envelope. Future upgrades require an explicit, tested record transformation.
+    /// No prototype/format-2 transform is shipped. Older records may carry incompatible
+    /// resume data or lack the original storage identity. Preserve them without inventing
+    /// host facts. Future upgrades require an explicit, tested record transformation.
     public static let standard = SnapshotMigrator(migrations: [])
 
     /// Returns the document at `current`, and the version it was found at.

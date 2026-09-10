@@ -11,28 +11,32 @@ import Foundation
 /// records controlling one VM). `validate()` runs before encoding and after decoding.
 /// The concrete runtime store owns durability, permissions and preservation of rejected files.
 public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
-    /// Format 2 contains typed provisioning records. Prototype/unversioned snapshots are
-    /// refused, not re-stamped or rewritten; a future migration needs an explicit transform.
-    public static let currentSchema = SchemaVersion(2)!
+    /// Format 3 retains host storage identity. Older writers must refuse it rather than
+    /// silently discard that identity. No older snapshot is re-stamped or rewritten.
+    public static let currentSchema = SchemaVersion(3)!
     public var schemaVersion: SchemaVersion
     public var environments: [DevelopmentEnvironment]
     public var slots: VMSlotInventory
     public var provisioning: [EnvironmentID: ProvisioningState]
+    /// Nil means unselected/unknown, never permission to infer a replacement for saved work.
+    public var storageSelection: HostStorageSelection?
 
     public init(
         schemaVersion: SchemaVersion = EnvironmentsSnapshot.currentSchema,
         environments: [DevelopmentEnvironment] = [],
         slots: VMSlotInventory = VMSlotInventory(),
-        provisioning: [EnvironmentID: ProvisioningState] = [:]
+        provisioning: [EnvironmentID: ProvisioningState] = [:],
+        storageSelection: HostStorageSelection? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.environments = environments
         self.slots = slots
         self.provisioning = provisioning
+        self.storageSelection = storageSelection
     }
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, environments, slots, provisioning
+        case schemaVersion, environments, slots, provisioning, storageSelection
     }
 
     public init(from decoder: any Decoder) throws {
@@ -45,7 +49,8 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
             schemaVersion: version,
             environments: try c.decode([DevelopmentEnvironment].self, forKey: .environments),
             slots: try c.decode(VMSlotInventory.self, forKey: .slots),
-            provisioning: try Self.decodeProvisioning(from: c)
+            provisioning: try Self.decodeProvisioning(from: c),
+            storageSelection: try c.decodeIfPresent(HostStorageSelection.self, forKey: .storageSelection)
         )
         do {
             try validate()
@@ -61,6 +66,7 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         try c.encode(environments, forKey: .environments)
         try c.encode(slots, forKey: .slots)
         try c.encode(provisioning, forKey: .provisioning)
+        try c.encodeIfPresent(storageSelection, forKey: .storageSelection)
     }
 
     /// Reads the provisioning object one key at a time instead of straight into a dictionary.

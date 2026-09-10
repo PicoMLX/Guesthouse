@@ -16,14 +16,14 @@ import Testing
         _ = try fixture.anchor.withFile(.readSnapshot, body: { try StateFileProtection.verify($0, kind: .regularFile) })
     }
 
-    @Test(arguments: [SchemaVersion.unversioned, SchemaVersion(1)!, SchemaVersion(99)!])
+    @Test(arguments: [SchemaVersion.unversioned, SchemaVersion(1)!, SchemaVersion(2)!, SchemaVersion(99)!])
     func rejectedValuePreservesSavedBytesAndAllTemporaries(version: SchemaVersion) throws {
         let fixture = try Fixture()
         let original = Data("original fixture".utf8), stale = fixture.state.appending(path: ".environments.json.tmp-\(UUID().uuidString)")
         try original.write(to: fixture.snapshot)
         try original.write(to: stale)
         try #require(chmod(stale.path, 0o600) == 0)
-        #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: version, current: SchemaVersion(2)!)) {
+        #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: version, current: SchemaVersion(3)!)) {
             try StateSnapshotPublication.save(EnvironmentsSnapshot(schemaVersion: version), to: fixture.anchor,
                 createTemporary: { _, _, _, _ in Issue.record("Created a rejected value"); return -1 })
         }
@@ -57,17 +57,18 @@ import Testing
     @Test func migratorCannotSelectAnUnsupportedWriterVersion() throws {
         let fixture = try Fixture()
         let future = SnapshotMigrator(current: SchemaVersion(99)!, migrations: [])
-        #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: SchemaVersion(2)!, current: SchemaVersion(99)!)) {
+        #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: SchemaVersion(3)!, current: SchemaVersion(99)!)) {
             try StateSnapshotPublication.save(.empty, to: fixture.anchor, migrator: future)
         }
         #expect(try fixture.names().isEmpty)
     }
 
     @Test(arguments: [
-        ("{\"schemaVersion\":99,\"futureField\":true}", StateStoreError.newerSchemaVersion(found: SchemaVersion(99)!, current: SchemaVersion(2)!)),
+        ("{\"schemaVersion\":99,\"futureField\":true}", StateStoreError.newerSchemaVersion(found: SchemaVersion(99)!, current: SchemaVersion(3)!)),
         ("{\"schemaVersion\":1}", .migrationMissing(from: SchemaVersion(1)!)),
         ("{}", .migrationMissing(from: .unversioned)),
-        ("{\"schemaVersion\":2}", .corruptSnapshot),
+        ("{\"schemaVersion\":2}", .migrationMissing(from: SchemaVersion(2)!)),
+        ("{\"schemaVersion\":3}", .corruptSnapshot),
         ("damaged fixture", .corruptSnapshot),
     ])
     func unsupportedOrDamagedSavedStateCannotBeOverwritten(raw: String, failure: StateStoreError) throws {
