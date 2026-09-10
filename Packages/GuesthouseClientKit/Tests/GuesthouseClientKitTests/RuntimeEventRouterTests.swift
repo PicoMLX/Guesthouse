@@ -5,6 +5,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct RuntimeEventRouterTests {
     static let environment = EnvironmentID(), id = OperationID()
     static let info = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")
+    static let preflight = PreflightCheck.run(snapshot: HostProbeSnapshot())
     static let traffic: [RuntimeEvent] = [
         .progress(id, .init(kind: .copying)),
         .diagnostic(.init(operation: .startEnvironment, outcome: .started, operationID: id.uuid)),
@@ -51,6 +52,7 @@ import Testing
     @Test func queryRepliesAndKnownLocalRejectionsSettleWithoutCancellation() async throws {
         let cases: [(RuntimeRequest, RuntimeEvent)] = [
             (.runtimeVersion, .runtimeVersion(Self.info)),
+            (.hostPreflight, .hostPreflight(Self.preflight)),
             (.environmentStatus(Self.environment), .status(.init(environmentID: Self.environment, vm: .stopped, readiness: .checking))),
             (.cancelOperation(Self.id), .completed(OperationID())),
             (.startEnvironment(Self.environment, .init()), .failed(Self.id, .runtimeMissing)),
@@ -68,10 +70,10 @@ import Testing
         #expect(router.isIdle)
     }
 
-    @Test(arguments: [false, true])
-    func unexpectedReplyRetainsIdentityAndRetires(accepted: Bool) async throws {
+    @Test(arguments: [false, true], [RuntimeRequest.runtimeVersion, .hostPreflight])
+    func unexpectedReplyRetainsIdentityAndRetires(accepted: Bool, request: RuntimeRequest) async throws {
         var router = RuntimeEventRouter()
-        let fixture = try start(&router, request: .runtimeVersion)
+        let fixture = try start(&router, request: request)
         let event: RuntimeEvent = accepted ? .accepted(Self.id) : .progress(Self.id, .init(kind: .copying))
         let failure = RuntimeSessionFailure(cause: .malformedResponse, operationID: Self.id)
         #expect(router.reply(.success(event), to: fixture.key) == [unknown(fixture, failure, environment: nil), .retireConnection])
@@ -92,6 +94,10 @@ import Testing
             #expect(try await collectRouting(fixture.stream) == [.accepted(Self.id), .completed(Self.id)])
         }
         let cases: [(RuntimeRequest, RuntimeEvent, RuntimeSessionFailure.Cause)] = [
+            (.hostPreflight, .runtimeVersion(Self.info), .malformedResponse),
+            (.runtimeVersion, .hostPreflight(Self.preflight), .malformedResponse),
+            (.hostPreflight, .hostPreflight(.init(results: [], storage: Self.preflight.storage,
+                                                powerSource: .unknown, checkedAt: Self.preflight.checkedAt)), .malformedResponse),
             (.environmentStatus(Self.environment), .status(.init(environmentID: EnvironmentID(), vm: .stopped, readiness: .checking)), .malformedResponse),
             (.runtimeVersion, .runtimeVersion(.init(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(11))), .protocolMismatch(service: 11)),
         ]
@@ -101,6 +107,38 @@ import Testing
             #expect(router.reply(.success(event), to: fixture.key) == [.retireConnection])
             await #expect(throws: RuntimeSessionFailure(cause: cause)) { try await collectRouting(fixture.stream) }
         }
+    }
+
+    @Test func preflightRepliesKeepTheirOwningRequestAndNeverBecomePushes() async throws {
+        var router = RuntimeEventRouter()
+        let first = try start(&router, request: .hostPreflight)
+        let second = try start(&router, request: .hostPreflight)
+        let other = PreflightReport(results: Self.preflight.results, storage: Self.preflight.storage,
+                                    powerSource: .battery, checkedAt: Self.preflight.checkedAt)
+        #expect(router.reply(.success(.hostPreflight(other)), to: second.key).isEmpty)
+        #expect(router.reply(.success(.hostPreflight(Self.preflight)), to: first.key).isEmpty)
+        #expect(try await collectRouting(first.stream) == [.hostPreflight(Self.preflight)])
+        #expect(try await collectRouting(second.stream) == [.hostPreflight(other)])
+        #expect(router.isIdle)
+        #expect(router.incoming(.hostPreflight(other)) == [.retireConnection])
+        #expect(router.pendingIDCount == 0)
+    }
+
+    @Test func preflightCannotAcknowledgeOrCompleteAnOperation() async throws {
+        let request = RuntimeRequest.startEnvironment(Self.environment, .init())
+        #expect(!request.acceptsReply(.hostPreflight(Self.preflight)))
+        #expect(!RuntimeRequest.hostPreflight.mayMutate)
+        #expect(!RuntimeRequest.hostPreflight.acceptsOperation)
+        #expect(RuntimeRequest.hostPreflight.environment == nil)
+        #expect(RuntimeRequest.hostPreflight.cancellationTarget == nil)
+        #expect(RuntimeEvent.hostPreflight(Self.preflight).routingID == nil)
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router, request: request)
+        let failure = RuntimeSessionFailure(cause: .malformedResponse, mayHaveMutated: true)
+        #expect(router.reply(.success(.hostPreflight(Self.preflight)), to: fixture.key) == [
+            unknown(fixture, failure), .retireConnection,
+        ])
+        await #expect(throws: failure) { try await collectRouting(fixture.stream) }
     }
 
     @Test func pendingIDOverflowFailsClosedAndKeepsTheLateOwningReply() async throws {
@@ -245,7 +283,7 @@ private struct Fixture {
 private func start(_ router: inout RuntimeEventRouter,
                    request: RuntimeRequest = .startEnvironment(RuntimeEventRouterTests.environment, .init())) throws -> Fixture {
     let mutating: Bool
-    switch request { case .runtimeVersion, .environmentStatus: mutating = false; default: mutating = true }
+    switch request { case .runtimeVersion, .hostPreflight, .environmentStatus: mutating = false; default: mutating = true }
     let fixture = Fixture(mutating: mutating)
     try #require(router.register(fixture.key, request: request, producer: fixture.producer) == .admitted)
     return fixture

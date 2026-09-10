@@ -37,7 +37,7 @@ public enum RequestValidator: Sendable {
             throw .protocolMismatch(client: envelope.protocolVersion, service: .current)
         }
         switch envelope.request {
-        case .runtimeVersion, .environmentStatus, .cancelOperation, .stopEnvironment(_, .force): break
+        case .runtimeVersion, .hostPreflight, .environmentStatus, .cancelOperation, .stopEnvironment(_, .force): break
         case .startEnvironment(_, let options):
             guard options.ipWait >= .zero, options.ipWait <= maximumIPWait else {
                 throw .optionOutOfRange(.ipWait)

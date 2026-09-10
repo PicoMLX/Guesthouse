@@ -34,6 +34,39 @@ import Testing
         #expect(await client.reconciliation().0.isEmpty)
     }
 
+    @Test func publicQueryPolicyAllowsPreflightButDoesNotOpenTheOperationAPI() async throws {
+        let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        var query = client.send(.hostPreflight).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        #expect(peer.requests == [.hostPreflight])
+        let report = PreflightCheck.run(snapshot: HostProbeSnapshot())
+        peer.answer(0, .success(.hostPreflight(report)))
+        #expect(try await query.next() == .hostPreflight(report))
+        #expect(try await query.next() == nil)
+        var mutation = client.send(Self.start).makeAsyncIterator()
+        await #expect(throws: GuesthouseError.invalidRequest(.unsupportedOperation)) { try await mutation.next() }
+        #expect(peer.requests == [.hostPreflight])
+        #expect(await client.reconciliation().0.isEmpty)
+        await client.close()
+        #expect(peer.cancelCount == 1)
+    }
+
+    @Test func preflightTransportFailureDoesNotInventAnUnknownMutationOrReplay() async throws {
+        let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        var query = client.send(.hostPreflight).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        peer.answer(0, .failure(.init(cause: .connectionLost)))
+        await #expect(throws: RuntimeSessionFailure(cause: .connectionLost)) { try await query.next() }
+        await client.flush()
+        #expect(await client.reconciliation().0.isEmpty)
+        #expect(await client.reconciliation().1.isEmpty)
+        #expect(peer.requests == [.hostPreflight])
+        #expect(fixture.connectionCount == 1)
+        await client.close()
+    }
+
     @Test(arguments: [false, true])
     func abandoningAnOperationSendsOneTrackedCancellation(beforeReply: Bool) async throws {
         let fixture = OwnerFixture(), client = fixture.client()
@@ -207,11 +240,12 @@ private final class OwnerFixture: Sendable {
     private let peers = Mutex<[OwnerPeer]>([])
     var latest: OwnerPeer? { peers.withLock { $0.last } }
     var connectionCount: Int { peers.withLock { $0.count } }
-    func client(deadline: @escaping RuntimeClient.Deadline = { try await Task.sleep(for: .seconds(10)) }) -> RuntimeClient {
+    func client(permitsOperations: Bool = true,
+                deadline: @escaping RuntimeClient.Deadline = { try await Task.sleep(for: .seconds(10)) }) -> RuntimeClient {
         RuntimeClient(connect: { [self] incoming, dropped in
             let peer = OwnerPeer(incoming: incoming, dropped: dropped)
             peers.withLock { $0.append(peer) }; return peer
-        }, deadline: deadline)
+        }, permitsOperations: permitsOperations, deadline: deadline)
     }
 }
 private final class OwnerPeer: RuntimeClientSession {

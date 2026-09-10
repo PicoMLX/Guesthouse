@@ -4,6 +4,8 @@ import Foundation
 /// private selection metadata is not a command, a diagnostic attachment, or access authority.
 public enum RuntimeRequest: Codable, Hashable, Sendable {
     case runtimeVersion
+    /// Read-only report; policy and storage identity are selected and retained by the service.
+    case hostPreflight
     case environmentStatus(EnvironmentID)
     case startEnvironment(EnvironmentID, StartOptions)
     case stopEnvironment(EnvironmentID, StopMode)
@@ -13,6 +15,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .runtimeVersion: "runtimeVersion"
+        case .hostPreflight: "hostPreflight"
         case .environmentStatus: "environmentStatus"
         case .startEnvironment: "startEnvironment"
         case .stopEnvironment: "stopEnvironment"

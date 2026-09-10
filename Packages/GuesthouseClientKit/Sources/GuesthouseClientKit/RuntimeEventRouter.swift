@@ -130,7 +130,7 @@ struct RuntimeEventRouter: Sendable {
     mutating func incoming(_ event: RuntimeEvent) -> [Effect] {
         guard !requiresRetirement else { return [] }
         switch event {
-        case .accepted, .runtimeVersion: return fault(.malformedResponse)
+        case .accepted, .runtimeVersion, .hostPreflight: return fault(.malformedResponse)
         case .status(let status) where status.inFlightOperation == nil:
             for entry in requests.values where entry.operation != nil && entry.request.environment == status.environmentID {
                 entry.producer.push(event)
@@ -211,18 +211,18 @@ struct RuntimeEventRouter: Sendable {
 
 extension RuntimeRequest {
     var mayMutate: Bool {
-        switch self { case .runtimeVersion, .environmentStatus: false; default: true }
+        switch self { case .runtimeVersion, .hostPreflight, .environmentStatus: false; default: true }
     }
     var environment: EnvironmentID? {
         switch self {
         case .environmentStatus(let id), .startEnvironment(let id, _), .stopEnvironment(let id, _), .importXcode(let id, _): id
-        case .runtimeVersion, .cancelOperation: nil
+        case .runtimeVersion, .hostPreflight, .cancelOperation: nil
         }
     }
     var acceptsOperation: Bool {
         switch self {
         case .startEnvironment, .stopEnvironment, .importXcode: true
-        case .runtimeVersion, .environmentStatus, .cancelOperation: false
+        case .runtimeVersion, .hostPreflight, .environmentStatus, .cancelOperation: false
         }
     }
     var cancellationTarget: OperationID? {
@@ -232,6 +232,7 @@ extension RuntimeRequest {
         if case .failed = event { return true } // Correlated service rejection, not a live registration.
         switch (self, event) {
         case (.runtimeVersion, .runtimeVersion(let info)): return info.protocolVersion == .current
+        case (.hostPreflight, .hostPreflight(let report)): return report.isComplete
         case (.environmentStatus(let id), .status(let status)): return status.environmentID == id
         case (.cancelOperation, .completed): return true // Cancel-request acknowledgement, not proof its target stopped.
         case (_, .accepted): return acceptsOperation
@@ -245,7 +246,7 @@ extension RuntimeEvent {
         case .accepted(let id), .progress(let id, _), .completed(let id), .failed(let id, _): id
         case .diagnostic(let event): OperationID(uuid: event.operationID)
         case .status(let status): status.inFlightOperation
-        case .runtimeVersion: nil
+        case .runtimeVersion, .hostPreflight: nil
         }
     }
     var isTerminal: Bool {
