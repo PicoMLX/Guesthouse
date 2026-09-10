@@ -115,24 +115,31 @@ import Testing
         #expect(try ProvisioningReducer.reduce(reconciled.state, .userRetried).state.status.caseName == "awaitingInspection")
     }
 
-    /// A record naming a counter at the end of the range would make the next token mint overflow
-    /// and trap the process rather than being reported as the corrupt record it is.
-    @Test func anExhaustedEffectCounterIsRefusedWhenDecoded() throws {
+    /// The last issued token remains recoverable after relaunch. Exhaustion refuses only new
+    /// reservations, without trapping, discarding the record, or reusing an earlier identity.
+    @Test func theLastEffectSurvivesRelaunchAndCanSettleWithoutAnotherMint() throws {
         func record(_ issued: String, status: String = "{\"notStarted\":{}}") -> Data {
             Data("{\"schemaVersion\":2,\"stage\":\"preflight\",\"issuedEffects\":\(issued),\"status\":\(status)}".utf8)
         }
-        #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: record("18446744073709551615")) }
-        #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(ProvisioningState.self, from: record("0", status: "{\"awaitingInspection\":{\"_0\":18446744073709551615}}"))
-        }
-        let accepted = try JSONDecoder().decode(ProvisioningState.self, from: record("\(ProvisioningState.maximumIssuedEffects)"))
-        #expect(accepted.issuedEffects == ProvisioningState.maximumIssuedEffects)
-        // The ceiling bounds what a record may say, not what a live state may hold: the first
-        // transition after reading one at the ceiling mints a token above it, and that has to
-        // produce a state rather than trap the process on the way out of a bad record.
+        let accepted = try JSONDecoder().decode(ProvisioningState.self, from: record("\(UInt64.max - 1)"))
         let minted = try ProvisioningReducer.reduce(accepted, .inspectionRequested)
-        #expect(minted.state.issuedEffects == ProvisioningState.maximumIssuedEffects + 1)
-        #expect(minted.state.status == .awaitingInspection(EffectToken(ProvisioningState.maximumIssuedEffects + 1)))
+        let last = EffectToken(UInt64.max)
+        #expect(minted.state.status == .awaitingInspection(last))
+        let restored = try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(minted.state))
+        let promoted = try JSONDecoder().decode(ProvisioningState.self, from: record("0", status: "{\"awaitingInspection\":{\"_0\":18446744073709551615}}"))
+        #expect(promoted == restored)
+        #expect(restored.issuedEffects == UInt64.max)
+        #expect(throws: ProvisioningTransitionError.effectCounterExhausted) {
+            try ProvisioningReducer.reduce(restored, .inspectionRequested)
+        }
+        let settled = try ProvisioningReducer.reduce(restored, .reconciled(last, .notStarted))
+        #expect(settled.state.status == .notStarted)
+        #expect(settled.effects.isEmpty)
+        #expect(settled.state.issuedEffects == UInt64.max)
+        #expect(try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(settled.state)) == settled.state)
+        #expect(throws: ProvisioningTransitionError.effectCounterExhausted) {
+            try ProvisioningReducer.reduce(settled.state, .startRequested(stage: .first))
+        }
     }
 
     /// A cleanup whose connection dropped can be reported as finished long after a second
