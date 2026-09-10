@@ -21,10 +21,14 @@ import XPC
         }
     }
 
-    // Retained #103 coverage: exercise every domain kind through actual native I/O,
+    // Retained #103 coverage: exercise every domain kind through actual native I/O — kept in
+    // step with `RuntimeEvent`, so a kind added later (`hostPreflight`) is covered here too —
     // with typed diagnostics replacing the deferred raw-log case (ADR 0003).
     @Test(arguments: [
         RuntimeEvent.runtimeVersion(RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")),
+        // A complete report: the wire refuses partial ones, so this is the shape that must
+        // survive the frame path, not a stand-in.
+        .hostPreflight(PreflightCheck.run(snapshot: HostProbeSnapshot())),
         .accepted(OperationID()),
         .progress(OperationID(), ProgressPhase(kind: .copying, fraction: 0.5)),
         .diagnostic(DiagnosticEvent(operation: .runtimeRequest, outcome: .started, operationID: UUID())),
