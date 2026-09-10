@@ -60,13 +60,23 @@ import Testing
         }
     }
 
-    @Test func aProvisioningCounterTheReaderWouldRefuseCannotBeEncoded() throws {
-        var ceiling = try sample()
-        ceiling.provisioning[environment.id] = ProvisioningState(stage: .first, status: .awaitingInspection(EffectToken(ProvisioningState.maximumIssuedEffects)))
-        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONEncoder().encode(ceiling)) == ceiling)
-        var beyond = ceiling
-        beyond.provisioning[environment.id] = ProvisioningState(stage: .first, status: .awaitingInspection(EffectToken(ProvisioningState.maximumIssuedEffects + 1)))
-        rejected(beyond, .effectCounter)
+    @Test(arguments: [
+        (UInt64(9_223_372_036_854_775_807), UInt64(9_223_372_036_854_775_808)),
+        (9_223_372_036_854_775_808, 9_223_372_036_854_775_809),
+        (UInt64.max - 1, UInt64.max),
+        (UInt64.max, nil)
+    ] as [(UInt64, UInt64?)])
+    func fullRangeProvisioningCountersSurviveSnapshots(counter: UInt64, next: UInt64?) throws {
+        var original = try sample()
+        original.provisioning[environment.id] = ProvisioningState(
+            stage: .first, status: .awaitingInspection(EffectToken(counter)), issuedEffects: counter
+        )
+        let restored = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONEncoder().encode(original))
+        #expect(restored == original)
+        let state = try #require(restored.provisioning[environment.id])
+        #expect(state.issuedEffects == counter)
+        #expect(state.status.pendingEffect == EffectToken(counter))
+        #expect(state.nextEffectToken?.value == next)
     }
 
     @Test(arguments: [1, 3, 99])
@@ -94,16 +104,27 @@ import Testing
         }
     }
 
-    @Test func aPersistedCounterAboveTheCeilingIsRefused() throws {
-        var json = try object(sample())
+    @Test(arguments: ["-1", "18446744073709551616", "\"1\"", "null", "true", "1.5"])
+    func malformedOrUnrepresentablePersistedCountersAreRefused(counter: String) throws {
+        let original = try sample()
+        var json = try object(original)
         var provisioning = try #require(json["provisioning"] as? [String: [String: Any]])
         let key = environment.id.uuid.uuidString
         var state = try #require(provisioning[key])
-        state["issuedEffects"] = ProvisioningState.maximumIssuedEffects + 1
+        // Insert the numeric token as text so the fixture itself never overflows UInt64
+        // or rounds an out-of-range number through a floating-point intermediary.
+        state["issuedEffects"] = "COUNTER_FIXTURE_MARKER"
         provisioning[key] = state
         json["provisioning"] = provisioning
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: json), as: UTF8.self)
+        let marker = "\"COUNTER_FIXTURE_MARKER\""
+        try #require(encoded.components(separatedBy: marker).count == 2)
+        let control = Data(encoded.replacingOccurrences(of: marker, with: "0").utf8)
+        let restored = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: control)
+        try #require(restored == original)
+        let data = Data(encoded.replacingOccurrences(of: marker, with: counter).utf8)
         #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+            try JSONDecoder().decode(EnvironmentsSnapshot.self, from: data)
         }
     }
 
