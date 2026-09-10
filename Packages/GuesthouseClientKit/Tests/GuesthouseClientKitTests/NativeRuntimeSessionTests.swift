@@ -8,7 +8,7 @@ import XPC
 /// Anonymous native I/O, never a signed-app identity, embedding, provider or hardware proof.
 @Suite(.timeLimit(.minutes(1))) struct NativeRuntimeSessionTests {
     enum Shape: Sendable, CaseIterable {
-        case current, exactBoundary, oversized, foreignOuter, contradictoryInner, unknownEvent, bareEvent, wrongHeader, wrongPayload, extraKey
+        case current, exactBoundary, oversized, foreignOuter, contradictoryInner, unknownEvent, malformedEvent, bareEvent, wrongHeader, wrongPayload, extraKey
     }
     @Test(arguments: Shape.allCases, [false, true])
     func boundedNativeRepliesAndPushes(shape: Shape, push: Bool) async throws {
@@ -19,6 +19,22 @@ import XPC
         case .foreignOuter: #expect(throws: RuntimeSessionFailure(cause: .protocolMismatch(service: 99))) { try result.get() }
         default: #expect(throws: RuntimeSessionFailure(cause: .malformedResponse)) { try result.get() }
         }
+    }
+
+    // Retained #103 coverage: exercise every domain kind through actual native I/O,
+    // with typed diagnostics replacing the deferred raw-log case (ADR 0003).
+    @Test(arguments: [
+        RuntimeEvent.runtimeVersion(RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")),
+        .accepted(OperationID()),
+        .progress(OperationID(), ProgressPhase(kind: .copying, fraction: 0.5)),
+        .diagnostic(DiagnosticEvent(operation: .runtimeRequest, outcome: .started, operationID: UUID())),
+        .status(EnvironmentStatus(environmentID: EnvironmentID(), vm: .stopped, readiness: .checking)),
+        .completed(OperationID()),
+        .failed(OperationID(), .canceled)
+    ], [false, true])
+    func wrappedEventKindsReachTheDomain(event: RuntimeEvent, push: Bool) async throws {
+        let result = try await exchange(.current, push: push, event: event)
+        #expect(try result.get() == event)
     }
 
     @Test(arguments: [false, true])
@@ -45,7 +61,7 @@ import XPC
         #expect(released == nil)
     }
 
-    private func exchange(_ shape: Shape, push: Bool) async throws -> Result<RuntimeEvent, RuntimeSessionFailure> {
+    private func exchange(_ shape: Shape, push: Bool, event response: RuntimeEvent = event) async throws -> Result<RuntimeEvent, RuntimeSessionFailure> {
         let delivery = AsyncStream<Result<RuntimeEvent, RuntimeSessionFailure>>.makeStream(bufferingPolicy: .bufferingOldest(1))
         let holder = Server()
         let listener = XPCListener { request in
@@ -54,10 +70,10 @@ import XPC
                     let bytes = try RawRuntimeFrame.payload(message, expectedVersion: epoch)
                     #expect(try RequestValidator.decode(bytes).request == .runtimeVersion)
                     let context = try #require(RawRuntimeReplyContext(receivedMessage: message))
-                    let reply = try #require(try context.takeReply(payload: RuntimeEventEnvelope(event: event).encoded(), protocolVersion: epoch))
+                    let reply = try #require(try context.takeReply(payload: RuntimeEventEnvelope(event: response).encoded(), protocolVersion: epoch))
                     let peer = try #require(holder.session.withLock { $0 })
-                    if push { try peer.send(message: shaped(shape, frame: XPCDictionary())) }
-                    try peer.send(message: push ? reply : shaped(shape, frame: reply))
+                    if push { try peer.send(message: shaped(shape, frame: XPCDictionary(), event: response)) }
+                    try peer.send(message: push ? reply : shaped(shape, frame: reply, event: response))
                     return nil // Context was consumed explicitly; never request a second implicit reply.
                 } catch {
                     Issue.record("Native response fixture failed")
@@ -99,12 +115,13 @@ private let event = RuntimeEvent.runtimeVersion(RuntimeVersionInfo(serviceVersio
 private final class Server: Sendable { let session = Mutex<XPCSession?>(nil) }
 private final class Results: Sendable { let values = Mutex<[Result<RuntimeEvent, RuntimeSessionFailure>]>([]) }
 
-private func shaped(_ shape: NativeRuntimeSessionTests.Shape, frame: XPCDictionary) throws -> XPCDictionary {
+private func shaped(_ shape: NativeRuntimeSessionTests.Shape, frame: XPCDictionary, event: RuntimeEvent) throws -> XPCDictionary {
     var frame = frame
     var payload = try RuntimeEventEnvelope(event: event).encoded()
     if shape == .exactBoundary { payload.append(Data(repeating: 32, count: RawRuntimeFrame.maximumPayloadBytes - payload.count)) }
     if shape == .oversized { payload = Data(repeating: 32, count: RawRuntimeFrame.maximumPayloadBytes + 1) }
     if shape == .foreignOuter || shape == .unknownEvent { payload = Data("{\"protocolVersion\":\(epoch),\"event\":{\"unknown\":{}}}".utf8) }
+    if shape == .malformedEvent { payload = Data("{\"protocolVersion\":\(epoch),\"event\":73}".utf8) }
     if shape == .contradictoryInner { payload = Data("{\"protocolVersion\":99,\"event\":{}}".utf8) }
     if shape == .bareEvent { payload = try JSONEncoder().encode(event) }
     frame["protocolVersion"] = shape == .foreignOuter ? Int64(99) : epoch
