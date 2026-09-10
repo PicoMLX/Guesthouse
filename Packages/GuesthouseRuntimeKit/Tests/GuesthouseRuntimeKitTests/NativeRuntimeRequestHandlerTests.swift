@@ -244,6 +244,45 @@ import XPC
         #expect(try await next(response) == .runtimeVersion(version))
     }
 
+    @Test func rejectedPlanReleasesCapturedOwnerAfterUnlockAndReplyHandoff() async throws {
+        let fixture = try Fixture(deferredReplies: true, captureLifetime: true)
+        defer { fixture.cancel() }
+        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        for _ in 0..<4 {
+            responses.append(fixture.request(try message(.current)))
+            _ = try await next(fixture.processed)
+        }
+        #expect(!fixture.trace.steps.withLock { $0.contains(.released) })
+        #expect(failure(try await next(fixture.request(try message(.current)))) == .invalidRequest(.tooManyInFlight))
+        _ = try await next(fixture.processed)
+        #expect(fixture.trace.steps.withLock { Array($0.suffix(2)) } == [.sent, .released])
+        #expect(fixture.trace.steps.withLock { $0.filter { $0 == .released }.count } == 1)
+        #expect(fixture.gate.refusal == nil)
+        fixture.executor.drain()
+        for response in responses { #expect(try await next(response) == .runtimeVersion(version)) }
+        #expect(fixture.trace.steps.withLock { $0.filter { $0 == .released }.count } == 5)
+        #expect(fixture.trace.steps.withLock { $0.filter { $0 == .probed }.count } == 4)
+    }
+
+    @Test(arguments: [false, true])
+    func acceptedPlanRetainsItsOwnerUntilActualQueueDrain(refuse: Bool) async throws {
+        let fixture = try Fixture(deferredReplies: true, captureLifetime: true)
+        defer { fixture.cancel() }
+        let response = fixture.request(try message(.current))
+        _ = try await next(fixture.processed)
+        if refuse {
+            let expected = GuesthouseError.protocolMismatch(client: 99, service: RuntimeProtocolVersion.current.rawValue)
+            #expect(failure(try await next(fixture.request(try message(.foreignHeader)))) == expected)
+            _ = try await next(fixture.processed)
+            #expect(failure(try await next(response)) == expected)
+        }
+        #expect(!fixture.trace.steps.withLock { $0.contains(.released) })
+        fixture.executor.drain()
+        if !refuse { #expect(try await next(response) == .runtimeVersion(version)) }
+        #expect(fixture.trace.steps.withLock { $0.filter { $0 == .released }.count } == 1)
+        #expect(fixture.trace.steps.withLock { $0.filter { $0 == .probed }.count } == (refuse ? 0 : 1))
+    }
+
     private func message(_ shape: Shape) throws -> XPCDictionary {
         var result = XPCDictionary()
         result["protocolVersion"] = Int64(RuntimeProtocolVersion.current.rawValue)
@@ -275,7 +314,7 @@ import XPC
 }
 
 private let version = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")
-private enum Step { case authenticated, decoded, registered, probed, diagnostic, sendAttempt, sent, canceled }
+private enum Step { case authenticated, decoded, registered, probed, released, diagnostic, sendAttempt, sent, canceled }
 private final class Trace: Sendable {
     let steps = Mutex<[Step]>([])
     let diagnostics = Mutex<[DiagnosticEvent]>([])
@@ -294,7 +333,8 @@ private final class Fixture: Sendable {
 
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
          refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
-         deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil) throws {
+         deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil,
+         captureLifetime: Bool = false) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
         processed = stream
         self.gate = gate
@@ -322,7 +362,11 @@ private final class Fixture: Sendable {
                             trace.record(.registered)
                             let result = NativeRuntimeRequestHandler.queryReply(request, version: badVersion
                                 ? RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(99)) : version)
-                            return deferredReplies ? .readOnly { trace.record(.probed); return result } : .immediate(result)
+                            guard deferredReplies else { return .immediate(result) }
+                            let owner = captureLifetime ? PlanOwner(gate: gate, trace: trace) : nil
+                            return .readOnly {
+                                withExtendedLifetime(owner) { trace.record(.probed); return result }
+                            }
                         },
                         send: { reply in
                             trace.record(.sendAttempt)
@@ -368,6 +412,17 @@ private final class DeferredExecutor: Sendable {
     func enqueue(_ work: @escaping @Sendable () -> Void) { pending.withLock { $0.append(work) } }
     func drain() {
         while let work = pending.withLock({ $0.isEmpty ? nil : $0.removeFirst() }) { work() }
+    }
+}
+
+private final class PlanOwner: Sendable {
+    let gate: RuntimeSessionGate
+    let trace: Trace
+    init(gate: RuntimeSessionGate, trace: Trace) { self.gate = gate; self.trace = trace }
+    deinit {
+        // Observable reentry: destroying the last captured owner under the gate would fail.
+        _ = gate.refusal
+        trace.record(.released)
     }
 }
 
