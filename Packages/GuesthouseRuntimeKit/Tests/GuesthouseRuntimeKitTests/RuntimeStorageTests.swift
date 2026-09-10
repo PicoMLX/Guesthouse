@@ -111,6 +111,72 @@ import Testing
         #expect(try Data(contentsOf: sentinel) == Data("keep me".utf8))
     }
 
+    @Test(arguments: [RuntimeStorage.Area.vms, .sshMaintenance], [(0o300, false), (0o100, false), (0o700, true)])
+    func unreadableSearchableLeavesAreRepairedWithoutReplacingWork(_ area: RuntimeStorage.Area, _ options: (Int, Bool)) async throws {
+        let fixture = try Fixture()
+        let storage = try RuntimeStorage(root: fixture.storage)
+        let leaf = try storage.location(for: area)
+        let before = try StorageProtection.structure(leaf)
+        let sentinel = leaf.appending(path: "unpublished")
+        try Data("keep me".utf8).write(to: sentinel)
+        // Hold cleanup authority before restricting access, including if preparation throws.
+        let cleanup = open(leaf.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(cleanup >= 0)
+        defer { close(cleanup) }
+        let empty = try #require(acl_init(0))
+        defer { fchmod(cleanup, 0o700); acl_set_fd(cleanup, empty); acl_free(UnsafeMutableRawPointer(empty)) }
+        try #require(fchmod(cleanup, mode_t(options.0)) == 0)
+        if options.1 { try await fixture.addACL("everyone deny read,list", at: leaf) }
+        let readFD = open(leaf.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        let readError = errno
+        if readFD >= 0 { close(readFD) }
+        try #require(readFD == -1 && readError == EACCES)
+        #expect(throws: StorageFailure.protectionDrift) { _ = try storage.location(for: area) }
+        let reopened = try RuntimeStorage(root: fixture.storage)
+        let after = try StorageProtection.structure(reopened.location(for: area))
+        #expect(after.st_dev == before.st_dev && after.st_ino == before.st_ino)
+        #expect(after.st_mode & 0o7777 == 0o700)
+        #expect(try Data(contentsOf: sentinel) == Data("keep me".utf8))
+    }
+
+    @Test func readableUnsearchableLeafRemainsRepairable() throws {
+        let fixture = try Fixture()
+        let storage = try RuntimeStorage(root: fixture.storage)
+        let leaf = try storage.location(for: .vms)
+        let cleanup = open(leaf.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(cleanup >= 0)
+        defer { fchmod(cleanup, 0o700); close(cleanup) }
+        try #require(fchmod(cleanup, 0o400) == 0)
+        let reopened = try RuntimeStorage(root: fixture.storage)
+        try StorageProtection.verify(reopened.location(for: .vms))
+    }
+
+    @Test(arguments: [false, true])
+    func inaccessibleLeafIsRefusedBeforeAnyPreparation(_ denyAccess: Bool) async throws {
+        let fixture = try Fixture()
+        try fixture.directory(fixture.storage, mode: 0o755)
+        let leaf = fixture.storage.appending(path: "vms")
+        try fixture.directory(leaf)
+        let sentinel = leaf.appending(path: "unpublished")
+        try Data("keep me".utf8).write(to: sentinel)
+        let cleanup = open(leaf.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(cleanup >= 0)
+        defer { close(cleanup) }
+        let empty = try #require(acl_init(0))
+        defer { fchmod(cleanup, 0o700); acl_set_fd(cleanup, empty); acl_free(UnsafeMutableRawPointer(empty)) }
+        if denyAccess { try await fixture.addACL("everyone deny read,list,search", at: leaf) }
+        else { try #require(fchmod(cleanup, 0o000) == 0) }
+        #expect(throws: StorageFailure.inspectionFailed) { _ = try RuntimeStorage(root: fixture.storage) }
+        #expect(try StorageProtection.structure(fixture.storage).st_mode & 0o7777 == 0o755)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.storage.path) == ["vms"])
+        let searchFD = open(leaf.path, O_SEARCH | O_NOFOLLOW | O_CLOEXEC)
+        let searchError = errno
+        if searchFD >= 0 { close(searchFD) }
+        #expect(searchFD == -1 && searchError == EACCES) // Refusal has not repaired access.
+        try #require(fchmod(cleanup, 0o700) == 0 && acl_set_fd(cleanup, empty) == 0)
+        #expect(try Data(contentsOf: sentinel) == Data("keep me".utf8))
+    }
+
     @Test(arguments: ["", "vms", "state", "ssh"])
     func staleBackupExclusionIsRefusedThenClearedOnExplicitPreparation(_ suffix: String) throws {
         let fixture = try Fixture()
