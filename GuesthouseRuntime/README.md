@@ -36,7 +36,7 @@ The scratch client is a copy of the real GUI with **only its outer app signature
    ```
 
    Require the copied service's team, identifier, and `CDHash` to match the original. Keep the original product untouched.
-2. With the original app stopped, open the copy from its temporary folder in Finder. Confirm the running app and runtime service executable paths belong to this copy, using Activity Monitor's process inspection or Xcode's debugger. Click **Check runtime connection** and require the same successful response. Then quit the copy and confirm its processes have exited. A failed copied positive control makes this experiment inconclusive; do not proceed.
+2. With the original app stopped, open the copy from its temporary folder in Finder. Confirm the running app's executable path belongs to this copy, using Activity Monitor's process inspection or Xcode's debugger. Click **Check runtime connection** and require the same successful response. Verify the service's executable path when the query launches it; if necessary, configure Xcode's debugger to wait for that service's launch before running the query. Do not require the on-demand service to exist before clicking the button. Then quit the copy and confirm its processes have exited. A failed copied positive control makes this experiment inconclusive; do not proceed.
 3. Re-sign only the copied outer app:
 
    ```bash
