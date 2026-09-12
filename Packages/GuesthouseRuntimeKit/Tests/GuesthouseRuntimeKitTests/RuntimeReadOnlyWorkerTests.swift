@@ -131,14 +131,17 @@ import Testing
         let running = try Call(), premature = try Call(), later = try Call()
         let others = try (0..<3).map { _ in try Call() }
         let refusal = RuntimeEvent.failed(OperationID(), .unauthorizedCaller)
-        let ticket = try #require(running.reserve(worker, work: {
+        let readWork: @Sendable () -> RuntimeEvent = {
             _ = running.trace.run()
             worker.refuse(running.gate, with: refusal)
             #expect(running.trace.state.withLock { $0.replies } == [refusal])
             #expect(premature.reserve(worker) == nil) // The read has not returned yet.
             premature.reject()
             return running.trace.success
-        }))
+        }
+        // Keep the @Sendable closure out of #require's diagnostic autoclosure boundary.
+        let reservedTicket = running.reserve(worker, work: readWork)
+        let ticket = try #require(reservedTicket)
         let otherTickets = try others.map { try #require($0.reserve(worker)) }
         #expect(worker.start(ticket))
         executor.runOne()
