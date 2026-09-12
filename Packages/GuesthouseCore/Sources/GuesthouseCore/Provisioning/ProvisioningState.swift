@@ -183,22 +183,30 @@ public enum StageStatus: Codable, Hashable, Sendable {
         }
     }
 
-    /// A fixed label for tests and presentation; never serialize this whole status as a log.
-    public var caseName: String {
+    /// Closed labels for transition errors; associated operational data stays separate.
+    public enum Kind: String, Hashable, Sendable, CaseIterable {
+        case notStarted, startRequested, startRejected, inProgress, persistingCheckpoint
+        case completed, canceled, recoverableFailure, needsUserAction, unknownOutcome
+        case awaitingInspection, resumable, cleanupRequired
+    }
+
+    public var caseName: String { kind.rawValue }
+
+    public var kind: Kind {
         switch self {
-        case .notStarted: "notStarted"
-        case .startRequested: "startRequested"
-        case .startRejected: "startRejected"
-        case .inProgress: "inProgress"
-        case .persistingCheckpoint: "persistingCheckpoint"
-        case .completed: "completed"
-        case .canceled: "canceled"
-        case .recoverableFailure: "recoverableFailure"
-        case .needsUserAction: "needsUserAction"
-        case .unknownOutcome: "unknownOutcome"
-        case .awaitingInspection: "awaitingInspection"
-        case .resumable: "resumable"
-        case .cleanupRequired: "cleanupRequired"
+        case .notStarted: .notStarted
+        case .startRequested: .startRequested
+        case .startRejected: .startRejected
+        case .inProgress: .inProgress
+        case .persistingCheckpoint: .persistingCheckpoint
+        case .completed: .completed
+        case .canceled: .canceled
+        case .recoverableFailure: .recoverableFailure
+        case .needsUserAction: .needsUserAction
+        case .unknownOutcome: .unknownOutcome
+        case .awaitingInspection: .awaitingInspection
+        case .resumable: .resumable
+        case .cleanupRequired: .cleanupRequired
         }
     }
 }
