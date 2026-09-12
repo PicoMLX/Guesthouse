@@ -28,6 +28,35 @@ import Testing
         #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) { try RuntimeEventEnvelope.decode(data) }
     }
 
+    @Test(arguments: events)
+    func missingVersionRefusesOtherwiseValidWrappedEvent(event: RuntimeEvent) throws {
+        let envelope = RuntimeEventEnvelope(event: event)
+        let validData = try envelope.encoded()
+        let decoded = try RuntimeEventEnvelope.decode(validData)
+        try #require(decoded == envelope)
+        var object = try #require(JSONSerialization.jsonObject(with: validData) as? [String: Any])
+        try #require(Set(object.keys) == ["protocolVersion", "event"])
+        object.removeValue(forKey: "protocolVersion")
+        #expect(Set(object.keys) == ["event"])
+
+        // Keep the valid payload wrapped; a bare event is a different malformed shape.
+        let eventObject = try #require(object["event"])
+        let eventData = try JSONSerialization.data(withJSONObject: eventObject)
+        #expect(try JSONDecoder().decode(RuntimeEvent.self, from: eventData) == event)
+        let data = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) {
+            try RuntimeEventEnvelope.decode(data)
+        }
+        let error = try #require(throws: DecodingError.self) {
+            try JSONDecoder().decode(RuntimeEventEnvelope.self, from: data)
+        }
+        guard case .keyNotFound(let key, _) = error else {
+            Issue.record("Expected a missing protocolVersion key, not a payload failure")
+            return
+        }
+        #expect(key.stringValue == "protocolVersion")
+    }
+
     @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, Int.max])
     func foreignHeaderPrecedesUnknownEvent(version: Int) {
         let data = Data("{\"event\":{\"futureReply\":{}},\"protocolVersion\":\(version)}".utf8)
