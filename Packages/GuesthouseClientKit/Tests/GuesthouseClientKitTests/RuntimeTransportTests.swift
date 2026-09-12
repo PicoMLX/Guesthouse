@@ -6,6 +6,19 @@ import Testing
 @testable import GuesthouseClientKit
 
 @Suite struct RuntimeTransportTests {
+    @Test func preflightFailureIsClassifiedReadOnlyAtTheTransportBoundary() throws {
+        let fixture = TransportFixture(.replyFails)
+        defer { fixture.releaseCallbacks() }
+        let client = fixture.client()
+        try client.send(.init(request: .hostPreflight)) { result in
+            fixture.replies.withLock { $0.append(result) }
+        }
+        let result = try #require(fixture.replies.withLock { $0.first })
+        #expect(throws: RuntimeSessionFailure(cause: .malformedResponse, mayHaveMutated: false)) {
+            try result.get()
+        }
+    }
+
     @Test func invalidOutgoingOptionsNeverConnect() {
         let fixture = TransportFixture()
         defer { fixture.releaseCallbacks() }

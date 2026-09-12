@@ -6,7 +6,7 @@ import Testing
     static let environment = EnvironmentID()
     static let operation = OperationID()
     static let requests: [RuntimeRequest] = [
-        .runtimeVersion, .environmentStatus(environment), .cancelOperation(operation),
+        .runtimeVersion, .hostPreflight, .environmentStatus(environment), .cancelOperation(operation),
         .startEnvironment(environment, StartOptions()),
         .startEnvironment(environment, StartOptions(console: .native, ipWait: .seconds(120))),
         .stopEnvironment(environment, .graceful(deadline: .seconds(60))),
@@ -21,7 +21,7 @@ import Testing
         let envelope = RuntimeRequestEnvelope(request: request)
         let data = try JSONEncoder().encode(envelope)
         #expect(try RequestValidator.decode(data) == envelope)
-        #expect(envelope.protocolVersion.rawValue == 12)
+        #expect(envelope.protocolVersion.rawValue == 13)
     }
 
     @Test(arguments: requests, ["executable", "arguments", "command", "shell", "--", "/bin/"])
@@ -30,12 +30,12 @@ import Testing
         #expect(!String(decoding: data, as: UTF8.self).lowercased().contains(forbidden))
     }
 
-    @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, Int.max])
+    @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, Int.max])
     func foreignVersionPrecedesUnknownPayload(version: Int) {
         let data = Data("{\"protocolVersion\":\(version),\"request\":{\"futureRequest\":{}}}".utf8)
         let expected = RequestValidationError.protocolMismatch(client: RuntimeProtocolVersion(version), service: .current)
         #expect(throws: expected) { try RequestValidator.decode(data) }
-        #expect(expected.guesthouseError == .protocolMismatch(client: version, service: 12))
+        #expect(expected.guesthouseError == .protocolMismatch(client: version, service: 13))
     }
 
     @Test func directEnvelopeDecoderAlsoChecksHeaderFirst() throws {
@@ -43,12 +43,12 @@ import Testing
         let error = try #require(throws: RuntimeRequestEnvelope.ProtocolMismatch.self) {
             try JSONDecoder().decode(RuntimeRequestEnvelope.self, from: data)
         }
-        #expect(error.error == .protocolMismatch(client: 7, service: 12))
+        #expect(error.error == .protocolMismatch(client: 7, service: 13))
     }
 
     @Test(arguments: ["{}", "null", #"{"request":{"runtimeVersion":{}}}"#,
-                      #"{"protocolVersion":"12","request":{}}"#, #"{"protocolVersion":12}"#,
-                      #"{"protocolVersion":12,"request":{"runCommand":{"command":"private-marker"}}}"#])
+                      #"{"protocolVersion":"13","request":{}}"#, #"{"protocolVersion":13}"#,
+                      #"{"protocolVersion":13,"request":{"runCommand":{"command":"private-marker"}}}"#])
     func malformedRequestsAreTyped(json: String) {
         #expect(throws: RequestValidationError.malformed) { try RequestValidator.decode(Data(json.utf8)) }
     }
@@ -134,13 +134,13 @@ import Testing
     }
 
     @Test func unknownMetadataIsNotForwarded() throws {
-        let data = Data(#"{"protocolVersion":12,"private":"private-marker","request":{"runtimeVersion":{}}}"#.utf8)
+        let data = Data(#"{"protocolVersion":13,"private":"private-marker","request":{"runtimeVersion":{}}}"#.utf8)
         let encoded = try JSONEncoder().encode(RequestValidator.decode(data))
         #expect(!String(decoding: encoded, as: UTF8.self).contains("private-marker"))
     }
 
     @Test func malformedInputCannotReachStructuredErrorsOrExports() throws {
-        let data = Data(#"{"protocolVersion":12,"request":{"private-marker":{}}}"#.utf8)
+        let data = Data(#"{"protocolVersion":13,"request":{"private-marker":{}}}"#.utf8)
         let rejection = try #require(throws: RequestValidationError.self) { try RequestValidator.decode(data) }
         #expect(rejection.guesthouseError == .invalidRequest(.malformed))
         let event = DiagnosticEvent(operation: .importXcode, outcome: .init(error: rejection.guesthouseError), operationID: UUID())

@@ -4,9 +4,9 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
 
     public init(_ rawValue: Int) { self.rawValue = rawValue }
 
-    /// Epoch 12 activates bounded native frames and structured diagnostics on both endpoints.
-    /// Historical prototypes used 1–11. None is a compatible production fallback (ADR 0003).
-    public static let current = RuntimeProtocolVersion(12)
+    /// Epoch 13 adds the named host-preflight request/report to epoch 12's bounded frames.
+    /// Earlier epochs are not compatible fallbacks; GUI/service upgrade together (ADR 0003).
+    public static let current = RuntimeProtocolVersion(13)
 
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
     public var description: String { "protocol \(rawValue)" }

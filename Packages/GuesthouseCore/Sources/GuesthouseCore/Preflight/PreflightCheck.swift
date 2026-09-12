@@ -36,12 +36,16 @@ public struct PreflightReport: Codable, Hashable, Sendable {
         self.checkedAt = checkedAt
     }
 
+    /// Structural completeness is separate from success: a blocked report is still a valid reply.
+    public var isComplete: Bool {
+        results.count == PreflightCheckKind.allCases.count
+            && Set(results.map(\.kind)) == Set(PreflightCheckKind.allCases)
+    }
+
     /// Empty, partial, duplicated and blocking reports cannot proceed. A warning is an answer;
     /// an unavailable observation is not. Actual runtime safety checks remain mandatory.
     public var canProceed: Bool {
-        results.count == PreflightCheckKind.allCases.count
-            && Set(results.map(\.kind)) == Set(PreflightCheckKind.allCases)
-            && !results.contains(where: \.isBlocking)
+        isComplete && !results.contains(where: \.isBlocking)
     }
 
     public func result(_ kind: PreflightCheckKind) -> PreflightResult? {

@@ -1,6 +1,8 @@
 /// Named service-to-GUI events (#9, MVP-PLAN.md §3). Private status is not a diagnostic.
 public enum RuntimeEvent: Codable, Hashable, Sendable {
     case runtimeVersion(RuntimeVersionInfo)
+    /// Terminal reply to its owning query, never an unsolicited operation event.
+    case hostPreflight(PreflightReport)
     /// The service must journal/register the operation before acknowledging acceptance.
     case accepted(OperationID)
     case progress(OperationID, ProgressPhase)
@@ -13,6 +15,7 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .runtimeVersion: "runtimeVersion"
+        case .hostPreflight: "hostPreflight"
         case .accepted: "accepted"
         case .progress: "progress"
         case .diagnostic: "diagnostic"
