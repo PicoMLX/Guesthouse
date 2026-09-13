@@ -132,6 +132,48 @@ import Testing
         #expect(peer.requests.count == 1)
     }
 
+    @Test(arguments: [RuntimeSessionFailure.Cause.protocolMismatch(service: 99), .malformedResponse],
+          [(RuntimeRequest.runtimeVersion, false), (Self.start, true)])
+    func failedReplyKeepsItsContractCauseThroughTheOwner(cause: RuntimeSessionFailure.Cause,
+                                                       request: (RuntimeRequest, Bool)) async throws {
+        let fixture = OwnerFixture(), client = fixture.client()
+        var iterator = client.send(request.0).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        peer.answer(0, .failure(.init(cause: cause)))
+        let expected = RuntimeSessionFailure(cause: cause, mayHaveMutated: request.1)
+        await #expect(throws: expected) { try await iterator.next() }
+        await client.flush()
+        #expect(expected.recoveryActions.contains(.inspectState) == request.1)
+        #expect(!expected.recoveryActions.contains(.retry))
+        #expect(await client.reconciliation().0.count == (request.1 ? 1 : 0))
+        #expect(fixture.connectionCount == 1 && peer.requests == [request.0])
+        #expect(peer.cancelCount == 1)
+    }
+
+    @Test(arguments: [RuntimeSessionFailure.Cause.protocolMismatch(service: 99), .malformedResponse])
+    func failedPushKeepsTheAcceptedMutationForOwnerReconciliation(cause: RuntimeSessionFailure.Cause) async throws {
+        let fixture = OwnerFixture(), client = fixture.client()
+        var iterator = client.send(Self.start).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        peer.answer(0, .success(.accepted(Self.id)))
+        #expect(try await iterator.next() == .accepted(Self.id))
+        peer.incoming(.failure(.init(cause: cause)))
+        let expected = RuntimeSessionFailure(cause: cause, operationID: Self.id, mayHaveMutated: true)
+        await #expect(throws: expected) { try await iterator.next() }
+        await client.flush()
+        let pending = await client.reconciliation().0
+        try #require(pending.count == 1)
+        #expect(pending[0].failure == expected && pending[0].environmentID == Self.environment)
+        #expect(pending[0].cancellationTarget == nil)
+        #expect(expected.recoveryActions == [.inspectState, .reinstallApp, .cancel])
+        var refused = client.send(Self.start).makeAsyncIterator()
+        await #expect(throws: GuesthouseError.runtimeIncompatible) { try await refused.next() }
+        #expect(fixture.connectionCount == 1 && peer.requests == [Self.start])
+        #expect(peer.cancelCount == 1)
+    }
+
     @Test func opaqueSetupFailureIsKnownUnsentAndReleasesItsReservation() async throws {
         let calls = Mutex(0)
         let failures = RuntimeEventRouter.lifetimeLimit + 1
