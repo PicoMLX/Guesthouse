@@ -68,7 +68,7 @@ import XPC
     @Test func productionRegistrationSupportsOnlyTheReadOnlyVersionQuery() {
         let environment = EnvironmentID()
         let requests: [RuntimeRequest] = [
-            .environmentStatus(environment), .startEnvironment(environment, StartOptions()),
+            .hostPreflight, .environmentStatus(environment), .startEnvironment(environment, StartOptions()),
             .stopEnvironment(environment, .force), .cancelOperation(OperationID()),
             .importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")),
         ]
