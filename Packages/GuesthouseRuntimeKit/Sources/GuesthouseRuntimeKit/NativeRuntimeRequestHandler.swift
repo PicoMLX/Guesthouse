@@ -6,10 +6,20 @@ import XPC
 /// Only runtimeVersion is implemented: mutations stay unavailable until streaming and
 /// operation correlation/unknown-outcome handling migrate across all native consumers.
 public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
+    // In-process service policy only. Neither closures nor worker tickets cross XPC.
+    enum ReplyPlan: Sendable {
+        case immediate(RuntimeEvent)
+        case readOnly(@Sendable () -> RuntimeEvent)
+    }
+    private enum Delivery: Sendable {
+        case immediate(RuntimeEvent)
+        case deferred(RuntimeReadOnlyWorker.Ticket)
+    }
     private let gate: RuntimeSessionGate
+    private let worker: RuntimeReadOnlyWorker
     private let authenticate: @Sendable (XPCDictionary) -> Bool
     private let decode: @Sendable (Data, Int) -> RuntimeDispatcher.Decision
-    private let register: @Sendable (RuntimeRequest) -> RuntimeEvent
+    private let plan: @Sendable (RuntimeRequest) -> ReplyPlan
     private let send: @Sendable (XPCDictionary) throws -> Void
     private let cancel: @Sendable () -> Void
     private let diagnostic: @Sendable (DiagnosticEvent) -> Void
@@ -37,7 +47,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
 
     // Internal test seam only. Public construction never permits replacement authentication
     // or operation dispatch. Registration must stay bounded/in-memory with no I/O or reentry.
-    init(
+    convenience init(
         gate: RuntimeSessionGate = RuntimeSessionGate(),
         authenticate: @escaping @Sendable (XPCDictionary) -> Bool,
         decode: @escaping @Sendable (Data, Int) -> RuntimeDispatcher.Decision = RuntimeDispatcher.decide,
@@ -46,8 +56,23 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         cancel: @escaping @Sendable () -> Void,
         diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
     ) {
+        self.init(gate: gate, worker: .shared, authenticate: authenticate, decode: decode,
+                  plan: { .immediate(register($0)) }, send: send, cancel: cancel, diagnostic: diagnostic)
+    }
+
+    // Only named read-only service policy may select deferred work. Construct the worker
+    // and probe owners outside the gate. This seam does not activate a new public operation.
+    init(
+        gate: RuntimeSessionGate, worker: RuntimeReadOnlyWorker,
+        authenticate: @escaping @Sendable (XPCDictionary) -> Bool,
+        decode: @escaping @Sendable (Data, Int) -> RuntimeDispatcher.Decision = RuntimeDispatcher.decide,
+        plan: @escaping @Sendable (RuntimeRequest) -> ReplyPlan,
+        send: @escaping @Sendable (XPCDictionary) throws -> Void,
+        cancel: @escaping @Sendable () -> Void,
+        diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
+    ) {
         self.gate = gate; self.authenticate = authenticate; self.decode = decode
-        self.register = register; self.send = send; self.cancel = cancel; self.diagnostic = diagnostic
+        self.worker = worker; self.plan = plan; self.send = send; self.cancel = cancel; self.diagnostic = diagnostic
     }
 
     public func handleIncomingRequest(_ message: XPCDictionary) -> XPCDictionary? {
@@ -95,21 +120,45 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
                 }
             }
         }
-        let event: RuntimeEvent
         switch decision {
-        case .reply(let reply): event = reply
+        case .reply(let event): reply.finish(event)
         case .replyAndClose(let refusal):
-            gate.refuse(refusal)
-            event = gate.refusal ?? refusal
-        case .dispatch(let request): event = gate.commit(request, register: register)
+            worker.refuse(gate, with: refusal)
+            reply.finish(gate.refusal ?? refusal)
+        case .dispatch(let request): dispatch(request, reply: reply)
         }
-        reply.finish(event)
         return nil // No implicit second reply/context creation.
+    }
+
+    private func dispatch(_ request: RuntimeRequest, reply: RuntimeReplyObligation) {
+        // A rejected reservation may release its Job inside the gate. Retain the plan's
+        // captured owners until AFTER unlocking, including when the worker is full.
+        var retainedPlan: ReplyPlan?
+        defer { withExtendedLifetime(retainedPlan) {} }
+        let registration = gate.commitRegistration(request) { request -> Delivery in
+            let selected = plan(request)
+            retainedPlan = selected
+            switch selected {
+            case .immediate(let event): return .immediate(event)
+            case .readOnly(let work):
+                guard let ticket = worker.reserve(gate: gate, reply: reply, work: work) else {
+                    return .immediate(.failed(OperationID(), .invalidRequest(.tooManyInFlight)))
+                }
+                return .deferred(ticket)
+            }
+        }
+        switch registration {
+        case .refused(let event), .registered(.immediate(let event)): reply.finish(event)
+        case .registered(.deferred(let ticket)):
+            // Start even after an intervening refusal so the canceled reservation drains.
+            // The production executor enqueues, never runs a probe in this native callback.
+            worker.start(ticket)
+        }
     }
 
     private func refusing(_ error: GuesthouseError) -> RuntimeEvent {
         let refusal = RuntimeEvent.failed(OperationID(), error)
-        gate.refuse(refusal)
+        worker.refuse(gate, with: refusal)
         return gate.refusal ?? refusal
     }
 
@@ -146,7 +195,8 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
 
     public func handleCancellation(error: XPCRichError) {
         // Opaque native error text is not a diagnostic input. Stop new registration now;
-        // counted callbacks still finish themselves, without inventing operation outcomes.
+        // queued reads settle without probing; already-started OS calls retain their bounded
+        // capacity until return, but cannot send a second answer. No mutation is retried.
         _ = refusing(.invalidRuntimeReply(.malformed))
     }
 }
