@@ -1,10 +1,57 @@
 import Darwin
+import Dispatch
 import Foundation
 import GuesthouseCore
 import Testing
 @testable import GuesthouseRuntimeKit
 
 @Suite(.timeLimit(.minutes(1))) struct StateStoreStorageSelectionTests {
+    @Test(arguments: [false, true])
+    func firstSelectionAndJournalAppendShareOwnership(journalFirst: Bool) async throws {
+        let fixture = try Fixture(), value = try selected()
+        let (events, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let release = DispatchSemaphore(value: 0)
+        let barrier: StateStoreHooks.Barrier = { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            continuation.yield(())
+            // Only the dedicated native-I/O executor blocks, never an async executor.
+            try #require(release.wait(timeout: .now() + 10) == .success)
+        }
+        let first = try await fixture.open(hooks: journalFirst
+            ? StateStoreHooks(journalFile: barrier) : StateStoreHooks(snapshotFile: barrier))
+        let second = try await fixture.open()
+        let pending = Task {
+            defer { continuation.finish() }
+            if journalFirst { _ = try await first.begin(.startEnvironment, for: EnvironmentID()) }
+            else { try await first.saveSnapshot(value) }
+        }
+        defer { release.signal() }
+        var iterator = events.makeAsyncIterator()
+        try #require(await iterator.next() != nil)
+        let names = try fixture.names()
+        if journalFirst {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try await second.saveSnapshot(value)
+            }
+            #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+        } else {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await second.begin(.startEnvironment, for: EnvironmentID())
+            }
+            #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        }
+        #expect(try fixture.names() == names)
+        release.signal()
+        try await pending.value
+        if journalFirst {
+            await #expect(throws: StateStoreError.storageSelectionChanged) { try await second.saveSnapshot(value) }
+        } else {
+            #expect(try await second.loadSnapshot() == value)
+            _ = try await second.begin(.startEnvironment, for: EnvironmentID())
+            #expect(try await second.replay().records.count == 1)
+        }
+    }
+
     @Test func originalSelectionSurvivesSaveReopenAndReadOnlyInspection() async throws {
         let fixture = try Fixture(), store = try await fixture.open(), value = try selected()
         try await store.saveSnapshot(value)
