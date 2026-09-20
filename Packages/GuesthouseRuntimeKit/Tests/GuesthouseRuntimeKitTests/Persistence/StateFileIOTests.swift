@@ -72,6 +72,32 @@ import Testing
         #expect(calls == 0)
     }
 
+    @Test(arguments: [StateStoreError.File.snapshot, .journal])
+    func tailGrowthBudgetIncludesItsStartingOffset(name: StateStoreError.File) throws {
+        try withFile { fd, _ in
+            let limit = name == .snapshot ? StateFileIO.maximumSnapshotBytes : StateFileIO.maximumJournalBytes
+            var reads = 0
+            let exact = try StateFileIO.readAll(fd, from: off_t(limit - 2), name: name) { _, _, _ in
+                reads += 1; return reads == 1 ? 2 : 0
+            }
+            #expect(exact.count == 2)
+            reads = 0
+            #expect(throws: StateStoreError.fileUnreadable(name: name)) {
+                try StateFileIO.readAll(fd, from: off_t(limit - 2), name: name) { _, _, _ in
+                    reads += 1; return 2
+                }
+            }
+            #expect(reads == 2)
+            for offset in [off_t(-1), off_t(limit + 1), off_t.max] {
+                reads = 0
+                #expect(throws: StateStoreError.fileUnreadable(name: name)) {
+                    try StateFileIO.readAll(fd, from: offset, name: name) { _, _, _ in reads += 1; return 0 }
+                }
+                #expect(reads == 0)
+            }
+        }
+    }
+
     @Test func readRetriesInterruptionAndAccumulatesShortReads() throws {
         try withFile { fd, url in
             try Data("hello".utf8).write(to: url)
