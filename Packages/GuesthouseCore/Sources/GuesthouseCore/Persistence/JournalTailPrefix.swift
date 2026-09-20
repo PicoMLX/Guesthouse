@@ -134,8 +134,8 @@ struct JournalTailPrefix {
         // Require an encoder-produced witness, not just a permissive decimal regex.
         // Binary64's shortest finite spelling fits within 32 ASCII bytes.
         guard token.utf8.count < 32 else { return false }
-        for suffix in ["0", "1"] {
-            if canonicalDate(token + suffix)?.hasPrefix(token) == true { return true }
+        for digit in 0...9 {
+            if canonicalDate(token + String(digit))?.hasPrefix(token) == true { return true }
         }
         if token.contains("e") {
             for exponent in 0...324 {
