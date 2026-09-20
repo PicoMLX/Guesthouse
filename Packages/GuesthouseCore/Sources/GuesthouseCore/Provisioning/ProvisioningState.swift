@@ -6,7 +6,10 @@
 public struct EffectToken: Hashable, Sendable, CustomStringConvertible {
     public let value: UInt64
 
+    /// Zero is the initial issued-effect count, never a reserved effect identity.
+    /// Trusted callers construct only issued tokens; external data uses throwing decoding.
     public init(_ value: UInt64) {
+        precondition(value > 0, "effect identity must be nonzero")
         self.value = value
     }
 
@@ -15,7 +18,12 @@ public struct EffectToken: Hashable, Sendable, CustomStringConvertible {
 
 extension EffectToken: Codable {
     public init(from decoder: any Decoder) throws {
-        value = try decoder.singleValueContainer().decode(UInt64.self)
+        let container = try decoder.singleValueContainer()
+        let decoded = try container.decode(UInt64.self)
+        guard decoded > 0 else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Effect identity must be nonzero.")
+        }
+        self.init(decoded)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -63,7 +71,7 @@ public struct ProvisioningState: Hashable, Sendable {
         self.status = status
         // The count may never trail the outstanding token, or the next effect would be minted
         // with a token a late callback from the previous one still names.
-        self.issuedEffects = max(issuedEffects, status.pendingEffect?.value ?? 0)
+        self.issuedEffects = max(issuedEffects, status.greatestEffectValue)
     }
 
     /// A brand-new environment: nothing has run yet.
@@ -169,25 +177,39 @@ public enum StageStatus: Codable, Hashable, Sendable {
     /// Inspection found a failed attempt that left state behind. It must be cleaned before
     /// the stage can start again; `cleanup` identifies the cleanup that is running.
     case cleanupRequired(GuesthouseError, cleanup: EffectToken)
+    /// An inspection races an existing cleanup. Retain both identities so either the
+    /// cleanup's callback or the matching inspection can settle it, never a stale reply.
+    case inspectingCleanup(GuesthouseError, cleanup: EffectToken, inspection: EffectToken)
 
-    /// The start request or effect this status is waiting on. Only a callback naming
-    /// this token can move the status along.
+    /// The latest start request or effect this status is waiting on. For an inspection
+    /// racing cleanup, this is the inspection token; the retained cleanup token may also
+    /// settle the state. Each callback must match its own identity.
     public var pendingEffect: EffectToken? {
         switch self {
         case .startRequested(let token, _):
             token
         case .persistingCheckpoint(_, _, let token), .unknownOutcome(_, let token), .awaitingInspection(let token), .cleanupRequired(_, let token):
             token
+        case .inspectingCleanup(_, _, let inspection):
+            inspection
         default:
             nil
         }
+    }
+
+    /// Restoring two outstanding effects must not permit either identity to be reused.
+    var greatestEffectValue: UInt64 {
+        if case .inspectingCleanup(_, let cleanup, let inspection) = self {
+            return max(cleanup.value, inspection.value)
+        }
+        return pendingEffect?.value ?? 0
     }
 
     /// Closed labels for transition errors; associated operational data stays separate.
     public enum Kind: String, Hashable, Sendable, CaseIterable {
         case notStarted, startRequested, startRejected, inProgress, persistingCheckpoint
         case completed, canceled, recoverableFailure, needsUserAction, unknownOutcome
-        case awaitingInspection, resumable, cleanupRequired
+        case awaitingInspection, resumable, cleanupRequired, inspectingCleanup
     }
 
     public var caseName: String { kind.rawValue }
@@ -207,6 +229,7 @@ public enum StageStatus: Codable, Hashable, Sendable {
         case .awaitingInspection: .awaitingInspection
         case .resumable: .resumable
         case .cleanupRequired: .cleanupRequired
+        case .inspectingCleanup: .inspectingCleanup
         }
     }
 }
