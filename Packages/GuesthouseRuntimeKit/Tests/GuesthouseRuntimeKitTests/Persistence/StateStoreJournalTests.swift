@@ -7,6 +7,39 @@ import Testing
 
 /// Retains #57's append/recovery/durability cases with runtime-owned fixtures, not host/VM work.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreJournalTests {
+    @Test(arguments: [false, true], [false, true])
+    func initialReadFailureCannotAuthorizeLaterBegin(firstAppend: Bool, truncate: Bool) async throws {
+        let fixture = try Fixture(), attempts = Mutex(0), started = Self.record()
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            let attempt = attempts.withLock { $0 += 1; return $0 }
+            if attempt == 1 { throw StateStoreError.fileUnreadable(name: .journal) }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let original = try JSONEncoder().encode(started) + Data([10])
+        try fixture.write(original)
+        var before = stat(), after = stat()
+        try #require(lstat(fixture.journal.path, &before) == 0)
+        if firstAppend {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        let changed = truncate ? Data() : try JSONEncoder().encode(Self.record()) + Data([10])
+        try fixture.write(changed)
+        try #require(lstat(fixture.journal.path, &after) == 0)
+        try #require(StateFileIdentity(before) == StateFileIdentity(after))
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(attempts.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == changed)
+    }
+
     @Test(arguments: [false, true])
     func initialCorruptReadCannotAuthorizeBeginAfterTruncation(firstAppend: Bool) async throws {
         let fixture = try Fixture(), store = try await fixture.open(), started = Self.record()
