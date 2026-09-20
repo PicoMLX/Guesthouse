@@ -122,8 +122,8 @@ public actor StateStore {
     /// Observing these records is not proof of their durability or any mutation's outcome.
     public func replay() throws(StateStoreError) -> JournalReplay {
         do {
-            let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission) {
-                journalWasObserved = true
+            let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
+                                                didOpen: { journalWasObserved = true }) {
                 return try journal.refreshed($0, read: hooks.journalRead)
             }
             guard candidate != nil || !journalWasObserved else {
