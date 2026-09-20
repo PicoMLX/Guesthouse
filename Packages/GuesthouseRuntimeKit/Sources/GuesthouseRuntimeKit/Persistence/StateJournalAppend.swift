@@ -33,6 +33,7 @@ enum StateJournalAppend {
                     // a journal that our bounded replay cannot read on the next launch.
                     try requireCapacity(bytes: current.byteCount, records: current.history.records.count,
                                         additionalBytes: line.count)
+                    let expectedLength = current.byteCount + line.count // Capacity check makes this bounded.
                     if current.truncatedTail {
                         writeAttempted = true
                         guard ftruncate(descriptor, off_t(current.byteCount)) == 0 else {
@@ -46,14 +47,17 @@ enum StateJournalAppend {
                     do { try hooks.journalWrite(descriptor, line) }
                     catch let failure as StateStoreError { throw failure }
                     catch { throw StateStoreError.fileUnwritable(name: .journal) }
+                    try requireLength(descriptor, expected: expectedLength)
                     let written = try StateFileIO.version(descriptor, name: .journal)
                     let directoryVersion = try anchor.verifyCurrent()
                     try synchronize(descriptor, name: .journal, barrier: hooks.journalFile)
+                    try requireLength(descriptor, expected: expectedLength)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     // Every record needs an entry barrier, even when the journal already
                     // exists: a restore can reattach the same inode before our write.
                     try synchronize(directory, name: .stateDirectory, barrier: hooks.directory)
+                    try requireLength(descriptor, expected: expectedLength)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     return try current.appending(record, bytes: line.count, version: written)
@@ -63,6 +67,13 @@ enum StateJournalAppend {
         } catch {
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
             throw error
+        }
+    }
+
+    private static func requireLength(_ descriptor: Int32, expected: Int) throws(StateStoreError) {
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_size == off_t(expected) else {
+            throw .fileUnwritable(name: .journal)
         }
     }
 
