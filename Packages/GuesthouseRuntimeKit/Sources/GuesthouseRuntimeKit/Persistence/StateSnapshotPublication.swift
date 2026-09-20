@@ -44,7 +44,7 @@ enum StateSnapshotPublication {
             }
             try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
-                try requireUnchangedSnapshot(in: directory, expected: existing)
+                try requireUnchangedSnapshot(in: directory, expected: existing, didObserve: didObserve)
             })
             let name = temporaryPrefix + UUID().uuidString
             let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK
