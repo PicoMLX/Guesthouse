@@ -24,12 +24,14 @@ extension StateDirectoryAnchor {
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         didOpen: () -> Void = {},
         didObserve: () -> Void = {},
+        didIdentify: (StateFileIdentity?) -> Bool = { _ in true },
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
             try StateFileEntry.withDescriptor(in: directory, access: access,
                 protection: protection,
                 permissionBarrier: permissionBarrier, didOpen: didOpen, didObserve: didObserve,
+                didIdentify: didIdentify,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
         }
     }
@@ -48,6 +50,7 @@ enum StateFileEntry {
         permissionBarrier: StateFileProtection.Barrier,
         didOpen: () -> Void = {},
         didObserve: () -> Void = {},
+        didIdentify: (StateFileIdentity?) -> Bool = { _ in true },
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
@@ -69,7 +72,10 @@ enum StateFileEntry {
             let openFailure = errno
             // Non-ENOENT failures may hide an entry. Keep uncertainty even when verify-only
             // classification or protection checks below fail; this does not grant access.
-            if openFailure != ENOENT { didObserve() }
+            if openFailure != ENOENT {
+                didObserve()
+                guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
+            }
             if openFailure == EACCES, protection == .verifyOnly {
                 do {
                     let version = try StateFileIO.version(directory, name: .stateDirectory)
@@ -104,9 +110,11 @@ enum StateFileEntry {
                     return nil
                 } catch let failure as StateStoreError {
                     didObserve() // Failed stabilization cannot prove continued absence.
+                    _ = didIdentify(entryIdentity(in: directory, access: access))
                     throw failure
                 } catch {
                     didObserve()
+                    _ = didIdentify(entryIdentity(in: directory, access: access))
                     throw access.failure
                 }
             }
@@ -118,6 +126,9 @@ enum StateFileEntry {
         // No descriptor escapes; this cannot imply validated contents or durability.
         didOpen()
         didObserve()
+        var opened = stat()
+        let observedIdentity = fstat(descriptor, &opened) == 0 ? StateFileIdentity(opened) : nil
+        guard didIdentify(observedIdentity) else { throw access.failure }
         do {
             // Refuse FIFOs/directories/links before a lock or metadata repair. NONBLOCK keeps
             // opening an unexpected FIFO from waiting for a peer before this inspection.
@@ -146,6 +157,13 @@ enum StateFileEntry {
             return result
         } catch let error as StateStoreError { throw error }
         catch { throw access.failure }
+    }
+
+    /// Nofollow metadata for failed opens only. An identity is evidence, not valid contents
+    /// or access authority; inability to bind it is reported explicitly to the owner.
+    private static func entryIdentity(in directory: Int32, access: StateFileAccess) -> StateFileIdentity? {
+        var entry = stat()
+        return fstatat(directory, access.name, &entry, AT_SYMLINK_NOFOLLOW) == 0 ? StateFileIdentity(entry) : nil
     }
 
     /// In addition to inode identity, a supplied version detects same-inode reattachment or
