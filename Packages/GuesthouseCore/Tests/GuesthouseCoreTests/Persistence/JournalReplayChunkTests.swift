@@ -163,6 +163,30 @@ import Testing
         #expect(first.history.records == [record(.started)])
     }
 
+    @Test(arguments: [#""format":3"#, #""format":2"#, #""for\u006dat":3"#], [false, true])
+    func duplicateFormatKeysRefuseEitherOrder(member: String, terminated: Bool) throws {
+        let start = record(.started)
+        let prefix = try JournalReplayChunk(line(start))
+        let encoded = try #require(String(data: line(record(.completed), terminated: false), encoding: .utf8))
+        for json in ["{" + member + "," + encoded.dropFirst(), encoded.dropLast() + "," + member + "}"] {
+            let data = Data((json + (terminated ? "\n" : "")).utf8)
+            #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+                try JournalReplayChunk(data, following: prefix.history)
+            }
+            #expect(prefix.history.records == [start])
+            #expect(prefix.history.inFlight == [id: start])
+        }
+    }
+
+    @Test func nestedAndQuotedFormatKeysDoNotShadowTheEnvelope() throws {
+        let start = record(.started)
+        let encoded = try #require(String(data: line(start, terminated: false), encoding: .utf8))
+        let extra = #", "extension":{"format":3,"nested":{"format":99}}, "text":"\"format\":3"}"#
+        let chunk = try JournalReplayChunk(Data((encoded.dropLast() + extra).utf8))
+        #expect(chunk.history.records == [start])
+        #expect(chunk.unterminatedRecord)
+    }
+
     @Test func ignoredRawFieldsCannotBeReencodedFromTheReplay() throws {
         let start = record(.started)
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(start)) as? [String: Any])
