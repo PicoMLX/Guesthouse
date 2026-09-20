@@ -94,6 +94,20 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     private var servingTicket: UInt64 = 0
     private var waiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var producerCompletion: (@Sendable (RuntimeRequest) -> Void)?
+    private var eventPause: (@Sendable () async -> Void)?
+
+    /// Internal test synchronization: observe producer cleanup without timing-based polling.
+    /// This is not a runtime event, diagnostic sink, or proof of real mutation completion.
+    func observeProducerCompletion(_ observer: @escaping @Sendable (RuntimeRequest) -> Void) {
+        producerCompletion = observer
+    }
+
+    /// Tests can hold an event boundary explicitly instead of racing the preview delay.
+    /// The injected wait must cooperate with task cancellation; no runtime behavior is enabled.
+    func setEventPause(_ pause: @escaping @Sendable () async -> Void) {
+        eventPause = pause
+    }
 
     public init(delay: Duration = .zero, versionInfo: RuntimeVersionInfo = RuntimeVersionInfo(serviceVersion: "0.0.0", serviceBuild: "fake")) {
         self.delay = delay
@@ -150,6 +164,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     private func run(_ request: RuntimeRequest, ticket: UInt64, binding: Binding, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async {
         await waitForTurn(ticket)
+        defer { producerCompletion?(request) }
         record(request, at: .request(ticket))
         let scenario = binding.scenario
 
@@ -211,7 +226,10 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 // event, which is where the status stops naming it. Clearing it here would let a
                 // status query in that window report an unsettled mutation as complete
                 // (AGENTS.md: an interrupted operation's outcome is unknown until inspected).
-                if let status { statuses[status.environmentID] = status }
+                if let status {
+                    statuses[status.environmentID] = liveOperations.contains(id)
+                        ? settingOperation(id, on: status) : status
+                }
                 // An operation no producer of this fake is running — one a seeded status reports
                 // as recovered — has no terminal event coming: the acknowledgment is the only thing
                 // that can settle it, and the scripted status must not keep naming it.
@@ -242,7 +260,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // Cancellation is re-checked after the pause: an operation cancelled while the
             // fake was waiting must not report success, and it stays in flight until its own
             // terminal event, so a status query never sees an idle environment mid-stream.
-            guard !cancelled(id, continuation) else { return }
+            guard !(await cancelled(id, continuation)) else { return }
             if let status {
                 // The scripted status is stored with the operation still in flight, since it
                 // does not end until `completed`: a status query during the pause below must
@@ -253,7 +271,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 // and a status query agree about the operation still being in flight.
                 continuation.yield(.status(stored))
                 await pause()
-                guard !cancelled(id, continuation) else { return }
+                guard !(await cancelled(id, continuation)) else { return }
             }
             clearInFlight(id)
             continuation.yield(.completed(id))
@@ -264,7 +282,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 guard await progress(id, phase, continuation) else { return }
             }
             await pause()
-            guard !cancelled(id, continuation) else { return }
+            guard !(await cancelled(id, continuation)) else { return }
             // A failed operation is no longer in flight for any environment.
             clearInFlight(id)
             continuation.yield(.failed(id, error))
@@ -274,7 +292,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             while !Task.isCancelled, !canceledOperations.contains(id) {
                 try? await Task.sleep(for: .milliseconds(5))
             }
-            recordImplicitCancellation(of: id)
+            await recordImplicitCancellation(of: id)
             clearInFlight(id)
             continuation.yield(.failed(id, .canceled))
             continuation.finish()
@@ -287,7 +305,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // A consumer that went away during the pause cancelled the operation, exactly as
             // in the other branches: it is recorded and ends as canceled rather than leaving
             // a seeded operation in flight behind a connection loss nobody is listening for.
-            guard !cancelled(id, continuation) else { return }
+            guard !(await cancelled(id, continuation)) else { return }
             continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, operationID: id, mayHaveMutated: true))
         }
     }
@@ -295,16 +313,16 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     /// Emits one phase. Returns false if the consumer or a `cancelOperation` canceled meanwhile.
     private func progress(_ id: OperationID, _ phase: ProgressPhase, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async -> Bool {
         await pause()
-        guard !cancelled(id, continuation) else { return false }
+        guard !(await cancelled(id, continuation)) else { return false }
         continuation.yield(.progress(id, phase))
         return true
     }
 
     /// Whether the operation was cancelled, by the consumer or by a `cancelOperation`. Ends
     /// the stream with `canceled` when it was, so every suspension point answers the same way.
-    private func cancelled(_ id: OperationID, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) -> Bool {
+    private func cancelled(_ id: OperationID, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async -> Bool {
         guard Task.isCancelled || canceledOperations.contains(id) else { return false }
-        recordImplicitCancellation(of: id)
+        await recordImplicitCancellation(of: id)
         // A cancelled operation is no longer in flight either, however it was cancelled.
         clearInFlight(id)
         continuation.yield(.failed(id, .canceled))
@@ -376,7 +394,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     ///
     /// The synthetic request takes a ticket like any other, so it cannot overtake a `send`
     /// that was made before the consumer went away.
-    private func recordImplicitCancellation(of id: OperationID) {
+    private func recordImplicitCancellation(of id: OperationID) async {
         guard Task.isCancelled, !canceledOperations.contains(id) else { return }
         // One snapshot gives the suppression a position relative to concurrent sends. Taking
         // the reservation and ticket separately could move it behind a send between those reads.
@@ -401,7 +419,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         }
         canceledOperations.insert(id)
         let ticket = nextTicket()
-        Task { await self.appendCancellation(of: id, ticket: ticket) }
+        // The producer retains the operation until its ticketed bookkeeping is complete.
+        // A detached append would expose terminal cleanup while the log still omitted it.
+        await appendCancellation(of: id, ticket: ticket)
     }
 
     private nonisolated func nextTicket() -> UInt64 {
@@ -434,6 +454,10 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     private func pause() async {
+        if let eventPause {
+            await eventPause()
+            return
+        }
         guard delay > .zero else { return }
         try? await Task.sleep(for: delay)
     }
