@@ -19,6 +19,9 @@ public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
         if case .runtimeVersion(let info) = decoded, info.protocolVersion != version {
             throw GuesthouseError.invalidRuntimeReply(.malformed)
         }
+        if case .hostPreflight(let report) = decoded, !report.isComplete {
+            throw GuesthouseError.invalidRuntimeReply(.malformed)
+        }
         protocolVersion = version
         event = decoded
     }
@@ -53,6 +56,9 @@ public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
             throw ProtocolMismatch(service: protocolVersion).error
         }
         if case .runtimeVersion(let info) = event, info.protocolVersion != protocolVersion {
+            throw .invalidRuntimeReply(.malformed)
+        }
+        if case .hostPreflight(let report) = event, !report.isComplete {
             throw .invalidRuntimeReply(.malformed)
         }
         do {

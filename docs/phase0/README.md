@@ -6,6 +6,16 @@ The [Lume/shared work-priority decision](../decisions/0002-prioritize-lume-and-s
 
 A gate record is evidence, not a plan. It is written only from an actual run, never from reasoning about what should happen. Autonomous agents do not run gates and do not fill in these files.
 
+## Current planning additions
+
+Read [the roadmap](../../ROADMAP.md) before choosing work. The gate registry remains eight prerequisite gates plus #42. Add console takeover/responsiveness and fresh-work durability to #35; distinguish credential, desktop and automation readiness in #36/#40/#41; add Simulator warmup/stateful fixture evidence to #38 and supported SSH registration to #41. Provider-specific procedures still require the provider-selection decision under #82; these planning additions do not approve a provider or make legacy Tart commands a Lume runbook.
+
+The separate GUI-automation and network-baseline studies are human-run prerequisites for #42's scope decision, not new formal gate records. Store their actual observations under `docs/research/` when run, with exact versions, checked-out revision, operator, evidence and unresolved results. Do not create placeholder results. #42 must cite both studies, record whether the first release includes interactive verification, and repeat the selected workflow; a build/test-only decision cannot waive any original gate. Multi-repo task handoff remains a deferred follow-on outside phase zero.
+
+Start preliminary provider-artifact, actual guest Codex connection and native MLX/GPU checks as soon as a reviewed safe human-run diagnostic permits them, alongside shared implementation rather than after the full dashboard/persistence stack. Retain #82's verifier, ownership and required connection/credential protections. Record these limited observations under `docs/research/provider-feasibility.md`; they neither select a provider nor close #38/#41 or any other gate.
+
+#188 has two engineer-days plus one human session of at most two hours after prerequisites are available. Ronald Mannak decides build/test-only v1 or a bounded extension if the study exhausts its budget. #42 requires that recorded decision, not exploration of every integration. Study capture/transmission is limited to disclosed, approved fixture windows before any observation; wrong-target requests must be refused and the host marker is supporting evidence only.
+
 ## Gates
 
 | Gate | Issue | Record | Status |

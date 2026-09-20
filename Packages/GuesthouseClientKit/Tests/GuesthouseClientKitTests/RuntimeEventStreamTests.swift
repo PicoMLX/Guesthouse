@@ -61,6 +61,7 @@ import Testing
     }
 
     @Test(arguments: [RuntimeEvent.runtimeVersion(info),
+                       .hostPreflight(PreflightCheck.run(snapshot: HostProbeSnapshot())),
                        .status(.init(environmentID: EnvironmentID(), vm: .stopped, readiness: .checking)),
                        .completed(id), .failed(id, .unauthorizedCaller)])
     func queryReplyFinishesOnce(event: RuntimeEvent) async throws {
@@ -68,6 +69,18 @@ import Testing
         pair.producer.reply(event)
         pair.producer.reply(.accepted(Self.id))
         #expect(try await collect(pair.stream) == [event])
+    }
+
+    @Test func unsolicitedPreflightCannotFinishALiveOperation() async throws {
+        let pair = RuntimeEventStream.make(mayHaveMutated: true) { _ in }
+        pair.producer.reply(.accepted(Self.id))
+        pair.producer.push(.hostPreflight(PreflightCheck.run(snapshot: HostProbeSnapshot())))
+        var iterator = pair.stream.makeAsyncIterator()
+        #expect(try await iterator.next() == .accepted(Self.id))
+        await #expect(throws: RuntimeSessionFailure(cause: .malformedResponse,
+                                                  operationID: Self.id, mayHaveMutated: true)) {
+            try await iterator.next()
+        }
     }
 
     @Test(arguments: [false, true])
