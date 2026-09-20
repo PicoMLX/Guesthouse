@@ -25,11 +25,20 @@ struct RuntimeStorage: Sendable {
     /// Individual areas still require location(for:); this is not mutation admission.
     static func existing() throws -> RuntimeStorage? { try existing(root: defaultRoot()) }
 
-    static func existing(root: URL) throws -> RuntimeStorage? {
+    static func existing(root: URL, afterMissingRoot: () throws -> Void = {}) throws -> RuntimeStorage? {
         let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
         try StorageProtection.existingAncestors(of: root)
         var info = stat()
         if lstat(root.path(percentEncoded: false), &info) != 0 {
+            guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
+            // Runtime-only synchronous seam for namespace-race fixtures. Repeat both ancestry
+            // and absence checks; an appearing root is uncertainty, not an automatic read retry.
+            // These remain point-in-time observations, not a lease against same-user changes.
+            try afterMissingRoot()
+            try StorageProtection.existingAncestors(of: root)
+            guard lstat(root.path(percentEncoded: false), &info) != 0 else {
+                throw StorageFailure.unsafeStructure
+            }
             guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
             return nil
         }
