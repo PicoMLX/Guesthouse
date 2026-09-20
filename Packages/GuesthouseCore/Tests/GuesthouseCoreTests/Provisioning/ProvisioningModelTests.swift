@@ -43,7 +43,7 @@ import Testing
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: fixture) }
     }
 
-    @Test(arguments: ["-1", "true", #""1""#, "1.5", "18446744073709551616"],
+    @Test(arguments: ["0", "-1", "true", #""1""#, "1.5", "18446744073709551616"],
           [#"{"startRequested":{"request":TOKEN}}"#, #"{"awaitingInspection":{"_0":TOKEN}}"#])
     func malformedOrOutOfRangePendingTokensAreRefused(token: String, status: String) {
         let payload = status.replacingOccurrences(of: "TOKEN", with: token)
@@ -57,7 +57,7 @@ import Testing
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(ProvisioningState.self, from: record(issued: issued)) }
     }
 
-    @Test(arguments: [UInt64(0), 9, UInt64.max / 2, UInt64.max / 2 + 1, UInt64.max - 1], [false, true])
+    @Test(arguments: [UInt64(1), 9, UInt64.max / 2, UInt64.max / 2 + 1, UInt64.max - 1], [false, true])
     func mintedTokensRemainDecodableAcrossCounterBoundaries(value: UInt64, promotedFromPending: Bool) throws {
         let status = promotedFromPending ? "{\"startRequested\":{\"request\":\(value)}}" : #"{"notStarted":{}}"#
         let restored = try JSONDecoder().decode(ProvisioningState.self, from: record(issued: promotedFromPending ? "0" : String(value), status: status))
@@ -81,10 +81,50 @@ import Testing
         #expect(try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(restored)) == restored)
     }
 
-    @Test(arguments: [UInt64(0), 1, 9, UInt64.max])
+    @Test(arguments: [UInt64(1), 9, UInt64.max])
     func tokensRoundTripWithoutTruncation(value: UInt64) throws {
         let token = EffectToken(value)
         #expect(try JSONDecoder().decode(EffectToken.self, from: JSONEncoder().encode(token)) == token)
+    }
+
+    @Test func zeroCounterStillMintsTheFirstRealIdentity() throws {
+        let initial = try JSONDecoder().decode(ProvisioningState.self, from: record(issued: "0"))
+        #expect(initial == .initial)
+        #expect(initial.issuedEffects == 0)
+        #expect(initial.nextEffectToken == EffectToken(1))
+        let reserved = try ProvisioningReducer.reduce(initial, .startRequested(stage: .first))
+        #expect(reserved.state.status == .startRequested(request: EffectToken(1), resuming: nil))
+        #expect(try JSONDecoder().decode(ProvisioningState.self, from: JSONEncoder().encode(reserved.state)) == reserved.state)
+    }
+
+    @Test func zeroTokenCannotEnterThroughDecoding() {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(EffectToken.self, from: Data("0".utf8))
+        }
+    }
+
+    @Test(arguments: [
+        (StageStatus.startRequested(request: EffectToken(1), resuming: nil), "request"),
+        (.awaitingInspection(EffectToken(1)), "_0"),
+        (.unknownOutcome(OperationID(), inspection: EffectToken(1)), "inspection"),
+        (.cleanupRequired(.runtimeMissing, cleanup: EffectToken(1)), "cleanup"),
+        (.persistingCheckpoint(Checkpoint(stage: .first, reachedAt: Date(timeIntervalSince1970: 0)), operation: nil, write: EffectToken(1)), "write"),
+    ])
+    func zeroOutstandingIdentityIsRefusedWithoutRenumbering(status: StageStatus, field: String) throws {
+        let original = ProvisioningState(stage: .first, status: status)
+        let encoded = try JSONEncoder().encode(original)
+        #expect(try JSONDecoder().decode(ProvisioningState.self, from: encoded) == original)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var statusObject = try #require(object["status"] as? [String: Any])
+        var payload = try #require(statusObject[status.caseName] as? [String: Any])
+        #expect(payload[field] as? Int == 1)
+        payload[field] = 0
+        statusObject[status.caseName] = payload
+        object["status"] = statusObject
+        let malformed = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ProvisioningState.self, from: malformed)
+        }
     }
 
     private func record(issued: String, status: String = #"{"notStarted":{}}"#) -> Data {
