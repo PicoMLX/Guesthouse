@@ -52,6 +52,9 @@ public actor StateStore {
                     try anchor.synchronizePreparation(barrier: hooks.preparation)
                     result = .success(StateStore(anchor: anchor, migrator: migrator, hooks: hooks, queue: queue))
                 } catch let failure as StateStoreError { result = .failure(failure) }
+                catch StorageFailure.protectionDrift { result = .failure(.insecureDirectory(reason: .permissions)) }
+                catch StorageFailure.unsafeStructure { result = .failure(.insecureDirectory(reason: .changed)) }
+                catch is StorageFailure { result = .failure(.insecureDirectory(reason: .unreadable)) }
                 catch { result = .failure(.fileUnwritable(name: .stateDirectory)) }
                 continuation.resume(returning: result)
             }

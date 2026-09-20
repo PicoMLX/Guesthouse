@@ -99,7 +99,7 @@ import Testing
         }.count == 1)
     }
 
-    @Test func ownConfirmedWritesStayCachedAndEveryRecordBarriersItsEntry() async throws {
+    @Test func confirmedWritesAreRevalidatedAndEveryRecordBarriersItsEntry() async throws {
         let fixture = try Fixture(), calls = Mutex<[StateStoreError.File]>([]), reads = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
             calls.withLock { $0.append(name) }
@@ -113,7 +113,7 @@ import Testing
         }))
         for _ in 0..<3 { _ = try await store.begin(.startEnvironment, for: EnvironmentID()) }
         #expect(try await store.replay().records.count == 3)
-        #expect(reads.withLock { $0 } == 0)
+        #expect(reads.withLock { $0 } == 4)
         #expect(calls.withLock { $0 } == [.journal, .stateDirectory, .journal, .stateDirectory, .journal, .stateDirectory])
     }
 
@@ -189,7 +189,7 @@ import Testing
         }
         let evidence = try fixture.bytes(), replay = try await store.replay()
         let started = try #require(replay.inFlight.values.first)
-        #expect(reads.withLock { $0 } == 1)
+        #expect(reads.withLock { $0 } == 2)
         await #expect(throws: StateStoreError.operationUnresolved(started.id)) {
             try await store.begin(.startEnvironment, for: environment)
         }
@@ -230,7 +230,7 @@ import Testing
         #expect(try await reopened.replay().records.isEmpty)
     }
 
-    @Test func reattachedJournalIsRereadThenConfirmedWritesStayCached() async throws {
+    @Test func reattachedJournalAndLaterConfirmedWritesAreReread() async throws {
         let fixture = try Fixture(), reads = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
             reads.withLock { $0 += 1 }
@@ -239,9 +239,9 @@ import Testing
         _ = try await store.begin(.startEnvironment, for: EnvironmentID())
         try fixture.reattachJournal()
         let accepted = try await store.begin(.stopEnvironment, for: EnvironmentID())
-        #expect(reads.withLock { $0 } == 1)
+        #expect(reads.withLock { $0 } == 2)
         _ = try await store.begin(.exportWork, for: EnvironmentID())
-        #expect(reads.withLock { $0 } == 1)
+        #expect(reads.withLock { $0 } == 3)
         #expect(try await store.replay().inFlight[accepted]?.operation == .stopEnvironment)
     }
 

@@ -89,7 +89,7 @@ public struct SnapshotMigrator: Sendable {
 
     static func version(of data: Data) throws(StateStoreError) -> SchemaVersion {
         let object = try object(in: data)
-        try requireUnambiguousVersion(in: data)
+        try requireUnambiguousMembers(in: data)
         guard let raw = object["schemaVersion"] else { return .unversioned }
         // `true` and `false` arrive as boolean `NSNumber`s, which cast to 1 and 0. A document
         // whose version reads `false` would otherwise look unversioned and be rewritten as
@@ -107,14 +107,14 @@ public struct SnapshotMigrator: Sendable {
     /// Scan only the original top-level keys before choosing a transform. Persisted metadata
     /// and transform output use UTF-8 (as JSONEncoder does); refuse other encodings rather
     /// than scan a different representation from the one being returned or transformed.
-    private static func requireUnambiguousVersion(in data: Data) throws(StateStoreError) {
+    private static func requireUnambiguousMembers(in data: Data) throws(StateStoreError) {
         guard String(data: data, encoding: .utf8) != nil, !data.contains(0) else {
             throw .corruptSnapshot
         }
         let bytes = Array(data)
         var index = 0
         var depth = 0
-        var foundVersion = false
+        var keys: Set<String> = []
         while index < bytes.count {
             switch bytes[index] {
             case 123, 91: depth += 1 // { [
@@ -134,10 +134,7 @@ public struct SnapshotMigrator: Sendable {
                         guard let key = try? JSONDecoder().decode(String.self, from: Data(bytes[start...index])) else {
                             throw .corruptSnapshot
                         }
-                        if key == "schemaVersion" {
-                            guard !foundVersion else { throw .corruptSnapshot }
-                            foundVersion = true
-                        }
+                        guard keys.insert(key).inserted else { throw .corruptSnapshot }
                     }
                 }
             default: break

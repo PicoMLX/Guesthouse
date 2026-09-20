@@ -2,9 +2,9 @@ import Foundation
 import GuesthouseCore
 
 extension StateStore {
-    /// A startup-query budget, not a limit on saved work. Oversized state is preserved and
-    /// requires inspection through the store/recovery path, never truncation or replacement.
-    static let inspectionByteLimit = 4 * 1024 * 1024
+    /// Share the ordinary snapshot budget. Oversized state is preserved and refused,
+    /// never truncated or silently replaced through either inspection or the writable store.
+    static let inspectionByteLimit = StateFileIO.maximumSnapshotBytes
 
     /// Read-only prerequisite for retained-volume bootstrap (#12/#61; MVP-PLAN.md §§2–3).
     /// Reuses the store's anchored/locked file access, never StateStore.open or metadata
