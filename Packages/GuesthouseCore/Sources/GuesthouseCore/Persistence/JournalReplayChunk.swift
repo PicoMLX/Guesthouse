@@ -46,8 +46,9 @@ public struct JournalReplayChunk: Sendable {
                 byteCount += unterminated.count
                 unterminatedRecord = true
             } else {
-                // Complete invalid JSON values are evidence, not torn encoder writes.
-                guard (try? JSONSerialization.jsonObject(with: unterminated, options: .fragmentsAllowed)) == nil else {
+                // Only a prefix of the closed encoder shapes can authorize tail repair.
+                // Malformed or complete-invalid bytes remain evidence, not missing bytes.
+                guard JournalTailPrefix.accepts(unterminated) else {
                     throw .corruptJournal(line: number)
                 }
                 truncatedTail = true
