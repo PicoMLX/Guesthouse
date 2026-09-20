@@ -205,6 +205,20 @@ import Testing
         #expect(try fixture.bytes() == evidence)
     }
 
+    @Test func extraBytesBeforeVersionCaptureNeverAuthorizeBegin() async throws {
+        let fixture = try Fixture(), extra = Data("unparsed-evidence".utf8)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            try StateFileIO.writeAll(fd, bytes + extra, name: .journal)
+        }))
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+            try await store.begin(.startEnvironment, for: EnvironmentID())
+        }
+        let evidence = try fixture.bytes()
+        #expect(evidence.suffix(extra.count) == extra)
+        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        #expect(try fixture.bytes() == evidence)
+    }
+
     @Test(arguments: [false, true])
     func failedBarrierRequiresInspectionAndDoesNotAdoptCachedWrites(fileBarrier: Bool) async throws {
         let fixture = try Fixture(), fail = Mutex(true), reads = Mutex(0)
