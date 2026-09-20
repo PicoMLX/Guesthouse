@@ -5,8 +5,8 @@ import GuesthouseCore
 
 /// Runtime-owned persistence, migrated from #57/#76 (MVP-PLAN.md §3). One owner per managed
 /// state area; the GUI sees only Core values/errors, never a root URL or borrowed descriptor.
-/// Snapshot operations are complete synchronous actor transactions: there is no suspension
-/// between validation and publication. Journal append/durability integration is a separate step.
+/// Snapshot and journal operations are complete synchronous actor transactions: there is no
+/// suspension between validation and publication. They never execute the recorded mutation.
 public actor StateStore {
     private let anchor: StateDirectoryAnchor
     private let migrator: SnapshotMigrator
@@ -92,6 +92,30 @@ public actor StateStore {
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
 
+    /// Returns an identity only after the started record's complete write/barrier checks.
+    /// A failure may leave evidence on disk; inspect rather than blindly retry the operation.
+    public func begin(
+        _ operation: JournalOperation, for environmentID: EnvironmentID, at timestamp: Date = Date()
+    ) throws(StateStoreError) -> OperationID {
+        let id = OperationID()
+        try append(JournalRecord(id: id, environmentID: environmentID, operation: operation,
+                                 timestamp: timestamp, outcome: .started))
+        return id
+    }
+
+    /// Retains exact operation identity and unknown outcomes. Only an incomplete final line
+    /// may be truncated; unsupported/corrupt complete records refuse publication unchanged.
+    public func append(_ record: JournalRecord) throws(StateStoreError) {
+        do {
+            // Adopt only after ALL outer file-entry and directory checks have returned.
+            journal = try StateJournalAppend.append(record, to: anchor, observation: &journalObservation, hooks: hooks,
+                requireExisting: journalWasObserved, didObserve: { journalWasObserved = true })
+        } catch {
+            journal = StateJournalCache()
+            throw error
+        }
+    }
+
     /// Replay never creates or truncates the journal. Torn bytes remain available for later
     /// inspected recovery; complete invalid/unsupported records refuse the whole result.
     /// Observing these records is not proof of their durability or any mutation's outcome.
@@ -127,6 +151,8 @@ struct StateStoreHooks: Sendable {
     var permission: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var snapshotFile: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var directory: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
+    var journalFile: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
+    var journalWrite: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .journal) }
     var journalRead: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     var didCloseDirectory: @Sendable () -> Void = {}
 }
