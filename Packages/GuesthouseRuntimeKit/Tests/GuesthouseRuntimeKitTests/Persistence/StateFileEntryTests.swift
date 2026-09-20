@@ -18,15 +18,18 @@ import Testing
     @Test(arguments: [StateFileAccess.readSnapshot, .readJournal])
     func creationDuringMissingEntryValidationCannotPublishEmpty(access: StateFileAccess) throws {
         let fixture = try Fixture()
+        var observed = false
         #expect(throws: access.failure) {
             try fixture.anchor.withDescriptor { directory in
                 try StateFileEntry.withDescriptor(in: directory, access: access,
                     permissionBarrier: { _, _ in Issue.record("Missing file needed no repair") },
+                    didObserve: { observed = true },
                     validateDirectory: { _ in try evidence.write(to: fixture.file(access)) },
                     body: { _ in Issue.record("Missing observation was retried"); return 1 })
             }
         }
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
+        #expect(observed)
     }
 
     @Test(arguments: [false, true]) func journalCreationNeverTruncatesExistingBytes(existing: Bool) throws {
