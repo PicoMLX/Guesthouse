@@ -6,10 +6,12 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct FakeRuntimeBackendBaselineTests {
     let environment = EnvironmentID(), operation = OperationID()
 
-    @Test func successRetainsIdentityThroughProgressAndImmutableStatus() async throws {
+    @Test(arguments: [false, true])
+    func successRetainsIdentityThroughProgressAndImmutableStatus(foreignID: Bool) async throws {
         let backend = FakeRuntimeBackend()
         let phase = ProgressPhase(kind: .startingVM)
-        let status = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready)
+        let status = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready,
+                                       inFlightOperation: foreignID ? OperationID() : nil)
         await backend.useOperationID(operation, forNext: "startEnvironment")
         await backend.script("startEnvironment", .succeed(phases: [phase], status: status))
         let request = RuntimeRequest.startEnvironment(environment, StartOptions())
@@ -17,7 +19,8 @@ import Testing
         let inFlight = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready,
                                          inFlightOperation: operation)
         #expect(events == [.accepted(operation), .progress(operation, phase), .status(inFlight), .completed(operation)])
-        #expect(await backend.status(of: environment) == status)
+        #expect(await backend.status(of: environment) ==
+                EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready))
         #expect(await backend.receivedRequests == [request])
     }
 

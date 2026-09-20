@@ -54,6 +54,9 @@ import Testing
         canceller.cancel()
         _ = try? await canceller.value
         try await waitFor(.cancelOperation(operation), in: &finished)
+        // This inserts the earlier consumer abandonment into the fake's request ledger.
+        // It does not call send or run another cancellation producer; the synthetic entry
+        // records the consumer action that already finished before the status query.
         #expect(await backend.receivedRequests == [
             request, .cancelOperation(operation), .cancelOperation(operation), .environmentStatus(environment)
         ])
