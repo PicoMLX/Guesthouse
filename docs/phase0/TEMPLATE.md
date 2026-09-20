@@ -45,6 +45,8 @@ Copy the required proofs from the gate issue as a checklist and mark each one.
 
 For each step: what was done, what was observed, and where the evidence is. Every piece of evidence must be redacted before it is committed: log excerpts and screenshots alike must contain no tokens, device codes, bootstrap or account passwords, private keys, or account identifiers. Review each screenshot for on-screen secrets (SSH pairing and provider sign-in screens are the usual offenders) and crop or mask them. Screenshots go under `docs/phase0/evidence/<gate>/`.
 
+Before capture/model transmission, record the allowed app/window scope, user disclosure and sensitive-window handling, including transient content that will never be stored. Do not capture authentication/credential or unrelated windows without the required deliberate user involvement; refuse when scope cannot be enforced. Masking for a later commit is not a substitute for this pre-capture boundary. For automation checks, record refusal of wrong-host, wrong-guest/session and stale targets separately from an unchanged host marker. For readiness, record the check's environment/session generation, relevant tool identity and invalidation context; late success or failure must not replace newer evidence.
+
 1. `<step>`: `<observation>`. Evidence: `<path or excerpt>`.
 
 ## Measurements
