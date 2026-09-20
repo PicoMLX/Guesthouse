@@ -13,7 +13,7 @@ public enum CapabilityState: Equatable, Sendable {
 
 /// Fixed presentation facts, never process output, paths or permission transcripts.
 public enum CapabilityReason: String, CaseIterable, Sendable {
-    case disconnected, toolUnavailable, permissionRequired, sessionLocked, inspectionFailed
+    case disconnected, toolUnavailable, permissionRequired, sessionLocked, inspectionFailed, signInRequired
 
     public var userMessage: String {
         switch self {
@@ -22,19 +22,32 @@ public enum CapabilityReason: String, CaseIterable, Sendable {
         case .permissionRequired: "Review the required permission in System Settings, then check again."
         case .sessionLocked: "Unlock the guest session, then check again."
         case .inspectionFailed: "Guesthouse could not verify this capability. Inspect its state before continuing."
+        case .signInRequired: "Sign in again to the intended account inside the development Mac, then check again."
+        }
+    }
+
+    public var recoveryActions: [RecoveryAction] {
+        switch self {
+        case .signInRequired: [.signInAgain, .cancel]
+        case .permissionRequired: [.openSettings, .cancel]
+        case .sessionLocked: [.openConsole, .cancel]
+        case .toolUnavailable: [.repair(.tools), .cancel]
+        case .disconnected, .inspectionFailed: [.inspectState, .cancel]
         }
     }
 }
 
 /// Private operational identity, not a diagnostic payload or proof of provider acceptance.
-/// The producer must rotate instanceID when the relevant executable/helper is replaced,
-/// even when its reported version and path stay unchanged. No filesystem inspection here.
+/// instanceID identifies the producer-selected probe/target configuration, including an
+/// absent target. Rotate it on replacement or absent/present transition, even when reported
+/// versions stay unchanged. The optional complete tuple is validated compatibility metadata,
+/// not a prerequisite for reporting unavailable tools. No filesystem inspection here.
 public struct CapabilityToolIdentity: Equatable, Sendable {
-    public let tuple: CompatibilityTuple
+    public let tuple: CompatibilityTuple?
     public let instanceID: UUID
 
-    public init(tuple: CompatibilityTuple, instanceID: UUID) throws(CompatibilityRecordError) {
-        try ConnectionVerificationRecord.validate(tuple)
+    public init(tuple: CompatibilityTuple? = nil, instanceID: UUID) throws(CompatibilityRecordError) {
+        if let tuple { try ConnectionVerificationRecord.validate(tuple) }
         self.tuple = tuple
         self.instanceID = instanceID
     }
@@ -64,13 +77,14 @@ public enum CapabilityInvalidation: CaseIterable, Sendable {
 }
 
 /// Pure, bounded observation ledger: at most five entries and one request per capability.
-/// One owner serializes these value transitions; this is not a runtime admission lock.
+/// Actor reference identity means aliases share revocation; copying cannot fork authority.
+/// No transition suspends internally. This is not a runtime mutation admission lock.
 /// Call invalidation on lifecycle/permission changes and replace the tool on identity drift.
 /// No timestamps can revive a revoked request. A fresh UUID revision avoids counter wrap.
 /// Existing EnvironmentStatus wire/schema layouts are UNCHANGED; absent live evidence is
 /// unknown. A future wire representation requires explicit protocol/schema review, not
 /// Codable conformance that restores ready observations from disk.
-public struct EnvironmentCapabilities: Sendable {
+public actor EnvironmentCapabilities {
     private struct Entry: Sendable {
         let tool: CapabilityToolIdentity
         var revision = UUID()
@@ -79,31 +93,38 @@ public struct EnvironmentCapabilities: Sendable {
     }
 
     public let environmentID: EnvironmentID
-    private var generation: RuntimeSessionGeneration
+    private let currentGeneration: @Sendable () -> RuntimeSessionGeneration?
+    private var generation: RuntimeSessionGeneration?
     private var context = UUID()
     private var entries: [EnvironmentCapability: Entry] = [:]
 
-    public init(environmentID: EnvironmentID, generation: RuntimeSessionGeneration) {
+    public init<Session: Sendable>(environmentID: EnvironmentID, registry: RuntimeSessionRegistry<Session>) {
         self.environmentID = environmentID
-        self.generation = generation
+        currentGeneration = { registry.current?.generation }
+        generation = registry.current?.generation
     }
 
-    /// A replacement always revokes the old context, even if the same generation is supplied.
+    private var isCurrent: Bool {
+        guard let generation else { return false }
+        return currentGeneration() === generation
+    }
+
+    /// A replacement always revokes the old context, even if the same generation remains active.
     /// Guest reconnects within a still-live host XPC session must also call this or invalidate.
-    public mutating func reconnect(generation: RuntimeSessionGeneration) {
-        self.generation = generation
+    public func reconnect() {
+        generation = currentGeneration()
         context = UUID()
         invalidate(.reconnect)
     }
 
     /// A changed identity invalidates just the capability it supports. The producer calls
     /// this for every affected capability when a shared tool is replaced.
-    public mutating func setTool(_ tool: CapabilityToolIdentity, for capability: EnvironmentCapability) {
+    public func setTool(_ tool: CapabilityToolIdentity, for capability: EnvironmentCapability) {
         guard entries[capability]?.tool != tool else { return }
         entries[capability] = Entry(tool: tool)
     }
 
-    public mutating func invalidate(_ event: CapabilityInvalidation) {
+    public func invalidate(_ event: CapabilityInvalidation) {
         for capability in event.affected {
             guard var entry = entries[capability] else { continue }
             entry.revision = UUID()
@@ -114,12 +135,12 @@ public struct EnvironmentCapabilities: Sendable {
     }
 
     public func state(of capability: EnvironmentCapability) -> CapabilityState {
-        guard generation.retirementFailure == nil else { return .unknown }
+        guard isCurrent else { return .unknown }
         return entries[capability]?.state ?? .unknown
     }
 
-    public mutating func begin(_ capability: EnvironmentCapability) -> CapabilityObservationRequest? {
-        guard generation.retirementFailure == nil, var entry = entries[capability] else { return nil }
+    public func begin(_ capability: EnvironmentCapability) -> CapabilityObservationRequest? {
+        guard isCurrent, var entry = entries[capability] else { return nil }
         let requestID = UUID()
         entry.pending = requestID
         entry.state = .checking
@@ -133,11 +154,11 @@ public struct EnvironmentCapabilities: Sendable {
     /// not values copied from an unrelated request. This compares provenance; it cannot
     /// prove a probe or permission grant happened. A result is terminal and consumes its request.
     @discardableResult
-    public mutating func complete(_ request: CapabilityObservationRequest,
+    public func complete(_ request: CapabilityObservationRequest,
                                   environmentID: EnvironmentID, generation: RuntimeSessionGeneration,
                                   tool: CapabilityToolIdentity, result: CapabilityState) -> Bool {
         guard self.environmentID == environmentID, request.environmentID == environmentID,
-              self.generation === generation, generation.retirementFailure == nil,
+              self.generation === generation, isCurrent,
               request.context == context, request.tool == tool,
               var entry = entries[request.capability], entry.tool == tool,
               entry.revision == request.revision, entry.pending == request.requestID else { return false }
@@ -150,6 +171,15 @@ public struct EnvironmentCapabilities: Sendable {
         entry.state = result
         entries[request.capability] = entry
         return true
+    }
+
+    /// One actor turn evaluates all required observations against the current activated lease.
+    fileprivate func availability(for workflow: CapabilityWorkflow, status: EnvironmentStatus) -> CapabilityAvailability {
+        guard environmentID == status.environmentID, status.vm == .running,
+              status.inFlightOperation == nil, status.readiness == .ready else { return .requiresInspection }
+        guard isCurrent else { return .blocked(workflow.required) }
+        let missing = workflow.required.filter { entries[$0]?.state != .ready }
+        return missing.isEmpty ? .available : .blocked(missing)
     }
 }
 
@@ -178,10 +208,7 @@ extension EnvironmentStatus {
     /// approval or a hardware gate. Existing ownership, current tuple compatibility, journal
     /// reconciliation and per-action runtime admission remain separate mandatory checks.
     public func capabilityAvailability(for workflow: CapabilityWorkflow,
-                                       using capabilities: EnvironmentCapabilities) -> CapabilityAvailability {
-        guard environmentID == capabilities.environmentID, vm == .running,
-              inFlightOperation == nil, readiness == .ready else { return .requiresInspection }
-        let missing = workflow.required.filter { capabilities.state(of: $0) != .ready }
-        return missing.isEmpty ? .available : .blocked(missing)
+                                       using capabilities: EnvironmentCapabilities) async -> CapabilityAvailability {
+        await capabilities.availability(for: workflow, status: self)
     }
 }
