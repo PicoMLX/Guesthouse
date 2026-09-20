@@ -26,6 +26,27 @@ import Testing
         #expect(try Data(contentsOf: retained) == evidence)
     }
 
+    @Test func failedAppendPreparationCannotAuthorizeJournalRecreation() async throws {
+        let fixture = try Fixture()
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { _, _ in
+            throw StateStoreError.fileUnwritable(name: .journal)
+        }))
+        let bytes = try JSONEncoder().encode(Self.record()) + Data([10])
+        try fixture.write(bytes)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+            try await store.begin(.startEnvironment, for: EnvironmentID())
+        }
+        let retained = fixture.state.appending(path: "retained")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        #expect(try Data(contentsOf: retained) == bytes)
+    }
+
     @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
         let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
         try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
@@ -221,6 +242,21 @@ import Testing
         }
         let evidence = try fixture.bytes(), replay = try await store.replay()
         #expect(evidence.count == 12 && replay.records.isEmpty && replay.truncatedTail)
+        #expect(try fixture.bytes() == evidence)
+    }
+
+    @Test func sameLengthSubstitutionBeforeVersionCaptureNeverAuthorizesBegin() async throws {
+        let fixture = try Fixture()
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            // Simulates a same-size replacement before the post-write version is captured.
+            try StateFileIO.writeAll(fd, Data(repeating: 120, count: bytes.count), name: .journal)
+        }))
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+            try await store.begin(.startEnvironment, for: EnvironmentID())
+        }
+        let evidence = try fixture.bytes()
+        #expect(!evidence.isEmpty && evidence.allSatisfy { $0 == 120 })
+        await #expect(throws: StateStoreError.corruptJournal(line: 1)) { try await store.replay() }
         #expect(try fixture.bytes() == evidence)
     }
 
