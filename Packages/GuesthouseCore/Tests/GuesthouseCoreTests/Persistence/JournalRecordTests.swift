@@ -15,6 +15,14 @@ import Testing
         try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])
     }
 
+    func expectDecodingRefusal(_ record: JournalRecord) throws {
+        #expect(!record.isSelfConsistent)
+        let data = try JSONEncoder().encode(record)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(JournalRecord.self, from: data)
+        }
+    }
+
     @Test(arguments: JournalOperation.allCases)
     func everyOperationRetainsItsInspectionDetail(operation: JournalOperation) throws {
         let original = record(.started, operation: operation)
@@ -56,27 +64,34 @@ import Testing
         #expect(!record(.notApplied).leavesInFlight)
     }
 
-    @Test func unknownFailureIdentityMustAgreeWithTheRecord() {
+    @Test func unknownFailureIdentityMustAgreeWithTheRecord() throws {
         #expect(record(.failed(.operationOutcomeUnknown(operationID))).isSelfConsistent)
-        #expect(!record(.failed(.operationOutcomeUnknown(OperationID()))).isSelfConsistent)
+        try expectDecodingRefusal(record(.failed(.operationOutcomeUnknown(OperationID()))))
     }
 
-    @Test func environmentErrorsMustNameTheRecordedEnvironment() {
-        #expect(record(.failed(.guestNotReachable(environmentID))).isSelfConsistent)
-        #expect(record(.failed(.hostKeyChanged(environmentID))).isSelfConsistent)
-        #expect(!record(.failed(.guestNotReachable(EnvironmentID()))).isSelfConsistent)
-        #expect(!record(.failed(.hostKeyChanged(EnvironmentID()))).isSelfConsistent)
+    @Test func environmentErrorsMustNameTheRecordedEnvironment() throws {
+        for error in [GuesthouseError.guestNotReachable(environmentID), .hostKeyChanged(environmentID)] {
+            let original = record(.failed(error))
+            #expect(original.isSelfConsistent)
+            let restored = try JSONDecoder().decode(JournalRecord.self, from: JSONEncoder().encode(original))
+            #expect(restored == original)
+        }
+        try expectDecodingRefusal(record(.failed(.guestNotReachable(EnvironmentID()))))
+        try expectDecodingRefusal(record(.failed(.hostKeyChanged(EnvironmentID()))))
     }
 
     @Test(arguments: ProvisioningStage.allCases)
-    func checkpointsMustMatchTheProvisioningOperation(stage: ProvisioningStage) {
-        #expect(record(.checkpoint(stage), operation: .provision(stage: stage)).isSelfConsistent)
-        #expect(!record(.checkpoint(stage), operation: .importXcode).isSelfConsistent)
+    func checkpointsMustMatchTheProvisioningOperation(stage: ProvisioningStage) throws {
+        let original = record(.checkpoint(stage), operation: .provision(stage: stage))
+        #expect(original.isSelfConsistent)
+        let restored = try JSONDecoder().decode(JournalRecord.self, from: JSONEncoder().encode(original))
+        #expect(restored == original)
+        try expectDecodingRefusal(record(.checkpoint(stage), operation: .importXcode))
     }
 
-    @Test func aCheckpointCannotClaimADifferentStage() {
-        #expect(!record(.checkpoint(.ready), operation: .provision(stage: .first)).isSelfConsistent)
-        #expect(!record(.checkpoint(.first), operation: .provision(stage: .ready)).isSelfConsistent)
+    @Test func aCheckpointCannotClaimADifferentStage() throws {
+        try expectDecodingRefusal(record(.checkpoint(.ready), operation: .provision(stage: .first)))
+        try expectDecodingRefusal(record(.checkpoint(.first), operation: .provision(stage: .ready)))
     }
 
     @Test func structuredJournalFormatIsIndependentAndExplicit() throws {

@@ -90,6 +90,11 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         operation = try c.decode(JournalOperation.self, forKey: .operation)
         timestamp = try c.decode(Date.self, forKey: .timestamp)
         outcome = try c.decode(Outcome.self, forKey: .outcome)
+        guard isSelfConsistent else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .outcome, in: c, debugDescription: "The journal record contains inconsistent identities or stages."
+            )
+        }
     }
 
     /// Whether this record leaves the operation in flight. A failure whose error says the
