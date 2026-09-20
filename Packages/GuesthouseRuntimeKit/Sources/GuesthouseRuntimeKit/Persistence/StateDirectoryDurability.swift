@@ -40,7 +40,12 @@ enum StateDirectoryDurability {
         // that target explicitly, open its real final component without following a new link,
         // and bind the descriptor to the original ancestor. Its parent is in the plan as well.
         let resolved = try resolve(path)
-        let descriptor = open(resolved, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        var descriptor = open(resolved, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        // RuntimeStorage permits safe search-only ancestors. Match its descriptor opening
+        // policy without adding list permission or skipping the required durability barrier.
+        if descriptor < 0 && errno == EACCES {
+            descriptor = open(resolved, O_SEARCH | O_NOFOLLOW | O_CLOEXEC)
+        }
         guard descriptor >= 0 else { throw .insecureDirectory(reason: .unopenable) }
         defer { close(descriptor) }
         try verify(descriptor, path: path, expected: expected)

@@ -65,6 +65,11 @@ public struct JournalReplayChunk: Sendable {
     }
 
     private static func decode(_ line: Data.SubSequence, number: Int, using decoder: JSONDecoder) throws(StateStoreError) -> JournalRecord? {
+        // Complete JSON with ambiguous envelope keys is evidence, never a torn write.
+        // Validate grammar first so a genuinely incomplete final line retains tail handling.
+        if (try? JSONSerialization.jsonObject(with: line, options: .fragmentsAllowed)) != nil {
+            try requireUnambiguousFormat(in: line, number: number, using: decoder)
+        }
         if let declared = try? decoder.decode(RecordFormat.self, from: line), !JournalRecord.canRead(declared.format) {
             // Positive but unsupported includes prototype format 1, not only newer releases.
             // Neither is safe to skip or truncate, even when this final line has no newline.
@@ -76,5 +81,46 @@ public struct JournalReplayChunk: Sendable {
 
     private struct RecordFormat: Decodable {
         let format: Int
+    }
+
+    /// Foundation collapses duplicate members. Inspect original UTF-8 top-level keys,
+    /// including escaped spellings, before either decoder can select a format value.
+    private static func requireUnambiguousFormat(in data: Data, number: Int,
+                                                using decoder: JSONDecoder) throws(StateStoreError) {
+        guard String(data: data, encoding: .utf8) != nil, !data.contains(0) else {
+            throw .corruptJournal(line: number)
+        }
+        let bytes = Array(data)
+        var index = 0, depth = 0
+        var foundFormat = false
+        while index < bytes.count {
+            switch bytes[index] {
+            case 123, 91: depth += 1
+            case 125, 93: depth -= 1
+            case 34:
+                let start = index
+                index += 1
+                while index < bytes.count && bytes[index] != 34 {
+                    if bytes[index] == 92 { index += 1 }
+                    index += 1
+                }
+                guard index < bytes.count else { throw .corruptJournal(line: number) }
+                if depth == 1 {
+                    var next = index + 1
+                    while next < bytes.count && [9, 10, 13, 32].contains(bytes[next]) { next += 1 }
+                    if next < bytes.count && bytes[next] == 58 {
+                        guard let key = try? decoder.decode(String.self, from: Data(bytes[start...index])) else {
+                            throw .corruptJournal(line: number)
+                        }
+                        if key == "format" {
+                            guard !foundFormat else { throw .corruptJournal(line: number) }
+                            foundFormat = true
+                        }
+                    }
+                }
+            default: break
+            }
+            index += 1
+        }
     }
 }
