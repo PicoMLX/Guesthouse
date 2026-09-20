@@ -8,7 +8,7 @@ import GuesthouseCore
 enum StateJournalAppend {
     static func append(
         _ record: JournalRecord, to anchor: StateDirectoryAnchor,
-        cached: StateJournalCache, hooks: StateStoreHooks,
+        observation: inout StateJournalObservation, hooks: StateStoreHooks,
         requireExisting: Bool = false, didObserve: () -> Void = {}
     ) throws(StateStoreError) -> StateJournalCache {
         var line: Data
@@ -30,7 +30,7 @@ enum StateJournalAppend {
                     in: directory, access: .writeJournal, requireExisting: requireExisting,
                     permissionBarrier: hooks.permission, didObserve: didObserve,
                     validateDirectory: { try anchor.verifyCurrent(version: $0) }, body: { descriptor in
-                    let current = try cached.refreshed(descriptor, read: hooks.journalRead)
+                    let current = try observation.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
                     if current.unterminatedRecord { line.insert(0x0A, at: line.startIndex) }
                     // Capacity refusal must precede any repair/write attempt. Do not produce
@@ -54,13 +54,13 @@ enum StateJournalAppend {
                     try requireLength(descriptor, expected: expectedLength)
                     let written = try StateFileIO.version(descriptor, name: .journal)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
-                    try requireHistory(descriptor, expected: current.history.records + [record])
+                    try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     let directoryVersion = try anchor.verifyCurrent()
                     try synchronize(descriptor, name: .journal, barrier: hooks.journalFile)
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
-                    try requireHistory(descriptor, expected: current.history.records + [record])
+                    try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     // Every record needs an entry barrier, even when the journal already
@@ -68,7 +68,7 @@ enum StateJournalAppend {
                     try synchronize(directory, name: .stateDirectory, barrier: hooks.directory)
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
-                    try requireHistory(descriptor, expected: current.history.records + [record])
+                    try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     return try current.appending(record, bytes: line.count, version: written)
@@ -91,8 +91,12 @@ enum StateJournalAppend {
 
     /// Checking only our appended range misses a rewritten prior operation. Revalidate the
     /// complete bounded history at every publication boundary, then check binding/version.
-    private static func requireHistory(_ descriptor: Int32, expected: [JournalRecord]) throws(StateStoreError) {
-        let observed = try StateJournalCache().refreshed(descriptor)
+    private static func requireHistory(
+        _ descriptor: Int32, expected: [JournalRecord], observation: inout StateJournalObservation
+    ) throws(StateStoreError) {
+        // Retain visible complete evidence even if a later barrier/binding check fails.
+        // This does not publish an OperationID or claim that the write was durable.
+        let observed = try observation.refreshed(descriptor)
         guard !observed.truncatedTail, !observed.unterminatedRecord,
               observed.history.records == expected else { throw .fileUnwritable(name: .journal) }
     }
