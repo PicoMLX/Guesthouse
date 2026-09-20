@@ -37,6 +37,7 @@ struct StateJournalCache {
     func refreshed(
         _ descriptor: Int32,
         requiringPrefix: Data = Data(),
+        didRead: (Data) -> Void = { _ in },
         read: Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> Self {
         var info = stat()
@@ -50,8 +51,10 @@ struct StateJournalCache {
         do { fresh = try read(descriptor, 0) }
         catch let failure as StateStoreError { throw failure }
         catch { throw .fileUnreadable(name: .journal) }
-        try Self.validateBudget(fresh)
+        guard fresh.count <= StateFileIO.maximumJournalBytes else { throw .fileUnreadable(name: .journal) }
         guard fresh.starts(with: requiringPrefix) else { throw .fileUnreadable(name: .journal) }
+        didRead(fresh) // Bounded raw evidence survives record-budget or decoding failure.
+        try Self.validateBudget(fresh)
         let chunk = try JournalReplayChunk(fresh)
         candidate.history = chunk.history
         candidate.byteCount = chunk.validatedByteCount
@@ -80,15 +83,27 @@ struct StateJournalCache {
 struct StateJournalObservation {
     private var identity: StateFileIdentity?
     private var prefix = Data()
+    private var unboundObservation = false
+
+    /// Called before preparation/body entry. Unknown binding cannot later become a new
+    /// journal implicitly; it requires explicit recovery outside this owner's lifetime.
+    mutating func identify(_ observed: StateFileIdentity?) -> Bool {
+        guard let observed else { unboundObservation = true; return false }
+        guard !unboundObservation, identity == nil || identity == observed else { return false }
+        identity = observed
+        return true
+    }
 
     mutating func refreshed(
         _ descriptor: Int32,
         read: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> StateJournalCache {
         let current = try StateFileIO.version(descriptor, name: .journal).identity
-        guard identity == nil || identity == current else { throw .fileUnreadable(name: .journal) }
-        identity = current // Retain identity even if the subsequent read/parse fails.
-        let candidate = try StateJournalCache().refreshed(descriptor, requiringPrefix: prefix, read: read)
+        guard identify(current) else { throw .fileUnreadable(name: .journal) }
+        let candidate = try StateJournalCache().refreshed(descriptor, requiringPrefix: prefix,
+            didRead: { prefix = $0 }, read: read)
+        // Only a successful parse can release a proven torn suffix for inspected repair.
+        // A corrupt/unsupported complete record pins the whole bounded input instead.
         prefix = candidate.validatedBytes
         return candidate
     }

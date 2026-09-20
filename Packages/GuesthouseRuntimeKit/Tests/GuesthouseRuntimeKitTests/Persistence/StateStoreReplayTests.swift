@@ -7,6 +7,53 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
+    @Test func firstCorruptReplayPinsItsWholeEvidenceBeforeDecoding() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let original = try Self.lines([Self.record()]) + Data("not JSON\n".utf8)
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        try fixture.write(Data())
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try fixture.bytes().isEmpty)
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        #expect(try fixture.bytes() == original)
+    }
+
+    @Test(arguments: [false, true])
+    func firstPreBodyFailurePinsIdentityBeforeReplacement(deniedOpen: Bool) async throws {
+        let fixture = try Fixture(), fail = Mutex(!deniedOpen)
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { fd, name in
+            if fail.withLock({ $0 }) { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }))
+        let original = try Self.lines([Self.record()])
+        try fixture.write(original)
+        if deniedOpen { try #require(chmod(fixture.journal.path, 0) == 0) }
+        await #expect(throws: StateStoreError.self) { try await store.replay() }
+        let retained = fixture.state.appending(path: "retained-original")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        try fixture.write(Data())
+        fail.withLock { $0 = false }
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try fixture.bytes().isEmpty)
+        try #require(chmod(retained.path, 0o600) == 0)
+        #expect(try Data(contentsOf: retained) == original)
+    }
+
+    @Test func unknownEntryBindingCannotBecomeANewIdentity() throws {
+        let fixture = try Fixture()
+        _ = try RuntimeStorage(root: fixture.root)
+        try fixture.write(Data())
+        var observation = StateJournalObservation()
+        #expect(!observation.identify(nil))
+        #expect(!observation.identify(try fixture.identity(fixture.journal)))
+    }
+
     @Test func deniedJournalOpenThenDisappearanceCannotBecomeEmpty() async throws {
         let fixture = try Fixture(), store = try await fixture.open()
         let evidence = try Self.lines([Self.record()])
@@ -164,6 +211,15 @@ import Testing
             await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         }
         #expect(try fixture.bytes() == prefix)
+        if parseFailure {
+            // A failed complete parse pins even the corrupt suffix: deleting it is not
+            // implicit repair. Restoring all observed bytes retains the original refusal.
+            let corrupt = full + Data("not JSON\n".utf8)
+            try fixture.write(corrupt)
+            await #expect(throws: StateStoreError.corruptJournal(line: 3)) { try await store.replay() }
+            #expect(try fixture.bytes() == corrupt)
+            return
+        }
         // Restoring the same inode's known bytes is explicit fixture repair, not a retry.
         try fixture.write(full)
         #expect(try await store.replay().records == [first, second])
