@@ -68,9 +68,9 @@ enum StateSnapshotPublication {
             let written = try StateFileIO.version(descriptor, name: .snapshot)
             let beforePublication = try anchor.verifyCurrent()
             try synchronize(descriptor, name: .snapshot, using: fileBarrier)
+            try requireUnchangedSnapshot(in: directory, expected: existing, didObserve: didObserve)
             try verifyTemporary(descriptor, in: directory, name: name, version: written)
             try anchor.verifyCurrent(version: beforePublication)
-            try requireUnchangedSnapshot(in: directory, expected: existing)
             guard renameat(directory, name, directory, StateFileAccess.readSnapshot.name) == 0 else {
                 throw StateStoreError.fileUnwritable(name: .snapshot)
             }
@@ -111,15 +111,17 @@ enum StateSnapshotPublication {
     /// This is a last pre-publication check, not a compare-and-swap or a namespace lock.
     /// Publication ownership excludes cooperating writers; arbitrary same-user changes remain outside it.
     private static func requireUnchangedSnapshot(
-        in directory: Int32, expected: StateFileVersion?
+        in directory: Int32, expected: StateFileVersion?, didObserve: () -> Void
     ) throws(StateStoreError) {
         var entry = stat()
         let result = fstatat(directory, StateFileAccess.readSnapshot.name, &entry, AT_SYMLINK_NOFOLLOW)
+        let entryError = errno
+        if result != -1 || entryError != ENOENT { didObserve() }
         if let expected {
             guard result == 0, StateFileVersion(entry) == expected else { throw .fileUnwritable(name: .snapshot) }
             try StateFileProtection.validateStructure(entry, kind: .regularFile)
         } else {
-            guard result == -1, errno == ENOENT else { throw .fileUnwritable(name: .snapshot) }
+            guard result == -1, entryError == ENOENT else { throw .fileUnwritable(name: .snapshot) }
         }
     }
 
