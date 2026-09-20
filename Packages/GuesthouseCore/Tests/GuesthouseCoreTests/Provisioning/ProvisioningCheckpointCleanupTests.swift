@@ -77,7 +77,7 @@ import Testing
             try ProvisioningReducer.reduce(state(.cleanupRequired(.canceled, cleanup: outstanding)), .connectionInterrupted(operation))
         }
         let cleanup = try ProvisioningReducer.reduce(state(.cleanupRequired(.canceled, cleanup: outstanding)), .inspectionRequested)
-        #expect(cleanup.state.status.caseName == "awaitingInspection")
+        #expect(cleanup.state.status == .inspectingCleanup(.canceled, cleanup: outstanding, inspection: try token(of: cleanup.effects)))
         let cleanupRetry = try ProvisioningReducer.reduce(state(.cleanupRequired(.canceled, cleanup: outstanding)), .userRetried)
         #expect(cleanupRetry.effects == [.inspectActualState(.first, try token(of: cleanupRetry.effects), operation: nil)])
     }
