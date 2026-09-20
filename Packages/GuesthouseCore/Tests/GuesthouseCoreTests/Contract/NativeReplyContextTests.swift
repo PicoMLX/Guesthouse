@@ -163,11 +163,18 @@ private final class Fixture: Sendable {
         // cleanup without global state. XPCSession is SDK-declared Sendable.
         let holder = SessionHolder()
         let listener = XPCListener { request in
-            request.accept { session in
-                holder.session.withLock { $0 = session }
-                holder.progress.value.withLock { $0 = .awaitingRequest }
-                return Handler(events: events, progress: holder.progress)
-            }
+            holder.progress.value.withLock { $0 = .acceptingSession }
+            let handler = Handler(events: events, progress: holder.progress)
+            // Match the raw-dictionary registration used by the native frame/session
+            // fixtures. This suite tests retained reply contexts, not peer-handler setup.
+            let (decision, session) = request.accept(
+                incomingMessageHandler: { (message: XPCDictionary) -> XPCDictionary? in
+                    handler.handleIncomingRequest(message)
+                }, cancellationHandler: { error in handler.handleCancellation(error: error) }
+            )
+            holder.session.withLock { $0 = session }
+            holder.progress.value.withLock { $0 = .awaitingRequest }
+            return decision
         }
         do {
             client = try XPCSession(endpoint: listener.endpoint, cancellationHandler: { _ in
@@ -223,7 +230,7 @@ private final class ProgressProbe: Sendable {
     let value = Mutex(FixtureProgress.awaitingConnection)
 }
 
-private struct Handler: XPCPeerHandler {
+private struct Handler: Sendable {
     let events: AsyncThrowingStream<Incoming, any Error>.Continuation
     let progress: ProgressProbe
 
@@ -243,7 +250,7 @@ private struct Handler: XPCPeerHandler {
 }
 
 private enum FixtureProgress: Sendable, Equatable {
-    case awaitingConnection, awaitingRequest, creatingFirstContext, checkingSecondContext
+    case awaitingConnection, acceptingSession, awaitingRequest, creatingFirstContext, checkingSecondContext
     case deliveringIncoming, awaitingReply
 }
 private enum FixtureFailure: Error, Equatable {
