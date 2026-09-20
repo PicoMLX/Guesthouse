@@ -21,12 +21,13 @@ struct StateJournalCache {
 
     /// Stage our appended record using ONLY the version checked across both barriers.
     /// This value still must not become the actor's cache until the whole borrow returns.
-    func appending(_ record: JournalRecord, bytes: Int, version: StateFileVersion) throws(StateStoreError) -> Self {
+    func appending(_ record: JournalRecord, bytes: Data, version: StateFileVersion) throws(StateStoreError) -> Self {
         var candidate = self
-        let (count, overflow) = byteCount.addingReportingOverflow(bytes)
-        guard bytes > 0, !overflow else { throw .fileUnwritable(name: .journal) }
+        let (count, overflow) = byteCount.addingReportingOverflow(bytes.count)
+        guard !bytes.isEmpty, !overflow else { throw .fileUnwritable(name: .journal) }
         try candidate.history.append(record)
         candidate.byteCount = count
+        candidate.validatedBytes.append(bytes)
         candidate.truncatedTail = false
         candidate.unterminatedRecord = false
         candidate.file = version
