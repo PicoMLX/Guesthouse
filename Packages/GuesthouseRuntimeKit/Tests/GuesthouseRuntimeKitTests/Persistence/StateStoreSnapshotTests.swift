@@ -124,10 +124,31 @@ import Testing
         #expect(try fixture.names() == ["environments.json"])
     }
 
-    @Test func duplicateMigrationOutputCannotAuthorizeRewrite() async throws {
+    @Test(arguments: [#"{"name":"first","name":"second"}"#,
+                      #"{"slot":{"id":1,"\u0069d":2}}"#,
+                      #"{"provisioning":[{"stage":1,"stage":2}]}"#])
+    func nestedDuplicateMembersRefuseLoadAndOverwrite(nested: String) async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let encoded = try #require(String(data: JSONEncoder().encode(EnvironmentsSnapshot.empty), encoding: .utf8))
+        let bytes = Data((encoded.dropLast() + ",\"extension\":" + nested + "}").utf8)
+        #expect(throws: StateStoreError.corruptSnapshot) { try SnapshotMigrator.standard.migrate(bytes) }
+        try fixture.write(bytes)
+        await #expect(throws: StateStoreError.corruptSnapshot) { try await store.loadSnapshot() }
+        await #expect(throws: StateStoreError.corruptSnapshot) { try await store.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == bytes)
+    }
+
+    @Test func distinctObjectsMayReuseKeysAndQuotedColonsAreNotMembers() throws {
+        let encoded = try #require(String(data: JSONEncoder().encode(EnvironmentsSnapshot.empty), encoding: .utf8))
+        let extra = #","extension":[{"name":"a"},{"name":"b","text":"\\\"name\\\":0"}]}"#
+        #expect(throws: Never.self) { try SnapshotMigrator.standard.migrate(Data((encoded.dropLast() + extra).utf8)) }
+    }
+
+    @Test(arguments: [false, true]) func duplicateMigrationOutputCannotAuthorizeRewrite(nested: Bool) async throws {
         let fixture = try Fixture()
         let encoded = try #require(String(data: JSONEncoder().encode(EnvironmentsSnapshot.empty), encoding: .utf8))
-        let ambiguous = Data((encoded.dropLast() + ",\"environments\":null}").utf8)
+        let extra = nested ? #","extension":{"stage":1,"stage":2}}"# : ",\"environments\":null}"
+        let ambiguous = Data((encoded.dropLast() + extra).utf8)
         let previous = SchemaVersion(EnvironmentsSnapshot.currentSchema.rawValue - 1)!
         let migrator = SnapshotMigrator(migrations: [.init(from: previous) { _ in ambiguous }])
         let store = try await fixture.open(migrator: migrator)
