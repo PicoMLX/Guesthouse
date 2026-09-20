@@ -438,7 +438,7 @@ import Testing
         #expect(try fixture.bytes() == next)
     }
 
-    @Test func postReadFileReattachmentRefusesAndDiscardsTheCandidate() async throws {
+    @Test func postReadFileReattachmentKeepsTheOwnerUnread() async throws {
         let fixture = try Fixture(), reads = Mutex(0)
         let target = fixture.journal, detached = fixture.base.appending(path: "detached")
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
@@ -454,9 +454,10 @@ import Testing
         }))
         let record = Self.record(), bytes = try Self.lines([record])
         try fixture.write(bytes)
-        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) { try await store.replay() }
-        #expect(try await store.replay().records == [record])
-        #expect(reads.withLock { $0 } == 2)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 1)
         #expect(try fixture.bytes() == bytes)
     }
 
