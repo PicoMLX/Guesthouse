@@ -52,8 +52,11 @@ import Testing
         }
         let consistent = Data(String(decoding: tail, as: UTF8.self)
             .replacingOccurrences(of: different.uuidString, with: original.uuidString).utf8)
+        var history = JournalHistory()
+        try history.append(JournalRecord(id: operation, environmentID: environment,
+                                         operation: .startEnvironment, timestamp: Date(), outcome: .started))
         for length in 1...consistent.count {
-            #expect(try JournalReplayChunk(Data(consistent.prefix(length))).truncatedTail)
+            #expect(try JournalReplayChunk(Data(consistent.prefix(length)), following: history).truncatedTail)
         }
     }
 
@@ -80,14 +83,19 @@ import Testing
     }
 
     private func checkEveryCut(_ record: JournalRecord) throws {
+        var history = JournalHistory()
+        if record.outcome != .started {
+            try history.append(JournalRecord(id: record.id, environmentID: record.environmentID,
+                operation: record.operation, timestamp: record.timestamp, outcome: .started))
+        }
         for sorted in [false, true] {
             let encoder = JSONEncoder()
             if sorted { encoder.outputFormatting = [.sortedKeys] }
             let bytes = try encoder.encode(record)
             for length in 1..<bytes.count {
-                let chunk = try JournalReplayChunk(Data(bytes.prefix(length)))
+                let chunk = try JournalReplayChunk(Data(bytes.prefix(length)), following: history)
                 #expect(chunk.truncatedTail)
-                #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
+                #expect(chunk.validatedByteCount == 0 && chunk.history.records == history.records)
             }
         }
     }
@@ -127,7 +135,7 @@ import Testing
             Date(timeIntervalSinceReferenceDate: -9.084938291167941e+48)), as: UTF8.self)
         let exponent = try #require(encoded.firstIndex(of: "e"))
         let mantissa = String(encoded[..<exponent])
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + mantissa).utf8)))
+        #expect(try JournalReplayChunk(Data(("{\"timestamp\":" + mantissa).utf8)).truncatedTail)
     }
 
     @Test(arguments: ["id", "environmentID"])
