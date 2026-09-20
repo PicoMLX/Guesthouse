@@ -113,7 +113,11 @@ import Testing
             original.append(0x0A)
         }
         let finalBytes = try JSONEncoder().encode(final)
-        try #require(try JSONDecoder().decode(JournalRecord.self, from: finalBytes) == final)
+        if case .conflictingFailureIdentity = contradiction {
+            #expect(throws: DecodingError.self) { try JSONDecoder().decode(JournalRecord.self, from: finalBytes) }
+        } else {
+            try #require(try JSONDecoder().decode(JournalRecord.self, from: finalBytes) == final)
+        }
         original.append(finalBytes) // Complete JSON, deliberately no final separator.
         try fixture.write(original)
         let failure = StateStoreError.corruptJournal(line: prefix.count + 1)
@@ -138,7 +142,7 @@ import Testing
         let inconsistent = Self.record(id: started.id, environment: started.environmentID,
                                        operation: started.operation, outcome: outcome)
         let line = try JSONEncoder().encode(inconsistent)
-        try #require(try JSONDecoder().decode(JournalRecord.self, from: line) == inconsistent)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(JournalRecord.self, from: line) }
         try await store.append(started)
         let evidence = try fixture.bytes()
         await #expect(throws: StateStoreError.inconsistentRecord(started.id)) { try await store.append(inconsistent) }
