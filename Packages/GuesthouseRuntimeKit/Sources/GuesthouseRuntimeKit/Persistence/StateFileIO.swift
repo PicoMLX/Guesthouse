@@ -24,6 +24,8 @@ enum StateFileIO {
         if let maximumBytes, maximumBytes < 0 { throw .fileUnreadable(name: name) }
         let ordinaryLimit = name == .snapshot ? maximumSnapshotBytes : maximumJournalBytes
         let limit = min(maximumBytes ?? ordinaryLimit, ordinaryLimit)
+        guard offset >= 0, offset <= off_t(limit) else { throw .fileUnreadable(name: name) }
+        let remaining = limit - Int(offset)
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_size >= 0,
               info.st_size <= off_t(limit) else { throw .fileUnreadable(name: name) }
@@ -34,7 +36,7 @@ enum StateFileIO {
             let count = buffer.withUnsafeMutableBytes { readBytes(descriptor, $0.baseAddress, $0.count) }
             if count > 0 {
                 guard count <= buffer.count else { throw .fileUnreadable(name: name) }
-                if data.count > limit || count > limit - data.count {
+                if data.count > remaining || count > remaining - data.count {
                     throw .fileUnreadable(name: name)
                 }
                 data.append(contentsOf: buffer.prefix(count))

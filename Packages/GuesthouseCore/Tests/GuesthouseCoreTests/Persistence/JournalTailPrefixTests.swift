@@ -69,4 +69,15 @@ import Testing
     func invalidUTF8AndNULRemainEvidence(bytes: Data) {
         #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(bytes) }
     }
+
+    @Test(arguments: [UInt8(9), 13, 32])
+    func nonEncoderWhitespaceCannotReplaceMissingBytes(whitespace: UInt8) throws {
+        let record = JournalRecord(id: OperationID(), environmentID: EnvironmentID(), operation: .startEnvironment,
+                                   timestamp: Date(), outcome: .started)
+        let encoded = try JSONEncoder().encode(record)
+        for damaged in [Data([123, whitespace]), Data(encoded.dropLast()) + Data([whitespace]),
+                        Data([123, whitespace]) + Data(encoded.dropFirst().dropLast())] {
+            #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(damaged) }
+        }
+    }
 }
