@@ -6,11 +6,15 @@ import GuesthouseCore
 /// Runtime-owned persistence, migrated from #57/#76 (MVP-PLAN.md §3). One owner per managed
 /// state area; the GUI sees only Core values/errors, never a root URL or borrowed descriptor.
 /// Snapshot operations are complete synchronous actor transactions: there is no suspension
-/// between validation and publication. Journal/recovery integration is still a separate step.
+/// between validation and publication. Journal append/durability integration is a separate step.
 public actor StateStore {
     private let anchor: StateDirectoryAnchor
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
+    private var journal = StateJournalCache()
+    private var journalObservation = StateJournalObservation()
+    // This observation survives cache invalidation and failed parsing/post-checks.
+    private var journalWasObserved = false
     // Observation survives failed reads/publications. Absence after observation is evidence
     // loss, never an empty new store. This is actor-confined and never reset by an error.
     private var snapshotWasObserved = false
@@ -87,6 +91,32 @@ public actor StateStore {
             requireExisting: snapshotWasObserved, didObserve: { self.snapshotWasObserved = true },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
+
+    /// Replay never creates or truncates the journal. Torn bytes remain available for later
+    /// inspected recovery; complete invalid/unsupported records refuse the whole result.
+    /// Observing these records is not proof of their durability or any mutation's outcome.
+    public func replay() throws(StateStoreError) -> JournalReplay {
+        var enteredBody = false
+        do {
+            let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
+                                                didObserve: { journalWasObserved = true },
+                                                didIdentify: { journalObservation.identify($0) }) {
+                enteredBody = true
+                return try journalObservation.refreshed($0, read: hooks.journalRead)
+            }
+            guard candidate != nil || !journalWasObserved else {
+                throw StateStoreError.fileUnreadable(name: .journal)
+            }
+            // Adoption happens only after all outer entry and directory checks. Missing
+            // state is empty only before this owner has ever observed a journal.
+            journal = candidate ?? StateJournalCache()
+            return journal.replay
+        } catch {
+            if !enteredBody && journalWasObserved { journalObservation.recordUnreadFailure() }
+            journal = StateJournalCache()
+            throw error
+        }
+    }
 }
 
 /// Internal synchronous fault/lifetime seams, not a diagnostic sink or an XPC API.
@@ -97,5 +127,6 @@ struct StateStoreHooks: Sendable {
     var permission: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var snapshotFile: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var directory: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
+    var journalRead: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     var didCloseDirectory: @Sendable () -> Void = {}
 }
