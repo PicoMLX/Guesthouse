@@ -11,7 +11,7 @@ Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC).
 | Guesthouse signed build | `<git SHA; Developer ID or development signing; launched from Finder>` |
 | Guesthouse debug build | `<git SHA; launched from Xcode>` |
 | Guesthouse checkout state | `<clean, or the exact uncommitted diff that produced this evidence>` |
-| Tart | `<version, Team ID verified yes/no>` |
+| Runtime provider and accepted selection ADR | `<provider, version, artifact digest, Team ID/strict verification result; provider procedures must already be approved>` |
 | Guest macOS | `<version (build)>` |
 | Xcode (host) | `<version (build); the installation that built and signed Guesthouse>` |
 | Xcode (guest) | `<version (build)>` |
@@ -22,6 +22,7 @@ Issue: `#<number>`. Run by: `<name>`. Completed: `<YYYY-MM-DDTHH:MM:SSZ>` (UTC).
 | Git (guest) | `<version; executable path as resolved by the login shell>` |
 | Provisioning scripts | `<version or commit>` |
 | Guest VM configuration | `<preset name; CPU count; RAM; logical disk capacity>` |
+| Guest desktop and automation (where applicable) | `<account/session state; tool identity/version; permission and approval state; actual execution location>` |
 
 For gates whose result depends on the repositories under test (#38, #39, #42), record the exact
 input as well, so two runs with identical component versions are still comparable:
@@ -47,6 +48,8 @@ For each step: what was done, what was observed, and where the evidence is. Ever
 1. `<step>`: `<observation>`. Evidence: `<path or excerpt>`.
 
 ## Measurements
+
+For #35 record normal-stop work durability, viewer reopen/resize and input-to-visible-result behavior while idle and under build/memory load, plus how human takeover stops agent input. For #38 record first and subsequent Simulator launch time. For #36/#40/#41 distinguish connection, credential, build, desktop and automation capability results, including unknown/unavailable states. #42 cites the GUI-automation and network-baseline studies and the chosen release scope. These fields describe evidence to collect, never inferred passes.
 
 | Measure | Value |
 | --- | --- |

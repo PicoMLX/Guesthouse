@@ -1,0 +1,78 @@
+# Guesthouse implementation roadmap
+
+Updated September 20, 2026 (UTC). Start here when picking work, then read the current body of [issue #48](https://github.com/PicoMLX/Guesthouse/issues/48) for the live PR queue and the individual issue for remaining acceptance. This document orders work; it does not certify a PR, select a provider or record hardware results.
+
+The planning baseline is main `016768fc` (owner-merged #185). #186 was open when this update began; verify its current state rather than treating this checkpoint as a merge instruction. Older retained drafts preserve useful implementation and findings; continue their replacements instead of building duplicate infrastructure. The owner merges after the existing CI/review requirements.
+
+## Decisions that still govern the work
+
+- [ADR 0002](docs/decisions/0002-prioritize-lume-and-shared-infrastructure.md): prioritize Lume candidate validation and shared infrastructure. New Tart-specific #13/#23/#25 work stays deferred. Legacy Tart instructions are reference, not a Lume procedure.
+- [#82](https://github.com/PicoMLX/Guesthouse/issues/82): strict artifact verification, owned-process/storage safety, bootstrap credentials, VNC containment and human provider preflight precede provider acceptance. Historical Lume 0.5.3 findings do not establish later-release behavior. Select and pin an acceptable artifact; never bypass verification.
+- [ADR 0003](docs/decisions/0003-structured-diagnostics.md): structured diagnostics only. Raw output, screenshots and accessibility trees cannot become diagnostic strings or automatic export attachments.
+- [#16](https://github.com/PicoMLX/Guesthouse/issues/16): the owner must settle the local-package workflow before activating a generated workspace or changing package links. The old generator remains reference. Other shared work can continue.
+- [Phase-zero registry](docs/phase0/README.md): only people run hardware gates and record actual results. The eight prerequisite gates plus #42 remain intact. Later-phase epics stay unsplit until #42; the new pure model is preparatory shared work, and the new studies are research, not premature product implementation.
+
+## Implementation order
+
+Rows describe dependency stages, not an instruction to run every issue strictly serially. Recheck merged replacements and open findings in #48 before starting.
+
+| Order | Issues | Work and exit condition |
+| --- | --- | --- |
+| 1 | [#6](https://github.com/PicoMLX/Guesthouse/issues/6), [#8](https://github.com/PicoMLX/Guesthouse/issues/8), [#76](https://github.com/PicoMLX/Guesthouse/issues/76) | Finish the remaining provisioning callback/inspection findings and existing snapshot/journal/StateStore migration, including #186 and retained ancestry. Durable publication and reconciliation must precede runtime acknowledgment; merged record models alone do not finish this work. |
+| 2 | [#12](https://github.com/PicoMLX/Guesthouse/issues/12), [#19](https://github.com/PicoMLX/Guesthouse/issues/19), [#21](https://github.com/PicoMLX/Guesthouse/issues/21), [#22](https://github.com/PicoMLX/Guesthouse/issues/22), [#24](https://github.com/PicoMLX/Guesthouse/issues/24), [#26](https://github.com/PicoMLX/Guesthouse/issues/26), [#112](https://github.com/PicoMLX/Guesthouse/issues/112) | Complete retained service/storage/runner ownership, bounded IPC and import-access integration. Activate preflight only after service-owned volume selection/persistence/loading is sound; never take storage authority from the GUI. Reuse already merged components. |
+| 3 | [#187](https://github.com/PicoMLX/Guesthouse/issues/187), [#10](https://github.com/PicoMLX/Guesthouse/issues/10), [#27–#32](https://github.com/PicoMLX/Guesthouse/issues/27) | Add the pure capability contract after #6's relevant semantics settle; finish remaining fake previews and GUI migration on existing contracts. Ready connection/build/credentials must not imply ready desktop/automation. Real Start/Stop remain dependent on the accepted provider. |
+| 4 | [#82](https://github.com/PicoMLX/Guesthouse/issues/82), [#15](https://github.com/PicoMLX/Guesthouse/issues/15), [#16](https://github.com/PicoMLX/Guesthouse/issues/16), [#17](https://github.com/PicoMLX/Guesthouse/issues/17), [#18](https://github.com/PicoMLX/Guesthouse/issues/18), [#33](https://github.com/PicoMLX/Guesthouse/issues/33) | Resolve provider/workspace decisions and prepare the approved bounded provider diagnostics and stateful fixture. #82 review and the #16 decision can proceed alongside shared work; human preflight waits for safe prerequisites. #33 retains its usable-runtime/GUI prerequisite. Provider acceptance requires its own ADR and revised procedures. |
+| 5 | [#34](https://github.com/PicoMLX/Guesthouse/issues/34) → [#35](https://github.com/PicoMLX/Guesthouse/issues/35) → [#36](https://github.com/PicoMLX/Guesthouse/issues/36) → [#37](https://github.com/PicoMLX/Guesthouse/issues/37) → [#38](https://github.com/PicoMLX/Guesthouse/issues/38) → [#39](https://github.com/PicoMLX/Guesthouse/issues/39); [#40](https://github.com/PicoMLX/Guesthouse/issues/40), [#41](https://github.com/PicoMLX/Guesthouse/issues/41) once their required credentials/tools are available | Human-run existing gates, with approved provider procedures. Include durability, responsive console/takeover, separate readiness, warmup and supported SSH registration. GPU/MLX remains independent of Simulator or UI success. |
+| 6 | [#188](https://github.com/PicoMLX/Guesthouse/issues/188), [#189](https://github.com/PicoMLX/Guesthouse/issues/189) | Human studies: #188 after #33/#35/#36/#38/#41; #189 after provider acceptance and #34/#35/#36, so network observations may precede later gates. Record actual results and release-scope decisions; no inferred passes. |
+| 7 | [#42](https://github.com/PicoMLX/Guesthouse/issues/42) | Fresh complete-path run after #34–#41 and both study outcomes. Cite the provider/package decisions, chosen interactive scope, network baseline and exact validated tuple. Preserve all original proofs and limited exception rules. |
+| 8 | [#44](https://github.com/PicoMLX/Guesthouse/issues/44) → [#45](https://github.com/PicoMLX/Guesthouse/issues/45) → [#46](https://github.com/PicoMLX/Guesthouse/issues/46) → [#47](https://github.com/PicoMLX/Guesthouse/issues/47) | Only now split repeatable setup, account/Codex integration, multi-repo workflows and beta hardening into small implementation issues using measured decisions. |
+| 9 | [#190](https://github.com/PicoMLX/Guesthouse/issues/190) | Deferred task-handoff study after #42, the #16 decision and working connection/workspace flows. Stronger networking follows #189 only if justified; it requires its own accepted privilege/design scope. |
+
+The next implementation priority is the existing #6/#8/#76 chain, not a GUI-automation helper. Pure #187 preparation and provider/workspace decision work can overlap once their own dependencies allow it. A blocked hardware experiment does not justify recreating completed software or resuming deferred Tart work.
+
+## Requirements and issue coverage
+
+| Requirement | Owning issues | Specification |
+| --- | --- | --- |
+| Separate connection, build, credential, desktop and automation readiness; invalidate stale observations | #187; consumers #28/#32/#44/#45; evidence #36/#40/#41 | MVP §5 |
+| Prove guest-only macOS and Simulator observation/action through the actual Codex task | #188; fixture #33; complete-path decision #42 | MVP §§1, 5, 6, 10 |
+| Stateful save/quit/reopen fixture plus deliberately broken persistence case; keep native GPU proof separate | #33/#38/#188; product #46/#47 | MVP §§6, 8, 11 |
+| Supported permission setup and helper-identity checks; Simulator warmup and measured launch time | #36/#38/#188; production #44/#45 | MVP §§4–5 |
+| Supported SSH registration link, encoded development alias, manual fallback and actual remote-folder validation | #41; production #45 | MVP §5 |
+| Console responsiveness under build/memory load, viewer reopen/resize and human stop/takeover/resume | #35/#188; beta #47 | MVP §§10–11 |
+| Persist new unpushed work across normal stop/cold boot; interrupted stop preserves disk and unknown outcome | #35/#40; product #47 | MVP §9 |
+| Revision/destination/tool attribution and bounded verification-artifact policy separate from diagnostics | #188; product #46/#47 | MVP §§3, 6 |
+| Host/gateway/LAN, IPv4/IPv6/DNS/VPN and inbound-console reachability baseline; explicit enforcement decision | #189 with #82 preflight; #42/#47 | MVP §§8, 12 |
+| Evaluate Codex handoff's single-repository/worktree assumptions against independent multi-repo clones | #190; #16 decision and #39 evidence retained | MVP §§6, 12 |
+| Re-estimate after provider and interaction decisions | #42; epics #44–#47 | MVP §10 |
+
+## Scope rules for the studies
+
+**Guest interaction (#188).** Prefer the existing supported SSH task/tool path. If it cannot operate the guest UI, compare a narrowly scoped guest-local CLI/MCP helper with a guest desktop app using supported Remote. No path is assumed to work. Record the executing machine/account/session and prove a harmless host marker stays unchanged. Use structured controls when available and screenshots for visual assertions; reacquire observations after human takeover. Optional locked-use support does not prove cold-boot readiness. A helper candidate such as [accessibility-cli](https://github.com/DioxusLabs/accessibility-cli) requires dependency, API, packaging, signature and SSH permission review before adoption.
+
+**Release scope.** #188 must produce either a demonstrated interactive workflow or an explicit build/test-only v1 decision with GUI automation shown as unavailable. #42 incorporates that decision before its run. This is not permission to waive lifecycle, credential, GPU, local-integration or other existing proofs. If interactive verification is selected, the complete-path run repeats it and beta must test its failure/recovery cases.
+
+**Artifacts.** Manual study evidence follows the existing reviewed-evidence template. Before production capture or persistence, #46/#47 must define a reviewed artifact schema and content policy: source revisions/dirty state, environment/tool tuple, target/destination and result, plus bounds, retention, user review and selected export. No raw-output logging, automatic support-bundle attachment, or generic string metadata extension to DiagnosticEvent. #30 remains structured diagnostics; #91 remains deferred.
+
+**Networking (#189).** Use only operator-owned benign endpoints. Measure actual reachability, including gateway exceptions and console exposure, before making an isolation claim. Do not assume a particular network flag is sufficient or that Tart/Softnet is a Lume integration. Any proposed enforcement needs privilege/signing/installation/failure analysis and must not silently fall back to unrestricted traffic. Baseline research does not authorize firewall mutation or weaken #82's VNC/credential prerequisites.
+
+**Task handoff (#190).** Supported Codex handoff matches saved repository projects and transfers Git state into destination worktrees. Inventory one repo first, then siblings, dirty/untracked/ignored files, integration files and artifact references using the #16-approved workflow. Define omissions and unsupported cases rather than promising atomic transfer. Ordinary SSH workspace use does not depend on handoff.
+
+## Keep deferred
+
+Keep persistent local disks and safe work export. Custom snapshot/NBD storage, cloud fleet scheduling, a custom Ethernet gateway, a video pipeline and embedded Simulator pane need measured justification. A persistent supervisor and separate Mac mini hosting remain distinct architectural milestones in MVP §12. Do not modify macOS privacy databases to remove setup clicks or silently enable privileged host software.
+
+The legacy 28–46 engineer-day estimate is not a current Lume commitment. #42 must re-estimate the chosen provider, any helper/guest-desktop topology, required network enforcement and the production artifact work. Handoff is separate follow-on scope.
+
+## Documentation and session handoff
+
+- `AGENTS.md` (also reached through `CLAUDE.md`) points here; `MVP-PLAN.md` holds the requirements, and #48 holds the live queue.
+- Update an existing issue's current scope rather than creating a duplicate. Preserve historical evidence and unresolved findings; do not mark a hardware result complete through documentation changes.
+- After each implementation, update the owning issue and #48 with the remaining dependency/status. This roadmap should change when the implementation order or scope changes, not for every CI poll.
+- All actionable research findings are captured here, in the MVP plan and the linked issues. The earlier standalone review is no longer required for task discovery.
+
+## Primary integration references
+
+- [Codex remote connections and task handoff](https://learn.chatgpt.com/docs/remote-connections): supported SSH/project path and matching-repository transfer behavior.
+- [Codex commands and deep links](https://learn.chatgpt.com/docs/reference/commands#settings): `codex://settings/connections/ssh/add?name=<encoded-alias>` registers an existing alias; new-task paths are local.
+- [Computer Use](https://learn.chatgpt.com/docs/computer-use): supported plugin/permission setup, app approvals and locked-use constraints. A CLI-only guest's actual capability still needs testing.

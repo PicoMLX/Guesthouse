@@ -2,6 +2,8 @@
 
 > Current work prioritizes Lume candidate validation and shared infrastructure under [ADR 0002](docs/decisions/0002-prioritize-lume-and-shared-infrastructure.md). Tart-specific instructions below are retained as legacy reference; new Tart-specific work is deferred. Lume is not yet an accepted provider. A separate accepted provider-selection ADR and corresponding plan/gate updates must precede formal Lume gate evidence. Shared security, lifecycle, and proof requirements remain in force.
 
+> **Current roadmap — September 20, 2026 (UTC):** Start with [ROADMAP.md](ROADMAP.md) and [issue #48](https://github.com/PicoMLX/Guesthouse/issues/48). The additions below cover guest GUI verification, separate readiness capabilities, supported Codex connection links, console takeover, network reachability and task handoff. They do not select Lume, pass hardware gates, or lift the package-workflow hold in [#16](https://github.com/PicoMLX/Guesthouse/issues/16).
+
 Build a native macOS app that prepares an isolated development Mac, connects it to the existing Codex desktop app, and manages multi-repository Xcode workspaces. The developer should not need Terminal, Homebrew, an SSH configuration tutorial, or a hand-written environment manifest.
 
 The proposed implementation is a sandboxed SwiftUI app with a narrowly scoped, non-sandboxed XPC runtime service around the official Tart executable and OpenSSH. GitHub CLI and Codex CLI run inside the guest. Do not build a new chat interface, fork Tart or Codex, or implement a virtualization engine for the MVP.
@@ -13,6 +15,8 @@ The first milestone is a thin GUI proof of the complete workflow, including the 
 ## 1. Define the smallest useful product
 
 The MVP is complete when a developer can use the GUI to create a development environment, import Xcode, sign in to GitHub and Codex, select an app repository plus sibling Swift packages, and open that workspace in Codex. Codex must then edit both repositories, build and test inside the VM, and produce a draft PR in each changed repository. A cold reboot must not require repeating setup.
+
+Phase zero must also resolve whether the tested Codex connection supports interactive guest-app verification. Record the selected scope before the complete-path run: either a demonstrated macOS/Simulator observation-and-action loop or an explicit build/test-only first release with GUI automation shown as unavailable. This decision does not waive any existing gate. Product implementation follows that recorded scope; SSH success alone never establishes GUI automation.
 
 Use the existing Codex desktop experience for conversations, code review, and agent approvals. Guesthouse owns the environment and workspace setup. This division keeps the product useful without recreating an editor. This document calls the host application “Codex desktop”; follow the installed application's supported connection UI, which current OpenAI documentation describes within the ChatGPT desktop app.
 
@@ -315,6 +319,8 @@ Register only the non-admin development alias in that discoverable configuration
 
 Codex exposes remote connection setup through its supported Connections UI. Guesthouse can open Codex and provide the alias and folder, but should not depend on an undocumented deep link, private database, or configuration mutation to register projects. [Codex remote connections](https://learn.chatgpt.com/docs/remote-connections).
 
+Use the documented `codex://settings/connections/ssh/add?name=<encoded-alias>` after creating and validating the development alias. It adds an existing SSH-config alias and opens Settings with automatic connection disabled; it neither verifies connectivity nor selects a remote project. Test missing aliases and unsupported desktop builds and retain the manual Connections flow. Never expose the maintenance alias. The new-task `path` parameter addresses a local directory, so it must not be used to infer remote routing. [Supported Codex links](https://learn.chatgpt.com/docs/reference/commands#settings).
+
 ### Codex sign-in
 
 Wrap guest `codex login --device-auth` in a native sign-in sheet and verify completion using `codex login status`. Device authentication is beta and may require account or workspace permission. Provide the documented browser-callback fallback through a host-loopback SSH tunnel to guest port 1455; handle a busy port without terminating another application. [Codex authentication](https://learn.chatgpt.com/docs/auth).
@@ -366,6 +372,14 @@ Prefer a small, explicit unlock mechanism if required. If the supported image in
 
 “Ready” means SSH, Xcode, account access, private Git access, and Codex connection checks pass. A successful ping or `uname` is insufficient.
 
+### Guest desktop and automation readiness
+
+Model connection, build tools, credentials, guest desktop and GUI automation separately, extending the existing status/compatibility contracts rather than adding a competing state machine. Each observation needs freshness and a known, unknown/checking, unavailable or needs-user-action result. Saved provisioning completion is not live evidence. Revalidate affected capabilities after cold boot, lock/unlock, reconnect, host wake, permission changes and relevant tool replacement. Shell/build workflows may remain usable when only GUI automation is unavailable; the UI must explain that limit.
+
+The phase-zero feasibility study first tests supported tools in the actual SSH task, then evaluates a narrowly scoped guest-local CLI/MCP helper if needed, and only then considers a desktop app inside the guest using supported remote control. Record where every tool executes and which account/session/app it can see. A host Screen Sharing window is not proof of structured guest UI access. Helper packaging, signing, permission attribution, API stability and any new dependency require review; no new host command endpoint or exposed app-server listener is implied. [Codex remote connections](https://learn.chatgpt.com/docs/remote-connections).
+
+Guide the user through supported Screen Recording, Accessibility and app-approval setup for the actual helper identity. Verify the resulting ability to observe and act; do not write macOS privacy databases offline or automate administrator/security prompts. Optional locked-use support does not establish cold-boot availability. Warm the chosen Simulator and time a fixture launch before declaring that capability ready, showing explicit progress without waiting indefinitely for all OS background activity to cease. [Computer Use](https://learn.chatgpt.com/docs/computer-use).
+
 ## 6. Treat multiple repositories as a first-class workspace
 
 ### Workspace ownership and layout
@@ -396,6 +410,8 @@ Generate workspace-specific agent guidance describing repository responsibilitie
 
 ### Deterministic local package overrides
 
+**Product-decision hold:** [#16](https://github.com/PicoMLX/Guesthouse/issues/16) and draft #64 preserve the proposed generator. The owner has not approved a replacement package workflow. The generated-workspace instructions below remain a proposal pending that decision; do not alter package links by assumption. Task-handoff evaluation must follow the selected workflow.
+
 Do not rely on the agent to remember how to rewrite and later restore production dependency settings. Generate a wrapper `.xcworkspace` containing the app's `.xcodeproj` and selected local package directories. Build through that workspace so the local dependencies participate in resolution. Apple documents local package replacement, but the exact supported project shapes must be validated with fixtures. [Local package development in Xcode](https://developer.apple.com/documentation/xcode/editing-a-package-dependency-as-a-local-package).
 
 Before presenting a workspace as supported:
@@ -420,6 +436,12 @@ Use `xcodebuild -workspace` for the generated integration workspace; a build aga
 A green local integration test does not prove the consumer PR will pass after publication. Keep both statuses visible. When a package API changes, the package may need to merge and receive a release or commit pin before the app's dependency update becomes valid.
 
 Preserve the existing Codex push reviews and Xcode Cloud checks. Do not alter required status checks or merge gates to make a multi-repository change appear complete.
+
+### Interactive verification and evidence
+
+Extend the fixture with an editable value and saved state: edit, save, quit, reopen and verify both state and appearance on macOS and Simulator. Include a deliberately broken persistence variant that the verification must detect. Use accessibility roles/names or stable app identifiers when supported, and screenshots for visual assertions. Neither a dismissed menu nor a successful compilation proves state restoration. Native MLX execution remains a separate proof.
+
+Evidence must identify the environment, guest app and Simulator destination, each repository revision and dirty state, the tested tool tuple, and the workflow/result. During phase zero a person reviews evidence under the existing evidence template. Production screenshots, accessibility trees and test-result files require an explicit artifact schema, storage limits, retention, review and user-selected export policy before implementation. They are user content, never `DiagnosticEvent` strings or a raw-output debug bypass. ADR 0003's typed diagnostics remain unchanged; diagnostic export contains no automatic screenshot/tree/stdout attachments.
 
 ### Concurrency
 
@@ -461,6 +483,8 @@ Additional defaults:
 
 Default NAT is connectivity, not complete network isolation. The guest may still reach host or LAN services and the internet. Provider credentials remain usable by the agent after sign-in. State both limitations in the UI; do not market the MVP as safe for arbitrary hostile code or unrestricted cloud-account operations.
 
+Measure the accepted provider's actual reachability using benign, operator-owned endpoints: guest-to-host/gateway, private LAN, IPv4/IPv6, DNS, VPN changes and inbound SSH/console exposure. Record the baseline and product threat model before the complete-path decision. Stronger enforcement is a separate follow-on decision, including privilege/install costs and failure behavior. Prefer supported provider capabilities; do not assume Tart/Softnet settings apply to Lume or add an independent host packet filter without testing coexistence. Any policy advertised as enforced must fail closed rather than silently fall back. Lume VNC containment and bootstrap-credential proofs remain prerequisites under #82.
+
 Reduced agent prompts require an explicit guest-only permission choice in Codex. Keep its approval UI and account policies intact. Do not automatically change the host's global agent settings or promise that SSH removes approvals.
 
 ### Metal and MLX validation
@@ -499,6 +523,8 @@ If the guest cannot boot or answer SSH, preserve its disk and describe recovery 
 
 Gracefully shut down the guest before lifecycle operations when possible. Force-stop requires a separate warning. Saved VM execution state is not a substitute for a disk snapshot or a work backup.
 
+The lifecycle experiment must save new unpushed work, stop normally, cold-boot and verify that work remains intact. Test interrupted shutdown separately: preserve the disk and reconcile uncertain outcomes. Confirm completion of owned operations and required durable writes before reporting normal stop complete. This requires no custom snapshot service.
+
 Sign-out removes local credentials where supported and links to provider revocation controls. Do not claim that deleting the VM or running a CLI logout revokes every server-side token or session.
 
 ## 10. Deliver in six phases
@@ -518,11 +544,15 @@ The estimates assume one experienced macOS engineer, one reference Mac, and a na
 
 Revised planning range: 28–46 engineer-days, roughly 6–10 working weeks allowing for integration contingency. This replaces the earlier 22–36-day estimate: the sandbox/XPC boundary, reconnectable console, security maintenance, and negative lifecycle tests are real additional work. It includes the proposed Screen Sharing path, but not a persistent supervisor, native virtualization backend, or separate-Mac hosting. Re-estimate if a phase-zero gate requires one of those changes. An internal happy-path demo can arrive earlier; it is not a public beta.
 
+This range describes the legacy Tart plan, not a validated estimate for Lume or the new capability studies. Re-estimate after provider selection and interactive-verification scope are recorded. Production helpers, a guest desktop topology, privileged network enforcement and task handoff are not implicitly included. The current implementation order is [ROADMAP.md](ROADMAP.md); preserve existing migrations and reviewed work.
+
 ### Phase 0: Prove the complete path
 
 Create `Guesthouse.xcodeproj`, the sandboxed GUI target, the runtime XPC target, and the local core package. First prove one named **Runtime version** request against a verified Tart bundle. Then add buttons for each experimental step and sanitized status. Use the fake backend for previews; do not add account integrations before host execution works.
 
 Implementation scripts and manual engineer diagnostics are acceptable during the experiment; record which actions must become GUI operations before beta. Test a signed app launched outside Xcode as well as a debug build. Complete these named gates:
+
+The nine-record gate structure remains unchanged. Human-run GUI-automation and network-reachability studies supply explicit scope decisions to #42; they are not new formal gate records or substitutes for #34–#41. Prepare software and procedures without running hardware experiments. Provider preflight under #82 precedes the accepted provider-selection ADR and corresponding procedure updates; formal provider-specific gates follow that decision.
 
 | Gate | Required proof and decision |
 | --- | --- |
@@ -534,6 +564,8 @@ Implementation scripts and manual engineer diagnostics are acceptable during the
 | Multi-repo workflow and review | App/package edits participate in the wrapper build; committed project/lockfiles stay unchanged; every changed repo has usable graphical review; two disposable draft PRs retain the existing required checks |
 | Maintenance and sleep recovery | User-approved guest update has a working authorization path; wake restores identity/readiness without replaying uncertain writes; no hidden bootable backup or irreversible automatic repair |
 | Desktop/CLI compatibility | Current desktop performs a real SSH connection; changed/unknown/incompatible tuples produce the defined states; no automatic mid-session CLI replacement or invented compatibility API |
+
+Extend the relevant gate checklists: #35 covers fresh-work durability, console latency under load, viewer reopen/resize and human takeover; #36 distinguishes credential unlock from GUI permission readiness; #38 records Simulator warmup and the stateful fixture; #40 invalidates affected capability evidence on wake/update; #41 tests supported SSH registration and the actual tool execution location. Before #42, record the interactive-verification scope and network baseline, then repeat the chosen workflow using the same validated tuple. Human takeover requires stopping/pausing the active agent via supported controls and a fresh observation before resuming input; Guesthouse must not claim a universal external-task pause mechanism.
 
 Repeat the complete path on a fresh environment, retiring or preserving the previous one within the two-slot cap. Record exact versions, pass/fail evidence, total setup time, active user time, peak disk and memory use, and guest-console interventions. Keep the result with the fixture in the repository.
 
@@ -609,6 +641,10 @@ Run unit and parser tests without booting VMs. Run real virtualization tests on 
 
 Public-beta release criteria:
 
+- Capability-specific readiness and supported Codex registration/fallback match the recorded scope; no shell-only check advertises GUI automation.
+- The selected interactive workflow, if included, detects the broken fixture and recovers from lock, permission loss, reconnect and tool changes. Its artifact policy is defined independently of diagnostics.
+- Console responsiveness, human takeover, normal-stop work durability and actual network reachability are measured on the reference Mac; isolation and performance claims reflect those results.
+
 - At least three fresh-user pilot runs reach a working Codex workspace without Terminal or hand-edited configuration.
 - The complete app-plus-package fixture passes after a cold boot.
 - The signed sandboxed-GUI/runtime arrangement passes first-boot console, caller validation, and external SSH/Keychain checks on a clean Mac.
@@ -623,6 +659,12 @@ Public-beta release criteria:
 - Setup duration, active user time, disk requirements, and memory guidance are based on measurements.
 
 ## 12. Sequence the follow-on work
+
+### Codex task handoff and stronger networking
+
+Codex documents task/Git-state transfer between matching saved repository projects using destination worktrees. Guesthouse's multi-repository parent has no single Git identity. Evaluate one repository first, then the selected package workflow: sibling repositories, branch/dirty/untracked state, ignored files, generated integration files and artifact references must be inventoried before and after transfer. Keep repository identity separate from worktree location. Declare unsupported cases rather than promising atomic workspace transfer; do not add a private Codex database/protocol dependency. This follow-on study is deferred until #42 and the #16 decision and is not a prerequisite for ordinary SSH workspace use. [Codex task handoff](https://learn.chatgpt.com/docs/remote-connections#hand-off-a-task-between-hosts).
+
+Implement stronger network enforcement only after the baseline study establishes a concrete requirement and an accepted privilege/installation design. Keep custom snapshot backends, custom streaming and an embedded Simulator pane deferred until measured product needs justify them. Persistent local disks, safe export and a usable provider console remain the starting point.
 
 ### Persistent local supervisor
 
@@ -647,6 +689,8 @@ Add an explicit repository-scoped credential approach when the product needs a s
 Expand tested Xcode/project layouts, template and backup handling within the VM limit, automatic first boot when stable Apple APIs permit it, and eventually Claude support. A fully sandboxed host runtime or deeply embedded console may justify a sandbox-aware Tart fork or direct Apple backend; neither is necessary merely to put the current executable behind XPC. Reassess against measured UX, maintenance, signing, and licensing costs.
 
 ## 13. Recommended first implementation task
+
+**Current ordering:** continue the existing provisioning/persistence and runtime integration work identified in [ROADMAP.md](ROADMAP.md) and #48. The initial scaffolding below already has substantial implementation on main and must not be recreated. Finish existing retained-scope migrations and Lume acceptance prerequisites, then run the approved human experiments before splitting later-phase epics.
 
 Build the phase-zero Guesthouse SwiftUI/XPC harness and an app-plus-package fixture. Start with a named runtime-version request and a fake backend. Its full success condition is one recorded run from VM creation through a cold-boot Codex connection to two draft PRs, with Xcode tests and native MLX validation executing in the guest, plus the named lifecycle and recovery gates.
 
