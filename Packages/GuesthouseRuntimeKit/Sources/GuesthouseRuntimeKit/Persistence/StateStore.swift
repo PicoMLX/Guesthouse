@@ -11,6 +11,9 @@ public actor StateStore {
     private let anchor: StateDirectoryAnchor
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
+    // Observation survives failed reads/publications. Absence after observation is evidence
+    // loss, never an empty new store. This is actor-confined and never reset by an error.
+    private var snapshotWasObserved = false
     private nonisolated let queue: DispatchSerialQueue
 
     /// Native descriptor IO/flushes and advisory lock waits may block. Use Dispatch's supplied
@@ -64,13 +67,16 @@ public actor StateStore {
     /// Missing state means an empty snapshot, not permission to create or rewrite files.
     /// Explicit migrations run in memory; reading never rewrites their source document.
     public func loadSnapshot() throws(StateStoreError) -> EnvironmentsSnapshot {
-        try anchor.withFile(.readSnapshot, permissionBarrier: hooks.permission, body: { descriptor in
+        let snapshot = try anchor.withFile(.readSnapshot, permissionBarrier: hooks.permission,
+            didObserve: { self.snapshotWasObserved = true }, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try migrator.migrate(raw)
             do { return try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
             catch let failure as StateStoreError { throw failure }
             catch { throw StateStoreError.corruptSnapshot }
-        }) ?? .empty
+        })
+        guard snapshot != nil || !snapshotWasObserved else { throw .fileUnreadable(name: .snapshot) }
+        return snapshot ?? .empty
     }
 
     /// Return only after the full verified publication completes. Cancellation does not abort
@@ -78,6 +84,7 @@ public actor StateStore {
     /// assume a failed save restored the old bytes or blindly repeat the associated operation.
     public func saveSnapshot(_ snapshot: EnvironmentsSnapshot) throws(StateStoreError) {
         try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
+            requireExisting: snapshotWasObserved, didObserve: { self.snapshotWasObserved = true },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
 }
