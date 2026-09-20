@@ -12,6 +12,7 @@ public actor StateStore {
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
     private var journal = StateJournalCache()
+    private var journalObservation = StateJournalObservation()
     // This observation survives cache invalidation and failed parsing/post-checks.
     private var journalWasObserved = false
     // Observation survives failed reads/publications. Absence after observation is evidence
@@ -122,7 +123,7 @@ public actor StateStore {
         do {
             let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
                                                 didObserve: { journalWasObserved = true }) {
-                return try journal.refreshed($0, read: hooks.journalRead)
+                return try journalObservation.refreshed($0, read: hooks.journalRead)
             }
             guard candidate != nil || !journalWasObserved else {
                 throw StateStoreError.fileUnreadable(name: .journal)
