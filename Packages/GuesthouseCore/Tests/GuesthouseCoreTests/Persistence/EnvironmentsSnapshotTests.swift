@@ -39,6 +39,22 @@ import Testing
         #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONEncoder().encode(EnvironmentsSnapshot.empty)) == .empty)
     }
 
+    @Test(arguments: ProvisioningStage.allCases)
+    func recoveredCheckpointWithoutOperationSurvivesSnapshot(stage: ProvisioningStage) throws {
+        var original = try sample()
+        let checkpoint = Checkpoint(stage: stage, reachedAt: environment.createdAt)
+        let write = EffectToken(7)
+        original.provisioning[environment.id] = ProvisioningState(
+            stage: stage, status: .persistingCheckpoint(checkpoint, operation: nil, write: write)
+        )
+        let decoded = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONEncoder().encode(original))
+        #expect(decoded == original)
+        let restored = try #require(decoded.provisioning[environment.id])
+        let acknowledged = try ProvisioningReducer.reduce(restored, .checkpointPersisted(write, checkpoint))
+        #expect(acknowledged.state.status == .completed(checkpoint))
+        #expect(acknowledged.effects.isEmpty)
+    }
+
     @Test func inconsistentIdentityListsCannotBeEncoded() throws {
         rejected(EnvironmentsSnapshot(environments: [environment, environment]), .duplicateEnvironments)
         rejected(EnvironmentsSnapshot(environments: [environment]), .slotsDisagree)

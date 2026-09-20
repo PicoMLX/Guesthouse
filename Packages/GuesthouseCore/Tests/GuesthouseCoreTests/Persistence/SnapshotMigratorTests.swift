@@ -30,6 +30,26 @@ import Testing
         #expect(restored.provisioning[environment.id]?.status.pendingEffect == EffectToken(counter))
     }
 
+    @Test(arguments: [(UInt64.max, UInt64(7)), (UInt64(7), UInt64.max)])
+    func currentSnapshotKeepsBothCleanupInspectionIdentities(cleanup: UInt64, inspection: UInt64) throws {
+        let environment = DevelopmentEnvironment(name: "Dev", createdAt: Date(timeIntervalSince1970: 0))
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let state = ProvisioningState(stage: .first, status: .inspectingCleanup(
+            .canceled, cleanup: EffectToken(cleanup), inspection: EffectToken(inspection)
+        ))
+        let original = EnvironmentsSnapshot(environments: [environment], slots: slots, provisioning: [environment.id: state])
+        let source = try JSONEncoder().encode(original)
+        let result = try SnapshotMigrator.standard.migrate(source)
+        #expect(result.data == source)
+        let restored = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: result.data)
+        #expect(restored == original)
+        let recovered = try #require(restored.provisioning[environment.id])
+        #expect(recovered.issuedEffects == UInt64.max)
+        #expect(recovered.nextEffectToken == nil)
+        #expect(try ProvisioningReducer.reduce(recovered, .cleanupFinished(EffectToken(cleanup))).state.status == .notStarted)
+    }
+
     @Test(arguments: [
         ("{}", SchemaVersion.unversioned),
         ("{\"schemaVersion\":1}", SchemaVersion(1)!),

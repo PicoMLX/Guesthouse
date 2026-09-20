@@ -9,6 +9,7 @@ import Foundation
 /// does not validate the complete snapshot. Callers must decode and validate the result before
 /// durable publication; a successful transform is not proof that the records are consistent.
 /// Registered transforms must be side-effect-free. Filesystem authority belongs to RuntimeKit.
+/// Input and transform output must be UTF-8 JSON with an unambiguous top-level version.
 public struct SnapshotMigrator: Sendable {
     public struct Migration: Sendable {
         public let from: SchemaVersion
@@ -88,6 +89,7 @@ public struct SnapshotMigrator: Sendable {
 
     static func version(of data: Data) throws(StateStoreError) -> SchemaVersion {
         let object = try object(in: data)
+        try requireUnambiguousVersion(in: data)
         guard let raw = object["schemaVersion"] else { return .unversioned }
         // `true` and `false` arrive as boolean `NSNumber`s, which cast to 1 and 0. A document
         // whose version reads `false` would otherwise look unversioned and be rewritten as
@@ -99,5 +101,48 @@ public struct SnapshotMigrator: Sendable {
         // negative number is not the unversioned case, it is damage.
         guard let version = SchemaVersion(value) else { throw StateStoreError.corruptSnapshot }
         return version
+    }
+
+    /// Foundation validates the grammar above but collapses duplicate object members.
+    /// Scan only the original top-level keys before choosing a transform. Persisted metadata
+    /// and transform output use UTF-8 (as JSONEncoder does); refuse other encodings rather
+    /// than scan a different representation from the one being returned or transformed.
+    private static func requireUnambiguousVersion(in data: Data) throws(StateStoreError) {
+        guard String(data: data, encoding: .utf8) != nil, !data.contains(0) else {
+            throw .corruptSnapshot
+        }
+        let bytes = Array(data)
+        var index = 0
+        var depth = 0
+        var foundVersion = false
+        while index < bytes.count {
+            switch bytes[index] {
+            case 123, 91: depth += 1 // { [
+            case 125, 93: depth -= 1 // } ]
+            case 34:
+                let start = index
+                index += 1
+                while index < bytes.count && bytes[index] != 34 {
+                    if bytes[index] == 92 { index += 1 } // Skip an escaped byte, including quotes.
+                    index += 1
+                }
+                guard index < bytes.count else { throw .corruptSnapshot }
+                if depth == 1 {
+                    var next = index + 1
+                    while next < bytes.count && [9, 10, 13, 32].contains(bytes[next]) { next += 1 }
+                    if next < bytes.count && bytes[next] == 58 { // Only a member name precedes ':'.
+                        guard let key = try? JSONDecoder().decode(String.self, from: Data(bytes[start...index])) else {
+                            throw .corruptSnapshot
+                        }
+                        if key == "schemaVersion" {
+                            guard !foundVersion else { throw .corruptSnapshot }
+                            foundVersion = true
+                        }
+                    }
+                }
+            default: break
+            }
+            index += 1
+        }
     }
 }
