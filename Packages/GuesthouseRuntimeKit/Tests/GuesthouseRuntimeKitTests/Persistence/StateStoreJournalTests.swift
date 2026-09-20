@@ -633,6 +633,41 @@ import Testing
         #expect(try fixture.bytes() == evidence)
     }
 
+    @Test func failedReplayBindingCannotAuthorizeAppendAfterRestoration() async throws {
+        let fixture = try Fixture(), reads = Mutex(0), writes = Mutex(0)
+        let detached = fixture.base.appending(path: "original")
+        let quarantined = fixture.base.appending(path: "conflicting")
+        let original = Self.record(), conflicting = Self.record()
+        let bytes = try JSONEncoder().encode(original) + Data([0x0A])
+        let otherBytes = try JSONEncoder().encode(conflicting) + Data([0x0A])
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            let result = try StateFileIO.readAll(fd, from: offset, name: .journal)
+            let attempt = reads.withLock { $0 += 1; return $0 }
+            if attempt == 1 {
+                try #require(rename(fixture.state.path, detached.path) == 0)
+                try #require(mkdir(fixture.state.path, 0o700) == 0)
+                try fixture.write(otherBytes)
+            }
+            return result
+        }, journalWrite: { fd, data in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, data, name: .journal)
+        }))
+        try fixture.write(bytes)
+        await #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) { try await store.replay() }
+        try #require(rename(fixture.state.path, quarantined.path) == 0)
+        try #require(rename(detached.path, fixture.state.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: conflicting.environmentID)
+            }
+        }
+        #expect(reads.withLock { $0 } == 1)
+        #expect(writes.withLock { $0 } == 0)
+        #expect(try fixture.bytes() == bytes)
+        #expect(try Data(contentsOf: quarantined.appending(path: "journal.ndjson")) == otherBytes)
+    }
+
     private static func record() -> JournalRecord {
         JournalRecord(id: OperationID(), environmentID: EnvironmentID(), operation: .startEnvironment,
                       timestamp: Date(timeIntervalSinceReferenceDate: 800_000_000), outcome: .started)
