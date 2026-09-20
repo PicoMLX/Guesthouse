@@ -220,12 +220,12 @@ import Testing
             #expect(try fixture.bytes() == corrupt)
             return
         }
-        // Restoring the same inode's known bytes is explicit fixture repair, not a retry.
+        // Failed I/O may have hidden newer evidence; restoring an older prefix is not proof.
         try fixture.write(full)
-        #expect(try await store.replay().records == [first, second])
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         let third = Self.record()
         try fixture.write(full + Self.lines([third]))
-        #expect(try await store.replay().records == [first, second, third])
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
     }
 
     @Test(arguments: [JournalRecord.Outcome.started, .checkpoint(.preflight), .unknown])
@@ -374,7 +374,8 @@ import Testing
         #expect(reads.withLock { $0 } == 2)
     }
 
-    @Test func opaqueReadFailureIsClosedAndDoesNotPoisonTheNextReplay() async throws {
+    @Test(arguments: ["unchanged", "truncate", "rewrite"])
+    func initialReadFailureRemainsUncertainAfterSameInodeChanges(change: String) async throws {
         enum Failure: Error { case opaque }
         let fixture = try Fixture(), attempts = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
@@ -384,10 +385,16 @@ import Testing
         }))
         let record = Self.record(), bytes = try Self.lines([record])
         try fixture.write(bytes)
+        let identity = try fixture.identity(fixture.journal)
         await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
-        #expect(try await store.replay().records == [record])
-        #expect(attempts.withLock { $0 } == 2)
-        #expect(try fixture.bytes() == bytes)
+        let next = change == "truncate" ? Data() : change == "rewrite" ? try Self.lines([Self.record()]) : bytes
+        try fixture.write(next)
+        try #require(try fixture.identity(fixture.journal) == identity)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(attempts.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == next)
     }
 
     @Test func postReadFileReattachmentRefusesAndDiscardsTheCandidate() async throws {
