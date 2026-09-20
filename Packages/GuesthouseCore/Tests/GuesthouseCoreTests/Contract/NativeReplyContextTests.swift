@@ -143,6 +143,17 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
             _ = try await next(stream)
         }
     }
+
+    @Test func timeoutEvidenceDistinguishesQueueServiceFromConnectionAcceptance() {
+        let progress = ProgressProbe()
+        #expect(progress.timeoutStage == .awaitingConnection)
+        progress.servicedQueues.withLock { $0 = 1 }
+        #expect(progress.timeoutStage == .awaitingConnection)
+        progress.servicedQueues.withLock { $0 = 3 }
+        #expect(progress.timeoutStage == .awaitingConnectionOnServicedQueues)
+        progress.value.withLock { $0 = .acceptingSession }
+        #expect(progress.timeoutStage == .acceptingSession)
+    }
 }
 
 private struct Incoming: Sendable {
@@ -162,7 +173,14 @@ private final class Fixture: Sendable {
         // The listener owns its session; this separate holder allows deterministic fixture
         // cleanup without global state. XPCSession is SDK-declared Sendable.
         let holder = SessionHolder()
-        let listener = XPCListener { request in
+        // Each fixture owns separate callback targets instead of depending on the SDK's
+        // default dispatch target alongside the other native suites. Probes distinguish
+        // unscheduled callback queues from an endpoint that never accepts a connection.
+        let listenerQueue = DispatchQueue(label: "reply-context.listener.\(UUID())")
+        let clientQueue = DispatchQueue(label: "reply-context.client.\(UUID())")
+        listenerQueue.async { holder.progress.servicedQueues.withLock { $0 |= 1 } }
+        clientQueue.async { holder.progress.servicedQueues.withLock { $0 |= 2 } }
+        let listener = XPCListener(targetQueue: listenerQueue) { request in
             holder.progress.value.withLock { $0 = .acceptingSession }
             let handler = Handler(events: events, progress: holder.progress)
             // Match the raw-dictionary registration used by the native frame/session
@@ -177,7 +195,7 @@ private final class Fixture: Sendable {
             return decision
         }
         do {
-            client = try XPCSession(endpoint: listener.endpoint, cancellationHandler: { _ in
+            client = try XPCSession(endpoint: listener.endpoint, targetQueue: clientQueue, cancellationHandler: { _ in
                 events.finish(throwing: FixtureFailure.clientCancelled)
             })
         }
@@ -228,6 +246,15 @@ private final class SessionHolder: Sendable {
 
 private final class ProgressProbe: Sendable {
     let value = Mutex(FixtureProgress.awaitingConnection)
+    let servicedQueues = Mutex(0)
+
+    var timeoutStage: FixtureProgress {
+        let stage = value.withLock { $0 }
+        if stage == .awaitingConnection && servicedQueues.withLock({ $0 == 3 }) {
+            return .awaitingConnectionOnServicedQueues
+        }
+        return stage
+    }
 }
 
 private struct Handler: Sendable {
@@ -250,7 +277,7 @@ private struct Handler: Sendable {
 }
 
 private enum FixtureProgress: Sendable, Equatable {
-    case awaitingConnection, acceptingSession, awaitingRequest, creatingFirstContext, checkingSecondContext
+    case awaitingConnection, awaitingConnectionOnServicedQueues, acceptingSession, awaitingRequest, creatingFirstContext, checkingSecondContext
     case deliveringIncoming, awaitingReply
 }
 private enum FixtureFailure: Error, Equatable {
@@ -273,7 +300,7 @@ private func next<T: Sendable>(
         }
         group.addTask {
             try await Task.sleep(for: timeout)
-            throw FixtureFailure.timeout(progress?.value.withLock { $0 } ?? .awaitingReply)
+            throw FixtureFailure.timeout(progress?.timeoutStage ?? .awaitingReply)
         }
         defer { group.cancelAll() }
         return try #require(await group.next())
