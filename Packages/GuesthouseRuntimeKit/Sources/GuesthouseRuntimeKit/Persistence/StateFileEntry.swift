@@ -102,8 +102,13 @@ enum StateFileEntry {
                           errno == ENOENT else { throw access.failure }
                     try validateDirectory(version)
                     return nil
-                } catch let failure as StateStoreError { throw failure }
-                catch { throw access.failure }
+                } catch let failure as StateStoreError {
+                    didObserve() // Failed stabilization cannot prove continued absence.
+                    throw failure
+                } catch {
+                    didObserve()
+                    throw access.failure
+                }
             }
             if openFailure == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
             throw access.failure
