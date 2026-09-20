@@ -38,20 +38,27 @@ struct StateJournalCache {
         _ descriptor: Int32,
         requiringPrefix: Data = Data(),
         didRead: (Data) -> Void = { _ in },
+        didFailRead: () -> Void = {},
         read: Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> Self {
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_size >= 0,
-              info.st_size <= off_t(StateFileIO.maximumJournalBytes) else { throw .fileUnreadable(name: .journal) }
+              info.st_size <= off_t(StateFileIO.maximumJournalBytes) else {
+            didFailRead()
+            throw .fileUnreadable(name: .journal)
+        }
         // Metadata timestamps are not unique content generations. Re-read the complete
         // locked file even at equal length/version; never authorize recovery from stale bytes.
         var candidate = Self()
         candidate.file = StateFileVersion(info)
         let fresh: Data
         do { fresh = try read(descriptor, 0) }
-        catch let failure as StateStoreError { throw failure }
-        catch { throw .fileUnreadable(name: .journal) }
-        guard fresh.count <= StateFileIO.maximumJournalBytes else { throw .fileUnreadable(name: .journal) }
+        catch let failure as StateStoreError { didFailRead(); throw failure }
+        catch { didFailRead(); throw .fileUnreadable(name: .journal) }
+        guard fresh.count <= StateFileIO.maximumJournalBytes else {
+            didFailRead()
+            throw .fileUnreadable(name: .journal)
+        }
         guard fresh.starts(with: requiringPrefix) else { throw .fileUnreadable(name: .journal) }
         didRead(fresh) // Bounded raw evidence survives record-budget or decoding failure.
         try Self.validateBudget(fresh)
@@ -84,6 +91,7 @@ struct StateJournalObservation {
     private var identity: StateFileIdentity?
     private var prefix = Data()
     private var unboundObservation = false
+    private var unreadObservation = false
 
     /// Called before preparation/body entry. Unknown binding cannot later become a new
     /// journal implicitly; it requires explicit recovery outside this owner's lifetime.
@@ -98,10 +106,15 @@ struct StateJournalObservation {
         _ descriptor: Int32,
         read: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> StateJournalCache {
-        let current = try StateFileIO.version(descriptor, name: .journal).identity
+        guard !unreadObservation else { throw .fileUnreadable(name: .journal) }
+        let current: StateFileIdentity
+        do { current = try StateFileIO.version(descriptor, name: .journal).identity }
+        catch { unreadObservation = true; throw error }
         guard identify(current) else { throw .fileUnreadable(name: .journal) }
         let candidate = try StateJournalCache().refreshed(descriptor, requiringPrefix: prefix,
-            didRead: { prefix = $0 }, read: read)
+            didRead: { prefix = $0 }, didFailRead: { unreadObservation = true }, read: read)
+        // Failed I/O may have hidden newer evidence even when an earlier prefix is known.
+        // No subsequent read or cache reset can clear that uncertainty for this owner.
         // Only a successful parse can release a proven torn suffix for inspected repair.
         // A corrupt/unsupported complete record pins the whole bounded input instead.
         prefix = candidate.validatedBytes
