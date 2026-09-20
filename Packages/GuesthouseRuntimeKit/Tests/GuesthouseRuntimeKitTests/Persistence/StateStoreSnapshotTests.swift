@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 import GuesthouseCore
 import Synchronization
@@ -315,6 +316,41 @@ import Testing
             try await store.loadSnapshot()
         }
         #expect(try fixture.bytes() == bytes)
+    }
+
+    @Test(arguments: [false, true])
+    func independentStoresCannotOverlapPublication(afterRename: Bool) async throws {
+        let fixture = try Fixture(), replacement = try sample()
+        let (events, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let release = DispatchSemaphore(value: 0)
+        let barrier: StateStoreHooks.Barrier = { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            continuation.yield(())
+            // This bounded fixture wait is on the store's dedicated native-I/O executor,
+            // never a cooperative task executor or MainActor.
+            try #require(release.wait(timeout: .now() + 10) == .success)
+        }
+        let first = try await fixture.open(hooks: afterRename
+            ? StateStoreHooks(directory: barrier) : StateStoreHooks(snapshotFile: barrier))
+        let second = try await fixture.open()
+        let pending = Task {
+            defer { continuation.finish() }
+            try await first.saveSnapshot(.empty)
+        }
+        defer { release.signal() }
+        var iterator = events.makeAsyncIterator()
+        try #require(await iterator.next() != nil)
+        let names = try fixture.names()
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try await second.saveSnapshot(replacement)
+        }
+        #expect(try fixture.names() == names)
+        release.signal()
+        try await pending.value
+        #expect(try await second.loadSnapshot() == .empty)
+        // An explicit subsequent transaction can acquire the released ownership.
+        try await second.saveSnapshot(replacement)
+        #expect(try await first.loadSnapshot() == replacement)
     }
 
     @Test func actorSerializesCompletePublicationsAcrossConcurrentCallers() async throws {
