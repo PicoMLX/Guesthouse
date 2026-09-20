@@ -40,7 +40,7 @@ import Testing
         #expect((replay.inFlight[started.id] != nil) == unresolved)
     }
 
-    @Test func unchangedConcurrentReplaysReuseOnlyTheValidatedCache() async throws {
+    @Test func concurrentReplaysEachRevalidateLockedContents() async throws {
         let fixture = try Fixture(), reads = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
             reads.withLock { $0 += 1 }
@@ -52,7 +52,7 @@ import Testing
             for _ in 0..<20 { group.addTask { try await store.replay() } }
             for try await replay in group { #expect(replay.records == [record]) }
         }
-        #expect(reads.withLock { $0 } == 1)
+        #expect(reads.withLock { $0 } == 20)
     }
 
     @Test func equalSizeInPlaceRewriteInvalidatesCachedHistory() async throws {
@@ -104,7 +104,7 @@ import Testing
         let first = try await store.replay(), second = try await store.replay()
         #expect(first.records == [record] && second.records == [record])
         #expect(first.truncatedTail && second.truncatedTail)
-        #expect(offsets.withLock { $0 } == [0, off_t(prefix.count)])
+        #expect(offsets.withLock { $0 } == [0, 0])
         #expect(try fixture.bytes() == bytes)
     }
 
@@ -117,13 +117,29 @@ import Testing
         try #require(fd >= 0)
         defer { close(fd) }
         let first = try StateJournalCache().refreshed(fd)
-        let second = try first.refreshed(fd, read: { _, _ in
-            Issue.record("Unchanged validated bytes were read again")
-            return Data()
-        })
+        let second = try first.refreshed(fd)
         #expect(first.byteCount == bytes.count && second.byteCount == bytes.count)
         #expect(first.unterminatedRecord && second.unterminatedRecord)
         #expect(!second.truncatedTail && second.history.records == [record])
+    }
+
+    @Test func equalMetadataDoesNotAuthenticateCachedContents() throws {
+        let fixture = try Fixture()
+        _ = try RuntimeStorage(root: fixture.root)
+        let firstRecord = Self.record(), secondRecord = Self.record()
+        let firstBytes = try Self.lines([firstRecord]), secondBytes = try Self.lines([secondRecord])
+        try #require(firstBytes.count == secondBytes.count)
+        try fixture.write(firstBytes)
+        let fd = Darwin.open(fixture.journal.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        let first = try StateJournalCache().refreshed(fd)
+        let second = try first.refreshed(fd, read: { _, offset in
+            #expect(offset == 0)
+            return secondBytes // A different read with the exact same fstat metadata.
+        })
+        #expect(first.file == second.file && first.byteCount == second.byteCount)
+        #expect(second.history.records == [secondRecord])
     }
 
     @Test(arguments: [
