@@ -60,7 +60,29 @@ enum StateFileEntry {
             descriptor = openat(directory, access.name, flags, 0o600)
         }
         guard descriptor >= 0 else {
-            if errno == ENOENT, !access.creates {
+            let openFailure = errno
+            if openFailure == EACCES, protection == .verifyOnly {
+                do {
+                    let version = try StateFileIO.version(directory, name: .stateDirectory)
+                    try validateDirectory(version)
+                    var denied = stat(), current = stat()
+                    guard fstatat(directory, access.name, &denied, AT_SYMLINK_NOFOLLOW) == 0 else {
+                        throw access.failure
+                    }
+                    try StateFileProtection.validateStructure(denied, kind: .regularFile)
+                    try validateDirectory(version)
+                    guard fstatat(directory, access.name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                          StateFileVersion(denied) == StateFileVersion(current) else {
+                        throw StateStoreError.insecureDirectory(reason: .changed)
+                    }
+                    try StateFileProtection.validateStructure(current, kind: .regularFile)
+                    // A bound, owned regular file denied O_RDONLY access. Both restrictive
+                    // modes and deny-read ACLs need protection guidance, never silent repair.
+                    throw StateStoreError.insecureDirectory(reason: .permissions)
+                } catch let failure as StateStoreError { throw failure }
+                catch { throw access.failure }
+            }
+            if openFailure == ENOENT, !access.creates {
                 do {
                     let version = try StateFileIO.version(directory, name: .stateDirectory)
                     try validateDirectory(version)
@@ -74,7 +96,7 @@ enum StateFileEntry {
                 } catch let failure as StateStoreError { throw failure }
                 catch { throw access.failure }
             }
-            if errno == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
+            if openFailure == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
             throw access.failure
         }
         defer { close(descriptor) } // Closing the sole open description also releases its lock.

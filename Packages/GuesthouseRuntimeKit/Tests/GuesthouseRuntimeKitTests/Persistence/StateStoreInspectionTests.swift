@@ -21,6 +21,72 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).isEmpty)
     }
 
+    @Test(arguments: [false, true])
+    func rootAppearingAfterMissingObservationRefusesEmptyInventory(restore: Bool) throws {
+        let fixture = try Fixture()
+        try fixture.prepare()
+        let bytes = try Data(contentsOf: fixture.snapshot)
+        let retained = fixture.base.appending(path: "retained")
+        try FileManager.default.moveItem(at: fixture.root, to: retained)
+        #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+            try StateStore.inspectSnapshot(storage: {
+                try RuntimeStorage.existing(root: fixture.root, afterMissingRoot: {
+                    if restore { try FileManager.default.moveItem(at: retained, to: fixture.root) }
+                    else { try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: false) }
+                })
+            })
+        }
+        let saved = restore ? fixture.snapshot : retained.appending(path: "state/environments.json")
+        #expect(try Data(contentsOf: saved) == bytes)
+    }
+
+    @Test func linkAppearingAfterMissingRootIsNotFollowed() throws {
+        let fixture = try Fixture()
+        let absent = fixture.base.appending(path: "absent-target")
+        #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+            try StateStore.inspectSnapshot(storage: {
+                try RuntimeStorage.existing(root: fixture.root, afterMissingRoot: {
+                    try FileManager.default.createSymbolicLink(at: fixture.root, withDestinationURL: absent)
+                })
+            })
+        }
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: fixture.root.path) == absent.path)
+        #expect(!FileManager.default.fileExists(atPath: absent.path))
+    }
+
+    @Test(arguments: [mode_t(0), 0o200])
+    func unreadableSnapshotModeRetainsPermissionGuidance(mode: mode_t) throws {
+        let fixture = try Fixture()
+        try fixture.prepare()
+        let bytes = try Data(contentsOf: fixture.snapshot)
+        try #require(chmod(fixture.snapshot.path, mode) == 0)
+        defer { _ = chmod(fixture.snapshot.path, 0o600) }
+        let before = try fixture.version(fixture.snapshot)
+        #expect(throws: StateStoreError.insecureDirectory(reason: .permissions)) { try fixture.inspect() }
+        #expect(try fixture.version(fixture.snapshot) == before)
+        try #require(chmod(fixture.snapshot.path, 0o600) == 0)
+        #expect(try Data(contentsOf: fixture.snapshot) == bytes)
+    }
+
+    @Test func denyReadACLRetainsPermissionGuidanceWithoutRepair() async throws {
+        let fixture = try Fixture()
+        try fixture.prepare()
+        let bytes = try Data(contentsOf: fixture.snapshot)
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/chmod"),
+            arguments: ["+a", "everyone deny read", fixture.snapshot.path], timeout: .seconds(5)))
+        let report = try await run.waitForExit()
+        try #require(try report.childExit?.get() == .status(0) && !report.timedOut && !report.canceled)
+        let before = try fixture.version(fixture.snapshot)
+        #expect(throws: StateStoreError.insecureDirectory(reason: .permissions)) { try fixture.inspect() }
+        #expect(try fixture.version(fixture.snapshot) == before)
+        // Only the fixture explicitly removes its own ACL after verifying inspection did not.
+        let clear = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/chmod"),
+            arguments: ["-N", fixture.snapshot.path], timeout: .seconds(5)))
+        let cleared = try await clear.waitForExit()
+        try #require(try cleared.childExit?.get() == .status(0) && !cleared.timedOut && !cleared.canceled)
+        #expect(try Data(contentsOf: fixture.snapshot) == bytes)
+    }
+
     @Test func persistedSnapshotIsReadWithoutPreparingAStoreAgain() async throws {
         let fixture = try Fixture()
         let environment = DevelopmentEnvironment(name: "Retained work")
