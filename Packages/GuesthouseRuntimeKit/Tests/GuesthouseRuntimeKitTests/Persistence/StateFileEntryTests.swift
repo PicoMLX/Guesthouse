@@ -244,13 +244,18 @@ import Testing
     func observationSurvivesPreBodyProtectionFailure(access: StateFileAccess) throws {
         let fixture = try Fixture()
         try evidence.write(to: fixture.file(access))
+        var original = stat()
+        try #require(lstat(fixture.file(access).path, &original) == 0)
+        var identity: StateFileIdentity?
         var observations = 0
         let failure = StateStoreError.fileUnwritable(name: access.label)
         #expect(throws: failure) {
             try fixture.anchor.withFile(access, permissionBarrier: { _, _ in throw failure },
-                didOpen: { observations += 1 }, body: { _ in Issue.record("Reached body after failed protection") })
+                didOpen: { observations += 1 }, didIdentify: { identity = $0; return true },
+                body: { _ in Issue.record("Reached body after failed protection") })
         }
         #expect(observations == 1)
+        #expect(identity == StateFileIdentity(original))
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
     }
 
@@ -258,13 +263,18 @@ import Testing
     func deniedOpenIsObservedWithoutRepair(access: StateFileAccess) throws {
         let fixture = try Fixture()
         try evidence.write(to: fixture.file(access))
+        var original = stat()
+        try #require(lstat(fixture.file(access).path, &original) == 0)
+        var identity: StateFileIdentity?
         try #require(chmod(fixture.file(access).path, 0) == 0)
         var observed = 0, opened = 0
         #expect(throws: access.failure) {
             try fixture.anchor.withFile(access, didOpen: { opened += 1 },
-                didObserve: { observed += 1 }, body: { _ in Issue.record("Denied file reached body") })
+                didObserve: { observed += 1 }, didIdentify: { identity = $0; return true },
+                body: { _ in Issue.record("Denied file reached body") })
         }
         #expect(observed == 1 && opened == 0)
+        #expect(identity == StateFileIdentity(original))
         #expect(try fixture.mode(access) == 0)
         try #require(chmod(fixture.file(access).path, 0o600) == 0)
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
