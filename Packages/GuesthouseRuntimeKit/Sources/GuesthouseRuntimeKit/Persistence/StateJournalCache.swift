@@ -6,6 +6,7 @@ import GuesthouseCore
 /// A refresh returns a candidate, never publishes it. The caller holds the file lock and
 /// validates the complete descriptor/entry/directory borrow before adopting this value.
 struct StateJournalCache {
+    static let maximumRecords = 16_384
     typealias Reader = @Sendable (Int32, off_t) throws -> Data
     private(set) var history = JournalHistory()
     private(set) var byteCount = 0
@@ -22,7 +23,8 @@ struct StateJournalCache {
         read: Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> Self {
         var info = stat()
-        guard fstat(descriptor, &info) == 0, info.st_size >= 0 else { throw .fileUnreadable(name: .journal) }
+        guard fstat(descriptor, &info) == 0, info.st_size >= 0,
+              info.st_size <= off_t(StateFileIO.maximumJournalBytes) else { throw .fileUnreadable(name: .journal) }
         // Metadata timestamps are not unique content generations. Re-read the complete
         // locked file even at equal length/version; never authorize recovery from stale bytes.
         var candidate = Self()
@@ -31,11 +33,23 @@ struct StateJournalCache {
         do { fresh = try read(descriptor, 0) }
         catch let failure as StateStoreError { throw failure }
         catch { throw .fileUnreadable(name: .journal) }
+        try Self.validateBudget(fresh)
         let chunk = try JournalReplayChunk(fresh)
         candidate.history = chunk.history
         candidate.byteCount = chunk.validatedByteCount
         candidate.truncatedTail = chunk.truncatedTail
         candidate.unterminatedRecord = chunk.unterminatedRecord
         return candidate
+    }
+
+    /// Check before splitting lines or decoding records, including injected reads. A final
+    /// nonempty line counts even when incomplete; no rotation or evidence deletion is implied.
+    static func validateBudget(_ data: Data) throws(StateStoreError) {
+        guard data.count <= StateFileIO.maximumJournalBytes else { throw .fileUnreadable(name: .journal) }
+        var records = data.isEmpty || data.last == 10 ? 0 : 1
+        for byte in data where byte == 10 {
+            records += 1
+            guard records <= maximumRecords else { throw .fileUnreadable(name: .journal) }
+        }
     }
 }
