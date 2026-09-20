@@ -59,7 +59,7 @@ import Testing
         }
         #expect(try fixture.bytes().isEmpty)
         try fixture.write(original)
-        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         #expect(try fixture.bytes() == original)
     }
 
@@ -202,7 +202,11 @@ import Testing
     }
 
     @Test func equalSizeInPlaceRewriteCannotEraseObservedHistory() async throws {
-        let fixture = try Fixture(), store = try await fixture.open()
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
         let first = Self.record(), second = Self.record()
         let before = try Self.lines([first]), after = try Self.lines([second])
         try #require(before.count == after.count)
@@ -215,6 +219,12 @@ import Testing
             await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         }
         #expect(try fixture.bytes() == after)
+        try fixture.write(before)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 2)
+        #expect(try fixture.bytes() == before)
     }
 
     @Test func replacementAndShrinkCannotEraseObservedHistory() async throws {
@@ -253,11 +263,11 @@ import Testing
         }
         #expect(try fixture.bytes() == prefix)
         if parseFailure {
-            // A failed complete parse pins even the corrupt suffix: deleting it is not
-            // implicit repair. Restoring all observed bytes retains the original refusal.
+            // A failed complete parse pins even the corrupt suffix. Once a non-prefix
+            // read is observed, restoring any earlier bytes cannot clear uncertainty.
             let corrupt = full + Data("not JSON\n".utf8)
             try fixture.write(corrupt)
-            await #expect(throws: StateStoreError.corruptJournal(line: 3)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
             #expect(try fixture.bytes() == corrupt)
             return
         }

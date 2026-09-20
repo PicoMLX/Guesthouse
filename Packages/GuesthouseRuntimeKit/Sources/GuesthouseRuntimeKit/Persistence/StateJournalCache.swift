@@ -50,7 +50,12 @@ struct StateJournalCache {
             didFailRead()
             throw .fileUnreadable(name: .journal)
         }
-        guard fresh.starts(with: requiringPrefix) else { throw .fileUnreadable(name: .journal) }
+        guard fresh.starts(with: requiringPrefix) else {
+            // Conflicting observed bytes may name another interrupted operation. Restoring
+            // the old prefix cannot prove that operation never happened.
+            didFailRead()
+            throw .fileUnreadable(name: .journal)
+        }
         didRead(fresh) // Bounded raw evidence survives record-budget or decoding failure.
         try Self.validateBudget(fresh)
         let chunk = try JournalReplayChunk(fresh)
