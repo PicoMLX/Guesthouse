@@ -68,7 +68,7 @@ public struct JournalReplayChunk: Sendable {
         // Complete JSON with ambiguous envelope keys is evidence, never a torn write.
         // Validate grammar first so a genuinely incomplete final line retains tail handling.
         if (try? JSONSerialization.jsonObject(with: line, options: .fragmentsAllowed)) != nil {
-            try requireUnambiguousFormat(in: line, number: number, using: decoder)
+            try requireUnambiguousMembers(in: line, number: number, using: decoder)
         }
         if let declared = try? decoder.decode(RecordFormat.self, from: line), !JournalRecord.canRead(declared.format) {
             // Positive but unsupported includes prototype format 1, not only newer releases.
@@ -85,14 +85,14 @@ public struct JournalReplayChunk: Sendable {
 
     /// Foundation collapses duplicate members. Inspect original UTF-8 top-level keys,
     /// including escaped spellings, before either decoder can select a format value.
-    private static func requireUnambiguousFormat(in data: Data, number: Int,
+    private static func requireUnambiguousMembers(in data: Data, number: Int,
                                                 using decoder: JSONDecoder) throws(StateStoreError) {
         guard String(data: data, encoding: .utf8) != nil, !data.contains(0) else {
             throw .corruptJournal(line: number)
         }
         let bytes = Array(data)
         var index = 0, depth = 0
-        var foundFormat = false
+        var keys: Set<String> = []
         while index < bytes.count {
             switch bytes[index] {
             case 123, 91: depth += 1
@@ -112,10 +112,7 @@ public struct JournalReplayChunk: Sendable {
                         guard let key = try? decoder.decode(String.self, from: Data(bytes[start...index])) else {
                             throw .corruptJournal(line: number)
                         }
-                        if key == "format" {
-                            guard !foundFormat else { throw .corruptJournal(line: number) }
-                            foundFormat = true
-                        }
+                        guard keys.insert(key).inserted else { throw .corruptJournal(line: number) }
                     }
                 }
             default: break

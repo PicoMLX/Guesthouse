@@ -29,6 +29,8 @@ enum StateSnapshotPublication {
             encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
             data = try encoder.encode(snapshot)
         } catch { throw .unencodable(name: .snapshot) }
+        // Never publish bytes that the ordinary read/preflight budget would refuse.
+        guard data.count <= StateFileIO.maximumSnapshotBytes else { throw .unencodable(name: .snapshot) }
 
         // Refuse existing unsupported/corrupt bytes as well as unsafe file structure.
         // A valid in-memory value is not permission to erase an unreadable saved version.
