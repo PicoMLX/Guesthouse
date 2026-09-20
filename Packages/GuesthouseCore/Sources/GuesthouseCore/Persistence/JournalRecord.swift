@@ -31,6 +31,11 @@ public enum JournalOperation: Codable, Hashable, Sendable, CaseIterable {
 /// version. Unsupported records must stop replay, not be skipped: preserve the original
 /// journal and require a compatible reader before deciding which operations are unresolved.
 /// This is a pure record contract, not a file reader, replay implementation or diagnostic sink.
+/// It records actual operations, not every provisioning metadata write. A recovered checkpoint
+/// without a known operation belongs in the environment's Codable ProvisioningState metadata;
+/// never fabricate an OperationID to append it here. The coordinator must durably publish that
+/// metadata before acknowledging persistCheckpoint. A known journal operation must separately
+/// be settled using actual evidence; a metadata checkpoint does not settle unrelated mutations.
 public struct JournalRecord: Codable, Hashable, Sendable {
     /// Format 2 uses the structured GuesthouseError contract (ADR 0003). Prototype format 1
     /// may contain incompatible legacy error payloads and is refused without rewriting it.
@@ -90,6 +95,11 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         operation = try c.decode(JournalOperation.self, forKey: .operation)
         timestamp = try c.decode(Date.self, forKey: .timestamp)
         outcome = try c.decode(Outcome.self, forKey: .outcome)
+        guard isSelfConsistent else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .outcome, in: c, debugDescription: "The journal record contains inconsistent identities or stages."
+            )
+        }
     }
 
     /// Whether this record leaves the operation in flight. A failure whose error says the
