@@ -9,15 +9,45 @@ struct JournalTailPrefix {
     }
     private enum Stop: Error { case incomplete, invalid }
     private static let shape: Shape? = try? makeShape()
+    private static let startShape: Shape? = try? makeShape(starting: true)
+    private static let continuationShapes = Dictionary(uniqueKeysWithValues: JournalOperation.allCases.map {
+        ($0, try? makeShape(operation: $0, starting: false))
+    })
     private let bytes: [UInt8]
     private var index = 0
     private var identities: [Identity: [UInt8]] = [:]
+    private var excluded: [Identity: Set<[UInt8]>] = [:]
 
     static func accepts(_ data: Data) -> Bool {
+        accepts(data, shape: shape)
+    }
+
+    /// A tail must have some completion that the already-staged history could append.
+    /// New starts exclude all used operation IDs and currently occupied environments;
+    /// continuations bind every identity and the operation to an unresolved record.
+    static func accepts(_ data: Data, following history: JournalHistory) -> Bool {
+        func bytes<T: Encodable>(_ value: T) -> [UInt8] {
+            Array((try? JSONEncoder().encode(value)) ?? Data())
+        }
+        if accepts(data, shape: startShape, excluded: [
+            .operation: Set(history.records.map { bytes($0.id) }),
+            .environment: Set(history.inFlight.values.map { bytes($0.environmentID) })
+        ]) { return true }
+        for record in history.inFlight.values {
+            if accepts(data, shape: continuationShapes[record.operation] ?? nil, identities: [
+                .operation: bytes(record.id), .environment: bytes(record.environmentID)
+            ]) { return true }
+        }
+        return false
+    }
+
+    private static func accepts(_ data: Data, shape: Shape?,
+                                identities: [Identity: [UInt8]] = [:],
+                                excluded: [Identity: Set<[UInt8]>] = [:]) -> Bool {
         // These closed types emit ASCII; invalid/partial UTF-8 and NUL are not encoder tails.
         guard data.first == 123, data.allSatisfy({ $0 < 128 && $0 != 0 }),
               let shape else { return false }
-        var parser = Self(bytes: Array(data))
+        var parser = Self(bytes: Array(data), identities: identities, excluded: excluded)
         do { try parser.value(shape); return false }
         catch Stop.incomplete { return true }
         catch { return false }
@@ -93,6 +123,18 @@ struct JournalTailPrefix {
         case .uuid(let identity):
             _ = try peek()
             let start = index
+            if let identity, let forbidden = excluded[identity] {
+                // Even a cut UUID can have exhausted all of its possible completions.
+                let prefix = Array(bytes[start..<min(bytes.count, start + 38)])
+                let matches = forbidden.filter { $0.starts(with: prefix) }.count
+                var possibilities = 1
+                for position in prefix.count..<38 where position != 0 && position != 37
+                    && ![9, 14, 19, 24].contains(position) {
+                    if possibilities > matches { break }
+                    possibilities *= 16 // bounded by the finite forbidden-set size
+                }
+                guard matches < possibilities else { throw Stop.invalid }
+            }
             for position in 0..<38 {
                 guard index < bytes.count else { throw Stop.incomplete }
                 let byte = bytes[index]
@@ -144,10 +186,10 @@ struct JournalTailPrefix {
         for digit in 0...9 {
             if canonicalDate(token + String(digit))?.hasPrefix(token) == true { return true }
         }
-        if token.contains("e") {
+        for marker in token.contains("e") ? [""] : ["e"] {
             for exponent in 0...324 {
                 for sign in ["", "-", "+"] {
-                    if canonicalDate(token + sign + String(exponent))?.hasPrefix(token) == true { return true }
+                    if canonicalDate(token + marker + sign + String(exponent))?.hasPrefix(token) == true { return true }
                 }
             }
         }
@@ -169,7 +211,7 @@ struct JournalTailPrefix {
         return try shape(JSONSerialization.jsonObject(with: JSONEncoder().encode(value), options: .fragmentsAllowed))
     }
 
-    private static func makeShape() throws -> Shape {
+    private static func makeShape(operation: JournalOperation? = nil, starting: Bool? = nil) throws -> Shape {
         let errors: [GuesthouseError] = [
             .unsupportedHost(.notAppleSilicon), .unsupportedHost(.unknownArchitecture),
             .unsupportedHost(.macOSTooOld), .unsupportedHost(.insufficientMemory(foundBytes: 0, minimumBytes: 0)),
@@ -184,8 +226,10 @@ struct JournalTailPrefix {
             .invalidRuntimeReply(.malformed), .invalidRuntimeReply(.oversized)
         ] + GuesthouseError.Tool.allCases.map { .toolMismatch(tool: $0) }
           + GuesthouseError.InvalidRequestReason.allCases.map { .invalidRequest($0) }
-        let outcomes: [JournalRecord.Outcome] = [.started, .completed, .unknown, .notApplied]
+        var outcomes: [JournalRecord.Outcome] = [.started, .completed, .unknown, .notApplied]
             + errors.map { .failed($0) }
+        if starting == true { outcomes = [.started] }
+        if starting == false { outcomes.removeFirst() }
         func record(operation: Shape, outcome: Shape) -> Shape {
             .object([
                 "format": .literal(Array(String(JournalRecord.currentFormat).utf8)),
@@ -194,7 +238,7 @@ struct JournalTailPrefix {
             ])
         }
         let ordinary = record(
-            operation: .choice(try JournalOperation.allCases.map { try encodedShape($0) }),
+            operation: .choice(try (operation.map { [$0] } ?? JournalOperation.allCases).map { try encodedShape($0) }),
             outcome: .choice(try outcomes.map { outcome in
                 let identity: Identity?
                 switch outcome {
@@ -208,7 +252,10 @@ struct JournalTailPrefix {
         // A possible encoder continuation must also satisfy JournalRecord's cross-field
         // contract. Checkpoints bind both stages; error identities bind byte-for-byte in
         // either field order, including an interruption inside the second UUID.
-        let checkpoints = try ProvisioningStage.allCases.map { stage in
+        let stages = ProvisioningStage.allCases.filter {
+            starting != true && (operation == nil || operation == .provision(stage: $0))
+        }
+        let checkpoints = try stages.map { stage in
             record(operation: try encodedShape(JournalOperation.provision(stage: stage)),
                    outcome: try encodedShape(JournalRecord.Outcome.checkpoint(stage)))
         }
