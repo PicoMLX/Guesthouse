@@ -13,6 +13,7 @@ struct StateJournalCache {
     private(set) var truncatedTail = false
     private(set) var unterminatedRecord = false
     private(set) var file: StateFileVersion?
+    private(set) var validatedBytes = Data()
 
     var replay: JournalReplay {
         JournalReplay(records: history.records, inFlight: history.inFlight, truncatedTail: truncatedTail)
@@ -20,6 +21,7 @@ struct StateJournalCache {
 
     func refreshed(
         _ descriptor: Int32,
+        requiringPrefix: Data = Data(),
         read: Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> Self {
         var info = stat()
@@ -34,11 +36,13 @@ struct StateJournalCache {
         catch let failure as StateStoreError { throw failure }
         catch { throw .fileUnreadable(name: .journal) }
         try Self.validateBudget(fresh)
+        guard fresh.starts(with: requiringPrefix) else { throw .fileUnreadable(name: .journal) }
         let chunk = try JournalReplayChunk(fresh)
         candidate.history = chunk.history
         candidate.byteCount = chunk.validatedByteCount
         candidate.truncatedTail = chunk.truncatedTail
         candidate.unterminatedRecord = chunk.unterminatedRecord
+        candidate.validatedBytes = Data(fresh.prefix(chunk.validatedByteCount))
         return candidate
     }
 
@@ -51,5 +55,26 @@ struct StateJournalCache {
             records += 1
             guard records <= maximumRecords else { throw .fileUnreadable(name: .journal) }
         }
+    }
+}
+
+/// Monotonic evidence, separate from the disposable replay cache. Never reset on a failed
+/// read, parse, barrier or outer binding check. Observation is not durability or authorization.
+/// The retained complete-byte prefix is bounded by maximumJournalBytes. A torn suffix is not
+/// promoted to complete history; only the existing history-aware append repair can replace it.
+struct StateJournalObservation {
+    private var identity: StateFileIdentity?
+    private var prefix = Data()
+
+    mutating func refreshed(
+        _ descriptor: Int32,
+        read: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
+    ) throws(StateStoreError) -> StateJournalCache {
+        let current = try StateFileIO.version(descriptor, name: .journal).identity
+        guard identity == nil || identity == current else { throw .fileUnreadable(name: .journal) }
+        identity = current // Retain identity even if the subsequent read/parse fails.
+        let candidate = try StateJournalCache().refreshed(descriptor, requiringPrefix: prefix, read: read)
+        prefix = candidate.validatedBytes
+        return candidate
     }
 }

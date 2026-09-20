@@ -113,7 +113,7 @@ import Testing
         #expect(reads.withLock { $0 } == 20)
     }
 
-    @Test func equalSizeInPlaceRewriteInvalidatesCachedHistory() async throws {
+    @Test func equalSizeInPlaceRewriteCannotEraseObservedHistory() async throws {
         let fixture = try Fixture(), store = try await fixture.open()
         let first = Self.record(), second = Self.record()
         let before = try Self.lines([first]), after = try Self.lines([second])
@@ -123,10 +123,13 @@ import Testing
         #expect(try await store.replay().records == [first])
         try fixture.write(after)
         try #require(try fixture.identity(fixture.journal) == identity)
-        #expect(try await store.replay().records == [second])
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try fixture.bytes() == after)
     }
 
-    @Test func replacementAndShrinkDiscardTheOldHistory() async throws {
+    @Test func replacementAndShrinkCannotEraseObservedHistory() async throws {
         let fixture = try Fixture(), store = try await fixture.open(), first = Self.record(), second = Self.record()
         let original = try Self.lines([first])
         try fixture.write(original)
@@ -134,11 +137,39 @@ import Testing
         let detached = fixture.state.appending(path: "retained")
         try #require(rename(fixture.journal.path, detached.path) == 0)
         try fixture.write(Self.lines([second]))
-        #expect(try await store.replay().records == [second])
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         try fixture.write(Data())
-        let empty = try await store.replay()
-        #expect(empty.records.isEmpty && empty.inFlight.isEmpty && !empty.truncatedTail)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        #expect(try fixture.bytes().isEmpty)
         #expect(try Data(contentsOf: detached) == original)
+    }
+
+    @Test(arguments: [false, true])
+    func priorHistorySurvivesReadAndParseFailures(parseFailure: Bool) async throws {
+        let fixture = try Fixture(), fail = Mutex(false)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            if fail.withLock({ $0 }) { throw StateStoreError.fileUnreadable(name: .journal) }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let first = Self.record(), second = Self.record()
+        let prefix = try Self.lines([first]), full = try prefix + Self.lines([second])
+        try fixture.write(full)
+        #expect(try await store.replay().records == [first, second])
+        if parseFailure { try fixture.write(full + Data("not JSON\n".utf8)) }
+        else { fail.withLock { $0 = true } }
+        await #expect(throws: StateStoreError.self) { try await store.replay() }
+        fail.withLock { $0 = false }
+        try fixture.write(prefix)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try fixture.bytes() == prefix)
+        // Restoring the same inode's known bytes is explicit fixture repair, not a retry.
+        try fixture.write(full)
+        #expect(try await store.replay().records == [first, second])
+        let third = Self.record()
+        try fixture.write(full + Self.lines([third]))
+        #expect(try await store.replay().records == [first, second, third])
     }
 
     @Test(arguments: [JournalRecord.Outcome.started, .checkpoint(.preflight), .unknown])
