@@ -473,12 +473,15 @@ import Testing
 
     @Test func directoryReplacementAfterReadingCannotPublishACachedCandidate() async throws {
         let fixture = try Fixture(), reads = Mutex(0), detached = fixture.base.appending(path: "detached")
+        let conflicting = try Self.lines([Self.record()])
+        let quarantined = fixture.base.appending(path: "conflicting")
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
             let bytes = try StateFileIO.readAll(fd, from: offset, name: .journal)
             let attempt = reads.withLock { $0 += 1; return $0 }
             if attempt == 1 {
                 try #require(rename(fixture.state.path, detached.path) == 0)
                 try #require(mkdir(fixture.state.path, 0o700) == 0)
+                try fixture.write(conflicting)
             }
             return bytes
         }))
@@ -486,12 +489,16 @@ import Testing
         try fixture.write(bytes)
         await #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) { try await store.replay() }
         #expect(try Data(contentsOf: detached.appending(path: "journal.ndjson")) == bytes)
-        // Restore the retained fixture. Its file version is unchanged: a prematurely
-        // adopted candidate would now suppress the required read and fail the count.
-        try #require(rmdir(fixture.state.path) == 0)
+        // Restoring the original path cannot disprove the conflicting operation.
+        // Keep both pieces of evidence; this owner must not perform another read.
+        try #require(rename(fixture.state.path, quarantined.path) == 0)
         try #require(rename(detached.path, fixture.state.path) == 0)
-        #expect(try await store.replay().records == [record])
-        #expect(reads.withLock { $0 } == 2)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == bytes)
+        #expect(try Data(contentsOf: quarantined.appending(path: "journal.ndjson")) == conflicting)
     }
 
     @Test func fifoJournalIsRefusedWithoutWaitingForAWriter() async throws {
