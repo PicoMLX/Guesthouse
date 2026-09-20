@@ -14,6 +14,9 @@ public actor StateStore {
     private var journal = StateJournalCache()
     // This observation survives cache invalidation and failed parsing/post-checks.
     private var journalWasObserved = false
+    // Observation survives failed reads/publications. Absence after observation is evidence
+    // loss, never an empty new store. This is actor-confined and never reset by an error.
+    private var snapshotWasObserved = false
     private nonisolated let queue: DispatchSerialQueue
 
     /// Native descriptor IO/flushes and advisory lock waits may block. Use Dispatch's supplied
@@ -67,13 +70,16 @@ public actor StateStore {
     /// Missing state means an empty snapshot, not permission to create or rewrite files.
     /// Explicit migrations run in memory; reading never rewrites their source document.
     public func loadSnapshot() throws(StateStoreError) -> EnvironmentsSnapshot {
-        try anchor.withFile(.readSnapshot, permissionBarrier: hooks.permission, body: { descriptor in
+        let snapshot = try anchor.withFile(.readSnapshot, permissionBarrier: hooks.permission,
+            didObserve: { self.snapshotWasObserved = true }, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try migrator.migrate(raw)
             do { return try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
             catch let failure as StateStoreError { throw failure }
             catch { throw StateStoreError.corruptSnapshot }
-        }) ?? .empty
+        })
+        guard snapshot != nil || !snapshotWasObserved else { throw .fileUnreadable(name: .snapshot) }
+        return snapshot ?? .empty
     }
 
     /// Return only after the full verified publication completes. Cancellation does not abort
@@ -81,6 +87,7 @@ public actor StateStore {
     /// assume a failed save restored the old bytes or blindly repeat the associated operation.
     public func saveSnapshot(_ snapshot: EnvironmentsSnapshot) throws(StateStoreError) {
         try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
+            requireExisting: snapshotWasObserved, didObserve: { self.snapshotWasObserved = true },
             validateFirstSelection: {
                 // An empty/missing snapshot can follow a crashed operation. Existing journal
                 // evidence, including a torn first record, blocks new selection. The hook
@@ -110,7 +117,7 @@ public actor StateStore {
         do {
             // Adopt only after ALL outer file-entry and directory checks have returned.
             journal = try StateJournalAppend.append(record, to: anchor, cached: journal, hooks: hooks,
-                requireExisting: journalWasObserved, didOpen: { journalWasObserved = true })
+                requireExisting: journalWasObserved, didObserve: { journalWasObserved = true })
         } catch {
             journal = StateJournalCache()
             throw error
@@ -123,7 +130,7 @@ public actor StateStore {
     public func replay() throws(StateStoreError) -> JournalReplay {
         do {
             let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
-                                                didOpen: { journalWasObserved = true }) {
+                                                didObserve: { journalWasObserved = true }) {
                 return try journal.refreshed($0, read: hooks.journalRead)
             }
             guard candidate != nil || !journalWasObserved else {

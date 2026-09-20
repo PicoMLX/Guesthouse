@@ -23,12 +23,13 @@ extension StateDirectoryAnchor {
         protection: StateFileEntry.Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         didOpen: () -> Void = {},
+        didObserve: () -> Void = {},
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
             try StateFileEntry.withDescriptor(in: directory, access: access,
                 protection: protection,
-                permissionBarrier: permissionBarrier, didOpen: didOpen,
+                permissionBarrier: permissionBarrier, didOpen: didOpen, didObserve: didObserve,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
         }
     }
@@ -46,6 +47,7 @@ enum StateFileEntry {
         protection: Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier,
         didOpen: () -> Void = {},
+        didObserve: () -> Void = {},
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
@@ -65,6 +67,9 @@ enum StateFileEntry {
         }
         guard descriptor >= 0 else {
             let openFailure = errno
+            // Non-ENOENT failures may hide an entry. Keep uncertainty even when verify-only
+            // classification or protection checks below fail; this does not grant access.
+            if openFailure != ENOENT { didObserve() }
             if openFailure == EACCES, protection == .verifyOnly {
                 do {
                     let version = try StateFileIO.version(directory, name: .stateDirectory)
@@ -107,6 +112,7 @@ enum StateFileEntry {
         // Opening is already an observation, even if structure, locking or protection fails.
         // No descriptor escapes; this cannot imply validated contents or durability.
         didOpen()
+        didObserve()
         do {
             // Refuse FIFOs/directories/links before a lock or metadata repair. NONBLOCK keeps
             // opening an unexpected FIFO from waiting for a peer before this inspection.
