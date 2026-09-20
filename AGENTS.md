@@ -4,6 +4,8 @@ Guesthouse is a native macOS app that prepares an isolated development Mac (a ma
 
 Prioritize Lume candidate validation and shared infrastructure under [ADR 0002](docs/decisions/0002-prioritize-lume-and-shared-infrastructure.md). New Tart-specific work is deferred; retain its existing implementation and documentation as legacy reference. Lume remains a candidate pending strict runtime verification, human provider preflight, and a separate provider-selection decision.
 
+Start each planning or implementation session with [ROADMAP.md](ROADMAP.md), then check [issue #48](https://github.com/PicoMLX/Guesthouse/issues/48) for the live queue and existing PR coverage. The roadmap maps the current capability, Codex connection, network and verification requirements to issues; it supersedes historical task ordering, not accepted ADRs or recorded proof requirements. Do not infer readiness from an old checkout, an open PR, or a saved provisioning checkpoint.
+
 ## Layout
 
 | Path | What it is | Rules |
