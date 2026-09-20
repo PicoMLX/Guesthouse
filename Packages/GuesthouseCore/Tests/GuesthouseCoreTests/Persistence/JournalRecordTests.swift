@@ -102,6 +102,38 @@ import Testing
         #expect(JournalRecord.canRead(2))
     }
 
+    @Test(arguments: ProvisioningStage.allCases)
+    func recoveredCheckpointMetadataNeedsNoInventedOperation(stage: ProvisioningStage) throws {
+        let checkpoint = Checkpoint(stage: stage, reachedAt: timestamp)
+        let inspecting = try ProvisioningReducer.reduce(.initial, .inspectionRequested)
+        let inspection = try #require(inspecting.state.status.pendingEffect)
+        let recovered = try ProvisioningReducer.reduce(inspecting.state, .reconciled(inspection, .completed(checkpoint)))
+        let write = try #require(recovered.state.status.pendingEffect)
+        #expect(recovered.state.status == .persistingCheckpoint(checkpoint, operation: nil, write: write))
+        #expect(recovered.effects == [.persistCheckpoint(checkpoint, write)])
+
+        // Value/serialization contract only: the runtime store owns durable publication and
+        // may acknowledge it only after its barriers succeed. No journal ID is fabricated.
+        let data = try JSONEncoder().encode([environmentID: recovered.state])
+        let metadata = try JSONDecoder().decode([EnvironmentID: ProvisioningState].self, from: data)
+        let restored = try #require(metadata[environmentID])
+        #expect(restored == recovered.state)
+        let acknowledged = try ProvisioningReducer.reduce(restored, .checkpointPersisted(write, checkpoint))
+        #expect(acknowledged.state.status == .completed(checkpoint))
+        #expect(acknowledged.effects.isEmpty)
+        let saved = try JSONEncoder().encode(acknowledged.state)
+        #expect(try JSONDecoder().decode(ProvisioningState.self, from: saved) == acknowledged.state)
+    }
+
+    @Test(arguments: ["null", "missing"])
+    func operationJournalStillRequiresARealIdentity(identity: String) throws {
+        var fixture = try object(record(.checkpoint(.first), operation: .provision(stage: .first)))
+        if identity == "null" { fixture["id"] = NSNull() }
+        else { fixture.removeValue(forKey: "id") }
+        let data = try JSONSerialization.data(withJSONObject: fixture)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(JournalRecord.self, from: data) }
+    }
+
     @Test(arguments: [-1, 0, 1, 3, 99, Int.max])
     func unsupportedFormatsIncludingTheLegacyPrototypeAreRefused(format: Int) throws {
         var fixture = try object(record(.started))

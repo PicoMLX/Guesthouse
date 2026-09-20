@@ -15,7 +15,7 @@ import Foundation
 ///   start request is still live; each request replaces the outstanding one.
 /// - Every start request and effect carries a token, and only the callback naming the outstanding
 ///   token is accepted. Lost effects can be reissued without accepting their earlier replies.
-/// - A checkpoint counts only once the journal has it (§3: "Persist ... before updating the UI").
+/// - A checkpoint counts only once durably saved (§3: "Persist ... before updating the UI").
 public enum ProvisioningReducer: Sendable {
     public static func reduce(
         _ state: ProvisioningState,
