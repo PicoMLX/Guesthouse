@@ -6,7 +6,10 @@
 public struct EffectToken: Hashable, Sendable, CustomStringConvertible {
     public let value: UInt64
 
+    /// Zero is the initial issued-effect count, never a reserved effect identity.
+    /// Trusted callers construct only issued tokens; external data uses throwing decoding.
     public init(_ value: UInt64) {
+        precondition(value > 0, "effect identity must be nonzero")
         self.value = value
     }
 
@@ -15,7 +18,12 @@ public struct EffectToken: Hashable, Sendable, CustomStringConvertible {
 
 extension EffectToken: Codable {
     public init(from decoder: any Decoder) throws {
-        value = try decoder.singleValueContainer().decode(UInt64.self)
+        let container = try decoder.singleValueContainer()
+        let decoded = try container.decode(UInt64.self)
+        guard decoded > 0 else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Effect identity must be nonzero.")
+        }
+        self.init(decoded)
     }
 
     public func encode(to encoder: any Encoder) throws {
