@@ -28,6 +28,9 @@ extension StateStore {
                 catch { throw StateStoreError.corruptSnapshot }
             } ?? .empty
         } catch let failure as StateStoreError { throw failure }
+        catch StorageFailure.protectionDrift { throw .insecureDirectory(reason: .permissions) }
+        catch StorageFailure.unsafeStructure { throw .insecureDirectory(reason: .changed) }
+        catch is StorageFailure { throw .insecureDirectory(reason: .unreadable) }
         catch { throw .fileUnreadable(name: .stateDirectory) }
     }
 }

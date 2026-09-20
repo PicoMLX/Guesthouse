@@ -145,6 +145,18 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: fixture.state.appending(path: "retained").path))
     }
 
+    @Test(arguments: [StorageFailure.protectionDrift, .unsafeStructure, .inspectionFailed])
+    func knownFactoryFailuresPreserveProtectionGuidance(failure: StorageFailure) {
+        let reason: StateStoreError.ProtectionFailure = switch failure {
+        case .protectionDrift: .permissions
+        case .unsafeStructure: .changed
+        default: .unreadable
+        }
+        #expect(throws: StateStoreError.insecureDirectory(reason: reason)) {
+            try StateStore.inspectSnapshot(storage: { throw failure })
+        }
+    }
+
     @Test func arbitraryFactoryFailureUsesClosedErrorGuidance() {
         #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
             try StateStore.inspectSnapshot(storage: { throw NSError(domain: "private-fixture-marker", code: 1) })
