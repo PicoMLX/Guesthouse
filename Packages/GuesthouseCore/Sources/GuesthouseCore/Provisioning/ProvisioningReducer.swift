@@ -133,9 +133,12 @@ public enum ProvisioningReducer: Sendable {
             throw .inspectionWhileStartRequestLive
 
         case (.inProgress(let current), .checkpointReached(let id, let checkpoint)),
-             (.needsUserAction(let current, _), .checkpointReached(let id, let checkpoint)):
+             (.needsUserAction(let current, _), .checkpointReached(let id, let checkpoint)),
+             (.unknownOutcome(let current, _), .checkpointReached(let id, let checkpoint)):
             // A paused operation resumes as soon as the user does the out-of-app step, which can
             // be before the GUI reports it; refusing its checkpoint would drop a reached one.
+            // The same operation may answer while an inspection is pending. Its validated
+            // callback supersedes that inspection, whose earlier sample is now obsolete.
             try requireSame(current, id)
             guard checkpoint.stage == stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
             let write = try mint()
@@ -175,18 +178,21 @@ public enum ProvisioningReducer: Sendable {
             return try inspect(operation: writer)
 
         case (.inProgress(let current), .operationFailed(let id, let error)),
-             (.needsUserAction(let current, _), .operationFailed(let id, let error)):
+             (.needsUserAction(let current, _), .operationFailed(let id, let error)),
+             (.unknownOutcome(let current, _), .operationFailed(let id, let error)):
             // A reported failure is not proof that the operation can no longer mutate.
             // Keep its identity through persistence/retry, regardless of the error category;
             // only correlated inspection may settle it or resume monitoring (MVP-PLAN.md §3).
             try requireSame(current, id)
             return at(.recoverableFailure(error, interrupted: current))
 
-        case (.inProgress(let current), .operationCanceled(let id)):
+        case (.inProgress(let current), .operationCanceled(let id)),
+             (.unknownOutcome(let current, _), .operationCanceled(let id)):
             try requireSame(current, id)
             return at(.canceled)
 
-        case (.inProgress(let current), .userActionRequired(let id, let error)):
+        case (.inProgress(let current), .userActionRequired(let id, let error)),
+             (.unknownOutcome(let current, _), .userActionRequired(let id, let error)):
             try requireSame(current, id)
             return at(.needsUserAction(id, error))
 
@@ -218,7 +224,10 @@ public enum ProvisioningReducer: Sendable {
             // would otherwise leave no event that can produce a `reconciled` result.
             return try inspect()
 
-        case (.cleanupRequired, .userRetried):
+        case (.cleanupRequired(let error, let cleanup), .userRetried),
+             (.cleanupRequired(let error, let cleanup), .inspectionRequested),
+             (.inspectingCleanup(let error, let cleanup, _), .userRetried),
+             (.inspectingCleanup(let error, let cleanup, _), .inspectionRequested):
             // The cleanup's result is unknown; inspect rather than clean up blindly again. If
             // it turns out to still be running, `cleanupRunning` resumes monitoring it.
             //
@@ -229,7 +238,9 @@ public enum ProvisioningReducer: Sendable {
             // this cleanup's token with an inspection and make its own `cleanupFinished` stale.
             // A coordinator that loses contact while a cleanup is pending asks for the
             // inspection by name with `inspectionRequested`, which lands in the same place.
-            return try inspect()
+            let inspection = try mint()
+            return at(.inspectingCleanup(error, cleanup: cleanup, inspection: inspection),
+                      [.inspectActualState(stage, inspection, operation: nil)])
 
         case (.inProgress(let current), .inspectionRequested), (.needsUserAction(let current, _), .inspectionRequested):
             // The operation is still live, so its identity is carried through the inspection:
@@ -279,6 +290,25 @@ public enum ProvisioningReducer: Sendable {
             // only one there is.
             return try adopt(outcome, interrupted: nil)
 
+        case (.inspectingCleanup(_, let cleanup, let inspection), .reconciled(let token, let outcome)):
+            try requireOutstanding(inspection, token)
+            switch outcome {
+            case .cleanupRunning(let reported, _):
+                try requireOutstanding(cleanup, reported)
+            case .stillRunning, .stillNeedsUserAction:
+                // Finding a provisioning operation does not settle the retained cleanup.
+                throw .illegalTransition(status: state.status.kind, event: event.kind)
+            default: break
+            }
+            // As for unscoped inspection, a non-active result requires global quiescence.
+            // The known cleanup may not be replaced by a different active cleanup.
+            return try adopt(outcome, interrupted: nil)
+
+        case (.inspectingCleanup(_, let cleanup, let inspection), .inspectionFailed(let token, let error)):
+            try requireOutstanding(inspection, token)
+            // A failed query does not finish or abandon the cleanup it was inspecting.
+            return at(.cleanupRequired(error, cleanup: cleanup))
+
         case (.awaitingInspection(let inspection), .inspectionFailed(let token, let error)):
             // The inspection could not answer, so nothing is known that was not known before.
             // Keeping the error rather than dropping it is what lets the coordinator show why
@@ -295,11 +325,13 @@ public enum ProvisioningReducer: Sendable {
             try requireOutstanding(inspection, token)
             return at(.recoverableFailure(error, interrupted: interrupted))
 
-        case (.cleanupRequired(_, let cleanup), .cleanupFinished(let token)):
+        case (.cleanupRequired(_, let cleanup), .cleanupFinished(let token)),
+             (.inspectingCleanup(_, let cleanup, _), .cleanupFinished(let token)):
             try requireOutstanding(cleanup, token)
             return at(.notStarted)
 
-        case (.cleanupRequired(_, let cleanup), .cleanupFailed(let token, let error)):
+        case (.cleanupRequired(_, let cleanup), .cleanupFailed(let token, let error)),
+             (.inspectingCleanup(_, let cleanup, _), .cleanupFailed(let token, let error)):
             try requireOutstanding(cleanup, token)
             return at(.recoverableFailure(error, interrupted: nil))
 

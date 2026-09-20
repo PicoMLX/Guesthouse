@@ -24,6 +24,7 @@ import Testing
         .unknownOutcome(OperationID(), inspection: EffectToken(9)), .awaitingInspection(EffectToken(9)),
         .resumable(ResumeEvidence(kind: .unfinishedCopy)!),
         .cleanupRequired(.runtimeMissing, cleanup: EffectToken(9)),
+        .inspectingCleanup(.runtimeMissing, cleanup: EffectToken(9), inspection: EffectToken(10)),
     ])
     func everyStatusPreservesIdentityAndEvidenceThroughJSON(status: StageStatus) throws {
         let original = ProvisioningState(stage: .first, status: status, issuedEffects: 5)
