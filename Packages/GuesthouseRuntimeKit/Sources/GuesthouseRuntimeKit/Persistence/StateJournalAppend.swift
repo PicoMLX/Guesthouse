@@ -8,7 +8,8 @@ import GuesthouseCore
 enum StateJournalAppend {
     static func append(
         _ record: JournalRecord, to anchor: StateDirectoryAnchor,
-        cached: StateJournalCache, hooks: StateStoreHooks
+        cached: StateJournalCache, hooks: StateStoreHooks,
+        requireExisting: Bool = false, didOpen: () -> Void = {}
     ) throws(StateStoreError) -> StateJournalCache {
         var line: Data
         do {
@@ -24,8 +25,10 @@ enum StateJournalAppend {
         do {
             return try anchor.withDescriptor { directory in
                 guard let candidate = try StateFileEntry.withDescriptor(
-                    in: directory, access: .writeJournal, permissionBarrier: hooks.permission,
+                    in: directory, access: .writeJournal, requireExisting: requireExisting,
+                    permissionBarrier: hooks.permission,
                     validateDirectory: { try anchor.verifyCurrent(version: $0) }, body: { descriptor in
+                    didOpen()
                     let current = try cached.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
                     if current.unterminatedRecord { line.insert(0x0A, at: line.startIndex) }

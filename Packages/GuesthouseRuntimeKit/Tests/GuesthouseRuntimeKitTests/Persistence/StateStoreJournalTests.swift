@@ -7,6 +7,25 @@ import Testing
 
 /// Retains #57's append/recovery/durability cases with runtime-owned fixtures, not host/VM work.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreJournalTests {
+    @Test(arguments: [false, true])
+    func missingObservedJournalCannotBeRecreatedAfterWriteOrReplay(throughReplay: Bool) async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), started = Self.record()
+        if throughReplay {
+            try fixture.write(JSONEncoder().encode(started) + Data([10]))
+            _ = try await store.replay()
+        } else { try await store.append(started) }
+        let evidence = try fixture.bytes(), retained = fixture.state.appending(path: "retained")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        #expect(try Data(contentsOf: retained) == evidence)
+    }
+
     @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
         let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
         try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
