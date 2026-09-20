@@ -33,6 +33,36 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).isEmpty)
     }
 
+    @Test(arguments: [mode_t(0o100), mode_t(0o300)], [false, true])
+    func searchOnlyAncestorsRetainDescriptorChecksAndBarriers(mode: mode_t, throughSymlink: Bool) throws {
+        let fixture = try Fixture(existingLeaf: true)
+        try #require(chmod(fixture.actual.path, mode) == 0)
+        defer { _ = chmod(fixture.actual.path, 0o700) }
+        let storage = try fixture.storage(throughSymlink: throughSymlink)
+        let anchor = try StateDirectoryAnchor(storage: storage)
+        let expected = try fixture.identity(fixture.actual)
+        var visits = 0
+        try anchor.synchronizePreparation { fd, name in
+            if try identity(fd) == expected {
+                visits += 1
+                #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0)
+                var info = stat()
+                try #require(fstat(fd, &info) == 0)
+                #expect(info.st_mode & 0o777 == mode)
+            }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }
+        #expect(visits >= 1)
+        let failure = StateStoreError.fileUnwritable(name: .stateDirectory)
+        #expect(throws: failure) {
+            try StateDirectoryDurability.synchronize(fixture.actual.path) { _, _ in throw failure }
+        }
+        var after = stat()
+        try #require(stat(fixture.actual.path, &after) == 0)
+        #expect(after.st_mode & 0o777 == mode)
+        try anchor.verifyCurrent()
+    }
+
     @Test func aSecondPreparationRepeatsAllBarriersWithoutCachingVisibleSuccess() throws {
         let fixture = try Fixture()
         let anchor = try StateDirectoryAnchor(storage: fixture.storage())
