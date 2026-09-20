@@ -100,7 +100,8 @@ public actor StateStore {
     public func append(_ record: JournalRecord) throws(StateStoreError) {
         do {
             // Adopt only after ALL outer file-entry and directory checks have returned.
-            journal = try StateJournalAppend.append(record, to: anchor, cached: journal, hooks: hooks)
+            journal = try StateJournalAppend.append(record, to: anchor, cached: journal, hooks: hooks,
+                requireExisting: journalWasObserved, didOpen: { journalWasObserved = true })
         } catch {
             journal = StateJournalCache()
             throw error
