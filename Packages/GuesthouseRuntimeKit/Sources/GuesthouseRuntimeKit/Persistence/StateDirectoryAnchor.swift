@@ -47,11 +47,13 @@ final class StateDirectoryAnchor {
     /// A stable advisory lock shared by independently opened anchors, unlike the replaceable
     /// snapshot inode. Never suspend this borrow. Contention/unsupported locks fail closed
     /// before publication; no wait, fallback lock file, or automatic mutation retry.
-    func withPublicationOwnership<Result>(_ body: (Int32) throws -> Result) throws(StateStoreError) -> Result {
-        guard !publicationActive else { throw .fileUnwritable(name: .snapshot) }
+    func withPublicationOwnership<Result>(
+        for name: StateStoreError.File = .snapshot, _ body: (Int32) throws -> Result
+    ) throws(StateStoreError) -> Result {
+        guard !publicationActive else { throw .fileUnwritable(name: name) }
         try verifyCurrent()
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            throw .fileUnwritable(name: .snapshot)
+            throw .fileUnwritable(name: name)
         }
         publicationActive = true
         defer {
