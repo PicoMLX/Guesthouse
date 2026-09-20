@@ -57,7 +57,7 @@ final class RuntimeEventStream: Sendable {
             state.receivedReply = true
             switch event {
             case .accepted(let id): state.operation = id; state.queue.append(event); return false
-            case .runtimeVersion, .status, .completed, .failed:
+            case .runtimeVersion, .hostPreflight, .status, .completed, .failed:
                 state.queue.append(event); state.end = .finished; return true
             case .progress, .diagnostic:
                 state.end = .failed(failure(.malformedResponse, state: state)); return true
@@ -82,7 +82,7 @@ final class RuntimeEventStream: Sendable {
             case .status(let status):
                 guard status.inFlightOperation == nil || status.inFlightOperation == id else { return false }
                 terminal = false // Unscoped environment snapshots must be filtered by the client.
-            case .runtimeVersion, .accepted:
+            case .runtimeVersion, .hostPreflight, .accepted:
                 state.end = .failed(failure(.malformedResponse, state: state)); return true
             }
             // Nonterminal traffic can never consume the last terminal slot.

@@ -40,7 +40,7 @@ private let laterCheckpoint = Checkpoint(stage: .ready, reachedAt: Date(timeInte
     @Test(arguments: [
         StageStatus.Kind.notStarted, .startRejected, .inProgress, .persistingCheckpoint,
         .completed, .canceled, .recoverableFailure, .needsUserAction, .unknownOutcome,
-        .awaitingInspection, .resumable, .cleanupRequired,
+        .awaitingInspection, .resumable, .cleanupRequired, .inspectingCleanup,
     ])
     func otherRejectedStatusesKeepTheirInspectionRecovery(status: StageStatus.Kind) {
         let error = ProvisioningTransitionError.illegalTransition(status: status, event: .checkpointReached)
@@ -85,6 +85,7 @@ private let laterCheckpoint = Checkpoint(stage: .ready, reachedAt: Date(timeInte
         (.awaitingInspection(token), .awaitingInspection),
         (.resumable(ResumeEvidence(kind: .partialDownload)!), .resumable),
         (.cleanupRequired(.runtimeMissing, cleanup: token), .cleanupRequired),
+        (.inspectingCleanup(.runtimeMissing, cleanup: token, inspection: EffectToken(9)), .inspectingCleanup),
     ])
     func statusesMapToClosedKinds(status: StageStatus, expected: StageStatus.Kind) {
         #expect(status.kind == expected)
@@ -123,7 +124,7 @@ private let laterCheckpoint = Checkpoint(stage: .ready, reachedAt: Date(timeInte
         #expect(ProvisioningEffect.inspectActualState(.first, token, operation: operation) != .inspectActualState(.first, token, operation: nil))
         #expect(ProvisioningEffect.persistCheckpoint(checkpoint, token) != .persistCheckpoint(checkpoint, nextToken))
         #expect(ProvisioningEffect.cleanUp(.first, token) != .cleanUp(.first, nextToken))
-        #expect(StageStatus.Kind.allCases.count == 13)
+        #expect(StageStatus.Kind.allCases.count == 14)
         #expect(ProvisioningEvent.Kind.allCases.count == 19)
     }
 
