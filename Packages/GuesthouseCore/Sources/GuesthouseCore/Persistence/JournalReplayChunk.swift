@@ -48,7 +48,7 @@ public struct JournalReplayChunk: Sendable {
             } else {
                 // Only a prefix of the closed encoder shapes can authorize tail repair.
                 // Malformed or complete-invalid bytes remain evidence, not missing bytes.
-                guard JournalTailPrefix.accepts(unterminated) else {
+                guard JournalTailPrefix.accepts(unterminated, following: history) else {
                     throw .corruptJournal(line: number)
                 }
                 truncatedTail = true
