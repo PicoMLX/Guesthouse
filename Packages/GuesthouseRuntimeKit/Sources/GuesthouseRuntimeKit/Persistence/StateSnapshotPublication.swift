@@ -3,8 +3,9 @@ import Foundation
 import GuesthouseCore
 
 /// Atomic snapshot replacement adapted from #57 (MVP-PLAN.md §3). Runtime-internal and
-/// synchronous: the future StateStore actor serializes calls and first synchronizes directory
-/// preparation. No descriptor, raw bytes or filesystem authority crosses the GUI boundary.
+/// synchronous: the caller first synchronizes directory preparation. A retained-directory
+/// lock excludes other cooperating anchors throughout preflight and publication, independently
+/// of actor instances. No descriptor, raw bytes or filesystem authority crosses the GUI boundary.
 /// A failed publication may already be visible; preserve evidence and inspect before retrying.
 enum StateSnapshotPublication {
     static let temporaryPrefix = ".environments.json.tmp-"
@@ -35,14 +36,14 @@ enum StateSnapshotPublication {
 
         // Refuse existing unsupported/corrupt bytes as well as unsafe file structure.
         // A valid in-memory value is not permission to erase an unreadable saved version.
-        let existing = try existingVersion(in: anchor, replacingWith: snapshot,
-                                          migrator: migrator, permissionBarrier: permissionBarrier)
-        if snapshot.storageSelection != nil, existing?.selection == nil {
-            do { try validateFirstSelection() }
-            catch let failure as StateStoreError { throw failure }
-            catch { throw .storageSelectionChanged }
-        }
-        try anchor.withDescriptor { directory in
+        try anchor.withPublicationOwnership { directory in
+            let existing = try existingVersion(in: anchor, replacingWith: snapshot,
+                                              migrator: migrator, permissionBarrier: permissionBarrier)
+            if snapshot.storageSelection != nil, existing?.selection == nil {
+                do { try validateFirstSelection() }
+                catch let failure as StateStoreError { throw failure }
+                catch { throw StateStoreError.storageSelectionChanged }
+            }
             try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
                 try requireUnchangedSnapshot(in: directory, expected: existing?.version)
@@ -117,7 +118,7 @@ enum StateSnapshotPublication {
     }
 
     /// This is a last pre-publication check, not a compare-and-swap or a namespace lock.
-    /// One actor owns the store; arbitrary same-user changes remain outside that guarantee.
+    /// Publication ownership excludes cooperating writers; arbitrary same-user changes remain outside it.
     private static func requireUnchangedSnapshot(
         in directory: Int32, expected: StateFileVersion?
     ) throws(StateStoreError) {
