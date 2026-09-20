@@ -138,19 +138,25 @@ import Testing
         #expect(try fixture.bytes() == settled)
     }
 
-    @Test func twoStoresSerializeRefreshThroughPublication() async throws {
+    @Test func twoStoresPublishOrRefuseContentionWithoutRetry() async throws {
         let fixture = try Fixture(), first = try await fixture.open(), second = try await fixture.open()
-        let ids = try await withThrowingTaskGroup(of: OperationID.self) { group in
+        let ids = await withTaskGroup(of: OperationID?.self) { group in
             for index in 0..<20 {
                 let store = index.isMultiple(of: 2) ? first : second
-                group.addTask { try await store.begin(.startEnvironment, for: EnvironmentID()) }
+                group.addTask {
+                    do { return try await store.begin(.startEnvironment, for: EnvironmentID()) }
+                    catch {
+                        #expect(error == .fileUnwritable(name: .journal))
+                        return nil
+                    }
+                }
             }
             var ids = Set<OperationID>()
-            for try await id in group { ids.insert(id) }
+            for await id in group { if let id { ids.insert(id) } }
             return ids
         }
         let reopened = try await fixture.open(), replay = try await reopened.replay()
-        #expect(ids.count == 20 && replay.records.count == 20 && Set(replay.inFlight.keys) == ids)
+        #expect(!ids.isEmpty && replay.records.count == ids.count && Set(replay.inFlight.keys) == ids)
     }
 
     @Test func twoStoresCannotBothStartTheSameEnvironment() async throws {
@@ -171,7 +177,9 @@ import Testing
         #expect(replay.records.count == 1)
         #expect(results.filter { if case .success(let id) = $0 { id == started.id } else { false } }.count == 1)
         #expect(results.filter {
-            if case .failure(let failure) = $0 { failure == .operationUnresolved(started.id) } else { false }
+            if case .failure(let failure) = $0 {
+                failure == .operationUnresolved(started.id) || failure == .fileUnwritable(name: .journal)
+            } else { false }
         }.count == 1)
     }
 
@@ -258,6 +266,38 @@ import Testing
         #expect(!evidence.isEmpty && evidence.allSatisfy { $0 == 120 })
         await #expect(throws: StateStoreError.corruptJournal(line: 1)) { try await store.replay() }
         #expect(try fixture.bytes() == evidence)
+    }
+
+    @Test(arguments: [false, true])
+    func changedPriorHistoryBeforeVersionCaptureNeverAuthorizesBegin(validReplacement: Bool) async throws {
+        let fixture = try Fixture(), initial = try await fixture.open(), started = Self.record()
+        try await initial.append(started)
+        let original = try fixture.bytes()
+        var changed = original
+        if validReplacement {
+            // A different UUID preserves length and valid JSON while erasing an unresolved identity.
+            let old = Data(started.id.uuid.uuidString.utf8)
+            let range = try #require(changed.range(of: old))
+            changed.replaceSubrange(range, with: Data(OperationID().uuid.uuidString.utf8))
+        } else { changed[changed.startIndex] = 120 }
+        let replacement = changed
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            try #require(lseek(fd, 0, SEEK_SET) == 0)
+            try StateFileIO.writeAll(fd, replacement, name: .journal)
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        do {
+            _ = try await store.begin(.startEnvironment, for: EnvironmentID())
+            Issue.record("Changed prior history must not authorize a new operation")
+        } catch {
+            guard case .journalWriteUncertain = error else {
+                Issue.record("A post-write refusal must report an uncertain outcome")
+                return
+            }
+        }
+        let evidence = try fixture.bytes()
+        #expect(evidence.starts(with: replacement) && evidence.count > original.count)
+        #expect(evidence != original)
     }
 
     @Test func extraBytesBeforeVersionCaptureNeverAuthorizeBegin() async throws {
