@@ -130,12 +130,15 @@ public actor StateStore {
     /// Observing these records is not proof of their durability or any mutation's outcome.
     public func replay() throws(StateStoreError) -> JournalReplay {
         var enteredBody = false
+        var completedBody = false
         do {
             let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
                                                 didObserve: { journalWasObserved = true },
                                                 didIdentify: { journalObservation.identify($0) }) {
                 enteredBody = true
-                return try journalObservation.refreshed($0, read: hooks.journalRead)
+                let candidate = try journalObservation.refreshed($0, read: hooks.journalRead)
+                completedBody = true
+                return candidate
             }
             guard candidate != nil || !journalWasObserved else {
                 throw StateStoreError.fileUnreadable(name: .journal)
@@ -145,7 +148,11 @@ public actor StateStore {
             journal = candidate ?? StateJournalCache()
             return journal.replay
         } catch {
-            if !enteredBody && journalWasObserved { journalObservation.recordUnreadFailure() }
+            // A parsed candidate cannot settle uncertainty from a later binding failure.
+            // Parse failures retain their own raw evidence rather than taking this path.
+            if journalWasObserved && (!enteredBody || completedBody) {
+                journalObservation.recordUnreadFailure()
+            }
             journal = StateJournalCache()
             throw error
         }
