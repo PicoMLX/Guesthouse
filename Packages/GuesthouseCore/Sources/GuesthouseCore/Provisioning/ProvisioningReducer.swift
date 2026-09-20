@@ -134,11 +134,13 @@ public enum ProvisioningReducer: Sendable {
 
         case (.inProgress(let current), .checkpointReached(let id, let checkpoint)),
              (.needsUserAction(let current, _), .checkpointReached(let id, let checkpoint)),
-             (.unknownOutcome(let current, _), .checkpointReached(let id, let checkpoint)):
+             (.unknownOutcome(let current, _), .checkpointReached(let id, let checkpoint)),
+             (.recoverableFailure(_, .some(let current)), .checkpointReached(let id, let checkpoint)):
             // A paused operation resumes as soon as the user does the out-of-app step, which can
             // be before the GUI reports it; refusing its checkpoint would drop a reached one.
             // The same operation may answer while an inspection is pending. Its validated
             // callback supersedes that inspection, whose earlier sample is now obsolete.
+            // A failed inspection also leaves that operation unsettled and able to answer.
             try requireSame(current, id)
             guard checkpoint.stage == stage else { throw .stageMismatch(expected: stage, actual: checkpoint.stage) }
             let write = try mint()
@@ -179,7 +181,8 @@ public enum ProvisioningReducer: Sendable {
 
         case (.inProgress(let current), .operationFailed(let id, let error)),
              (.needsUserAction(let current, _), .operationFailed(let id, let error)),
-             (.unknownOutcome(let current, _), .operationFailed(let id, let error)):
+             (.unknownOutcome(let current, _), .operationFailed(let id, let error)),
+             (.recoverableFailure(_, .some(let current)), .operationFailed(let id, let error)):
             // A reported failure is not proof that the operation can no longer mutate.
             // Keep its identity through persistence/retry, regardless of the error category;
             // only correlated inspection may settle it or resume monitoring (MVP-PLAN.md §3).
@@ -187,12 +190,14 @@ public enum ProvisioningReducer: Sendable {
             return at(.recoverableFailure(error, interrupted: current))
 
         case (.inProgress(let current), .operationCanceled(let id)),
-             (.unknownOutcome(let current, _), .operationCanceled(let id)):
+             (.unknownOutcome(let current, _), .operationCanceled(let id)),
+             (.recoverableFailure(_, .some(let current)), .operationCanceled(let id)):
             try requireSame(current, id)
             return at(.canceled)
 
         case (.inProgress(let current), .userActionRequired(let id, let error)),
-             (.unknownOutcome(let current, _), .userActionRequired(let id, let error)):
+             (.unknownOutcome(let current, _), .userActionRequired(let id, let error)),
+             (.recoverableFailure(_, .some(let current)), .userActionRequired(let id, let error)):
             try requireSame(current, id)
             return at(.needsUserAction(id, error))
 
