@@ -103,6 +103,24 @@ import Testing
         #expect(try fixture.names().count == 2)
     }
 
+    @Test(arguments: [
+        #""provisioning":[],"provisioning":[]"#,
+        #""provisioning":[],"provisio\u006eing":[]"#,
+        #""extra":{"items":[{"value":1,"value":2}]}"#
+    ])
+    func ambiguousSavedMembersPreserveOriginalBytes(members: String) throws {
+        let fixture = try Fixture()
+        let encoded = try JSONEncoder().encode(EnvironmentsSnapshot.empty)
+        let original = Data(("{" + members + ",").utf8) + Data(encoded.dropFirst())
+        try original.write(to: fixture.snapshot)
+        #expect(throws: StateStoreError.corruptSnapshot) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor,
+                createTemporary: { _, _, _, _ in Issue.record("Created over ambiguous state"); return -1 })
+        }
+        #expect(try Data(contentsOf: fixture.snapshot) == original)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
     @Test func oneAtomicLockSpansPrivatePreparationWriteAndPublication() throws {
         let fixture = try Fixture()
         var temporary: URL?, barriers: [StateStoreError.File] = []
