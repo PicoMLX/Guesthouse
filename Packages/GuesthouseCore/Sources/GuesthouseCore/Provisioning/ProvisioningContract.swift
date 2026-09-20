@@ -142,8 +142,11 @@ public enum ProvisioningEffect: Hashable, Sendable {
     /// With an operation identity, inspect that operation globally across all stages and send
     /// `operationReconciled`. An active operation cannot be called absent merely because it
     /// is running at a different stage. Once it can no longer mutate, reconcile the reserved
-    /// stage and report `quiescent`. Without an identity, inspect the stage and send `reconciled`.
-    /// Either inspection may report `inspectionFailed`; uncertainty never authorizes a restart.
+    /// stage and report `quiescent`. Without an identity, inspect the owning environment's
+    /// app-managed mutations before sending `reconciled`: a stage-local absence cannot settle
+    /// an unidentified start elsewhere. Either inspection may report `inspectionFailed`;
+    /// uncertainty never authorizes a restart. The coordinator must establish this evidence;
+    /// constructing an outcome value is not an inspection.
     case inspectActualState(ProvisioningStage, EffectToken, operation: OperationID?)
     /// Write the checkpoint to the journal, then send `checkpointPersisted` or
     /// `checkpointPersistenceFailed`.
