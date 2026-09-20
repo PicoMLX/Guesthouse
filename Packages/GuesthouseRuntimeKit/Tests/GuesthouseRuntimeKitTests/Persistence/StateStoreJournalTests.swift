@@ -7,6 +7,35 @@ import Testing
 
 /// Retains #57's append/recovery/durability cases with runtime-owned fixtures, not host/VM work.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreJournalTests {
+    @Test(arguments: [false, true])
+    func initialPreparationFailureCannotAuthorizeTruncatedJournal(firstAppend: Bool) async throws {
+        let fixture = try Fixture(), fail = Mutex(true), writes = Mutex(0), started = Self.record()
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { fd, name in
+            if fail.withLock({ $0 }) { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }, journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        try fixture.write(JSONEncoder().encode(started) + Data([10]))
+        if firstAppend {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) { try await store.replay() }
+        }
+        try fixture.write(Data())
+        fail.withLock { $0 = false }
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+        }
+        #expect(writes.withLock { $0 } == 0)
+        #expect(try fixture.bytes().isEmpty)
+    }
+
     @Test(arguments: [false, true], [false, true])
     func initialReadFailureCannotAuthorizeLaterBegin(firstAppend: Bool, truncate: Bool) async throws {
         let fixture = try Fixture(), attempts = Mutex(0), started = Self.record()
