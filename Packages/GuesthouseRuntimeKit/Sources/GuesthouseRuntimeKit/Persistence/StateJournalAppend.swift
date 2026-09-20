@@ -26,9 +26,8 @@ enum StateJournalAppend {
             return try anchor.withDescriptor { directory in
                 guard let candidate = try StateFileEntry.withDescriptor(
                     in: directory, access: .writeJournal, requireExisting: requireExisting,
-                    permissionBarrier: hooks.permission,
+                    permissionBarrier: hooks.permission, didOpen: didOpen,
                     validateDirectory: { try anchor.verifyCurrent(version: $0) }, body: { descriptor in
-                    didOpen()
                     let current = try cached.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
                     if current.unterminatedRecord { line.insert(0x0A, at: line.startIndex) }
@@ -52,15 +51,19 @@ enum StateJournalAppend {
                     catch { throw StateStoreError.fileUnwritable(name: .journal) }
                     try requireLength(descriptor, expected: expectedLength)
                     let written = try StateFileIO.version(descriptor, name: .journal)
+                    try requireBytes(descriptor, from: current.byteCount, expected: line)
+                    try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     let directoryVersion = try anchor.verifyCurrent()
                     try synchronize(descriptor, name: .journal, barrier: hooks.journalFile)
                     try requireLength(descriptor, expected: expectedLength)
+                    try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     // Every record needs an entry barrier, even when the journal already
                     // exists: a restore can reattach the same inode before our write.
                     try synchronize(directory, name: .stateDirectory, barrier: hooks.directory)
                     try requireLength(descriptor, expected: expectedLength)
+                    try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     return try current.appending(record, bytes: line.count, version: written)
@@ -70,6 +73,14 @@ enum StateJournalAppend {
         } catch {
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
             throw error
+        }
+    }
+
+    /// Verify the actual written range, including a required separator, before publishing an
+    /// OperationID/cache. Equal length/version alone cannot attest the append's contents.
+    private static func requireBytes(_ descriptor: Int32, from offset: Int, expected: Data) throws(StateStoreError) {
+        guard try StateFileIO.readAll(descriptor, from: off_t(offset), name: .journal) == expected else {
+            throw .fileUnwritable(name: .journal)
         }
     }
 

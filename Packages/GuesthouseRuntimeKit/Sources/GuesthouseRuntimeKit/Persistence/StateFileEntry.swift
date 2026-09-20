@@ -22,12 +22,13 @@ extension StateDirectoryAnchor {
         _ access: StateFileAccess,
         protection: StateFileEntry.Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
+        didOpen: () -> Void = {},
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
             try StateFileEntry.withDescriptor(in: directory, access: access,
                 protection: protection,
-                permissionBarrier: permissionBarrier,
+                permissionBarrier: permissionBarrier, didOpen: didOpen,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
         }
     }
@@ -44,6 +45,7 @@ enum StateFileEntry {
         in directory: Int32, access: StateFileAccess, requireExisting: Bool = false,
         protection: Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier,
+        didOpen: () -> Void = {},
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
@@ -102,6 +104,9 @@ enum StateFileEntry {
             throw access.failure
         }
         defer { close(descriptor) } // Closing the sole open description also releases its lock.
+        // Opening is already an observation, even if structure, locking or protection fails.
+        // No descriptor escapes; this cannot imply validated contents or durability.
+        didOpen()
         do {
             // Refuse FIFOs/directories/links before a lock or metadata repair. NONBLOCK keeps
             // opening an unexpected FIFO from waiting for a peer before this inspection.
