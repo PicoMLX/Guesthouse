@@ -29,6 +29,7 @@ enum StateJournalAppend {
                 guard let candidate = try StateFileEntry.withDescriptor(
                     in: directory, access: .writeJournal, requireExisting: requireExisting,
                     permissionBarrier: hooks.permission, didObserve: didObserve,
+                    didIdentify: { observation.identify($0) },
                     validateDirectory: { try anchor.verifyCurrent(version: $0) }, body: { descriptor in
                     let current = try observation.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
