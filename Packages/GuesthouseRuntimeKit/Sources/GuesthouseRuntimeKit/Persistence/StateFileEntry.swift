@@ -37,17 +37,19 @@ extension StateDirectoryAnchor {
 /// This serializes cooperating stores, not arbitrary same-user namespace changes.
 enum StateFileEntry {
     static func withDescriptor<Result>(
-        in directory: Int32, access: StateFileAccess,
+        in directory: Int32, access: StateFileAccess, requireExisting: Bool = false,
         permissionBarrier: StateFileProtection.Barrier,
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
-        let flags = (access.creates ? O_RDWR | O_CREAT : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        // Once a journal was observed, disappearance must not silently create a new history.
+        let flags = (access.creates ? O_RDWR : O_RDONLY)
+            | (access.creates && !requireExisting ? O_CREAT : 0) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         var descriptor = openat(directory, access.name, flags, 0o600)
         // Retained bounded retry for a transient missing entry during creation. No bytes are
         // truncated and no VM/Git mutation is retried. Missing read-only files remain absent.
         var remaining = 4
-        while descriptor < 0, access.creates, errno == ENOENT, remaining > 0 {
+        while descriptor < 0, access.creates, !requireExisting, errno == ENOENT, remaining > 0 {
             remaining -= 1
             descriptor = openat(directory, access.name, flags, 0o600)
         }
