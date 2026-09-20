@@ -50,7 +50,19 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private nonisolated let configuration = Mutex(Configuration())
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
+
+    /// What a `hostPreflight` query answers with. A ready report by default, so a preview or a
+    /// test that never scripts one sees the wizard proceed; `setHostPreflight` scripts a blocked
+    /// or warning report the same way a status is scripted.
+    private var hostPreflight = PreflightCheck.run(snapshot: HostProbeSnapshot(
+        cpuArchitecture: .appleSilicon, operatingSystemVersion: SemanticVersion([99]),
+        physicalMemoryBytes: .max, powerSource: .externalPower, disk: .available(bytes: .max),
+        codexDesktop: .installed(version: nil, build: nil)
+    ), now: Date(timeIntervalSince1970: 1_800_000_000))
     private var canceledOperations: Set<OperationID> = []
+    /// Operations a producer of this fake is still running: accepted, and not yet at their
+    /// terminal event. Their status stops naming them on that event, never earlier.
+    private var liveOperations: Set<OperationID> = []
     /// Where a recorded request falls in the order the requests were *made*, which is the order
     /// their turn tickets were taken in rather than the order they reached `receivedRequests`.
     ///
@@ -118,6 +130,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         versionInfo = info
     }
 
+    /// Scripts the report the next `hostPreflight` query answers with.
+    public func setHostPreflight(_ report: PreflightReport) { hostPreflight = report }
+
     public func status(of id: EnvironmentID) -> EnvironmentStatus? {
         statuses[id]
     }
@@ -154,7 +169,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         let scenario = binding.scenario
 
         switch request {
-        case .runtimeVersion, .environmentStatus:
+        case .runtimeVersion, .hostPreflight, .environmentStatus:
             advanceTurn()
             await pause()
             switch scenario {
@@ -169,6 +184,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             case .succeed:
                 if case .environmentStatus(let id) = request {
                     continuation.yield(.status(statuses[id] ?? EnvironmentStatus(environmentID: id, vm: .notFound, readiness: .checking)))
+                } else if case .hostPreflight = request {
+                    continuation.yield(.hostPreflight(hostPreflight))
                 } else {
                     continuation.yield(.runtimeVersion(versionInfo))
                 }
@@ -180,29 +197,43 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             advanceTurn()
             await pause()
             switch scenario {
+            // A cancellation request that fails, hangs or loses its session fails as *its own*
+            // request: `id` names the operation it was aimed at, which the production router
+            // tracks separately as the cancellation target and never reports as the failed
+            // request's operation. Naming it here would let a fake-backed consumer read a
+            // refused cancellation as the target's terminal or interrupted outcome. The
+            // request may still have taken effect on the way out, so it is a mutation.
             case .disconnect:
                 // The request never took effect: the reservation is released, so a later
                 // consumer-driven cancellation is recorded as the request it is.
                 releaseReservation(of: id)
-                continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, operationID: id, mayHaveMutated: true))
+                continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, mayHaveMutated: true))
             case .fail(_, let error):
                 releaseReservation(of: id)
-                continuation.yield(.failed(id, error))
+                continuation.yield(.failed(binding.seededOperationID ?? OperationID(), error))
                 continuation.finish()
             case .hang:
                 while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
                 releaseReservation(of: id)
-                continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, operationID: id, mayHaveMutated: true))
+                continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, mayHaveMutated: true))
             case .succeed(_, let status):
                 canceledOperations.insert(id)
                 // This request took effect, so a consumer cancellation its reservation
                 // suppressed stays suppressed even if another reserved request later fails.
                 suppressedCancellations.removeValue(forKey: id)
-                // A scripted post-cancellation status is applied first: the canceled
-                // operation is no longer in flight for any environment, including one the
-                // scripted status still names.
-                if let status { statuses[status.environmentID] = status }
-                clearInFlight(id)
+                // The acknowledgment only says the request was taken: the target is still in
+                // flight until its own producer observes the cancellation and emits its terminal
+                // event, which is where the status stops naming it. Clearing it here would let a
+                // status query in that window report an unsettled mutation as complete
+                // (AGENTS.md: an interrupted operation's outcome is unknown until inspected).
+                if let status {
+                    statuses[status.environmentID] = liveOperations.contains(id)
+                        ? settingOperation(id, on: status) : status
+                }
+                // An operation no producer of this fake is running — one a seeded status reports
+                // as recovered — has no terminal event coming: the acknowledgment is the only thing
+                // that can settle it, and the scripted status must not keep naming it.
+                if !liveOperations.contains(id) { clearInFlight(id) }
                 // Acknowledge this cancel request, separately from the target's terminal event.
                 continuation.yield(.completed(binding.seededOperationID ?? OperationID()))
                 continuation.finish()
@@ -229,18 +260,18 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // Cancellation is re-checked after the pause: an operation cancelled while the
             // fake was waiting must not report success, and it stays in flight until its own
             // terminal event, so a status query never sees an idle environment mid-stream.
-            guard !cancelled(id, continuation) else { return }
+            guard !(await cancelled(id, continuation)) else { return }
             if let status {
                 // The scripted status is stored with the operation still in flight, since it
                 // does not end until `completed`: a status query during the pause below must
                 // not see an idle environment.
-                let stored = settingOperation(status.inFlightOperation ?? id, on: status)
+                let stored = settingOperation(id, on: status)
                 statuses[status.environmentID] = stored
                 // The stored copy is what is emitted, so a consumer applying stream events
                 // and a status query agree about the operation still being in flight.
                 continuation.yield(.status(stored))
                 await pause()
-                guard !cancelled(id, continuation) else { return }
+                guard !(await cancelled(id, continuation)) else { return }
             }
             clearInFlight(id)
             continuation.yield(.completed(id))
@@ -251,7 +282,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 guard await progress(id, phase, continuation) else { return }
             }
             await pause()
-            guard !cancelled(id, continuation) else { return }
+            guard !(await cancelled(id, continuation)) else { return }
             // A failed operation is no longer in flight for any environment.
             clearInFlight(id)
             continuation.yield(.failed(id, error))
@@ -261,7 +292,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             while !Task.isCancelled, !canceledOperations.contains(id) {
                 try? await Task.sleep(for: .milliseconds(5))
             }
-            recordImplicitCancellation(of: id)
+            await recordImplicitCancellation(of: id)
             clearInFlight(id)
             continuation.yield(.failed(id, .canceled))
             continuation.finish()
@@ -274,7 +305,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // A consumer that went away during the pause cancelled the operation, exactly as
             // in the other branches: it is recorded and ends as canceled rather than leaving
             // a seeded operation in flight behind a connection loss nobody is listening for.
-            guard !cancelled(id, continuation) else { return }
+            guard !(await cancelled(id, continuation)) else { return }
             continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, operationID: id, mayHaveMutated: true))
         }
     }
@@ -282,16 +313,16 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     /// Emits one phase. Returns false if the consumer or a `cancelOperation` canceled meanwhile.
     private func progress(_ id: OperationID, _ phase: ProgressPhase, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async -> Bool {
         await pause()
-        guard !cancelled(id, continuation) else { return false }
+        guard !(await cancelled(id, continuation)) else { return false }
         continuation.yield(.progress(id, phase))
         return true
     }
 
     /// Whether the operation was cancelled, by the consumer or by a `cancelOperation`. Ends
     /// the stream with `canceled` when it was, so every suspension point answers the same way.
-    private func cancelled(_ id: OperationID, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) -> Bool {
+    private func cancelled(_ id: OperationID, _ continuation: AsyncThrowingStream<RuntimeEvent, any Error>.Continuation) async -> Bool {
         guard Task.isCancelled || canceledOperations.contains(id) else { return false }
-        recordImplicitCancellation(of: id)
+        await recordImplicitCancellation(of: id)
         // A cancelled operation is no longer in flight either, however it was cancelled.
         clearInFlight(id)
         continuation.yield(.failed(id, .canceled))
@@ -330,6 +361,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     private func clearInFlight(_ id: OperationID) {
+        liveOperations.remove(id)
         for (environment, status) in statuses where status.inFlightOperation == id {
             statuses[environment] = settingOperation(nil, on: status)
         }
@@ -343,13 +375,14 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     /// Records every accepted operation, including when no status was scripted. Its baseline
     /// remains uncertain/checking until an observation establishes the VM's actual state.
     private func markInFlight(_ id: OperationID, for request: RuntimeRequest) {
+        liveOperations.insert(id)
         switch request {
         case .startEnvironment(let environment, _), .stopEnvironment(let environment, _), .importXcode(let environment, _):
             let status = statuses[environment] ?? EnvironmentStatus(
                 environmentID: environment, vm: .uncertain(reason: .inspectionFailed), readiness: .checking
             )
             statuses[environment] = settingOperation(id, on: status)
-        case .runtimeVersion, .environmentStatus, .cancelOperation:
+        case .runtimeVersion, .hostPreflight, .environmentStatus, .cancelOperation:
             break
         }
     }
@@ -361,7 +394,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     ///
     /// The synthetic request takes a ticket like any other, so it cannot overtake a `send`
     /// that was made before the consumer went away.
-    private func recordImplicitCancellation(of id: OperationID) {
+    private func recordImplicitCancellation(of id: OperationID) async {
         guard Task.isCancelled, !canceledOperations.contains(id) else { return }
         // One snapshot gives the suppression a position relative to concurrent sends. Taking
         // the reservation and ticket separately could move it behind a send between those reads.
@@ -386,7 +419,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         }
         canceledOperations.insert(id)
         let ticket = nextTicket()
-        Task { await self.appendCancellation(of: id, ticket: ticket) }
+        // The producer retains the operation until its ticketed bookkeeping is complete.
+        // A detached append would expose terminal cleanup while the log still omitted it.
+        await appendCancellation(of: id, ticket: ticket)
     }
 
     private nonisolated func nextTicket() -> UInt64 {

@@ -6,10 +6,12 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct FakeRuntimeBackendBaselineTests {
     let environment = EnvironmentID(), operation = OperationID()
 
-    @Test func successRetainsIdentityThroughProgressAndImmutableStatus() async throws {
+    @Test(arguments: [false, true])
+    func successRetainsIdentityThroughProgressAndImmutableStatus(foreignID: Bool) async throws {
         let backend = FakeRuntimeBackend()
         let phase = ProgressPhase(kind: .startingVM)
-        let status = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready)
+        let status = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready,
+                                       inFlightOperation: foreignID ? OperationID() : nil)
         await backend.useOperationID(operation, forNext: "startEnvironment")
         await backend.script("startEnvironment", .succeed(phases: [phase], status: status))
         let request = RuntimeRequest.startEnvironment(environment, StartOptions())
@@ -17,7 +19,8 @@ import Testing
         let inFlight = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready,
                                          inFlightOperation: operation)
         #expect(events == [.accepted(operation), .progress(operation, phase), .status(inFlight), .completed(operation)])
-        #expect(await backend.status(of: environment) == status)
+        #expect(await backend.status(of: environment) ==
+                EnvironmentStatus(environmentID: environment, vm: .running, readiness: .ready))
         #expect(await backend.receivedRequests == [request])
     }
 
@@ -38,6 +41,22 @@ import Testing
         let absent = EnvironmentStatus(environmentID: environment, vm: .notFound, readiness: .checking)
         #expect(try await collect(backend.send(.environmentStatus(environment))) == [.status(absent)])
         #expect(await backend.receivedRequests == [.runtimeVersion, .environmentStatus(environment)])
+    }
+
+    @Test func hostPreflightAnswersWithTheScriptedReportAndNeverAnOperation() async throws {
+        let backend = FakeRuntimeBackend()
+        // Unscripted, the fake reports a host that can proceed, so a preview or a wizard test
+        // that never scripts one is not blocked by an answer it did not ask for.
+        let ready = try #require(try await collect(backend.send(.hostPreflight)).first)
+        guard case .hostPreflight(let report) = ready else { Issue.record("expected a report, got \(ready)"); return }
+        #expect(report.isComplete && report.canProceed)
+        // A scripted report is answered verbatim: a blocked host is what the wizard has to show.
+        let blocked = PreflightCheck.run(snapshot: HostProbeSnapshot(), now: Date(timeIntervalSince1970: 0))
+        await backend.setHostPreflight(blocked)
+        #expect(try await collect(backend.send(.hostPreflight)) == [.hostPreflight(blocked)])
+        #expect(!blocked.canProceed)
+        // A query, like the version and status queries: no operation identity is invented.
+        #expect(await backend.receivedRequests == [.hostPreflight, .hostPreflight])
     }
 
     @Test func disconnectionDistinguishesQueriesFromAcceptedMutations() async throws {
@@ -68,6 +87,45 @@ import Testing
         #expect(try await iterator.next() == .failed(operation, .canceled))
         #expect(try await iterator.next() == nil)
         #expect(await backend.receivedRequests == [.startEnvironment(environment, StartOptions()), .cancelOperation(operation)])
+    }
+
+    @Test func aCanceledOperationStaysInFlightUntilItsOwnTerminalEvent() async throws {
+        let backend = FakeRuntimeBackend(), acknowledgment = OperationID()
+        await backend.useOperationID(operation, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .hang)
+        var target = backend.send(.startEnvironment(environment, StartOptions())).makeAsyncIterator()
+        try #require(try await target.next() == .accepted(operation))
+        // The scripted post-cancellation status still names the operation, as a runtime's would
+        // while the target winds down: the acknowledgment must not rewrite it.
+        let winding = EnvironmentStatus(environmentID: environment, vm: .running, readiness: .checking,
+                                        inFlightOperation: operation)
+        await backend.useOperationID(acknowledgment, forNext: "cancelOperation")
+        await backend.script("cancelOperation", .succeed(status: winding))
+        #expect(try await collect(backend.send(.cancelOperation(operation))) == [.completed(acknowledgment)])
+        // Whatever a query sees between the acknowledgment and the terminal event, it is one
+        // of two settled shapes — never a status that dropped the operation before it ended.
+        let observed = await backend.status(of: environment)
+        #expect(observed == winding || observed?.inFlightOperation == nil)
+        #expect(try await target.next() == .failed(operation, .canceled))
+        #expect(await backend.status(of: environment)?.inFlightOperation == nil, "the target's own terminal event is what clears it")
+    }
+
+    @Test func aRefusedCancellationFailsAsItsOwnRequestNotAsTheTarget() async throws {
+        let backend = FakeRuntimeBackend(), refusal = OperationID()
+        await backend.useOperationID(operation, forNext: "startEnvironment")
+        await backend.script("startEnvironment", .hang)
+        var target = backend.send(.startEnvironment(environment, StartOptions())).makeAsyncIterator()
+        try #require(try await target.next() == .accepted(operation))
+        await backend.useOperationID(refusal, forNext: "cancelOperation")
+        await backend.script("cancelOperation", .fail(error: .invalidRequest(.unsupportedOperation)))
+        #expect(try await collect(backend.send(.cancelOperation(operation))) == [.failed(refusal, .invalidRequest(.unsupportedOperation))])
+        await backend.script("cancelOperation", .disconnect())
+        // No operation of its own, but a mutation that may have gone out: the production
+        // router keeps the target as the cancellation target, not as this failure's operation.
+        await #expect(throws: RuntimeSessionFailure(cause: .connectionLost, mayHaveMutated: true)) {
+            try await collect(backend.send(.cancelOperation(operation)))
+        }
+        #expect(await backend.status(of: environment)?.inFlightOperation == operation, "the target is untouched by a cancellation that failed")
     }
 
     private func collect(_ stream: AsyncThrowingStream<RuntimeEvent, any Error>) async throws -> [RuntimeEvent] {

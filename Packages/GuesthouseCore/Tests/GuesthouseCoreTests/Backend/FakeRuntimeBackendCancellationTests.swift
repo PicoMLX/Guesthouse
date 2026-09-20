@@ -13,9 +13,12 @@ import Testing
         let request = RuntimeRequest.startEnvironment(environment, StartOptions())
         let consumer = try await start(backend, environment: environment, operation: operation)
         defer { consumer.cancel() }
+        // A refused cancellation fails as its own request, never as the target's outcome.
+        let refusal = OperationID()
+        await backend.useOperationID(refusal, forNext: "cancelOperation")
         await backend.script("cancelOperation", .fail(error: .invalidRequest(.unsupportedOperation)))
         #expect(try await collect(backend.send(.cancelOperation(operation))) ==
-                [.failed(operation, .invalidRequest(.unsupportedOperation))])
+                [.failed(refusal, .invalidRequest(.unsupportedOperation))])
 
         consumer.cancel()
         _ = try? await consumer.value
@@ -51,6 +54,9 @@ import Testing
         canceller.cancel()
         _ = try? await canceller.value
         try await waitFor(.cancelOperation(operation), in: &finished)
+        // This inserts the earlier consumer abandonment into the fake's request ledger.
+        // It does not call send or run another cancellation producer; the synthetic entry
+        // records the consumer action that already finished before the status query.
         #expect(await backend.receivedRequests == [
             request, .cancelOperation(operation), .cancelOperation(operation), .environmentStatus(environment)
         ])
@@ -112,7 +118,7 @@ import Testing
         let canceller = Task { try await collect(pending) }
         defer { canceller.cancel() }
         await backend.script("cancelOperation", .disconnect())
-        await #expect(throws: RuntimeSessionFailure(cause: .connectionLost, operationID: operation, mayHaveMutated: true)) {
+        await #expect(throws: RuntimeSessionFailure(cause: .connectionLost, mayHaveMutated: true)) {
             try await collect(backend.send(.cancelOperation(operation)))
         }
         try await waitFor(.cancelOperation(operation), in: &finished)
