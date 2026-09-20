@@ -5,6 +5,52 @@ import Testing
 @testable import GuesthouseRuntimeKit
 
 @Suite struct StateSnapshotPublicationTests {
+    @Test(arguments: [false, true])
+    func separateAnchorsCannotPublishDuringEitherBarrier(afterRename: Bool) throws {
+        let fixture = try Fixture()
+        let other = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+        var visited = false
+        let competing: StateFileProtection.Barrier = { _, _ in
+            visited = true
+            let names = try fixture.names()
+            #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try StateSnapshotPublication.save(.empty, to: other,
+                    createTemporary: { _, _, _, _ in Issue.record("Competing publication created a temporary"); return -1 })
+            }
+            #expect(try fixture.names() == names)
+        }
+        if afterRename {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, directoryBarrier: competing)
+        } else {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: competing)
+        }
+        #expect(visited)
+        // Ownership was released after success, not retained by an actor/anchor lifetime.
+        try StateSnapshotPublication.save(.empty, to: other)
+    }
+
+    @Test func publicationOwnershipPrecedesPreflightAndReleasesOnFailure() throws {
+        let fixture = try Fixture()
+        let other = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+        let original = Data("corrupt evidence".utf8)
+        try original.write(to: fixture.snapshot)
+        try fixture.anchor.withPublicationOwnership { _ in
+            #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try StateSnapshotPublication.save(.empty, to: other)
+            }
+            // A nested use of the same open description must not unlock its outer owner.
+            #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try fixture.anchor.withPublicationOwnership { _ in }
+            }
+            try requireContended(fixture.state)
+        }
+        #expect(throws: StateStoreError.corruptSnapshot) {
+            try StateSnapshotPublication.save(.empty, to: other)
+        }
+        try fixture.anchor.withPublicationOwnership { _ in }
+        #expect(try Data(contentsOf: fixture.snapshot) == original)
+    }
+
     @Test func firstSaveAndReplacementUseNewPrivateInodes() throws {
         let fixture = try Fixture()
         try StateSnapshotPublication.save(.empty, to: fixture.anchor)
