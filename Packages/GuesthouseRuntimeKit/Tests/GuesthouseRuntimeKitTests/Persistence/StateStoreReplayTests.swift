@@ -7,6 +7,45 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
+    @Test func budgetCountsFinalLinesBeforeDecoding() throws {
+        let exact = Data(repeating: 10, count: StateJournalCache.maximumRecords)
+        try StateJournalCache.validateBudget(exact)
+        for bytes in [exact + Data([10]), exact + Data([123]),
+                      Data(repeating: 0, count: StateFileIO.maximumJournalBytes + 1)] {
+            #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try StateJournalCache.validateBudget(bytes)
+            }
+        }
+    }
+
+    @Test func oversizedJournalRefusesBeforeCallingTheReader() async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { _, _ in
+            reads.withLock { $0 += 1 }; return Data()
+        }))
+        try fixture.write(Data())
+        let fd = Darwin.open(fixture.journal.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        try #require(ftruncate(fd, off_t(StateFileIO.maximumJournalBytes + 1)) == 0)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        #expect(reads.withLock { $0 } == 0)
+        var info = stat()
+        try #require(fstat(fd, &info) == 0)
+        #expect(info.st_size == off_t(StateFileIO.maximumJournalBytes + 1))
+    }
+
+    @Test func injectedOversizedReadCannotBypassBudget() async throws {
+        let fixture = try Fixture()
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { _, _ in
+            Data(repeating: 0, count: StateFileIO.maximumJournalBytes + 1)
+        }))
+        let original = try Self.lines([Self.record()])
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        #expect(try fixture.bytes() == original)
+    }
+
     @Test func missingJournalReturnsEmptyWithoutCreatingFiles() async throws {
         let fixture = try Fixture(), store = try await fixture.open()
         let replay = try await store.replay()

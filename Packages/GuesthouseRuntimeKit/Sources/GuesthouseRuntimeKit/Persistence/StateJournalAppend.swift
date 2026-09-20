@@ -29,6 +29,10 @@ enum StateJournalAppend {
                     let current = try cached.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
                     if current.unterminatedRecord { line.insert(0x0A, at: line.startIndex) }
+                    // Capacity refusal must precede any repair/write attempt. Do not produce
+                    // a journal that our bounded replay cannot read on the next launch.
+                    try requireCapacity(bytes: current.byteCount, records: current.history.records.count,
+                                        additionalBytes: line.count)
                     if current.truncatedTail {
                         writeAttempted = true
                         guard ftruncate(descriptor, off_t(current.byteCount)) == 0 else {
@@ -59,6 +63,14 @@ enum StateJournalAppend {
         } catch {
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
             throw error
+        }
+    }
+
+    static func requireCapacity(bytes: Int, records: Int, additionalBytes: Int) throws(StateStoreError) {
+        guard bytes >= 0, bytes <= StateFileIO.maximumJournalBytes,
+              additionalBytes >= 0, additionalBytes <= StateFileIO.maximumJournalBytes - bytes,
+              records >= 0, records < StateJournalCache.maximumRecords else {
+            throw .fileUnwritable(name: .journal)
         }
     }
 

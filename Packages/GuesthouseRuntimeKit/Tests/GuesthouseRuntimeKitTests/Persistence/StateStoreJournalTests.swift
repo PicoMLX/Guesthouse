@@ -7,6 +7,42 @@ import Testing
 
 /// Retains #57's append/recovery/durability cases with runtime-owned fixtures, not host/VM work.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreJournalTests {
+    @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
+        let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
+        try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
+        for values in [(limit - 10, records - 1, 11), (0, records, 1), (Int.max, 0, 1), (0, 0, Int.max)] {
+            #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try StateJournalAppend.requireCapacity(bytes: values.0, records: values.1, additionalBytes: values.2)
+            }
+        }
+    }
+
+    @Test(arguments: [Data("not json".utf8), Data("{]".utf8), Data([123, 34, 0xff]), Data([123, 0])])
+    func impossibleTailRefusesAppendWithoutErasingEvidence(tail: Data) async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), started = Self.record()
+        try await store.append(started)
+        let original = try fixture.bytes() + tail
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+            try await store.append(Self.record(matching: started, outcome: .completed))
+        }
+        #expect(try fixture.bytes() == original)
+    }
+
+    @Test func fullJournalRefusesBeforeRepairingItsTornTail() async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), started = Self.record()
+        let encoder = JSONEncoder()
+        var original = try encoder.encode(started)
+        // Valid JSON whitespace fills the byte budget without fabricating thousands of operations.
+        original.append(Data(repeating: 32, count: StateFileIO.maximumJournalBytes - original.count - 2))
+        original.append(contentsOf: [10, 123])
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+            try await store.append(Self.record(matching: started, outcome: .completed))
+        }
+        #expect(try fixture.bytes() == original)
+    }
+
     @Test(arguments: JournalOperation.allCases)
     func beginPersistsEveryOperationBeforeReturning(operation: JournalOperation) async throws {
         let fixture = try Fixture(), store = try await fixture.open(), environment = EnvironmentID()
