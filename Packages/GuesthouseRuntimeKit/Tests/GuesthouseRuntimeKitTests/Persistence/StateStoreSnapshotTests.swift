@@ -9,6 +9,59 @@ import Testing
 /// Actual actor composition of the retained #57 snapshot contracts, not just helper tests.
 /// Every root is an isolated fixture; never call the default App Support factory here.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreSnapshotTests {
+    @Test(arguments: [false, true])
+    func observedSnapshotDisappearanceNeverBecomesEmptyOrRecreated(observedBySave: Bool) async throws {
+        let fixture = try Fixture(), writer = try await fixture.open(), value = try sample()
+        try await writer.saveSnapshot(value)
+        let reader = try await fixture.open(), store = observedBySave ? writer : reader
+        if !observedBySave { #expect(try await store.loadSnapshot() == value) }
+        try await requireMissingSnapshotRefusal(store, fixture: fixture)
+    }
+
+    @Test(arguments: [false, true])
+    func failedSnapshotReadOrOverwriteStillRemembersEvidence(throughSave: Bool) async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try fixture.write(Data("corrupt snapshot evidence".utf8))
+        if throughSave {
+            await #expect(throws: StateStoreError.corruptSnapshot) { try await store.saveSnapshot(.empty) }
+        } else {
+            await #expect(throws: StateStoreError.corruptSnapshot) { try await store.loadSnapshot() }
+        }
+        try await requireMissingSnapshotRefusal(store, fixture: fixture)
+    }
+
+    @Test func failedVisiblePublicationStillRemembersSnapshot() async throws {
+        let fixture = try Fixture()
+        let store = try await fixture.open(hooks: StateStoreHooks(directory: { _, _ in
+            throw StateStoreError.fileUnwritable(name: .stateDirectory)
+        }))
+        await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) {
+            try await store.saveSnapshot(.empty)
+        }
+        try await requireMissingSnapshotRefusal(store, fixture: fixture)
+    }
+
+    @Test func deniedSnapshotOpenStillRemembersEvidence() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try fixture.write(Data("unreadable evidence".utf8))
+        try #require(chmod(fixture.snapshot.path, 0) == 0)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) { try await store.loadSnapshot() }
+        #expect(try fixture.mode(fixture.snapshot) == 0)
+        try #require(chmod(fixture.snapshot.path, 0o600) == 0)
+        try await requireMissingSnapshotRefusal(store, fixture: fixture)
+    }
+
+    private func requireMissingSnapshotRefusal(_ store: StateStore, fixture: Fixture) async throws {
+        let evidence = try fixture.bytes(), retained = fixture.state.appending(path: "retained-evidence")
+        try #require(rename(fixture.snapshot.path, retained.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) { try await store.loadSnapshot() }
+            await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await store.saveSnapshot(.empty) }
+        }
+        #expect(try fixture.names() == ["retained-evidence"])
+        #expect(try Data(contentsOf: retained) == evidence)
+    }
+
     @Test func openingAndMissingReadDoNotCreateStateFiles() async throws {
         let fixture = try Fixture()
         let barriers = Mutex<[StateStoreError.File]>([])
