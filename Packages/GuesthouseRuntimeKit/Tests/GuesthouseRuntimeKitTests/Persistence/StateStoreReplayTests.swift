@@ -141,6 +141,23 @@ import Testing
         #expect(try Data(contentsOf: fixture.state.appending(path: "retained")) == bytes)
     }
 
+    @Test func preBodyFailureStillRecordsJournalObservation() async throws {
+        let fixture = try Fixture()
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { _, _ in
+            throw StateStoreError.fileUnwritable(name: .journal)
+        }))
+        let bytes = try Self.lines([Self.record()])
+        try fixture.write(bytes)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) { try await store.replay() }
+        let retained = fixture.state.appending(path: "retained")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try Data(contentsOf: retained) == bytes)
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+    }
+
     @Test func failedParseDoesNotEraseJournalObservation() async throws {
         let fixture = try Fixture(), store = try await fixture.open()
         try fixture.write(Data("not json".utf8))
