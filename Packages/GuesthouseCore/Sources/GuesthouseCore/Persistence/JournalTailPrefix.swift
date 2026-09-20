@@ -3,13 +3,15 @@ import Foundation
 /// Recognizes prefixes of closed journal encoder shapes, not arbitrary broken JSON.
 /// Framing proves neither write origin nor mutation outcome. Unknown tails remain evidence.
 struct JournalTailPrefix {
+    private enum Identity: Hashable, Sendable { case operation, environment }
     private indirect enum Shape: Sendable {
-        case object([String: Shape]), choice([Shape]), literal([UInt8]), uuid, unsigned, signed, date
+        case object([String: Shape]), choice([Shape]), literal([UInt8]), uuid(Identity?), unsigned, signed, date
     }
     private enum Stop: Error { case incomplete, invalid }
     private static let shape: Shape? = try? makeShape()
     private let bytes: [UInt8]
     private var index = 0
+    private var identities: [Identity: [UInt8]] = [:]
 
     static func accepts(_ data: Data) -> Bool {
         // These closed types emit ASCII; invalid/partial UTF-8 and NUL are not encoder tails.
@@ -81,18 +83,22 @@ struct JournalTailPrefix {
             var possible = false
             for choice in choices {
                 var candidate = self
-                do { try candidate.value(choice); index = candidate.index; return }
+                do { try candidate.value(choice); self = candidate; return }
                 catch Stop.incomplete { possible = true }
                 catch {}
             }
             if possible { throw Stop.incomplete }
             throw Stop.invalid
         case .literal(let expected): try literal(expected)
-        case .uuid:
+        case .uuid(let identity):
             _ = try peek()
+            let start = index
             for position in 0..<38 {
                 guard index < bytes.count else { throw Stop.incomplete }
                 let byte = bytes[index]
+                if let identity, let previous = identities[identity] {
+                    guard byte == previous[position] else { throw Stop.invalid }
+                }
                 if position == 0 || position == 37 {
                     guard byte == 34 else { throw Stop.invalid }
                 } else if [9, 14, 19, 24].contains(position) {
@@ -102,6 +108,7 @@ struct JournalTailPrefix {
                 }
                 index += 1
             }
+            if let identity { identities[identity] = Array(bytes[start..<index]) }
         case .unsigned, .signed, .date:
             _ = try peek()
             let start = index
@@ -149,11 +156,11 @@ struct JournalTailPrefix {
 
     /// Derive enum keys/associated labels from Codable, without a second wire-format schema.
     /// Numeric and UUID leaves vary; every other token must match an encoded sample.
-    private static func encodedShape<T: Encodable>(_ value: T) throws -> Shape {
+    private static func encodedShape<T: Encodable>(_ value: T, identity: Identity? = nil) throws -> Shape {
         func shape(_ object: Any) throws -> Shape {
             if let fields = object as? [String: Any] { return .object(try fields.mapValues { try shape($0) }) }
             if let string = object as? String {
-                if UUID(uuidString: string) != nil { return .uuid }
+                if UUID(uuidString: string) != nil { return .uuid(identity) }
                 return .literal(Array(try JSONEncoder().encode(string)))
             }
             if let number = object as? NSNumber { return number.int64Value < 0 ? .signed : .unsigned }
@@ -178,12 +185,33 @@ struct JournalTailPrefix {
         ] + GuesthouseError.Tool.allCases.map { .toolMismatch(tool: $0) }
           + GuesthouseError.InvalidRequestReason.allCases.map { .invalidRequest($0) }
         let outcomes: [JournalRecord.Outcome] = [.started, .completed, .unknown, .notApplied]
-            + ProvisioningStage.allCases.map { .checkpoint($0) } + errors.map { .failed($0) }
-        return .object([
-            "format": .literal(Array(String(JournalRecord.currentFormat).utf8)),
-            "id": .uuid, "environmentID": .uuid, "timestamp": .date,
-            "operation": .choice(try JournalOperation.allCases.map { try encodedShape($0) }),
-            "outcome": .choice(try outcomes.map { try encodedShape($0) })
-        ])
+            + errors.map { .failed($0) }
+        func record(operation: Shape, outcome: Shape) -> Shape {
+            .object([
+                "format": .literal(Array(String(JournalRecord.currentFormat).utf8)),
+                "id": .uuid(.operation), "environmentID": .uuid(.environment), "timestamp": .date,
+                "operation": operation, "outcome": outcome
+            ])
+        }
+        let ordinary = record(
+            operation: .choice(try JournalOperation.allCases.map { try encodedShape($0) }),
+            outcome: .choice(try outcomes.map { outcome in
+                let identity: Identity?
+                switch outcome {
+                case .failed(.operationOutcomeUnknown): identity = .operation
+                case .failed(.guestNotReachable), .failed(.hostKeyChanged): identity = .environment
+                default: identity = nil
+                }
+                return try encodedShape(outcome, identity: identity)
+            })
+        )
+        // A possible encoder continuation must also satisfy JournalRecord's cross-field
+        // contract. Checkpoints bind both stages; error identities bind byte-for-byte in
+        // either field order, including an interruption inside the second UUID.
+        let checkpoints = try ProvisioningStage.allCases.map { stage in
+            record(operation: try encodedShape(JournalOperation.provision(stage: stage)),
+                   outcome: try encodedShape(JournalRecord.Outcome.checkpoint(stage)))
+        }
+        return .choice([ordinary] + checkpoints)
     }
 }

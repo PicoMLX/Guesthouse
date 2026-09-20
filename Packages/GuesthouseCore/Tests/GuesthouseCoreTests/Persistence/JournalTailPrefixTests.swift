@@ -11,6 +11,52 @@ import Testing
         try checkEveryCut(record)
     }
 
+    @Test(arguments: [JournalOperation.startEnvironment, .provision(stage: .preflight)], [false, true])
+    func inconsistentCheckpointTailCannotAuthorizeRepair(operation: JournalOperation, outcomeFirst: Bool) throws {
+        let operationJSON = String(decoding: try JSONEncoder().encode(operation), as: UTF8.self)
+        let outcomeJSON = String(decoding: try JSONEncoder().encode(JournalRecord.Outcome.checkpoint(.ready)), as: UTF8.self)
+        let fields = ["\"operation\":" + operationJSON, "\"outcome\":" + outcomeJSON]
+        let ordered = outcomeFirst ? Array(fields.reversed()) : fields
+        let tail = Data(("{" + ordered.joined(separator: ",")).utf8)
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
+    }
+
+    @Test(arguments: ["operationOutcomeUnknown", "guestNotReachable", "hostKeyChanged"], [false, true])
+    func inconsistentEmbeddedIdentityCannotAuthorizeRepair(error: String, outcomeFirst: Bool) throws {
+        let original = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let different = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let operation = OperationID(uuid: original), environment = EnvironmentID(uuid: original)
+        let reportedOperation = OperationID(uuid: different), reportedEnvironment = EnvironmentID(uuid: different)
+        let outcome: JournalRecord.Outcome
+        let key: String, identity: Data
+        switch error {
+        case "operationOutcomeUnknown":
+            outcome = .failed(.operationOutcomeUnknown(reportedOperation))
+            key = "id"; identity = try JSONEncoder().encode(operation)
+        case "guestNotReachable":
+            outcome = .failed(.guestNotReachable(reportedEnvironment))
+            key = "environmentID"; identity = try JSONEncoder().encode(environment)
+        default:
+            outcome = .failed(.hostKeyChanged(reportedEnvironment))
+            key = "environmentID"; identity = try JSONEncoder().encode(environment)
+        }
+        let fields = ["\"" + key + "\":" + String(decoding: identity, as: UTF8.self),
+                      "\"outcome\":" + String(decoding: try JSONEncoder().encode(outcome), as: UTF8.self)]
+        let ordered = outcomeFirst ? Array(fields.reversed()) : fields
+        let tail = Data(("{" + ordered.joined(separator: ",")).utf8)
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
+        // The conflicting UUID is already impossible before its closing quote/braces.
+        let lastQuote = try #require(tail.lastIndex(of: 34))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) {
+            try JournalReplayChunk(Data(tail.prefix(upTo: lastQuote)))
+        }
+        let consistent = Data(String(decoding: tail, as: UTF8.self)
+            .replacingOccurrences(of: different.uuidString, with: original.uuidString).utf8)
+        for length in 1...consistent.count {
+            #expect(try JournalReplayChunk(Data(consistent.prefix(length))).truncatedTail)
+        }
+    }
+
     @Test func outcomeShapesRetainUUIDAndNumericPayloadPrefixes() throws {
         let id = OperationID(), environment = EnvironmentID()
         let outcomes: [JournalRecord.Outcome] = [
