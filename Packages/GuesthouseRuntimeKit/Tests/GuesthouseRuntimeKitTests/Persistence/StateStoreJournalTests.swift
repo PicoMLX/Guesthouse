@@ -89,7 +89,7 @@ import Testing
         }
         #expect(try fixture.bytes().isEmpty)
         try fixture.write(original)
-        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         #expect(try fixture.bytes() == original)
     }
 
@@ -168,11 +168,42 @@ import Testing
             }
         }
         #expect(try fixture.bytes() == old)
-        try fixture.write(evidence) // Explicit fixture restoration, not a mutation retry.
-        #expect(try await store.replay().records == [first, second])
-        await #expect(throws: StateStoreError.operationUnresolved(second.id)) {
+        try fixture.write(evidence) // Restoration cannot erase the observed rollback.
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
             try await store.begin(.startEnvironment, for: second.environmentID)
         }
+    }
+
+    @Test(arguments: [false, true])
+    func conflictingReadCannotBeForgottenAfterRestoration(throughAppend: Bool) async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let first = Self.record(), conflicting = Self.record()
+        let original = try JSONEncoder().encode(first) + Data([10])
+        let rewritten = try JSONEncoder().encode(conflicting) + Data([10])
+        try fixture.write(original)
+        _ = try await store.replay()
+        try fixture.write(rewritten)
+        if throughAppend {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        try fixture.write(original)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: conflicting.environmentID)
+            }
+        }
+        #expect(reads.withLock { $0 } == 2)
+        #expect(try fixture.bytes() == original)
     }
 
     @Test(arguments: [false, true])
