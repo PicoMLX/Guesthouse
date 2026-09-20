@@ -18,9 +18,9 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         let first = fixture.request()
-        let firstIncoming = try await next(fixture.incoming)
+        let firstIncoming = try await fixture.nextIncoming()
         let second = fixture.request()
-        let secondIncoming = try await next(fixture.incoming)
+        let secondIncoming = try await fixture.nextIncoming()
         let firstContext = try #require(firstIncoming.context)
         let secondContext = try #require(secondIncoming.context)
         #expect(firstIncoming.secondCreationRejected)
@@ -39,11 +39,11 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         try fixture.client.send(message: XPCDictionary())
-        let oneWay = try await next(fixture.incoming)
+        let oneWay = try await fixture.nextIncoming()
         #expect(oneWay.context == nil)
         #expect(oneWay.secondCreationRejected)
         let reply = fixture.request()
-        let context = try #require(try await next(fixture.incoming).context)
+        let context = try #require(try await fixture.nextIncoming().context)
         try fixture.send(context, bytes: Data([7]))
         #expect(try await next(reply) == Data([7]))
     }
@@ -53,7 +53,7 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         let reply = fixture.request()
-        let context = try #require(try await next(fixture.incoming).context)
+        let context = try #require(try await fixture.nextIncoming().context)
         let expected: RawRuntimeFrame.Failure = count == 0 ? .malformed : .oversized
         #expect(throws: expected) {
             try context.takeReply(payload: Data(repeating: 0, count: count), protocolVersion: fixtureVersion)
@@ -72,7 +72,7 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         let reply = fixture.request()
-        let context = try #require(try await next(fixture.incoming).context)
+        let context = try #require(try await fixture.nextIncoming().context)
         let bytes = Data(repeating: 32, count: RawRuntimeFrame.maximumPayloadBytes)
         try fixture.send(context, bytes: bytes)
         #expect(try await next(reply) == bytes)
@@ -82,7 +82,7 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         _ = fixture.request()
-        let context = try #require(try await next(fixture.incoming).context)
+        let context = try #require(try await fixture.nextIncoming().context)
         // Deliberately discard the claimed frame without sending it. A caller whose send
         // failed or whose session disappeared likewise cannot acquire a second context.
         let claimed = try context.takeReply(payload: Data([6]), protocolVersion: fixtureVersion)
@@ -94,7 +94,7 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         let reply = fixture.request()
-        let context = try #require(try await next(fixture.incoming).context)
+        let context = try #require(try await fixture.nextIncoming().context)
         let claims = Mutex(0)
         let failures = Mutex(0)
         DispatchQueue.concurrentPerform(iterations: 32) { _ in
@@ -114,7 +114,7 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         let fixture = try Fixture()
         defer { fixture.cancel() }
         let reply = fixture.request()
-        let context = try #require(try await next(fixture.incoming).context)
+        let context = try #require(try await fixture.nextIncoming().context)
         let gate = RuntimeSessionGate()
         #expect(gate.began() == 0)
         gate.refuse(.failed(OperationID(), .unauthorizedCaller))
@@ -126,6 +126,22 @@ private let fixtureVersion = Int64(RuntimeProtocolVersion.current.rawValue)
         #expect(try await next(reply) == Data([4]))
         #expect(gate.began() == nil)
         #expect(try context.takeReply(payload: Data([5]), protocolVersion: fixtureVersion) == nil)
+    }
+
+    @Test func deadlineCancellationReportsOnlyTheTimeout() async {
+        let (stream, continuation) = AsyncThrowingStream<Data, any Error>.makeStream()
+        defer { continuation.finish() }
+        await #expect(throws: FixtureFailure.timeout(.awaitingReply)) {
+            _ = try await next(stream, timeout: .milliseconds(10))
+        }
+    }
+
+    @Test func anUnexpectedEndStillFailsTheWait() async {
+        let (stream, continuation) = AsyncThrowingStream<Data, any Error>.makeStream()
+        continuation.finish()
+        await #expect(throws: FixtureFailure.streamEnded) {
+            _ = try await next(stream)
+        }
     }
 }
 
@@ -147,15 +163,31 @@ private final class Fixture: Sendable {
         // cleanup without global state. XPCSession is SDK-declared Sendable.
         let holder = SessionHolder()
         let listener = XPCListener { request in
-            request.accept { session in
-                holder.session.withLock { $0 = session }
-                return Handler(events: events)
-            }
+            holder.progress.value.withLock { $0 = .acceptingSession }
+            let handler = Handler(events: events, progress: holder.progress)
+            // Match the raw-dictionary registration used by the native frame/session
+            // fixtures. This suite tests retained reply contexts, not peer-handler setup.
+            let (decision, session) = request.accept(
+                incomingMessageHandler: { (message: XPCDictionary) -> XPCDictionary? in
+                    handler.handleIncomingRequest(message)
+                }, cancellationHandler: { error in handler.handleCancellation(error: error) }
+            )
+            holder.session.withLock { $0 = session }
+            holder.progress.value.withLock { $0 = .awaitingRequest }
+            return decision
         }
-        do { client = try XPCSession(endpoint: listener.endpoint) }
+        do {
+            client = try XPCSession(endpoint: listener.endpoint, cancellationHandler: { _ in
+                events.finish(throwing: FixtureFailure.clientCancelled)
+            })
+        }
         catch { listener.cancel(); throw error }
         self.listener = listener
         self.holder = holder
+    }
+
+    func nextIncoming() async throws -> Incoming {
+        try await next(incoming, progress: holder.progress)
     }
 
     func server() throws -> XPCSession {
@@ -191,30 +223,57 @@ private final class Fixture: Sendable {
 
 private final class SessionHolder: Sendable {
     let session = Mutex<XPCSession?>(nil)
+    let progress = ProgressProbe()
 }
 
-private struct Handler: XPCPeerHandler {
+private final class ProgressProbe: Sendable {
+    let value = Mutex(FixtureProgress.awaitingConnection)
+}
+
+private struct Handler: Sendable {
     let events: AsyncThrowingStream<Incoming, any Error>.Continuation
+    let progress: ProgressProbe
 
     func handleIncomingRequest(_ message: XPCDictionary) -> XPCDictionary? {
+        progress.value.withLock { $0 = .creatingFirstContext }
         let context = RawRuntimeReplyContext(receivedMessage: message)
+        progress.value.withLock { $0 = .checkingSecondContext }
         let second = RawRuntimeReplyContext(receivedMessage: message)
+        progress.value.withLock { $0 = .deliveringIncoming }
         events.yield(Incoming(context: context, secondCreationRejected: second == nil))
         return nil // Context was consumed: never let the native API create a second reply.
     }
+
+    func handleCancellation(error: XPCRichError) {
+        events.finish(throwing: FixtureFailure.serverCancelled)
+    }
 }
 
-private enum FixtureFailure: Error { case timeout, transport }
+private enum FixtureProgress: Sendable, Equatable {
+    case awaitingConnection, acceptingSession, awaitingRequest, creatingFirstContext, checkingSecondContext
+    case deliveringIncoming, awaitingReply
+}
+private enum FixtureFailure: Error, Equatable {
+    case timeout(FixtureProgress), transport, clientCancelled, serverCancelled, streamEnded
+}
 
-private func next<T: Sendable>(_ stream: AsyncThrowingStream<T, any Error>) async throws -> T {
+private func next<T: Sendable>(
+    _ stream: AsyncThrowingStream<T, any Error>, progress: ProgressProbe? = nil,
+    timeout: Duration = .seconds(5)
+) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in
         group.addTask {
             var iterator = stream.makeAsyncIterator()
-            return try #require(await iterator.next())
+            let value = try await iterator.next()
+            // Losing the deadline race cancels next(), which legitimately returns nil.
+            // Do not turn that cleanup into a second, misleading Testing issue.
+            try Task.checkCancellation()
+            guard let value else { throw FixtureFailure.streamEnded }
+            return value
         }
         group.addTask {
-            try await Task.sleep(for: .seconds(5))
-            throw FixtureFailure.timeout
+            try await Task.sleep(for: timeout)
+            throw FixtureFailure.timeout(progress?.value.withLock { $0 } ?? .awaitingReply)
         }
         defer { group.cancelAll() }
         return try #require(await group.next())
