@@ -46,7 +46,9 @@ import Testing
         }
     }
 
-    @Test(arguments: [1.001, -1.001, 1e20, 1e-20, Double.leastNonzeroMagnitude, Double.greatestFiniteMagnitude])
+    @Test(arguments: [1.001, -1.001, 1e20, 1e-20, Double.leastNonzeroMagnitude, Double.greatestFiniteMagnitude,
+                      792938037.3147308, -792938037.3147308,
+                      Double(792938037.3147308).nextDown, Double(792938037.3147308).nextUp])
     func canonicalDateCutsRemainRecoverable(value: Double) throws {
         try checkEveryCut(JournalRecord(id: OperationID(), environmentID: EnvironmentID(),
                                        operation: .startEnvironment,
@@ -62,6 +64,16 @@ import Testing
     @Test func fractionalEOFIsNotProofThatTheNumberWasComplete() throws {
         // These bytes can come from a genuine interruption while encoding 1.001.
         #expect(try JournalReplayChunk(Data("{\"timestamp\":1.00".utf8)).truncatedTail)
+    }
+
+    @Test func interruptedDateCanRequireADigitOtherThanZeroOrOne() throws {
+        let timestamp = Date(timeIntervalSinceReferenceDate: 792938037.3147308)
+        let encoded = String(decoding: try JSONEncoder().encode(timestamp), as: UTF8.self)
+        let prefix = "792938037.314730"
+        try #require(encoded.hasPrefix(prefix) && encoded.count > prefix.count)
+        let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
+        #expect(chunk.truncatedTail)
+        #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
     }
 
     @Test(arguments: ["id", "environmentID"])
