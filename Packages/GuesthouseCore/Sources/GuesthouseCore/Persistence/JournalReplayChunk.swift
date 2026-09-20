@@ -66,11 +66,9 @@ public struct JournalReplayChunk: Sendable {
     }
 
     private static func decode(_ line: Data.SubSequence, number: Int, using decoder: JSONDecoder) throws(StateStoreError) -> JournalRecord? {
-        // Complete JSON with ambiguous envelope keys is evidence, never a torn write.
-        // Validate grammar first so a genuinely incomplete final line retains tail handling.
-        if (try? JSONSerialization.jsonObject(with: line, options: .fragmentsAllowed)) != nil {
-            try requireUnambiguousMembers(in: line, number: number, using: decoder)
-        }
+        // Scan original keys independently of value materialization. JSONDecoder may ignore
+        // unknown numbers that JSONSerialization cannot represent (e.g. 1e9999).
+        try requireUnambiguousMembers(in: line, number: number, using: decoder)
         if let declared = try? decoder.decode(RecordFormat.self, from: line), !JournalRecord.canRead(declared.format) {
             // Positive but unsupported includes prototype format 1, not only newer releases.
             // Neither is safe to skip or truncate, even when this final line has no newline.
@@ -97,7 +95,9 @@ public struct JournalReplayChunk: Sendable {
         while index < bytes.count {
             switch bytes[index] {
             case 123: objects.append([])
-            case 125: objects.removeLast() // JSON grammar was validated before this scan.
+            case 125:
+                guard !objects.isEmpty else { return } // The decoder/prefix recognizer rejects bad grammar.
+                objects.removeLast()
             case 34:
                 let start = index
                 index += 1
@@ -105,7 +105,9 @@ public struct JournalReplayChunk: Sendable {
                     if bytes[index] == 92 { index += 1 }
                     index += 1
                 }
-                guard index < bytes.count else { throw .corruptJournal(line: number) }
+                // An incomplete string is left for the closed tail-prefix recognizer. This
+                // scanner grants no grammar validity or permission to truncate anything.
+                guard index < bytes.count else { return }
                 if !objects.isEmpty {
                     var next = index + 1
                     while next < bytes.count && [9, 10, 13, 32].contains(bytes[next]) { next += 1 }
