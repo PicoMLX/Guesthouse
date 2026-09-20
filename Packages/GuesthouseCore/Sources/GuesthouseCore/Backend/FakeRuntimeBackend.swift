@@ -265,7 +265,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 // The scripted status is stored with the operation still in flight, since it
                 // does not end until `completed`: a status query during the pause below must
                 // not see an idle environment.
-                let stored = settingOperation(status.inFlightOperation ?? id, on: status)
+                let stored = settingOperation(id, on: status)
                 statuses[status.environmentID] = stored
                 // The stored copy is what is emitted, so a consumer applying stream events
                 // and a status query agree about the operation still being in flight.
