@@ -210,4 +210,41 @@ import Testing
         let restored = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         #expect(Set(restored.keys) == ["format", "id", "environmentID", "operation", "timestamp", "outcome"])
     }
+
+    @Test(arguments: [false, true])
+    func nestedRecoveryDuplicatesCannotSelectSettlement(terminated: Bool) throws {
+        let start = record(.started), prefix = try JournalReplayChunk(line(start))
+        let identity = String(decoding: try JSONEncoder().encode(id), as: UTF8.self)
+        let environment = String(decoding: try JSONEncoder().encode(self.environment), as: UTF8.self)
+        let other = String(decoding: try JSONEncoder().encode(EnvironmentID()), as: UTF8.self)
+        let errors = [#"{"canceled":{}}"#, #"{"runtimeMissing":{}}"#]
+        let members = [#""_0""#, #""\u005f0""#]
+        for key in members {
+            for pair in [(errors[0], errors[1]), (errors[1], errors[0])] {
+                let outcome = "{\"failed\":{\"_0\":" + pair.0 + "," + key + ":" + pair.1 + "}}"
+                try refuse(outcome)
+            }
+            for pair in [(environment, other), (other, environment)] {
+                try refuse("{\"failed\":{\"_0\":{\"guestNotReachable\":{\"_0\":" + pair.0
+                           + "," + key + ":" + pair.1 + "}}}}")
+            }
+        }
+        func refuse(_ outcome: String) throws {
+            let json = "{\"format\":2,\"id\":" + identity + ",\"environmentID\":" + environment
+                + ",\"operation\":{\"startEnvironment\":{}},\"timestamp\":0,\"outcome\":" + outcome + "}"
+            #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+                try JournalReplayChunk(Data((json + (terminated ? "\n" : "")).utf8), following: prefix.history)
+            }
+            #expect(prefix.history.inFlight[id] == start)
+        }
+    }
+
+    @Test func nestedObjectsInArraysHaveSeparateMemberNamespaces() throws {
+        let start = record(.started)
+        let encoded = String(decoding: try line(start, terminated: false), as: UTF8.self)
+        let valid = encoded.dropLast() + #", "extension":[{"same":1},{"same":2}], "text":"\"same\":3"}"#
+        #expect(try JournalReplayChunk(Data(valid.utf8)).history.records == [start])
+        let invalid = encoded.dropLast() + #", "extension":[{"same":1,"sa\u006de":2}]}"#
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(Data(invalid.utf8)) }
+    }
 }
