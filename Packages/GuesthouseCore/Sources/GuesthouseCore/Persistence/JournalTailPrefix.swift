@@ -186,7 +186,10 @@ struct JournalTailPrefix {
         for digit in 0...9 {
             if canonicalDate(token + String(digit))?.hasPrefix(token) == true { return true }
         }
-        for marker in token.contains("e") ? [""] : ["e"] {
+        // Rounding can require a further mantissa digit AND an exponent. Checking either
+        // extension alone misses genuine prefixes of e.g. 4.6728494007670807e+303.
+        let markers = token.contains("e") ? [""] : ["e"] + (0...9).map { String($0) + "e" }
+        for marker in markers {
             for exponent in 0...324 {
                 for sign in ["", "-", "+"] {
                     if canonicalDate(token + marker + sign + String(exponent))?.hasPrefix(token) == true { return true }
