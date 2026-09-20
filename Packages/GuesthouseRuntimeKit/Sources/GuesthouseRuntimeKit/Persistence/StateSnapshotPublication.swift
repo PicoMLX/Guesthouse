@@ -13,6 +13,7 @@ enum StateSnapshotPublication {
     static func save(
         _ snapshot: EnvironmentsSnapshot, to anchor: StateDirectoryAnchor,
         migrator: SnapshotMigrator = .standard,
+        requireExisting: Bool = false, didObserve: () -> Void = {},
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         fileBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         directoryBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
@@ -36,7 +37,11 @@ enum StateSnapshotPublication {
         // Refuse existing unsupported/corrupt bytes as well as unsafe file structure.
         // A valid in-memory value is not permission to erase an unreadable saved version.
         try anchor.withPublicationOwnership { directory in
-            let existing = try existingVersion(in: anchor, migrator: migrator, permissionBarrier: permissionBarrier)
+            let existing = try existingVersion(in: anchor, migrator: migrator,
+                permissionBarrier: permissionBarrier, didObserve: didObserve)
+            guard existing != nil || !requireExisting else {
+                throw StateStoreError.fileUnwritable(name: .snapshot)
+            }
             let name = temporaryPrefix + UUID().uuidString
             let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK
             // open(2) obtains this advisory lock atomically with creation. No unlocked
@@ -65,6 +70,8 @@ enum StateSnapshotPublication {
             guard renameat(directory, name, directory, StateFileAccess.readSnapshot.name) == 0 else {
                 throw StateStoreError.fileUnwritable(name: .snapshot)
             }
+            // Visibility is already evidence even if the following verification/barrier fails.
+            didObserve()
             let published = try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .readSnapshot)
             let directoryVersion = try anchor.verifyCurrent()
             try synchronize(directory, name: .stateDirectory, using: directoryBarrier)
@@ -85,9 +92,9 @@ enum StateSnapshotPublication {
 
     private static func existingVersion(
         in anchor: StateDirectoryAnchor, migrator: SnapshotMigrator,
-        permissionBarrier: StateFileProtection.Barrier
+        permissionBarrier: StateFileProtection.Barrier, didObserve: () -> Void
     ) throws(StateStoreError) -> StateFileVersion? {
-        try anchor.withFile(.readSnapshot, permissionBarrier: permissionBarrier, body: { descriptor in
+        try anchor.withFile(.readSnapshot, permissionBarrier: permissionBarrier, didObserve: didObserve, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try migrator.migrate(raw)
             do { _ = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
