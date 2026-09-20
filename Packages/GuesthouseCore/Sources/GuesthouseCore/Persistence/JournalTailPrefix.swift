@@ -98,8 +98,7 @@ struct JournalTailPrefix {
                 } else if [9, 14, 19, 24].contains(position) {
                     guard byte == 45 else { throw Stop.invalid }
                 } else {
-                    guard (48...57).contains(byte) || (65...70).contains(byte)
-                            || (97...102).contains(byte) else { throw Stop.invalid }
+                    guard (48...57).contains(byte) || (65...70).contains(byte) else { throw Stop.invalid }
                 }
                 index += 1
             }
@@ -109,7 +108,6 @@ struct JournalTailPrefix {
             while index < bytes.count, ![9, 10, 13, 32, 44, 125].contains(bytes[index]) { index += 1 }
             let token = String(decoding: bytes[start..<index], as: UTF8.self)
             let integer = #"^-?(0|[1-9][0-9]*)$"#
-            let decimal = #"^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$"#
             switch shape {
             case .unsigned:
                 guard token.range(of: #"^(0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
@@ -117,17 +115,36 @@ struct JournalTailPrefix {
             case .signed:
                 if token == "-", index == bytes.count { throw Stop.incomplete }
                 guard token.range(of: integer, options: .regularExpression) != nil,
-                      Int(token) != nil else { throw Stop.invalid }
+                      let number = Int(token), String(number) == token else { throw Stop.invalid }
             default:
-                guard token.range(of: decimal, options: .regularExpression) != nil,
-                      let number = Double(token), number.isFinite else {
-                    guard index == bytes.count,
-                          (token + "0").range(of: decimal, options: .regularExpression) != nil,
-                          let completion = Double(token + "0"), completion.isFinite else { throw Stop.invalid }
-                    throw Stop.incomplete
+                guard Self.canonicalDate(token) == token ||
+                      (index == bytes.count && Self.hasDateCompletion(token)) else { throw Stop.invalid }
+            }
+        }
+    }
+
+    private static func canonicalDate(_ token: String) -> String? {
+        guard let number = Double(token), number.isFinite,
+              let data = try? JSONEncoder().encode(Date(timeIntervalSinceReferenceDate: number)) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func hasDateCompletion(_ token: String) -> Bool {
+        // An EOF token may end inside a number: 1.00 is a real prefix of 1.001.
+        // Require an encoder-produced witness, not just a permissive decimal regex.
+        // Binary64's shortest finite spelling fits within 32 ASCII bytes.
+        guard token.utf8.count < 32 else { return false }
+        for suffix in ["0", "1"] {
+            if canonicalDate(token + suffix)?.hasPrefix(token) == true { return true }
+        }
+        if token.contains("e") {
+            for exponent in 0...324 {
+                for sign in ["", "-", "+"] {
+                    if canonicalDate(token + sign + String(exponent))?.hasPrefix(token) == true { return true }
                 }
             }
         }
+        return false
     }
 
     /// Derive enum keys/associated labels from Codable, without a second wire-format schema.
