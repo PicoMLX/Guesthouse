@@ -22,15 +22,18 @@ enum StateJournalAppend {
         // This flag surrounds the COMPLETE borrow, including its outer post-checks.
         // Tail truncation also changes disk state; a later failure must not claim no write.
         var writeAttempted = false
+        var observedEntry = false, enteredBody = false
         do {
             // Shares the snapshot/first-volume-selection transaction boundary. Contention
             // refuses before opening or creating a journal; it never waits or retries.
             return try anchor.withPublicationOwnership(for: .journal) { directory in
                 guard let candidate = try StateFileEntry.withDescriptor(
                     in: directory, access: .writeJournal, requireExisting: requireExisting,
-                    permissionBarrier: hooks.permission, didObserve: didObserve,
+                    permissionBarrier: hooks.permission,
+                    didObserve: { observedEntry = true; didObserve() },
                     didIdentify: { observation.identify($0) },
                     validateDirectory: { try anchor.verifyCurrent(version: $0) }, body: { descriptor in
+                    enteredBody = true
                     let current = try observation.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
                     if current.unterminatedRecord { line.insert(0x0A, at: line.startIndex) }
@@ -77,6 +80,7 @@ enum StateJournalAppend {
                 return candidate
             }
         } catch {
+            if observedEntry && !enteredBody { observation.recordUnreadFailure() }
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
             throw error
         }

@@ -59,6 +59,12 @@ struct StateJournalCache {
             didFailRead()
             throw .fileUnreadable(name: .journal)
         }
+        var after = stat()
+        guard fresh.count == Int(info.st_size), fstat(descriptor, &after) == 0,
+              after.st_size == info.st_size, StateFileVersion(after) == StateFileVersion(info) else {
+            didFailRead()
+            throw .fileUnreadable(name: .journal)
+        }
         guard fresh.starts(with: requiringPrefix) else { throw .fileUnreadable(name: .journal) }
         didRead(fresh) // Bounded raw evidence survives record-budget or decoding failure.
         try Self.validateBudget(fresh)
@@ -92,6 +98,8 @@ struct StateJournalObservation {
     private var prefix = Data()
     private var unboundObservation = false
     private var unreadObservation = false
+
+    mutating func recordUnreadFailure() { unreadObservation = true }
 
     /// Called before preparation/body entry. Unknown binding cannot later become a new
     /// journal implicitly; it requires explicit recovery outside this owner's lifetime.

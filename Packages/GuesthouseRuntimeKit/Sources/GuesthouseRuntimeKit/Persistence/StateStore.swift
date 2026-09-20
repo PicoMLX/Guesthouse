@@ -129,10 +129,12 @@ public actor StateStore {
     /// inspected recovery; complete invalid/unsupported records refuse the whole result.
     /// Observing these records is not proof of their durability or any mutation's outcome.
     public func replay() throws(StateStoreError) -> JournalReplay {
+        var enteredBody = false
         do {
             let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
                                                 didObserve: { journalWasObserved = true },
                                                 didIdentify: { journalObservation.identify($0) }) {
+                enteredBody = true
                 return try journalObservation.refreshed($0, read: hooks.journalRead)
             }
             guard candidate != nil || !journalWasObserved else {
@@ -143,6 +145,7 @@ public actor StateStore {
             journal = candidate ?? StateJournalCache()
             return journal.replay
         } catch {
+            if !enteredBody && journalWasObserved { journalObservation.recordUnreadFailure() }
             journal = StateJournalCache()
             throw error
         }

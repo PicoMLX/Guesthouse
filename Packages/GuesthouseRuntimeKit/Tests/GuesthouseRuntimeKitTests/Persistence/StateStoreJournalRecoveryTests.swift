@@ -35,7 +35,7 @@ import Testing
         #expect(try await store.replay().inFlight[started.id] == started)
     }
 
-    @Test func failedPermissionBarrierPrecedesWritingAndIsRetriedAfterVisibleRepair() async throws {
+    @Test func failedPermissionBarrierKeepsJournalUnreadDespiteVisibleRepair() async throws {
         let fixture = try Fixture(), original = try await fixture.open(), started = Self.record()
         try await original.append(started)
         let evidence = try fixture.bytes(), barriers = Mutex(0), writes = Mutex(0)
@@ -55,14 +55,14 @@ import Testing
         await #expect(throws: failure) { try await store.append(settled) }
         #expect(barriers.withLock { $0 } == 1 && writes.withLock { $0 } == 0)
         #expect(try fixture.bytes() == evidence)
-        // Retry only the inspected journal settlement; no VM/Git operation is replayed.
-        try await store.append(settled)
-        #expect(barriers.withLock { $0 } == 2 && writes.withLock { $0 } == 1)
-        #expect(try await store.replay().records == [started, settled])
+        // Repaired metadata is not evidence that unread operation bytes stayed unchanged.
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.append(settled) }
+        #expect(barriers.withLock { $0 } == 2 && writes.withLock { $0 } == 0)
+        #expect(try fixture.bytes() == evidence)
     }
 
     @Test(arguments: [StateFileAccess.readSnapshot, .readJournal])
-    func failedReadRepairIsRetriedAfterBothModeAndACLAlreadyChanged(access: StateFileAccess) async throws {
+    func failedReadRepairDoesNotClearUnreadJournalEvidence(access: StateFileAccess) async throws {
         let fixture = try Fixture(), original = try await fixture.open(), started = Self.record()
         try await Self.prepareReadFixture(access, store: original, record: started)
         let file = fixture.state.appending(path: access.name), evidence = try Data(contentsOf: file)
@@ -78,7 +78,13 @@ import Testing
         }))
         await #expect(throws: failure) { try await Self.readFixture(access, store: store, record: started) }
         #expect(barriers.withLock { $0 } == 1)
-        try await Self.readFixture(access, store: store, record: started)
+        if access == .readJournal {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await Self.readFixture(access, store: store, record: started)
+            }
+        } else {
+            try await Self.readFixture(access, store: store, record: started)
+        }
         #expect(barriers.withLock { $0 } == 2)
         #expect(try Data(contentsOf: file) == evidence)
     }

@@ -7,6 +7,47 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
+    @Test(arguments: [false, true])
+    func firstPreparationFailureCannotAcceptSameInodeChanges(truncate: Bool) async throws {
+        let fixture = try Fixture(), fail = Mutex(true), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { fd, name in
+            if fail.withLock({ $0 }) { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }, journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        try fixture.write(Self.lines([Self.record()]))
+        let identity = try fixture.identity(fixture.journal)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) { try await store.replay() }
+        let changed = truncate ? Data() : try Self.lines([Self.record()])
+        try fixture.write(changed)
+        try #require(try fixture.identity(fixture.journal) == identity)
+        fail.withLock { $0 = false }
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 0)
+        #expect(try fixture.bytes() == changed)
+    }
+
+    @Test(arguments: [false, true])
+    func shortFirstReadCannotPublishEmptyHistory(truncateFile: Bool) async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { _, _ in
+            reads.withLock { $0 += 1 }
+            if truncateFile { try fixture.write(Data()) }
+            return Data()
+        }))
+        let original = try Self.lines([Self.record()])
+        try fixture.write(original)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == (truncateFile ? Data() : original))
+    }
+
     @Test func firstCorruptReplayPinsItsWholeEvidenceBeforeDecoding() async throws {
         let fixture = try Fixture(), store = try await fixture.open()
         let original = try Self.lines([Self.record()]) + Data("not JSON\n".utf8)
@@ -370,8 +411,8 @@ import Testing
         fail.withLock { $0 = true }
         await #expect(throws: failure) { try await store.replay() }
         fail.withLock { $0 = false }
-        #expect(try await store.replay().records == [record])
-        #expect(reads.withLock { $0 } == 2)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        #expect(reads.withLock { $0 } == 1)
     }
 
     @Test(arguments: ["unchanged", "truncate", "rewrite"])
@@ -397,7 +438,7 @@ import Testing
         #expect(try fixture.bytes() == next)
     }
 
-    @Test func postReadFileReattachmentRefusesAndDiscardsTheCandidate() async throws {
+    @Test func postReadFileReattachmentKeepsTheOwnerUnread() async throws {
         let fixture = try Fixture(), reads = Mutex(0)
         let target = fixture.journal, detached = fixture.base.appending(path: "detached")
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
@@ -413,9 +454,10 @@ import Testing
         }))
         let record = Self.record(), bytes = try Self.lines([record])
         try fixture.write(bytes)
-        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) { try await store.replay() }
-        #expect(try await store.replay().records == [record])
-        #expect(reads.withLock { $0 } == 2)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 1)
         #expect(try fixture.bytes() == bytes)
     }
 
