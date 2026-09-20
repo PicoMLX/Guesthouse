@@ -38,7 +38,9 @@ public final class RuntimeClient: RuntimeBackend {
             inbox.ended(key, reason) // End callback only enqueues; never performs native cleanup.
         }
         do {
-            if !permitsOperations, request != .runtimeVersion { throw GuesthouseError.invalidRequest(.unsupportedOperation) }
+            if !permitsOperations, request != .runtimeVersion, request != .hostPreflight {
+                throw GuesthouseError.invalidRequest(.unsupportedOperation)
+            }
             let envelope = RuntimeRequestEnvelope(request: request)
             try RequestValidator.validate(envelope)
             try RequestValidator.validateEncodedSize(JSONEncoder().encode(envelope))

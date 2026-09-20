@@ -85,12 +85,16 @@ import Testing
     }
 
     @Test func inspectionCanBeRequestedFromEveryOtherStatus() throws {
-        for status in [StageStatus.notStarted, .completed(checkpoint), .recoverableFailure(.canceled, interrupted: nil), .startRejected(.canceled, resuming: nil), .cleanupRequired(.canceled, cleanup: outstanding), .persistingCheckpoint(checkpoint, operation: nil, write: outstanding), .awaitingInspection(outstanding)] {
+        for status in [StageStatus.notStarted, .completed(checkpoint), .recoverableFailure(.canceled, interrupted: nil), .startRejected(.canceled, resuming: nil), .persistingCheckpoint(checkpoint, operation: nil, write: outstanding), .awaitingInspection(outstanding)] {
             let result = try ProvisioningReducer.reduce(state(status), .inspectionRequested)
             let issued = try token(of: result.effects)
             #expect(result.state.status == .awaitingInspection(issued), "\(status.caseName)")
             #expect(result.effects == [.inspectActualState(.first, issued, operation: nil)], "\(status.caseName)")
         }
+        // Cleanup inspection must retain the live cleanup as well as the new query token.
+        let cleanup = try ProvisioningReducer.reduce(state(.cleanupRequired(.canceled, cleanup: outstanding)), .inspectionRequested)
+        #expect(cleanup.state.status == .inspectingCleanup(.canceled, cleanup: outstanding, inspection: EffectToken(2)))
+        #expect(cleanup.effects == [.inspectActualState(.first, EffectToken(2), operation: nil)])
         // An unknown outcome keeps the interrupted operation's identity while it inspects again.
         let unknown = try ProvisioningReducer.reduce(state(.unknownOutcome(operation, inspection: outstanding)), .inspectionRequested)
         #expect(unknown.state.status == .unknownOutcome(operation, inspection: EffectToken(2)))
