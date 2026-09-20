@@ -122,14 +122,31 @@ import Testing
         #expect(try Data(contentsOf: detached) == original)
     }
 
-    @Test func missingFileClearsCachedRecordsAndDoesNotRecreateIt() async throws {
-        let fixture = try Fixture(), store = try await fixture.open(), record = Self.record()
-        try fixture.write(Self.lines([record]))
-        #expect(try await store.replay().records == [record])
+    @Test(arguments: [JournalRecord.Outcome.started, .checkpoint(.preflight), .unknown])
+    func missingObservedJournalRefusesRepeatedReads(outcome: JournalRecord.Outcome) async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let started = Self.record(operation: .provision(stage: .preflight))
+        let latest = Self.record(id: started.id, environment: started.environmentID,
+                                 operation: started.operation, outcome: outcome)
+        let records = outcome == .started ? [started] : [started, latest]
+        let bytes = try Self.lines(records)
+        try fixture.write(bytes)
+        #expect(try await store.replay().records == records)
         // Preserve the fixture under another name rather than deleting its evidence.
         try #require(rename(fixture.journal.path, fixture.state.appending(path: "retained").path) == 0)
-        #expect(try await store.replay().records.isEmpty)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
         #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        #expect(try Data(contentsOf: fixture.state.appending(path: "retained")) == bytes)
+    }
+
+    @Test func failedParseDoesNotEraseJournalObservation() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try fixture.write(Data("not json".utf8))
+        await #expect(throws: StateStoreError.corruptJournal(line: 1)) { try await store.replay() }
+        try #require(rename(fixture.journal.path, fixture.state.appending(path: "retained").path) == 0)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
     }
 
     @Test func tornTailIsPreservedAndRereadFromItsFirstByte() async throws {

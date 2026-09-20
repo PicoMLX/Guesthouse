@@ -12,6 +12,8 @@ public actor StateStore {
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
     private var journal = StateJournalCache()
+    // This observation survives cache invalidation and failed parsing/post-checks.
+    private var journalWasObserved = false
     private nonisolated let queue: DispatchSerialQueue
 
     /// Native descriptor IO/flushes and advisory lock waits may block. Use Dispatch's supplied
@@ -107,7 +109,8 @@ public actor StateStore {
     public func append(_ record: JournalRecord) throws(StateStoreError) {
         do {
             // Adopt only after ALL outer file-entry and directory checks have returned.
-            journal = try StateJournalAppend.append(record, to: anchor, cached: journal, hooks: hooks)
+            journal = try StateJournalAppend.append(record, to: anchor, cached: journal, hooks: hooks,
+                requireExisting: journalWasObserved, didOpen: { journalWasObserved = true })
         } catch {
             journal = StateJournalCache()
             throw error
@@ -120,10 +123,14 @@ public actor StateStore {
     public func replay() throws(StateStoreError) -> JournalReplay {
         do {
             let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission) {
-                try journal.refreshed($0, read: hooks.journalRead)
+                journalWasObserved = true
+                return try journal.refreshed($0, read: hooks.journalRead)
             }
-            // Including missing-file resets, adoption happens only after all outer entry and
-            // directory checks. A candidate parsed before a failed post-check is not a cache.
+            guard candidate != nil || !journalWasObserved else {
+                throw StateStoreError.fileUnreadable(name: .journal)
+            }
+            // Adoption happens only after all outer entry and directory checks. Missing
+            // state is empty only before this owner has ever observed a journal.
             journal = candidate ?? StateJournalCache()
             return journal.replay
         } catch {
