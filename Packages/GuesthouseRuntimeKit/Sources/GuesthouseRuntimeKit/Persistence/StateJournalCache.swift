@@ -37,27 +37,17 @@ struct StateJournalCache {
     ) throws(StateStoreError) -> Self {
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_size >= 0 else { throw .fileUnreadable(name: .journal) }
-        let version = StateFileVersion(info)
-        var candidate = self
-        // Rewrites, replacement, permission repair and same-inode reattachment invalidate
-        // previous bytes. Only our own fully verified writes may retain a known prefix.
-        if candidate.file != version || off_t(candidate.byteCount) > info.st_size {
-            candidate = Self()
-            candidate.file = version
-        }
-        if off_t(candidate.byteCount) == info.st_size {
-            candidate.truncatedTail = false
-            // An unchanged complete record may still lack its separator. Do not clear this
-            // flag on an empty read, or a subsequent append would fuse two records.
-            return candidate
-        }
+        // Metadata timestamps are not unique content generations. Re-read the complete
+        // locked file even at equal length/version; never authorize recovery from stale bytes.
+        var candidate = Self()
+        candidate.file = StateFileVersion(info)
         let fresh: Data
-        do { fresh = try read(descriptor, off_t(candidate.byteCount)) }
+        do { fresh = try read(descriptor, 0) }
         catch let failure as StateStoreError { throw failure }
         catch { throw .fileUnreadable(name: .journal) }
-        let chunk = try JournalReplayChunk(fresh, following: candidate.history)
+        let chunk = try JournalReplayChunk(fresh)
         candidate.history = chunk.history
-        candidate.byteCount += chunk.validatedByteCount
+        candidate.byteCount = chunk.validatedByteCount
         candidate.truncatedTail = chunk.truncatedTail
         candidate.unterminatedRecord = chunk.unterminatedRecord
         return candidate

@@ -178,6 +178,19 @@ import Testing
         }
     }
 
+    @Test(arguments: ["id", "environmentID", "operation", "outcome", "timestamp", #"\u0069d"#], [false, true])
+    func duplicateRecoveryMembersCannotChooseAnOutcome(key: String, terminated: Bool) throws {
+        let start = record(.started), completed = record(.completed)
+        let prefix = try JournalReplayChunk(line(start))
+        let encoded = try #require(String(data: line(completed, terminated: false), encoding: .utf8))
+        let duplicate = ",\"" + key + "\":null}"
+        let bytes = Data((encoded.dropLast() + duplicate + (terminated ? "\n" : "")).utf8)
+        #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+            try JournalReplayChunk(bytes, following: prefix.history)
+        }
+        #expect(prefix.history.inFlight == [id: start])
+    }
+
     @Test func nestedAndQuotedFormatKeysDoNotShadowTheEnvelope() throws {
         let start = record(.started)
         let encoded = try #require(String(data: line(start, terminated: false), encoding: .utf8))
