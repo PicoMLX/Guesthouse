@@ -23,7 +23,9 @@ enum StateJournalAppend {
         // Tail truncation also changes disk state; a later failure must not claim no write.
         var writeAttempted = false
         do {
-            return try anchor.withDescriptor { directory in
+            // Shares the snapshot/first-volume-selection transaction boundary. Contention
+            // refuses before opening or creating a journal; it never waits or retries.
+            return try anchor.withPublicationOwnership(for: .journal) { directory in
                 guard let candidate = try StateFileEntry.withDescriptor(
                     in: directory, access: .writeJournal, requireExisting: requireExisting,
                     permissionBarrier: hooks.permission, didOpen: didOpen,
@@ -52,11 +54,13 @@ enum StateJournalAppend {
                     try requireLength(descriptor, expected: expectedLength)
                     let written = try StateFileIO.version(descriptor, name: .journal)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
+                    try requireHistory(descriptor, expected: current.history.records + [record])
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     let directoryVersion = try anchor.verifyCurrent()
                     try synchronize(descriptor, name: .journal, barrier: hooks.journalFile)
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
+                    try requireHistory(descriptor, expected: current.history.records + [record])
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     // Every record needs an entry barrier, even when the journal already
@@ -64,6 +68,7 @@ enum StateJournalAppend {
                     try synchronize(directory, name: .stateDirectory, barrier: hooks.directory)
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
+                    try requireHistory(descriptor, expected: current.history.records + [record])
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
                     return try current.appending(record, bytes: line.count, version: written)
@@ -82,6 +87,14 @@ enum StateJournalAppend {
         guard try StateFileIO.readAll(descriptor, from: off_t(offset), name: .journal) == expected else {
             throw .fileUnwritable(name: .journal)
         }
+    }
+
+    /// Checking only our appended range misses a rewritten prior operation. Revalidate the
+    /// complete bounded history at every publication boundary, then check binding/version.
+    private static func requireHistory(_ descriptor: Int32, expected: [JournalRecord]) throws(StateStoreError) {
+        let observed = try StateJournalCache().refreshed(descriptor)
+        guard !observed.truncatedTail, !observed.unterminatedRecord,
+              observed.history.records == expected else { throw .fileUnwritable(name: .journal) }
     }
 
     private static func requireLength(_ descriptor: Int32, expected: Int) throws(StateStoreError) {
