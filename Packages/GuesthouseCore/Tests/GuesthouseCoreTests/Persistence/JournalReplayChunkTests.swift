@@ -191,6 +191,27 @@ import Testing
         #expect(prefix.history.inFlight == [id: start])
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func ignoredUnrepresentableNumbersCannotBypassDuplicateKeys(duplicateFirst: Bool, terminated: Bool) throws {
+        let start = record(.started), prefix = try JournalReplayChunk(line(start))
+        let encoded = String(decoding: try line(record(.completed), terminated: false), as: UTF8.self)
+        let extra = #""extension":1e9999,"outcome":{"unknown":{}}"#
+        let json = duplicateFirst ? "{" + extra + "," + encoded.dropFirst()
+            : encoded.dropLast() + "," + extra + "}"
+        let bytes = Data((json + (terminated ? "\n" : "")).utf8)
+        #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+            try JournalReplayChunk(bytes, following: prefix.history)
+        }
+        #expect(prefix.history.inFlight == [id: start])
+    }
+
+    @Test func ignoredUnrepresentableNumberWithoutDuplicatesRemainsForwardCompatible() throws {
+        let start = record(.started)
+        let encoded = String(decoding: try line(start, terminated: false), as: UTF8.self)
+        let bytes = Data((encoded.dropLast() + #","extension":1e9999}"#).utf8)
+        #expect(try JournalReplayChunk(bytes).history.records == [start])
+    }
+
     @Test func nestedAndQuotedFormatKeysDoNotShadowTheEnvelope() throws {
         let start = record(.started)
         let encoded = try #require(String(data: line(start, terminated: false), encoding: .utf8))
