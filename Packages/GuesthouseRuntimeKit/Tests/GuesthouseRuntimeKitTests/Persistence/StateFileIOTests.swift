@@ -32,32 +32,35 @@ import Testing
         }
     }
 
-    @Test(arguments: [0, 1]) func snapshotBudgetAcceptsExactLimitAndRejectsOversize(extra: Int) throws {
+    @Test(arguments: [StateStoreError.File.snapshot, .journal], [0, 1])
+    func fileBudgetAcceptsExactLimitAndRejectsOversize(name: StateStoreError.File, extra: Int) throws {
         try withFile { fd, _ in
-            let size = StateFileIO.maximumSnapshotBytes + extra
+            let size = (name == .snapshot ? StateFileIO.maximumSnapshotBytes : StateFileIO.maximumJournalBytes) + extra
             try #require(ftruncate(fd, off_t(size)) == 0)
             if extra == 0 {
-                #expect(try StateFileIO.readAll(fd, from: 0, name: .snapshot).count == size)
+                #expect(try StateFileIO.readAll(fd, from: 0, name: name).count == size)
             } else {
                 var reads = 0
-                #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) {
-                    try StateFileIO.readAll(fd, from: 0, name: .snapshot) { _, _, _ in reads += 1; return 0 }
+                #expect(throws: StateStoreError.fileUnreadable(name: name)) {
+                    try StateFileIO.readAll(fd, from: 0, name: name) { _, _, _ in reads += 1; return 0 }
                 }
                 #expect(reads == 0)
             }
         }
     }
 
-    @Test func snapshotGrowthCannotBypassTheInitialSizeCheck() throws {
+    @Test(arguments: [StateStoreError.File.snapshot, .journal])
+    func fileGrowthCannotBypassTheInitialSizeCheck(name: StateStoreError.File) throws {
         try withFile { fd, _ in
             var reads = 0
-            #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) {
-                try StateFileIO.readAll(fd, from: 0, name: .snapshot) { _, _, capacity in
+            #expect(throws: StateStoreError.fileUnreadable(name: name)) {
+                try StateFileIO.readAll(fd, from: 0, name: name) { _, _, capacity in
                     reads += 1
                     return capacity // Deterministic continuously growing input, no disk mutation.
                 }
             }
-            #expect(reads == StateFileIO.maximumSnapshotBytes / (64 * 1024) + 1)
+            let limit = name == .snapshot ? StateFileIO.maximumSnapshotBytes : StateFileIO.maximumJournalBytes
+            #expect(reads == limit / (64 * 1024) + 1)
         }
     }
 
