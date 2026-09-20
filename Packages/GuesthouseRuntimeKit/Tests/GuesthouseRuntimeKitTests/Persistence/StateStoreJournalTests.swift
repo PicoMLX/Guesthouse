@@ -8,6 +8,31 @@ import Testing
 /// Retains #57's append/recovery/durability cases with runtime-owned fixtures, not host/VM work.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreJournalTests {
     @Test(arguments: [false, true])
+    func deniedJournalOpenCannotAuthorizeLaterCreation(throughReplay: Bool) async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let evidence = try JSONEncoder().encode(Self.record()) + Data([10])
+        try fixture.write(evidence)
+        try #require(chmod(fixture.journal.path, 0) == 0)
+        if throughReplay {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        } else {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        }
+        let retained = fixture.state.appending(path: "retained-evidence")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        try #require(chmod(retained.path, 0o600) == 0)
+        #expect(try Data(contentsOf: retained) == evidence)
+    }
+
+    @Test(arguments: [false, true])
     func missingObservedJournalCannotBeRecreatedAfterWriteOrReplay(throughReplay: Bool) async throws {
         let fixture = try Fixture(), store = try await fixture.open(), started = Self.record()
         if throughReplay {

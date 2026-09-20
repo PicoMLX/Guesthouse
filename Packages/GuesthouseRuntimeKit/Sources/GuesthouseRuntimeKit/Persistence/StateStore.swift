@@ -108,7 +108,7 @@ public actor StateStore {
         do {
             // Adopt only after ALL outer file-entry and directory checks have returned.
             journal = try StateJournalAppend.append(record, to: anchor, cached: journal, hooks: hooks,
-                requireExisting: journalWasObserved, didOpen: { journalWasObserved = true })
+                requireExisting: journalWasObserved, didObserve: { journalWasObserved = true })
         } catch {
             journal = StateJournalCache()
             throw error
