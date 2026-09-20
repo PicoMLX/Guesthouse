@@ -7,6 +7,25 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
+    @Test func deniedJournalOpenThenDisappearanceCannotBecomeEmpty() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let evidence = try Self.lines([Self.record()])
+        try fixture.write(evidence)
+        try #require(chmod(fixture.journal.path, 0) == 0)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        var info = stat()
+        try #require(lstat(fixture.journal.path, &info) == 0)
+        #expect(info.st_mode & 0o7777 == 0)
+        let retained = fixture.state.appending(path: "retained-evidence")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        try #require(chmod(retained.path, 0o600) == 0)
+        #expect(try Data(contentsOf: retained) == evidence)
+    }
+
     @Test func budgetCountsFinalLinesBeforeDecoding() throws {
         let exact = Data(repeating: 10, count: StateJournalCache.maximumRecords)
         try StateJournalCache.validateBudget(exact)

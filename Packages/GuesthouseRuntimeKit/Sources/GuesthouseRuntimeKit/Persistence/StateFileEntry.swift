@@ -22,11 +22,12 @@ extension StateDirectoryAnchor {
         _ access: StateFileAccess,
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         didOpen: () -> Void = {},
+        didObserve: () -> Void = {},
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
             try StateFileEntry.withDescriptor(in: directory, access: access,
-                permissionBarrier: permissionBarrier, didOpen: didOpen,
+                permissionBarrier: permissionBarrier, didOpen: didOpen, didObserve: didObserve,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
         }
     }
@@ -41,6 +42,7 @@ enum StateFileEntry {
         in directory: Int32, access: StateFileAccess, requireExisting: Bool = false,
         permissionBarrier: StateFileProtection.Barrier,
         didOpen: () -> Void = {},
+        didObserve: () -> Void = {},
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
@@ -56,7 +58,11 @@ enum StateFileEntry {
             descriptor = openat(directory, access.name, flags, 0o600)
         }
         guard descriptor >= 0 else {
-            if errno == ENOENT, !access.creates {
+            // Only a stabilized ENOENT proves absence. Other failures may hide an existing
+            // entry (permission drift, symlink, descriptor exhaustion); retain that uncertainty.
+            let openError = errno
+            if openError != ENOENT { didObserve() }
+            if openError == ENOENT, !access.creates {
                 do {
                     let version = try StateFileIO.version(directory, name: .stateDirectory)
                     try validateDirectory(version)
@@ -70,13 +76,14 @@ enum StateFileEntry {
                 } catch let failure as StateStoreError { throw failure }
                 catch { throw access.failure }
             }
-            if errno == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
+            if openError == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
             throw access.failure
         }
         defer { close(descriptor) } // Closing the sole open description also releases its lock.
         // Opening is already an observation, even if structure, locking or protection fails.
         // No descriptor escapes; this cannot imply validated contents or durability.
         didOpen()
+        didObserve()
         do {
             // Refuse FIFOs/directories/links before a lock or metadata repair. NONBLOCK keeps
             // opening an unexpected FIFO from waiting for a peer before this inspection.
