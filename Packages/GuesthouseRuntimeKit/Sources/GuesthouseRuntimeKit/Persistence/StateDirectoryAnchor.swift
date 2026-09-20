@@ -15,6 +15,7 @@ final class StateDirectoryAnchor {
     private let descriptor: Int32
     private let identity: StateFileIdentity
     private let closeDirectory: (Int32) -> Void
+    private var publicationActive = false
 
     /// Runtime-only native seams for deterministic open-race/lifetime tests. Not an XPC API.
     init(
@@ -42,6 +43,27 @@ final class StateDirectoryAnchor {
     }
 
     deinit { closeDirectory(descriptor) }
+
+    /// A stable advisory lock shared by independently opened anchors, unlike the replaceable
+    /// snapshot inode. Never suspend this borrow. Contention/unsupported locks fail closed
+    /// before publication; no wait, fallback lock file, or automatic mutation retry.
+    func withPublicationOwnership<Result>(
+        for name: StateStoreError.File = .snapshot, _ body: (Int32) throws -> Result
+    ) throws(StateStoreError) -> Result {
+        guard !publicationActive else { throw .fileUnwritable(name: name) }
+        try verifyCurrent()
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            throw .fileUnwritable(name: name)
+        }
+        publicationActive = true
+        defer {
+            publicationActive = false
+            flock(descriptor, LOCK_UN)
+        }
+        // The outer binding check also runs before releasing ownership. Directory replacement
+        // by a noncooperating process is still refused, not prevented by this advisory lock.
+        return try withDescriptor(body)
+    }
 
     /// Retains #57's startup barriers even for already-visible directories left by an interrupted
     /// preparation. Call before accepting store operations; there is no cached "already durable"
