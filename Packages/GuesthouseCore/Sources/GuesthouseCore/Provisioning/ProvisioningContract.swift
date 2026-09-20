@@ -19,9 +19,9 @@ public enum ProvisioningEvent: Hashable, Sendable {
     /// A progress line or direct-child exit is insufficient. It is not durable until
     /// `checkpointPersisted`; the coordinator must not advance before that acknowledgement.
     case checkpointReached(OperationID, Checkpoint)
-    /// The journal write for the checkpoint succeeded.
+    /// The checkpoint's durable metadata publication succeeded.
     case checkpointPersisted(EffectToken, Checkpoint)
-    /// The journal write for the checkpoint failed. Reality may be ahead of the journal.
+    /// Checkpoint publication failed. Reality may be ahead of the saved metadata.
     case checkpointPersistenceFailed(EffectToken, GuesthouseError)
     /// A failure was reported. This alone does NOT establish mutation quiescence:
     /// retain this operation's identity for inspection even if the error says canceled.
@@ -148,8 +148,10 @@ public enum ProvisioningEffect: Hashable, Sendable {
     /// uncertainty never authorizes a restart. The coordinator must establish this evidence;
     /// constructing an outcome value is not an inspection.
     case inspectActualState(ProvisioningStage, EffectToken, operation: OperationID?)
-    /// Write the checkpoint to the journal, then send `checkpointPersisted` or
-    /// `checkpointPersistenceFailed`.
+    /// Durably publish the checkpoint in environment metadata, then send `checkpointPersisted`
+    /// or `checkpointPersistenceFailed`. This effect is not itself an operation-journal entry:
+    /// recovered checkpoints may have no operation ID. Never invent one for persistence.
+    /// Settlement of any known journal operation requires separate actual-state evidence.
     case persistCheckpoint(Checkpoint, EffectToken)
     /// Remove the leftovers of a failed attempt, then send `cleanupFinished` or `cleanupFailed`.
     case cleanUp(ProvisioningStage, EffectToken)
