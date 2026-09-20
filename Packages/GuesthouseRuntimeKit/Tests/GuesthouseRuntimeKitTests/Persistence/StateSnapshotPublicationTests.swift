@@ -5,6 +5,27 @@ import Testing
 @testable import GuesthouseRuntimeKit
 
 @Suite struct StateSnapshotPublicationTests {
+    @Test func racedSnapshotAppearanceIsRememberedBeforeRefusal() throws {
+        let fixture = try Fixture(), evidence = Data("competing snapshot evidence".utf8)
+        var observed = false
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, didObserve: { observed = true },
+                fileBarrier: { _, _ in try evidence.write(to: fixture.snapshot) })
+        }
+        #expect(observed)
+        #expect(try Data(contentsOf: fixture.snapshot) == evidence)
+        let retained = fixture.state.appending(path: "retained-evidence")
+        try #require(rename(fixture.snapshot.path, retained.path) == 0)
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try StateSnapshotPublication.save(.empty, to: fixture.anchor, requireExisting: observed,
+                    createTemporary: { _, _, _, _ in Issue.record("Lost evidence must not create a temporary"); return -1 })
+            }
+        }
+        #expect(try Data(contentsOf: retained) == evidence)
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+    }
+
     @Test(arguments: [false, true])
     func separateAnchorsCannotPublishDuringEitherBarrier(afterRename: Bool) throws {
         let fixture = try Fixture()
