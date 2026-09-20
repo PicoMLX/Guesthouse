@@ -45,6 +45,18 @@ import Testing
         #expect(try fixture.names().isEmpty)
     }
 
+    @Test func oversizedEncodingCannotPublishAnUnreadableSnapshot() throws {
+        let fixture = try Fixture()
+        let environment = DevelopmentEnvironment(name: String(repeating: "x", count: 4 * 1024 * 1024))
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let value = EnvironmentsSnapshot(environments: [environment], slots: slots)
+        #expect(throws: StateStoreError.unencodable(name: .snapshot)) {
+            try StateSnapshotPublication.save(value, to: fixture.anchor)
+        }
+        #expect(try fixture.names().isEmpty)
+    }
+
     @Test func inconsistentValueCannotCreateState() throws {
         let fixture = try Fixture()
         let value = EnvironmentsSnapshot(environments: [DevelopmentEnvironment(name: "Dev")])

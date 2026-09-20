@@ -32,6 +32,35 @@ import Testing
         }
     }
 
+    @Test(arguments: [0, 1]) func snapshotBudgetAcceptsExactLimitAndRejectsOversize(extra: Int) throws {
+        try withFile { fd, _ in
+            let size = StateFileIO.maximumSnapshotBytes + extra
+            try #require(ftruncate(fd, off_t(size)) == 0)
+            if extra == 0 {
+                #expect(try StateFileIO.readAll(fd, from: 0, name: .snapshot).count == size)
+            } else {
+                var reads = 0
+                #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) {
+                    try StateFileIO.readAll(fd, from: 0, name: .snapshot) { _, _, _ in reads += 1; return 0 }
+                }
+                #expect(reads == 0)
+            }
+        }
+    }
+
+    @Test func snapshotGrowthCannotBypassTheInitialSizeCheck() throws {
+        try withFile { fd, _ in
+            var reads = 0
+            #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) {
+                try StateFileIO.readAll(fd, from: 0, name: .snapshot) { _, _, capacity in
+                    reads += 1
+                    return capacity // Deterministic continuously growing input, no disk mutation.
+                }
+            }
+            #expect(reads == StateFileIO.maximumSnapshotBytes / (64 * 1024) + 1)
+        }
+    }
+
     @Test func failedSeekDoesNotAttemptARead() {
         var calls = 0
         #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
