@@ -22,7 +22,8 @@ struct JournalTailPrefix {
     }
 
     private mutating func peek() throws -> UInt8 {
-        while index < bytes.count, [9, 10, 13, 32].contains(bytes[index]) { index += 1 }
+        // The journal uses compact JSONEncoder output. Whitespace is not an omitted
+        // delimiter: preserving it as corruption avoids erasing a damaged final record.
         guard index < bytes.count else { throw Stop.incomplete }
         return bytes[index]
     }
