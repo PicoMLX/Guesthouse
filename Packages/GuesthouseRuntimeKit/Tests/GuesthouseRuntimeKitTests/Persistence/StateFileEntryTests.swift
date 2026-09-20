@@ -251,6 +251,22 @@ import Testing
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
     }
 
+    @Test(arguments: StateFileAccess.allCases)
+    func deniedOpenIsObservedWithoutRepair(access: StateFileAccess) throws {
+        let fixture = try Fixture()
+        try evidence.write(to: fixture.file(access))
+        try #require(chmod(fixture.file(access).path, 0) == 0)
+        var observed = 0, opened = 0
+        #expect(throws: access.failure) {
+            try fixture.anchor.withFile(access, didOpen: { opened += 1 },
+                didObserve: { observed += 1 }, body: { _ in Issue.record("Denied file reached body") })
+        }
+        #expect(observed == 1 && opened == 0)
+        #expect(try fixture.mode(access) == 0)
+        try #require(chmod(fixture.file(access).path, 0o600) == 0)
+        #expect(try Data(contentsOf: fixture.file(access)) == evidence)
+    }
+
     private func requireContended(_ descriptor: Int32) throws {
         let result = flock(descriptor, LOCK_EX | LOCK_NB), failure = errno
         try #require(result == -1 && failure == EWOULDBLOCK)
