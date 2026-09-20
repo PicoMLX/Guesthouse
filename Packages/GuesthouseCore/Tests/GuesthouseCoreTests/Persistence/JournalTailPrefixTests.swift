@@ -102,6 +102,8 @@ import Testing
 
     @Test(arguments: [1.001, -1.001, 1e20, 1e-20, Double.leastNonzeroMagnitude, Double.greatestFiniteMagnitude,
                       792938037.3147308, -792938037.3147308, -9.084938291167941e+48,
+                      4.6728494007670807e+303, -4.6728494007670807e+303,
+                      Double(4.6728494007670807e+303).nextDown, Double(4.6728494007670807e+303).nextUp,
                       Double(792938037.3147308).nextDown, Double(792938037.3147308).nextUp])
     func canonicalDateCutsRemainRecoverable(value: Double) throws {
         try checkEveryCut(JournalRecord(id: OperationID(), environmentID: EnvironmentID(),
@@ -128,6 +130,14 @@ import Testing
         let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
         #expect(chunk.truncatedTail)
         #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
+    }
+
+    @Test func interruptedDateMayNeedBothMantissaContinuationAndExponent() throws {
+        let encoded = String(decoding: try JSONEncoder().encode(
+            Date(timeIntervalSinceReferenceDate: 4.6728494007670807e+303)), as: UTF8.self)
+        let prefix = "4.672849400767080"
+        try #require(encoded.hasPrefix(prefix) && encoded.contains("e"))
+        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
     }
 
     @Test func interruptedDateBeforeExponentMarkerHasAnEncoderWitness() throws {
