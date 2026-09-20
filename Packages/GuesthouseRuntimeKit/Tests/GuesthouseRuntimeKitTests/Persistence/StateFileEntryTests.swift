@@ -237,6 +237,20 @@ import Testing
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
     }
 
+    @Test(arguments: StateFileAccess.allCases)
+    func observationSurvivesPreBodyProtectionFailure(access: StateFileAccess) throws {
+        let fixture = try Fixture()
+        try evidence.write(to: fixture.file(access))
+        var observations = 0
+        let failure = StateStoreError.fileUnwritable(name: access.label)
+        #expect(throws: failure) {
+            try fixture.anchor.withFile(access, permissionBarrier: { _, _ in throw failure },
+                didOpen: { observations += 1 }, body: { _ in Issue.record("Reached body after failed protection") })
+        }
+        #expect(observations == 1)
+        #expect(try Data(contentsOf: fixture.file(access)) == evidence)
+    }
+
     private func requireContended(_ descriptor: Int32) throws {
         let result = flock(descriptor, LOCK_EX | LOCK_NB), failure = errno
         try #require(result == -1 && failure == EWOULDBLOCK)
