@@ -98,7 +98,8 @@ public actor StateStore {
     public func replay() throws(StateStoreError) -> JournalReplay {
         do {
             let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
-                                                didObserve: { journalWasObserved = true }) {
+                                                didObserve: { journalWasObserved = true },
+                                                didIdentify: { journalObservation.identify($0) }) {
                 return try journalObservation.refreshed($0, read: hooks.journalRead)
             }
             guard candidate != nil || !journalWasObserved else {
