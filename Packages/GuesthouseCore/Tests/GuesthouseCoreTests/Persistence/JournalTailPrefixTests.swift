@@ -46,6 +46,34 @@ import Testing
         }
     }
 
+    @Test(arguments: [1.001, -1.001, 1e20, 1e-20, Double.leastNonzeroMagnitude, Double.greatestFiniteMagnitude])
+    func canonicalDateCutsRemainRecoverable(value: Double) throws {
+        try checkEveryCut(JournalRecord(id: OperationID(), environmentID: EnvironmentID(),
+                                       operation: .startEnvironment,
+                                       timestamp: Date(timeIntervalSinceReferenceDate: value), outcome: .started))
+    }
+
+    @Test(arguments: ["1.00,", "1E+20", "1e+020", "-0.00,", "01", "+1", "1e999", "1.00e-2"])
+    func noncanonicalDateTokensCannotGrantRepair(token: String) {
+        let tail = Data(("{\"timestamp\":" + token).utf8)
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
+    }
+
+    @Test func fractionalEOFIsNotProofThatTheNumberWasComplete() throws {
+        // These bytes can come from a genuine interruption while encoding 1.001.
+        #expect(try JournalReplayChunk(Data("{\"timestamp\":1.00".utf8)).truncatedTail)
+    }
+
+    @Test(arguments: ["id", "environmentID"])
+    func lowercaseIdentityRemainsCorruption(key: String) throws {
+        let uuid = UUID(uuidString: "ABCDEF12-ABCD-ABCD-ABCD-ABCDEF123456")!
+        let canonical = String(decoding: try JSONEncoder().encode(uuid), as: UTF8.self)
+        try #require(canonical == "\"ABCDEF12-ABCD-ABCD-ABCD-ABCDEF123456\"")
+        let tail = Data(("{\"" + key + "\":" + canonical.lowercased()).utf8)
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
+        #expect(try JournalReplayChunk(Data(("{\"" + key + "\":" + canonical).utf8)).truncatedTail)
+    }
+
     @Test(arguments: [
         "not json", "{]", " ", "{\"unknown", "{\"format\":3", "{\"format\":\"",
         "{\"id\":\"not-a-uuid", "{\"operation\":{\"invented", "{\"timestamp\":01",
