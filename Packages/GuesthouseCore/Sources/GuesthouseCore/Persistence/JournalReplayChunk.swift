@@ -84,7 +84,7 @@ public struct JournalReplayChunk: Sendable {
         let format: Int
     }
 
-    /// Foundation collapses duplicate members. Inspect original UTF-8 top-level keys,
+    /// Foundation collapses duplicate members. Inspect original UTF-8 keys in every object,
     /// including escaped spellings, before either decoder can select a format value.
     private static func requireUnambiguousMembers(in data: Data, number: Int,
                                                 using decoder: JSONDecoder) throws(StateStoreError) {
@@ -92,12 +92,12 @@ public struct JournalReplayChunk: Sendable {
             throw .corruptJournal(line: number)
         }
         let bytes = Array(data)
-        var index = 0, depth = 0
-        var keys: Set<String> = []
+        var index = 0
+        var objects: [Set<String>] = []
         while index < bytes.count {
             switch bytes[index] {
-            case 123, 91: depth += 1
-            case 125, 93: depth -= 1
+            case 123: objects.append([])
+            case 125: objects.removeLast() // JSON grammar was validated before this scan.
             case 34:
                 let start = index
                 index += 1
@@ -106,14 +106,16 @@ public struct JournalReplayChunk: Sendable {
                     index += 1
                 }
                 guard index < bytes.count else { throw .corruptJournal(line: number) }
-                if depth == 1 {
+                if !objects.isEmpty {
                     var next = index + 1
                     while next < bytes.count && [9, 10, 13, 32].contains(bytes[next]) { next += 1 }
                     if next < bytes.count && bytes[next] == 58 {
                         guard let key = try? decoder.decode(String.self, from: Data(bytes[start...index])) else {
                             throw .corruptJournal(line: number)
                         }
-                        guard keys.insert(key).inserted else { throw .corruptJournal(line: number) }
+                        guard objects[objects.count - 1].insert(key).inserted else {
+                            throw .corruptJournal(line: number)
+                        }
                     }
                 }
             default: break
