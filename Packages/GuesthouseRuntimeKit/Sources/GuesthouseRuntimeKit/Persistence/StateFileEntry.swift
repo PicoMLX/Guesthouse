@@ -60,7 +60,20 @@ enum StateFileEntry {
             descriptor = openat(directory, access.name, flags, 0o600)
         }
         guard descriptor >= 0 else {
-            if errno == ENOENT, !access.creates { return nil }
+            if errno == ENOENT, !access.creates {
+                do {
+                    let version = try StateFileIO.version(directory, name: .stateDirectory)
+                    try validateDirectory(version)
+                    var entry = stat()
+                    // Stabilize the missing observation before publishing an empty value. A
+                    // newly created entry is evidence to inspect, not an automatic read retry.
+                    guard fstatat(directory, access.name, &entry, AT_SYMLINK_NOFOLLOW) == -1,
+                          errno == ENOENT else { throw access.failure }
+                    try validateDirectory(version)
+                    return nil
+                } catch let failure as StateStoreError { throw failure }
+                catch { throw access.failure }
+            }
             if errno == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
             throw access.failure
         }

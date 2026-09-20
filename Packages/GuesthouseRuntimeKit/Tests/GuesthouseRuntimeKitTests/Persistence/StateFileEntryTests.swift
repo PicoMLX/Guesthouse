@@ -15,6 +15,20 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).isEmpty)
     }
 
+    @Test(arguments: [StateFileAccess.readSnapshot, .readJournal])
+    func creationDuringMissingEntryValidationCannotPublishEmpty(access: StateFileAccess) throws {
+        let fixture = try Fixture()
+        #expect(throws: access.failure) {
+            try fixture.anchor.withDescriptor { directory in
+                try StateFileEntry.withDescriptor(in: directory, access: access,
+                    permissionBarrier: { _, _ in Issue.record("Missing file needed no repair") },
+                    validateDirectory: { _ in try evidence.write(to: fixture.file(access)) },
+                    body: { _ in Issue.record("Missing observation was retried"); return 1 })
+            }
+        }
+        #expect(try Data(contentsOf: fixture.file(access)) == evidence)
+    }
+
     @Test(arguments: [false, true]) func journalCreationNeverTruncatesExistingBytes(existing: Bool) throws {
         let fixture = try Fixture()
         if existing { try evidence.write(to: fixture.file(.writeJournal)) }

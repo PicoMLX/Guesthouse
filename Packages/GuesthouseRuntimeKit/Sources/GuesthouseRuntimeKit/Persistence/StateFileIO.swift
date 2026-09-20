@@ -7,7 +7,11 @@ import GuesthouseCore
 /// These synchronous helpers neither acquire ownership nor publish state. In particular, a write
 /// failure can leave bytes behind; the journal owner must classify an attempted write as uncertain.
 enum StateFileIO {
-    /// Reads through observed EOF. The store owns size policy and cache/identity validation.
+    /// Fixed snapshot budget, shared by ordinary load, save preflight and publication.
+    static let maximumSnapshotBytes = 4 * 1024 * 1024
+
+    /// Reads through observed EOF. Snapshot size is checked before allocation and on growth.
+    /// Journal input policy and cache/identity validation remain owned by the store.
     /// Injected calls are synchronous test seams with the same return/errno contract as Darwin.
     static func readAll(
         _ descriptor: Int32, from offset: off_t, name: StateStoreError.File,
@@ -15,6 +19,12 @@ enum StateFileIO {
         readBytes: (Int32, UnsafeMutableRawPointer?, Int) -> Int = Darwin.read
     ) throws(StateStoreError) -> Data {
         if let maximumBytes, maximumBytes < 0 { throw .fileUnreadable(name: name) }
+        let limit = name == .snapshot ? min(maximumBytes ?? maximumSnapshotBytes, maximumSnapshotBytes) : maximumBytes
+        if name == .snapshot {
+            var info = stat()
+            guard fstat(descriptor, &info) == 0, info.st_size >= 0,
+                  info.st_size <= off_t(maximumSnapshotBytes) else { throw .fileUnreadable(name: name) }
+        }
         guard lseek(descriptor, offset, SEEK_SET) >= 0 else { throw .fileUnreadable(name: name) }
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
@@ -22,8 +32,8 @@ enum StateFileIO {
             let count = buffer.withUnsafeMutableBytes { readBytes(descriptor, $0.baseAddress, $0.count) }
             if count > 0 {
                 guard count <= buffer.count else { throw .fileUnreadable(name: name) }
-                if let maximumBytes {
-                    guard data.count <= maximumBytes, count <= maximumBytes - data.count else {
+                if let limit {
+                    guard data.count <= limit, count <= limit - data.count else {
                         throw .fileUnreadable(name: name)
                     }
                 }

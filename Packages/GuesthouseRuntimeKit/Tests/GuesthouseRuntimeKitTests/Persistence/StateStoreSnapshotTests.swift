@@ -99,6 +99,45 @@ import Testing
         #expect(try fixture.bytes() == bytes)
     }
 
+    @Test(arguments: [StorageFailure.protectionDrift, .unsafeStructure, .inspectionFailed])
+    func knownFactoryProtectionFailuresRetainRecoveryGuidance(failure: StorageFailure) async {
+        let reason: StateStoreError.ProtectionFailure = switch failure {
+        case .protectionDrift: .permissions
+        case .unsafeStructure: .changed
+        default: .unreadable
+        }
+        await #expect(throws: StateStoreError.insecureDirectory(reason: reason)) {
+            try await StateStore.open(storage: { throw failure })
+        }
+    }
+
+    @Test(arguments: ["environments", "slots", "provisioning", "schemaVersion", #"\u0065nvironments"#])
+    func duplicateSnapshotMembersRefuseLoadAndOverwrite(key: String) async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        try await store.saveSnapshot(.empty)
+        let encoded = try #require(String(data: fixture.bytes(), encoding: .utf8))
+        let bytes = Data((encoded.dropLast() + ",\"" + key + "\":null}").utf8)
+        try fixture.write(bytes)
+        await #expect(throws: StateStoreError.corruptSnapshot) { try await store.loadSnapshot() }
+        await #expect(throws: StateStoreError.corruptSnapshot) { try await store.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == bytes)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
+    @Test func duplicateMigrationOutputCannotAuthorizeRewrite() async throws {
+        let fixture = try Fixture()
+        let encoded = try #require(String(data: JSONEncoder().encode(EnvironmentsSnapshot.empty), encoding: .utf8))
+        let ambiguous = Data((encoded.dropLast() + ",\"environments\":null}").utf8)
+        let previous = SchemaVersion(EnvironmentsSnapshot.currentSchema.rawValue - 1)!
+        let migrator = SnapshotMigrator(migrations: [.init(from: previous) { _ in ambiguous }])
+        let store = try await fixture.open(migrator: migrator)
+        let original = Data("{\"schemaVersion\":\(previous.rawValue)}".utf8)
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.corruptSnapshot) { try await store.loadSnapshot() }
+        await #expect(throws: StateStoreError.corruptSnapshot) { try await store.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == original)
+    }
+
     @Test func arbitraryFactoryErrorsBecomeClosedFailures() async {
         await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) {
             try await StateStore.open(storage: { throw FixtureFailure.opaque })
@@ -138,6 +177,16 @@ import Testing
         await #expect(throws: failure) { try await store.loadSnapshot() }
         await #expect(throws: failure) { try await store.saveSnapshot(.empty) }
         #expect(try fixture.bytes() == bytes)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
+    @Test func oversizedSavedSnapshotRefusesLoadAndReplacement() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let evidence = Data(repeating: 32, count: 4 * 1024 * 1024 + 1)
+        try fixture.write(evidence)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) { try await store.loadSnapshot() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) { try await store.saveSnapshot(.empty) }
+        #expect(try fixture.bytes() == evidence)
         #expect(try fixture.names() == ["environments.json"])
     }
 
