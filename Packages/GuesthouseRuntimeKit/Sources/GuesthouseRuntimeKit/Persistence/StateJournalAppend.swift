@@ -71,7 +71,7 @@ enum StateJournalAppend {
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
-                    return try current.appending(record, bytes: line.count, version: written)
+                    return try current.appending(record, bytes: line, version: written)
                 }) else { throw StateStoreError.fileUnwritable(name: .journal) }
                 return candidate
             }
