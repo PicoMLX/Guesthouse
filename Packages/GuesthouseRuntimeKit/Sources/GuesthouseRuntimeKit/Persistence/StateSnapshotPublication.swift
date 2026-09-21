@@ -55,7 +55,7 @@ enum StateSnapshotPublication {
                 catch let failure as StateStoreError { throw failure }
                 catch { throw StateStoreError.storageSelectionChanged }
             }
-            try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
+            try StateSnapshotTemporaries.collect(in: directory, reservingPublicationTemporary: true, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
                 try requireUnchangedSnapshot(in: directory, expected: existing?.version,
                     requireExisting: requireExisting, didObserve: didObserve)
