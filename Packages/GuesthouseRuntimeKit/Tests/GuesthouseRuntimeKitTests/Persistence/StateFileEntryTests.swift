@@ -48,10 +48,15 @@ import Testing
         let detached = fixture.state.appending(path: "detached")
         try #require(rename(file.path, detached.path) == 0)
         for _ in 0..<2 {
+            var observations = 0, identities = 0
             #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
                 try fixture.anchor.withFile(.writeJournal, requireExisting: true,
+                    didOpen: { Issue.record("Missing required journal must not open") },
+                    didObserve: { observations += 1 },
+                    didIdentify: { identity in identities += 1; #expect(identity == nil); return true },
                     body: { _ in Issue.record("Recreated previously observed journal") })
             }
+            #expect(observations == 1 && identities == 1)
             #expect(!FileManager.default.fileExists(atPath: file.path))
             #expect(try Data(contentsOf: detached) == evidence)
         }
@@ -65,6 +70,7 @@ import Testing
         try evidence.write(to: fixture.file(access))
         let bytes = try fixture.anchor.withFile(access, body: { fd in
             #expect(fcntl(fd, F_GETFL) & O_ACCMODE == mode)
+            #expect((fcntl(fd, F_GETFL) & O_APPEND != 0) == access.creates)
             #expect(fcntl(fd, F_GETFL) & O_NONBLOCK != 0)
             #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0)
             return try StateFileIO.readAll(fd, from: 0, name: access.label)

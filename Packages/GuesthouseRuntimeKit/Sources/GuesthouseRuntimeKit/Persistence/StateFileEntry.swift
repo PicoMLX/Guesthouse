@@ -50,7 +50,8 @@ enum StateFileEntry {
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         // Once a journal was observed, disappearance must not silently create a new history.
-        let flags = (access.creates ? O_RDWR : O_RDONLY)
+        // Append placement must not overwrite a competing write after a prior EOF seek.
+        let flags = (access.creates ? O_RDWR | O_APPEND : O_RDONLY)
             | (access.creates && !requireExisting ? O_CREAT : 0) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         var descriptor = openat(directory, access.name, flags, 0o600)
         // Retained bounded retry for a transient missing entry during creation. No bytes are
@@ -64,7 +65,10 @@ enum StateFileEntry {
             // Only a stabilized ENOENT proves absence. Other failures may hide an existing
             // entry (permission drift, symlink, descriptor exhaustion); retain that uncertainty.
             let openError = errno
-            if openError != ENOENT {
+            // A required-existing writer losing its entry is itself uncertain evidence.
+            // Report it even on ENOENT so restoring the original cannot authorize append.
+            // This runs only after an actual open failure, never on prior lock contention.
+            if openError != ENOENT || (access.creates && requireExisting) {
                 didObserve()
                 guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
             }

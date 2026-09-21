@@ -50,10 +50,12 @@ final class StateDirectoryAnchor {
     /// snapshot inode. Never suspend this borrow. Contention/unsupported locks fail closed
     /// before publication; no wait, fallback lock file, or automatic mutation retry.
     func withPublicationOwnership<Result>(
-        for name: StateStoreError.File = .snapshot, _ body: (Int32) throws -> Result
+        for name: StateStoreError.File = .snapshot,
+        didFailBinding: () -> Void = {}, _ body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result {
         guard !publicationActive else { throw .fileUnwritable(name: name) }
-        try verifyCurrent()
+        do { try verifyCurrent() }
+        catch { didFailBinding(); throw error }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
             throw .fileUnwritable(name: name)
         }
@@ -64,7 +66,7 @@ final class StateDirectoryAnchor {
         }
         // The outer binding check also runs before releasing ownership. Directory replacement
         // by a noncooperating process is still refused, not prevented by this advisory lock.
-        return try withDescriptor(body)
+        return try withDescriptor(didFailBinding: didFailBinding, body)
     }
 
     /// Retains #57's startup barriers even for already-visible directories left by an interrupted
@@ -101,15 +103,23 @@ final class StateDirectoryAnchor {
         try Self.verify(storage, descriptor: descriptor, identity: identity, version: version)
     }
 
-    /// Checks protection/current binding before entry and after successful work. If work throws,
-    /// its closed failure is preserved. A post-check failure does not undo any attempted write.
-    func withDescriptor<Result>(_ body: (Int32) throws -> Result) throws(StateStoreError) -> Result {
-        try verifyCurrent()
+    /// Checks binding even after a throwing body, while publication ownership is still held.
+    /// Preserve the body's closed failure, but report binding uncertainty independently.
+    func withDescriptor<Result>(
+        didFailBinding: () -> Void = {}, _ body: (Int32) throws -> Result
+    ) throws(StateStoreError) -> Result {
+        do { try verifyCurrent() }
+        catch { didFailBinding(); throw error }
         let result: Result
         do { result = try body(descriptor) }
-        catch let error as StateStoreError { throw error }
-        catch { throw .fileUnwritable(name: .stateDirectory) }
-        try verifyCurrent()
+        catch {
+            let failure = (error as? StateStoreError) ?? .fileUnwritable(name: .stateDirectory)
+            do { try verifyCurrent() }
+            catch { didFailBinding() }
+            throw failure
+        }
+        do { try verifyCurrent() }
+        catch { didFailBinding(); throw error }
         return result
     }
 
