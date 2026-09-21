@@ -159,6 +159,41 @@ import Testing
         #expect(try fixture.bytes() == bytes)
     }
 
+    @Test(arguments: ["truncate", "replace", "extend"])
+    func observedTornSuffixCannotBeSubstitutedByOrdinaryReplay(change: String) async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let prior = Self.record(), partial = Self.record(), prefix = try Self.lines([prior])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let complete = try encoder.encode(partial)
+        let original = prefix + complete.dropLast()
+        try fixture.write(original)
+        let identity = try fixture.identity(fixture.journal)
+        let first = try await store.replay()
+        #expect(first.records == [prior] && first.truncatedTail)
+        let next = change == "truncate" ? prefix : change == "replace"
+            ? prefix + (try Self.lines([Self.record()])) : prefix + complete + Data([10])
+        try fixture.write(next)
+        #expect(try fixture.identity(fixture.journal) == identity)
+        if change == "extend" {
+            let replay = try await store.replay()
+            #expect(replay.records == [prior, partial] && !replay.truncatedTail)
+        } else {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            }
+            #expect(try fixture.bytes() == next)
+            try fixture.write(original)
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == 2)
+        #expect(try fixture.bytes() == (change == "extend" ? next : original))
+    }
+
     @Test func unchangedUnterminatedRecordKeepsItsSeparatorRequirement() async throws {
         let fixture = try Fixture(), store = try await fixture.open(), record = Self.record()
         let bytes = try JSONEncoder().encode(record)
