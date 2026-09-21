@@ -13,9 +13,8 @@ public actor StateStore {
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
     private var journal = StateJournalCache()
-    private var journalObservation = StateJournalObservation()
-    // This observation survives cache invalidation and failed parsing/post-checks.
-    private var journalWasObserved = false
+    // Shared evidence survives another live owner's failed parsing/binding or creation.
+    private let journalOwnership: StateJournalOwnership
     // Observation survives failed reads/publications. Absence after observation is evidence
     // loss, never an empty new store. All live owners of this directory share the evidence.
     private let snapshotObservation: StateSnapshotObservation
@@ -28,12 +27,13 @@ public actor StateStore {
 
     private init(anchor: sending StateDirectoryAnchor, migrator: SnapshotMigrator,
                  hooks: StateStoreHooks, queue: DispatchSerialQueue,
-                 snapshotObservation: StateSnapshotObservation) {
+                 snapshotObservation: StateSnapshotObservation, journalOwnership: StateJournalOwnership) {
         self.anchor = anchor
         self.migrator = migrator
         self.hooks = hooks
         self.queue = queue
         self.snapshotObservation = snapshotObservation
+        self.journalOwnership = journalOwnership
     }
 
     /// Select and prepare the runtime's fixed managed storage. No caller-selected path API.
@@ -60,9 +60,12 @@ public actor StateStore {
                     // No actor reference escapes until ALL preparation barriers succeed.
                     // A failed preparation releases the local anchor and preserves disk evidence.
                     try anchor.synchronizePreparation(barrier: hooks.preparation)
-                    let observation = StateSnapshotObservation(identity: try anchor.verifyCurrent().identity)
+                    let identity = try anchor.verifyCurrent().identity
+                    let observation = StateSnapshotObservation(identity: identity)
+                    let journalOwnership = StateJournalOwnership(identity: identity)
                     result = .success(StateStore(anchor: anchor, migrator: migrator, hooks: hooks,
-                                                 queue: queue, snapshotObservation: observation))
+                                                 queue: queue, snapshotObservation: observation,
+                                                 journalOwnership: journalOwnership))
                 } catch let failure as StateStoreError { result = .failure(failure) }
                 catch StorageFailure.protectionDrift { result = .failure(.insecureDirectory(reason: .permissions)) }
                 catch StorageFailure.unsafeStructure { result = .failure(.insecureDirectory(reason: .changed)) }
@@ -102,6 +105,15 @@ public actor StateStore {
     /// inspected recovery; complete invalid/unsupported records refuse the whole result.
     /// Observing these records is not proof of their durability or any mutation's outcome.
     public func replay() throws(StateStoreError) -> JournalReplay {
+        try journalOwnership.withObservation { (observation, wasObserved) throws(StateStoreError) in
+            try replay(observation: &observation, wasObserved: &wasObserved)
+        }
+    }
+
+    private func replay(
+        observation journalObservation: inout StateJournalObservation,
+        wasObserved journalWasObserved: inout Bool
+    ) throws(StateStoreError) -> JournalReplay {
         try journalObservation.requireReadable()
         var enteredBody = false
         var completedBody = false
