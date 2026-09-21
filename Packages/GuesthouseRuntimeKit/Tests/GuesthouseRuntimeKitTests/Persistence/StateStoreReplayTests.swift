@@ -114,6 +114,16 @@ import Testing
         #expect(try Data(contentsOf: retained) == evidence)
     }
 
+    @Test func unreadBorrowCannotBeClearedByMissingOrNewIdentity() throws {
+        var observation = StateJournalObservation()
+        observation.recordUnreadFailure()
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try observation.requireReadable()
+            }
+        }
+    }
+
     @Test func budgetCountsFinalLinesBeforeDecoding() throws {
         let exact = Data(repeating: 10, count: StateJournalCache.maximumRecords)
         try StateJournalCache.validateBudget(exact)
