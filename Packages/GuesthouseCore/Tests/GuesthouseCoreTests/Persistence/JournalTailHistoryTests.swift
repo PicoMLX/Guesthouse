@@ -3,6 +3,31 @@ import GuesthouseCore
 import Testing
 
 @Suite struct JournalTailHistoryTests {
+    @Test(arguments: [4_096, 16 * 1_024 * 1_024 - 1])
+    func oversizedASCIITailRefusesWithManyUnresolvedOperations(byteCount: Int) throws {
+        var history = JournalHistory()
+        for _ in 0..<512 {
+            try history.append(JournalRecord(id: OperationID(), environmentID: EnvironmentID(),
+                operation: .startEnvironment, timestamp: Date(timeIntervalSinceReferenceDate: 0), outcome: .started))
+        }
+        let prefix = Data("{\"timestamp\":".utf8)
+        let tail = prefix + Data(repeating: 49, count: byteCount - prefix.count)
+        #expect(throws: StateStoreError.corruptJournal(line: 513)) {
+            try JournalReplayChunk(tail, following: history)
+        }
+        #expect(history.records.count == 512 && history.inFlight.count == 512)
+        // A real continuation with wide numeric fields remains recoverable against the
+        // same history. Existing every-cut tests exercise all closed operation/outcome shapes.
+        let started = try #require(history.records.last)
+        let completion = JournalRecord(id: started.id, environmentID: started.environmentID,
+            operation: started.operation, timestamp: Date(timeIntervalSinceReferenceDate: .greatestFiniteMagnitude),
+            outcome: .failed(.unsupportedHost(.insufficientMemory(foundBytes: .max, minimumBytes: .max))))
+        let bytes = try JSONEncoder().encode(completion)
+        let chunk = try JournalReplayChunk(Data(bytes.dropLast()), following: history)
+        #expect(chunk.truncatedTail && chunk.validatedByteCount == 0)
+        #expect(chunk.history.records == history.records)
+    }
+
     @Test(arguments: [false, true])
     func impossibleAppendsRefuseWithoutAdoptingStagedHistory(sorted: Bool) throws {
         let id = OperationID(), environment = EnvironmentID()

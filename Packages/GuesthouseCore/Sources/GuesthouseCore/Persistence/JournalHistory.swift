@@ -16,6 +16,9 @@ public struct JournalHistory: Sendable {
     }
 
     private var identities: [OperationID: Identity] = [:]
+    // One unresolved operation per environment. Keep lookup independent of history size
+    // so a bounded replay does not scan the growing inFlight table for every start.
+    private var unresolvedByEnvironment: [EnvironmentID: OperationID] = [:]
     /// A terminal record prevents all subsequent records against the same operation ID.
     private var settled: Set<OperationID> = []
 
@@ -28,8 +31,8 @@ public struct JournalHistory: Sendable {
         guard record.isSelfConsistent else { throw .inconsistentRecord(record.id) }
         switch (record.outcome, identities[record.id]) {
         case (.started, nil):
-            if let unresolved = inFlight.values.first(where: { $0.environmentID == record.environmentID }) {
-                throw .operationUnresolved(unresolved.id)
+            if let unresolved = unresolvedByEnvironment[record.environmentID] {
+                throw .operationUnresolved(unresolved)
             }
         case (.started, .some), (_, nil):
             throw .inconsistentRecord(record.id)
@@ -51,8 +54,10 @@ public struct JournalHistory: Sendable {
         identities[record.id] = Identity(environment: record.environmentID, operation: record.operation)
         if record.leavesInFlight {
             inFlight[record.id] = record
+            unresolvedByEnvironment[record.environmentID] = record.id
         } else {
             inFlight.removeValue(forKey: record.id)
+            unresolvedByEnvironment.removeValue(forKey: record.environmentID)
             settled.insert(record.id)
         }
     }
