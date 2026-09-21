@@ -7,6 +7,16 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
+    @Test func unreadBorrowCannotBeClearedByMissingOrNewIdentity() throws {
+        var observation = StateJournalObservation()
+        observation.recordUnreadFailure()
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try observation.requireReadable()
+            }
+        }
+    }
+
     @Test func budgetCountsFinalLinesBeforeDecoding() throws {
         let exact = Data(repeating: 10, count: StateJournalCache.maximumRecords)
         try StateJournalCache.validateBudget(exact)

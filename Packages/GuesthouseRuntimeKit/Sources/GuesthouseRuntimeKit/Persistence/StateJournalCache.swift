@@ -91,6 +91,12 @@ struct StateJournalObservation {
 
     mutating func recordUnreadFailure() { unreadObservation = true }
 
+    /// Check before opening, including when the entry is currently missing. Absence cannot
+    /// clear an earlier failed borrow whose directory/journal binding was never established.
+    func requireReadable() throws(StateStoreError) {
+        guard !unreadObservation, !unboundObservation else { throw .fileUnreadable(name: .journal) }
+    }
+
     /// Called before preparation/body entry. Unknown binding cannot later become a new
     /// journal implicitly; it requires explicit recovery outside this owner's lifetime.
     mutating func identify(_ observed: StateFileIdentity?) -> Bool {
@@ -104,7 +110,7 @@ struct StateJournalObservation {
         _ descriptor: Int32,
         read: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     ) throws(StateStoreError) -> StateJournalCache {
-        guard !unreadObservation else { throw .fileUnreadable(name: .journal) }
+        try requireReadable()
         let current: StateFileIdentity
         do { current = try StateFileIO.version(descriptor, name: .journal).identity }
         catch { unreadObservation = true; throw error }
