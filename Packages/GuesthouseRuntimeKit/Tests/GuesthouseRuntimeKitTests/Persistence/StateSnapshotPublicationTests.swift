@@ -5,6 +5,27 @@ import Testing
 @testable import GuesthouseRuntimeKit
 
 @Suite struct StateSnapshotPublicationTests {
+    @Test func racedSnapshotAppearanceIsRememberedBeforeRefusal() throws {
+        let fixture = try Fixture(), evidence = Data("competing snapshot evidence".utf8)
+        var observed = false
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, didObserve: { observed = true },
+                fileBarrier: { _, _ in try evidence.write(to: fixture.snapshot) })
+        }
+        #expect(observed)
+        #expect(try Data(contentsOf: fixture.snapshot) == evidence)
+        let retained = fixture.state.appending(path: "retained-evidence")
+        try #require(rename(fixture.snapshot.path, retained.path) == 0)
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try StateSnapshotPublication.save(.empty, to: fixture.anchor, requireExisting: observed,
+                    createTemporary: { _, _, _, _ in Issue.record("Lost evidence must not create a temporary"); return -1 })
+            }
+        }
+        #expect(try Data(contentsOf: retained) == evidence)
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+    }
+
     @Test(arguments: [false, true])
     func separateAnchorsCannotPublishDuringEitherBarrier(afterRename: Bool) throws {
         let fixture = try Fixture()
@@ -198,6 +219,161 @@ import Testing
         try #require(reader >= 0)
         defer { close(reader) }
         #expect(flock(reader, LOCK_EX | LOCK_NB) == 0)
+    }
+
+    @Test(arguments: [ENOTSUP, EOPNOTSUPP, EINTR, EEXIST])
+    func failedAtomicCreationIsNotRetriedOrDowngraded(failure: Int32) throws {
+        let fixture = try Fixture()
+        var attempts = 0
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, createTemporary: { _, _, _, _ in
+                attempts += 1
+                errno = failure
+                return -1
+            })
+        }
+        #expect(attempts == 1)
+        #expect(try fixture.names().isEmpty)
+    }
+
+    @Test func failedExclusiveOpenDoesNotDeleteTheCollidingEntry() throws {
+        let fixture = try Fixture()
+        let bytes = Data("existing temporary".utf8)
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, createTemporary: { directory, name, flags, mode in
+                do { try bytes.write(to: fixture.state.appending(path: name)) }
+                catch { Issue.record("Could not create collision fixture") }
+                return openat(directory, name, flags, mode)
+            })
+        }
+        let name = try #require(try fixture.names().first)
+        #expect(try Data(contentsOf: fixture.state.appending(path: name)) == bytes)
+    }
+
+    @Test func failedFileBarrierPreservesTheOriginalAndUnpublishedTemporary() throws {
+        enum Failure: Error { case interrupted }
+        let fixture = try Fixture()
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        let original = try fixture.identity(fixture.snapshot)
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { _, _ in throw Failure.interrupted })
+        }
+        #expect(try fixture.identity(fixture.snapshot) == original)
+        #expect(try fixture.names().count == 2)
+        let temporary = try #require(try fixture.names().first { $0 != "environments.json" })
+        let bytes = try Data(contentsOf: fixture.state.appending(path: temporary))
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: bytes) == .empty)
+    }
+
+    @Test func failedDirectoryBarrierPreservesPublishedEvidence() throws {
+        let fixture = try Fixture()
+        let failure = StateStoreError.fileUnwritable(name: .stateDirectory)
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, directoryBarrier: { _, _ in throw failure })
+        }
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: Data(contentsOf: fixture.snapshot)) == .empty)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
+    @Test func failedPermissionBarrierDoesNotPublishOrDeleteTheTemporary() throws {
+        let fixture = try Fixture()
+        let failure = StateStoreError.fileUnwritable(name: .snapshot)
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, permissionBarrier: { _, _ in throw failure })
+        }
+        let name = try #require(try fixture.names().first)
+        #expect(name.hasPrefix(".environments.json.tmp-"))
+        #expect(try Data(contentsOf: fixture.state.appending(path: name)).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+    }
+
+    @Test func rewritingTheTemporaryDuringItsFileBarrierIsRefused() throws {
+        let fixture = try Fixture(), changed = Data("changed temporary".utf8)
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { fd, _ in
+                try #require(ftruncate(fd, 0) == 0)
+                try #require(lseek(fd, 0, SEEK_SET) == 0)
+                try StateFileIO.writeAll(fd, changed, name: .snapshot)
+            })
+        }
+        let name = try #require(try fixture.names().first)
+        #expect(try Data(contentsOf: fixture.state.appending(path: name)) == changed)
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+    }
+
+    @Test func aChangedExistingSnapshotIsNotOverwrittenAfterPreflight() throws {
+        let fixture = try Fixture()
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        let future = Data("{\"schemaVersion\":99,\"preserve\":true}".utf8)
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { _, _ in
+                try future.write(to: fixture.snapshot)
+            })
+        }
+        #expect(try Data(contentsOf: fixture.snapshot) == future)
+    }
+
+    @Test func aTemporaryReplacedDuringTheFileBarrierIsNeverPublished() throws {
+        let fixture = try Fixture()
+        let replacement = Data("replacement temporary".utf8)
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { _, _ in
+                let name = try #require(try fixture.names().first)
+                let temporary = fixture.state.appending(path: name)
+                try #require(rename(temporary.path, fixture.state.appending(path: "detached").path) == 0)
+                try replacement.write(to: temporary)
+            })
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+        let retained = try Data(contentsOf: fixture.state.appending(path: "detached"))
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: retained) == .empty)
+    }
+
+    @Test(arguments: [(false, StateStoreError.fileUnwritable(name: .snapshot)), (true, .insecureDirectory(reason: .changed))])
+    func replacementDuringPublicationIsRefused(directory: Bool, failure: StateStoreError) throws {
+        let fixture = try Fixture(), replacement = Data("replacement fixture".utf8)
+        let target = directory ? fixture.state : fixture.snapshot, detached = fixture.base.appending(path: "detached")
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, directoryBarrier: { fd, label in
+                try StateFileIO.fullySynchronize(fd, name: label)
+                try #require(rename(target.path, detached.path) == 0)
+                if directory { try #require(mkdir(fixture.state.path, 0o700) == 0) }
+                try replacement.write(to: fixture.snapshot)
+            })
+        }
+        #expect(try Data(contentsOf: fixture.snapshot) == replacement)
+        let retained = directory ? detached.appending(path: "environments.json") : detached
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: Data(contentsOf: retained)) == .empty)
+    }
+
+    @Test(arguments: [(false, StateStoreError.fileUnwritable(name: .snapshot)), (true, .insecureDirectory(reason: .changed))])
+    func sameInodeReattachmentDuringPublicationIsRefused(directory: Bool, failure: StateStoreError) throws {
+        let fixture = try Fixture()
+        let target = directory ? fixture.state : fixture.snapshot, detached = fixture.base.appending(path: "detached")
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, directoryBarrier: { fd, label in
+                try StateFileIO.fullySynchronize(fd, name: label)
+                let identity = try fixture.identity(target)
+                try #require(rename(target.path, detached.path) == 0)
+                try #require(rename(detached.path, target.path) == 0)
+                try #require(try fixture.identity(target) == identity)
+            })
+        }
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: Data(contentsOf: fixture.snapshot)) == .empty)
+    }
+
+    @Test func thisPublicationDoesNotCollectOtherWritersOrStaleEvidence() throws {
+        let fixture = try Fixture(), evidence = Data("retained temporary".utf8)
+        let live = fixture.state.appending(path: ".environments.json.tmp-\(UUID().uuidString)")
+        let stale = fixture.state.appending(path: ".environments.json.tmp-\(UUID().uuidString)")
+        try evidence.write(to: live)
+        try evidence.write(to: stale)
+        let held = open(live.path, O_RDONLY | O_EXLOCK | O_NOFOLLOW | O_CLOEXEC)
+        try #require(held >= 0)
+        defer { close(held) }
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        #expect(try Data(contentsOf: live) == evidence)
+        #expect(try Data(contentsOf: stale) == evidence)
     }
 
     private func requireContended(_ path: URL) throws {
