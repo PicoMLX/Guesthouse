@@ -150,6 +150,16 @@ import Testing
         #expect(try JournalReplayChunk(Data(("{\"timestamp\":" + mantissa).utf8)).truncatedTail)
     }
 
+    @Test(arguments: [4.6728494007670807e+303, -4.6728494007670807e+303])
+    func interruptedExponentRetainsZeroPrefixedCompletion(value: Double) throws {
+        let encoded = String(decoding: try JSONEncoder().encode(
+            Date(timeIntervalSinceReferenceDate: value)), as: UTF8.self)
+        try #require(encoded.hasSuffix("e+303"))
+        let prefix = String(encoded.dropLast(2))
+        try #require(prefix.hasSuffix("e+3"))
+        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
+    }
+
     @Test(arguments: ["id", "environmentID"])
     func lowercaseIdentityRemainsCorruption(key: String) throws {
         let uuid = UUID(uuidString: "ABCDEF12-ABCD-ABCD-ABCD-ABCDEF123456")!
