@@ -262,19 +262,24 @@ import Testing
         #expect(attempts.withLock { $0 } == 1)
     }
 
-    @Test(arguments: ["write", "fileBarrier", "directoryBarrier"])
-    func throwingMutationRetainsReplacedDirectoryUncertainty(stage: String) async throws {
+    @Test(arguments: ["write", "fileBarrier", "directoryBarrier"], [false, true])
+    func throwingMutationRetainsReplacedBindingUncertainty(stage: String, replaceDirectory: Bool) async throws {
         let fixture = try Fixture(), peer = try await fixture.open(), prior = Self.record(), next = Self.record()
         try await peer.append(prior)
         let original = try fixture.bytes(), writes = Mutex(0)
-        let detached = fixture.base.appending(path: "detached-state")
-        let conflicting = fixture.base.appending(path: "conflicting-state")
+        let target = replaceDirectory ? fixture.state : fixture.journal
+        let detached = fixture.base.appending(path: "detached-evidence")
+        let conflicting = fixture.base.appending(path: "conflicting-evidence")
+        let retainedJournal = replaceDirectory ? detached.appending(path: "journal.ndjson") : detached
+        let conflictingJournal = replaceDirectory ? conflicting.appending(path: "journal.ndjson") : conflicting
         let otherBytes = try JSONEncoder().encode(Self.record()) + Data([10])
         let failure = StateStoreError.fileUnwritable(name: .journal)
         let replaceAndFail: @Sendable () throws -> Void = {
-            try FileManager.default.moveItem(at: fixture.state, to: detached)
-            try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: false,
-                                                   attributes: [.posixPermissions: 0o700])
+            try FileManager.default.moveItem(at: target, to: detached)
+            if replaceDirectory {
+                try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: false,
+                                                       attributes: [.posixPermissions: 0o700])
+            }
             try fixture.write(otherBytes)
             throw failure
         }
@@ -292,12 +297,12 @@ import Testing
         await #expect(throws: StateStoreError.journalWriteUncertain(cause: failure)) {
             try await store.append(next)
         }
-        let retained = try Data(contentsOf: detached.appending(path: "journal.ndjson"))
+        let retained = try Data(contentsOf: retainedJournal)
         #expect(retained.starts(with: original))
         #expect(try fixture.bytes() == otherBytes)
         // Restore before any replay; a later failed inspection must not supply the latch.
-        try FileManager.default.moveItem(at: fixture.state, to: conflicting)
-        try FileManager.default.moveItem(at: detached, to: fixture.state)
+        try FileManager.default.moveItem(at: target, to: conflicting)
+        try FileManager.default.moveItem(at: detached, to: target)
         let later = try await fixture.open()
         for owner in [store, peer, later] {
             for _ in 0..<2 {
@@ -306,7 +311,7 @@ import Testing
                 #expect(try fixture.bytes() == retained)
             }
         }
-        #expect(try Data(contentsOf: conflicting.appending(path: "journal.ndjson")) == otherBytes)
+        #expect(try Data(contentsOf: conflictingJournal) == otherBytes)
         #expect(writes.withLock { $0 } == 1)
     }
 
