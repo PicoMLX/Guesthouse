@@ -15,9 +15,9 @@ struct RuntimeStorage: Sendable {
         var excludedFromBackup: Bool { self == .staging || self == .downloads }
     }
     private let root: URL
-    // Read-only discovery retains the first root, including across anchor construction.
+    // Read-only discovery retains the first root and namespace version across anchor construction.
     // Prepared layouts retain their existing semantics; this is not a persistent lease.
-    private let observedRoot: StateFileIdentity?
+    private let observedRoot: StateFileVersion?
     typealias BackupWriter = @Sendable (URL, Bool) throws -> Void
 
     init() throws { try self.init(root: Self.defaultRoot()) }
@@ -48,7 +48,7 @@ struct RuntimeStorage: Sendable {
             guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
             return nil
         }
-        let storage = RuntimeStorage(verifiedRoot: root, identity: StateFileIdentity(info))
+        let storage = RuntimeStorage(verifiedRoot: root, version: StateFileVersion(info))
         try afterObservedRoot()
         try storage.verifyObservedRoot()
         try verify(root, excluded: false)
@@ -56,15 +56,17 @@ struct RuntimeStorage: Sendable {
         return storage
     }
 
-    private init(verifiedRoot: URL, identity: StateFileIdentity) {
+    private init(verifiedRoot: URL, version: StateFileVersion) {
         root = verifiedRoot
-        observedRoot = identity
+        observedRoot = version
     }
 
     private func verifyObservedRoot() throws {
         guard let observedRoot else { return }
         let current = try StorageProtection.structure(root)
-        guard StateFileIdentity(current) == observedRoot else { throw StorageFailure.unsafeStructure }
+        // An unchanged root inode does not prove its state entry is the one first observed.
+        // Fail closed on namespace drift; a fresh discovery is a separate observation.
+        guard StateFileVersion(current) == observedRoot else { throw StorageFailure.unsafeStructure }
     }
 
     /// Runtime-only injection for isolated fixtures; never exposed in an XPC request.
