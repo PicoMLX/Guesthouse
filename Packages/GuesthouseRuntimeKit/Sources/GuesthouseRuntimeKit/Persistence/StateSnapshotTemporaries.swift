@@ -6,6 +6,11 @@ import GuesthouseCore
 /// The caller first validates the value and existing snapshot, then keeps its directory borrow
 /// and snapshot precondition throughout this synchronous call. No arbitrary paths or GUI API.
 enum StateSnapshotTemporaries {
+    // Bound retained names and enumeration work independently. Every retained name has
+    // the fixed ASCII prefix + 36-byte UUID length. Overflow refuses before any unlink.
+    static let maximumCandidates = 256
+    static let maximumDirectoryEntries = 4_096
+
     static func isManagedName(_ name: String) -> Bool {
         let prefix = StateSnapshotPublication.temporaryPrefix
         guard name.hasPrefix(prefix), let id = UUID(uuidString: String(name.dropFirst(prefix.count))) else { return false }
@@ -51,12 +56,15 @@ enum StateSnapshotTemporaries {
         }
         defer { closedir(stream) }
         var names: [String] = []
+        var inspected = 0
         while true {
             errno = 0
             guard let entry = readdir(stream) else {
                 guard errno == 0 else { throw .fileUnreadable(name: .stateDirectory) }
                 return names
             }
+            guard inspected < maximumDirectoryEntries else { throw .fileUnreadable(name: .stateDirectory) }
+            inspected += 1 // Includes unrelated entries and the directory's dot entries.
             let length = Int(entry.pointee.d_namlen)
             guard length == StateSnapshotPublication.temporaryPrefix.utf8.count + 36 else { continue }
             // dir(5) records are packed to their actual length. Borrow the first character's
@@ -69,7 +77,10 @@ enum StateSnapshotTemporaries {
                 return String(bytes: UnsafeBufferPointer(start: bytes, count: length), encoding: .utf8)
             }
             // d_type is deliberately ignored: it is optional filesystem-supplied evidence.
-            if let name, isManagedName(name) { names.append(name) }
+            if let name, isManagedName(name) {
+                guard names.count < maximumCandidates else { throw .fileUnreadable(name: .stateDirectory) }
+                names.append(name)
+            }
         }
     }
 
