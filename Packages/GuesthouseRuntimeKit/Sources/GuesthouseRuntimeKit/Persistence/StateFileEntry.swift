@@ -60,6 +60,12 @@ enum StateFileEntry {
         // Once a journal was observed, disappearance must not silently create a new history.
         let flags = (access.creates ? O_RDWR : O_RDONLY)
             | (access.creates && !requireExisting ? O_CREAT : 0) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        // A denied open has no descriptor identity. Pin the namespace before attempting it,
+        // so later permission guidance cannot accidentally describe a replacement entry.
+        let openingDirectoryVersion: StateFileVersion?
+        if protection == .verifyOnly {
+            openingDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+        } else { openingDirectoryVersion = nil }
         var descriptor = openat(directory, access.name, flags, 0o600)
         // Retained bounded retry for a transient missing entry during creation. No bytes are
         // truncated and no VM/Git mutation is retried. Missing read-only files remain absent.
@@ -78,7 +84,7 @@ enum StateFileEntry {
             }
             if openFailure == EACCES, protection == .verifyOnly {
                 do {
-                    let version = try StateFileIO.version(directory, name: .stateDirectory)
+                    guard let version = openingDirectoryVersion else { throw access.failure }
                     try validateDirectory(version)
                     var denied = stat(), current = stat()
                     guard fstatat(directory, access.name, &denied, AT_SYMLINK_NOFOLLOW) == 0 else {

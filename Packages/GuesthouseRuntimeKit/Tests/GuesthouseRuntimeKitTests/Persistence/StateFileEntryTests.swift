@@ -324,6 +324,41 @@ import Testing
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
     }
 
+    @Test(arguments: [StateFileAccess.readSnapshot, .readJournal], [false, true])
+    func deniedReadClassificationRetainsPreOpenNamespace(access: StateFileAccess, replace: Bool) throws {
+        let fixture = try Fixture(), file = fixture.file(access)
+        let detached = fixture.base.appending(path: "denied-original")
+        let replacement = fixture.base.appending(path: "replacement")
+        let other = Data("distinct readable evidence".utf8)
+        try evidence.write(to: file)
+        try other.write(to: replacement)
+        try #require(chmod(replacement.path, 0o600) == 0)
+        try #require(chmod(file.path, 0) == 0)
+        defer { _ = chmod(file.path, 0o600); _ = chmod(detached.path, 0o600) }
+        var observed = 0, opened = 0
+        let failure = StateStoreError.insecureDirectory(reason: replace ? .changed : .permissions)
+        #expect(throws: failure) {
+            try fixture.anchor.withFile(access, protection: .verifyOnly,
+                permissionBarrier: { _, _ in Issue.record("Inspection must not repair protection") },
+                didOpen: { opened += 1 }, didObserve: {
+                    observed += 1
+                    if replace {
+                        #expect(rename(file.path, detached.path) == 0)
+                        #expect(rename(replacement.path, file.path) == 0)
+                    }
+                }, body: { _ in Issue.record("Denied open must not enter the body") })
+        }
+        #expect(observed == 1 && opened == 0)
+        let retained = replace ? detached : file
+        var info = stat()
+        try #require(lstat(retained.path, &info) == 0)
+        #expect(info.st_mode & 0o7777 == 0)
+        try #require(chmod(retained.path, 0o600) == 0)
+        #expect(try Data(contentsOf: retained) == evidence)
+        #expect(try Data(contentsOf: replace ? file : replacement) == other)
+        #expect(try fixture.mode(access) == 0o600)
+    }
+
     private func requireContended(_ descriptor: Int32) throws {
         let result = flock(descriptor, LOCK_EX | LOCK_NB), failure = errno
         try #require(result == -1 && failure == EWOULDBLOCK)
