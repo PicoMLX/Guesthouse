@@ -232,6 +232,33 @@ import Testing
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
     }
 
+    @Test(arguments: [false, true])
+    func journalWriteRejectsNamespaceChangesButAllowsContentWrites(reattach: Bool) throws {
+        let fixture = try Fixture(), file = fixture.file(.writeJournal)
+        try evidence.write(to: file)
+        let detached = fixture.state.appending(path: "detached")
+        let conflicting = fixture.state.appending(path: "conflicting")
+        let otherEvidence = Data("conflicting journal history".utf8)
+        let appended = Data(" appended record".utf8)
+        let borrow = {
+            try fixture.anchor.withFile(.writeJournal, body: { fd in
+                try #require(lseek(fd, 0, SEEK_END) >= 0)
+                try StateFileIO.writeAll(fd, appended, name: .journal)
+                if reattach {
+                    try #require(rename(file.path, detached.path) == 0)
+                    try otherEvidence.write(to: file)
+                    try #require(rename(file.path, conflicting.path) == 0)
+                    try #require(rename(detached.path, file.path) == 0)
+                }
+            })
+        }
+        if reattach {
+            #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) { try borrow() }
+            #expect(try Data(contentsOf: conflicting) == otherEvidence)
+        } else { try borrow() }
+        #expect(try Data(contentsOf: file) == evidence + appended)
+    }
+
     @Test func failedBorrowedWritePreservesEvidenceAndItsTypedUncertainty() throws {
         let fixture = try Fixture()
         let failure = StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))
