@@ -19,7 +19,7 @@ extension StateDirectoryAnchor {
     /// A journal caller must classify ANY failure after its write attempt, including post-checks,
     /// as uncertain, and only publish cache/operation results after this entire call succeeds.
     func withFile<Result>(
-        _ access: StateFileAccess,
+        _ access: StateFileAccess, requireExisting: Bool = false,
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         didOpen: () -> Void = {},
         didObserve: () -> Void = {},
@@ -27,7 +27,7 @@ extension StateDirectoryAnchor {
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
-            try StateFileEntry.withDescriptor(in: directory, access: access,
+            try StateFileEntry.withDescriptor(in: directory, access: access, requireExisting: requireExisting,
                 permissionBarrier: permissionBarrier, didOpen: didOpen, didObserve: didObserve,
                 didIdentify: didIdentify,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
