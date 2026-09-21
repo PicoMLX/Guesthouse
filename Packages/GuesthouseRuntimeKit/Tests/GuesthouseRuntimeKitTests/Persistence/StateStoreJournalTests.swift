@@ -698,7 +698,7 @@ import Testing
         }
         let evidence = try fixture.bytes()
         #expect(!evidence.isEmpty && evidence.allSatisfy { $0 == 120 })
-        await #expect(throws: StateStoreError.corruptJournal(line: 1)) { try await store.replay() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         #expect(try fixture.bytes() == evidence)
     }
 
@@ -744,7 +744,7 @@ import Testing
         }
         let evidence = try fixture.bytes()
         #expect(evidence.suffix(extra.count) == extra)
-        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         #expect(try fixture.bytes() == evidence)
     }
 
