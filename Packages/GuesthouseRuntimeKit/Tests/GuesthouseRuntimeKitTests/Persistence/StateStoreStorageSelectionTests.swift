@@ -111,6 +111,7 @@ import Testing
                 #expect(try fixture.inspect() == original)
             }
             // Preserving unselected, nonempty work remains an ordinary save, not a reset.
+            #expect(try await owner.loadSnapshot() == original)
             try await owner.saveSnapshot(original)
             #expect(try await owner.loadSnapshot() == original)
         }
@@ -120,6 +121,7 @@ import Testing
         let fixture = try Fixture(), store = try await fixture.open(), value = try selected()
         try await store.saveSnapshot(.empty)
         let reopened = try await fixture.open()
+        #expect(try await reopened.loadSnapshot() == .empty)
         try await reopened.saveSnapshot(value)
         #expect(try fixture.inspect() == value)
     }
