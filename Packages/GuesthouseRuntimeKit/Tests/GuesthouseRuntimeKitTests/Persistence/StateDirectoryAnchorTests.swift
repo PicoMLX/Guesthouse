@@ -50,6 +50,29 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: fixture.detached.path))
     }
 
+    @Test(arguments: [false, true])
+    func preOpenReplacementCannotBecomeTheObservedDirectory(populated: Bool) throws {
+        let fixture = try Fixture(), replacement = try Fixture()
+        let original = Data("original retained inventory".utf8)
+        let other = Data("different retained inventory".utf8)
+        try original.write(to: fixture.state.appending(path: "evidence"))
+        if populated { try other.write(to: replacement.state.appending(path: "evidence")) }
+        var opens = 0, closes = 0
+        #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+            _ = try StateDirectoryAnchor(storage: fixture.storage, openDirectory: { path, flags in
+                opens += 1
+                #expect(rename(path, fixture.detached.path) == 0)
+                #expect(rename(replacement.state.path, path) == 0)
+                return open(path, flags)
+            }, closeDirectory: { fd in closes += 1; close(fd) })
+        }
+        #expect(opens == 1 && closes == 1)
+        #expect(try Data(contentsOf: fixture.detached.appending(path: "evidence")) == original)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path) ==
+                (populated ? ["evidence"] : []))
+        if populated { #expect(try Data(contentsOf: fixture.state.appending(path: "evidence")) == other) }
+    }
+
     @Test func successfulOwnerClosesExactlyOnceOnReleaseNotAfterBorrowing() throws {
         let fixture = try Fixture()
         var closes = 0
