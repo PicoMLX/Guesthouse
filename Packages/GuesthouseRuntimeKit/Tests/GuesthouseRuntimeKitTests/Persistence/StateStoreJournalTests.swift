@@ -298,6 +298,45 @@ import Testing
         else { #expect(!FileManager.default.fileExists(atPath: fixture.journal.path)) }
     }
 
+    @Test func failedRequiredOpenRemainsUnreadAfterOriginalJournalReturns() async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), writes = Mutex(0)
+        let peer = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        let started = Self.record()
+        try await first.append(started)
+        let original = try fixture.bytes(), detached = fixture.state.appending(path: "original")
+        var before = stat(), restored = stat()
+        try #require(lstat(fixture.journal.path, &before) == 0)
+        try #require(rename(fixture.journal.path, detached.path) == 0)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+            try await peer.append(Self.record(matching: started, outcome: .completed))
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        // Do NOT replay the missing path here: that would independently latch uncertainty
+        // and mask whether the failed required-existing append retained it.
+        let hidden = try JSONEncoder().encode(Self.record()) + Data([10])
+        try fixture.write(hidden)
+        let hiddenJournal = fixture.state.appending(path: "hidden")
+        try #require(rename(fixture.journal.path, hiddenJournal.path) == 0)
+        try #require(rename(detached.path, fixture.journal.path) == 0)
+        try #require(lstat(fixture.journal.path, &restored) == 0)
+        #expect(StateFileIdentity(before) == StateFileIdentity(restored))
+        let later = try await fixture.open()
+        for owner in [peer, first, later] {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                    try await owner.append(Self.record(matching: started, outcome: .completed))
+                }
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.replay() }
+                #expect(try fixture.bytes() == original)
+                #expect(try Data(contentsOf: hiddenJournal) == hidden)
+            }
+        }
+        #expect(writes.withLock { $0 } == 0)
+    }
+
     @Test(arguments: [false, true])
     func tailRepairResultIsSharedWithAlreadyOpenPeers(failBarrier: Bool) async throws {
         let fixture = try Fixture(), peer = try await fixture.open(), started = Self.record()
