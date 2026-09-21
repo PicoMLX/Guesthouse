@@ -64,7 +64,10 @@ enum StateFileEntry {
             // Only a stabilized ENOENT proves absence. Other failures may hide an existing
             // entry (permission drift, symlink, descriptor exhaustion); retain that uncertainty.
             let openError = errno
-            if openError != ENOENT {
+            // A required-existing writer losing its entry is itself uncertain evidence.
+            // Report it even on ENOENT so restoring the original cannot authorize append.
+            // This runs only after an actual open failure, never on prior lock contention.
+            if openError != ENOENT || (access.creates && requireExisting) {
                 didObserve()
                 guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
             }
