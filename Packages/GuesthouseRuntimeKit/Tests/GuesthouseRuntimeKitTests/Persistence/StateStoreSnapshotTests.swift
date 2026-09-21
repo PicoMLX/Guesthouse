@@ -49,6 +49,70 @@ import Testing
         #expect(try Data(contentsOf: retained) == evidence)
     }
 
+    @Test(arguments: [false, true])
+    func staleOwnersCannotOverwritePeerPublications(initiallyPresent: Bool) async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), second = try await fixture.open()
+        if initiallyPresent { try await first.saveSnapshot(sample()) }
+        let baseline = try await first.loadSnapshot()
+        #expect(try await second.loadSnapshot() == baseline)
+        let winner = try sample(), loser = try sample()
+        try await first.saveSnapshot(winner)
+        let bytes = try fixture.bytes(), names = try fixture.names()
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try await second.saveSnapshot(loser)
+            }
+            #expect(try fixture.bytes() == bytes)
+            #expect(try fixture.names() == names)
+        }
+        // Opening a new owner is not authority to overwrite an existing generation either.
+        let fresh = try await fixture.open()
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try await fresh.saveSnapshot(loser)
+        }
+        #expect(try fixture.bytes() == bytes)
+        #expect(try fixture.names() == names)
+        // The caller explicitly inspects/reconciles before a subsequent replacement.
+        #expect(try await second.loadSnapshot() == winner)
+        try await second.saveSnapshot(loser)
+        let replacement = try fixture.bytes()
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try await first.saveSnapshot(winner)
+        }
+        #expect(try fixture.bytes() == replacement)
+        #expect(try await first.loadSnapshot() == loser)
+    }
+
+    @Test func failedPublicationDoesNotAdvanceTheOwnersExpectedVersion() async throws {
+        let fixture = try Fixture(), initial = try await fixture.open(), baseline = try sample()
+        try await initial.saveSnapshot(baseline)
+        let barriers = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
+            let attempt = barriers.withLock { $0 += 1; return $0 }
+            if attempt == 1 { throw StateStoreError.fileUnwritable(name: .stateDirectory) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }))
+        #expect(try await store.loadSnapshot() == baseline)
+        let published = try sample()
+        await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) {
+            try await store.saveSnapshot(published)
+        }
+        let evidence = try fixture.bytes(), names = try fixture.names()
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try await store.saveSnapshot(baseline)
+            }
+            #expect(try fixture.bytes() == evidence)
+            #expect(try fixture.names() == names)
+        }
+        #expect(barriers.withLock { $0 } == 1)
+        // Reading visible bytes is inspection, not proof that the failed save was durable.
+        #expect(try await store.loadSnapshot() == published)
+        try await store.saveSnapshot(baseline)
+        #expect(barriers.withLock { $0 } == 2)
+        #expect(try await store.loadSnapshot() == baseline)
+    }
+
     @Test(arguments: [0, 1, 2, 3])
     func separateStoresShareSuccessfulAndFailedSnapshotObservations(scenario: Int) async throws {
         let fixture = try Fixture()
@@ -373,6 +437,7 @@ import Testing
         try await initial.saveSnapshot(sample())
         let bytes = try fixture.bytes()
         let failed = try await fixture.open(hooks: StateStoreHooks(snapshotFile: { _, _ in throw FixtureFailure.opaque }))
+        _ = try await failed.loadSnapshot() // Establish the generation before exercising the write barrier.
         await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await failed.saveSnapshot(.empty) }
         #expect(try fixture.bytes() == bytes)
         #expect(try fixture.names().count == 2)
