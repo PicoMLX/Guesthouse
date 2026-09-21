@@ -45,13 +45,17 @@ struct RuntimeStorage: Sendable {
 
     /// Each use rechecks the root, every managed intermediate, and the selected leaf, including
     /// backup-policy drift. Returning this URL does not authorize arbitrary child paths or writes.
-    func location(for area: Area) throws -> URL {
+    /// Reports the first observed leaf synchronously so an anchor can bind its later open.
+    func location(for area: Area, didObserve: (StateFileIdentity) -> Void = { _ in }) throws -> URL {
         try Self.verify(root, excluded: false)
         var result = root
         let parts = area.rawValue.split(separator: "/")
         for (index, part) in parts.enumerated() {
             result.append(path: String(part))
+            let observed = try StorageProtection.structure(result)
+            if index == parts.count - 1 { didObserve(StateFileIdentity(observed)) }
             try Self.verify(result, excluded: index == parts.count - 1 && area.excludedFromBackup)
+            try Self.verifyIdentity(result, expected: observed)
         }
         return result
     }
