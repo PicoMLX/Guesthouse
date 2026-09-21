@@ -11,6 +11,7 @@ enum StateJournalAppend {
         observation: inout StateJournalObservation, hooks: StateStoreHooks,
         requireExisting: Bool = false, didObserve: () -> Void = {}
     ) throws(StateStoreError) -> StateJournalCache {
+        try observation.requireReadable()
         var line: Data
         do {
             let encoder = JSONEncoder()
@@ -24,10 +25,12 @@ enum StateJournalAppend {
         var writeAttempted = false
         var observedEntry = false, enteredBody = false
         var checkingBinding = false, completedBody = false
+        var outerBindingFailed = false
         do {
             // Shares the snapshot/first-volume-selection transaction boundary. Contention
             // refuses before opening or creating a journal; it never waits or retries.
-            return try anchor.withPublicationOwnership(for: .journal) { directory in
+            return try anchor.withPublicationOwnership(for: .journal,
+                didFailBinding: { outerBindingFailed = true }) { directory in
                 guard let candidate = try StateFileEntry.withDescriptor(
                     in: directory, access: .writeJournal, requireExisting: requireExisting,
                     permissionBarrier: hooks.permission,
@@ -93,7 +96,9 @@ enum StateJournalAppend {
             // Restoring the old path must not clear that uncertainty. Plain write/barrier
             // failures retain their existing explicit-inspection policy when binding was
             // not checked and found inconsistent; this never claims the mutation succeeded.
-            if (observedEntry && !enteredBody) || checkingBinding || completedBody {
+            // Directory binding can fail before any file callback. The anchor reports only
+            // its binding checks, never ordinary nonblocking lock contention/reentrancy.
+            if outerBindingFailed || (observedEntry && !enteredBody) || checkingBinding || completedBody {
                 observation.recordUnreadFailure()
             }
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
