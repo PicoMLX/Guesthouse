@@ -7,6 +7,178 @@ import Testing
 
 /// Retains #57's append/recovery/durability cases with runtime-owned fixtures, not host/VM work.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreJournalTests {
+    @Test(arguments: [false, true], [false, true])
+    func preBorrowBindingFailureCannotAuthorizeRestoredHistory(firstAppend: Bool, initiallyMissing: Bool) async throws {
+        let fixture = try Fixture(), reads = Mutex(0), writes = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }, journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        let original = try JSONEncoder().encode(Self.record()) + Data([10])
+        let other = try JSONEncoder().encode(Self.record()) + Data([10])
+        if !initiallyMissing {
+            try fixture.write(original)
+            _ = try await store.replay()
+        }
+        let detached = fixture.base.appending(path: "retained-directory")
+        let conflicting = fixture.base.appending(path: "conflicting-directory")
+        try #require(rename(fixture.state.path, detached.path) == 0)
+        try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        try fixture.write(other)
+        if firstAppend {
+            await #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) { try await store.replay() }
+        }
+        try #require(rename(fixture.state.path, conflicting.path) == 0)
+        try #require(rename(detached.path, fixture.state.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        }
+        #expect(reads.withLock { $0 } == (initiallyMissing ? 0 : 1) && writes.withLock { $0 } == 0)
+        if initiallyMissing { #expect(!FileManager.default.fileExists(atPath: fixture.journal.path)) }
+        else { #expect(try fixture.bytes() == original) }
+        #expect(try Data(contentsOf: conflicting.appending(path: "journal.ndjson")) == other)
+    }
+
+    @Test func ordinaryDirectoryContentionDoesNotPoisonUnobservedJournal() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let fd = Darwin.open(fixture.state.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        try #require(flock(fd, LOCK_EX | LOCK_NB) == 0)
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+            try await store.begin(.startEnvironment, for: EnvironmentID())
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
+        try #require(flock(fd, LOCK_UN) == 0)
+        #expect(try await store.replay().records.isEmpty)
+        let id = try await store.begin(.startEnvironment, for: EnvironmentID())
+        #expect(try await store.replay().records.map(\.id) == [id])
+    }
+
+    @Test(arguments: [false, true])
+    func initialPreparationFailureCannotAuthorizeTruncatedJournal(firstAppend: Bool) async throws {
+        let fixture = try Fixture(), fail = Mutex(true), writes = Mutex(0), started = Self.record()
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { fd, name in
+            if fail.withLock({ $0 }) { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }, journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        try fixture.write(JSONEncoder().encode(started) + Data([10]))
+        if firstAppend {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) { try await store.replay() }
+        }
+        try fixture.write(Data())
+        fail.withLock { $0 = false }
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+        }
+        #expect(writes.withLock { $0 } == 0)
+        #expect(try fixture.bytes().isEmpty)
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func initialReadFailureCannotAuthorizeLaterBegin(firstAppend: Bool, truncate: Bool) async throws {
+        let fixture = try Fixture(), attempts = Mutex(0), started = Self.record()
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            let attempt = attempts.withLock { $0 += 1; return $0 }
+            if attempt == 1 { throw StateStoreError.fileUnreadable(name: .journal) }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let original = try JSONEncoder().encode(started) + Data([10])
+        try fixture.write(original)
+        var before = stat(), after = stat()
+        try #require(lstat(fixture.journal.path, &before) == 0)
+        if firstAppend {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        let changed = truncate ? Data() : try JSONEncoder().encode(Self.record()) + Data([10])
+        try fixture.write(changed)
+        try #require(lstat(fixture.journal.path, &after) == 0)
+        try #require(StateFileIdentity(before) == StateFileIdentity(after))
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(attempts.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == changed)
+    }
+
+    @Test(arguments: [false, true])
+    func initialCorruptReadCannotAuthorizeBeginAfterTruncation(firstAppend: Bool) async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), started = Self.record()
+        let original = try JSONEncoder().encode(started) + Data("\nnot JSON\n".utf8)
+        try fixture.write(original)
+        if firstAppend {
+            await #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        } else {
+            await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+        }
+        try fixture.write(Data())
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+        }
+        #expect(try fixture.bytes().isEmpty)
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        #expect(try fixture.bytes() == original)
+    }
+
+    @Test(arguments: [false, true])
+    func failedInitialAppendPreparationCannotAcceptReplacement(deniedOpen: Bool) async throws {
+        let fixture = try Fixture(), fail = Mutex(!deniedOpen), started = Self.record()
+        let store = try await fixture.open(hooks: StateStoreHooks(permission: { fd, name in
+            if fail.withLock({ $0 }) { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }))
+        let original = try JSONEncoder().encode(started) + Data([10])
+        try fixture.write(original)
+        if deniedOpen { try #require(chmod(fixture.journal.path, 0) == 0) }
+        await #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+            try await store.begin(.startEnvironment, for: EnvironmentID())
+        }
+        let retained = fixture.state.appending(path: "retained-initial")
+        try #require(rename(fixture.journal.path, retained.path) == 0)
+        try fixture.write(Data())
+        fail.withLock { $0 = false }
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: started.environmentID)
+            }
+        }
+        #expect(try fixture.bytes().isEmpty)
+        try #require(chmod(retained.path, 0o600) == 0)
+        #expect(try Data(contentsOf: retained) == original)
+    }
+
     @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
         let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
         try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
