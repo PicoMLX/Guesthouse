@@ -79,7 +79,10 @@ enum StateFileEntry {
             let openFailure = errno
             // Non-ENOENT failures may hide an entry. Keep uncertainty even when verify-only
             // classification or protection checks below fail; this does not grant access.
-            if openFailure != ENOENT {
+            // A required-existing writer losing its entry is itself uncertain evidence.
+            // Report it even on ENOENT so restoring the original cannot authorize append.
+            // This runs only after an actual open failure, never on prior lock contention.
+            if openFailure != ENOENT || (access.creates && requireExisting) {
                 didObserve()
                 guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
             }
