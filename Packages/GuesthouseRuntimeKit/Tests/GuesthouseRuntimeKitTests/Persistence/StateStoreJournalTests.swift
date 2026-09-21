@@ -179,6 +179,48 @@ import Testing
         #expect(try Data(contentsOf: retained) == original)
     }
 
+    @Test(arguments: [false, true], ["write", "fileBarrier", "directoryBarrier"])
+    func failedContentVerificationRemainsUnreadAfterRestoration(wrongLength: Bool, stage: String) async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), prior = Self.record(), next = Self.record()
+        try await first.append(prior)
+        let original = try fixture.bytes(), attempts = Mutex(0)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let expected = try encoder.encode(next) + Data([10])
+        let conflicting = JournalRecord(id: OperationID(), environmentID: next.environmentID,
+            operation: next.operation, timestamp: next.timestamp, outcome: next.outcome)
+        let changed = try encoder.encode(conflicting) + Data([10])
+        try #require(changed.count == expected.count && changed != expected)
+        let substituted = wrongLength ? expected + Data([10]) : changed
+        let alter: @Sendable () throws -> Void = { try fixture.write(original + substituted) }
+        let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            if stage == "directoryBarrier" { try alter() }
+        }, journalFile: { fd, name in
+            try StateFileIO.fullySynchronize(fd, name: name)
+            if stage == "fileBarrier" { try alter() }
+        }, journalWrite: { fd, bytes in
+            attempts.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+            if stage == "write" { try alter() }
+        }))
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+            try await store.append(next)
+        }
+        #expect(try fixture.bytes() == original + substituted)
+        // Restore before ANY replay; no subsequent parse/prefix failure may mask the check.
+        try fixture.write(original)
+        let later = try await fixture.open()
+        for owner in [store, first, later] {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.append(next) }
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.replay() }
+                #expect(try fixture.bytes() == original)
+            }
+        }
+        #expect(attempts.withLock { $0 } == 1)
+    }
+
     @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
         let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
         try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
