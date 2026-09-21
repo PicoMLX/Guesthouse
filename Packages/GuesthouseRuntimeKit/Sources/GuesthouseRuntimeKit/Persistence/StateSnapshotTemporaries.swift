@@ -43,8 +43,9 @@ enum StateSnapshotTemporaries {
             // or on a stream's position while its directory entries are changing.
             // Publication may leave its new temporary behind on failure. Reserve that
             // retained name before ANY move, not after collecting the existing inventory.
-            let limit = maximumCandidates - (reservingPublicationTemporary ? 1 : 0)
-            let names = try candidates(in: directory, limit: limit)
+            let reservation = reservingPublicationTemporary ? 1 : 0
+            let names = try candidates(in: directory, limit: maximumCandidates - reservation,
+                                       entryLimit: maximumDirectoryEntries - reservation)
             var quarantined = 0
             for name in names {
                 try validateStore(nil)
@@ -59,7 +60,7 @@ enum StateSnapshotTemporaries {
         catch { throw .fileUnwritable(name: .snapshot) }
     }
 
-    private static func candidates(in directory: Int32, limit: Int) throws(StateStoreError) -> [String] {
+    private static func candidates(in directory: Int32, limit: Int, entryLimit: Int) throws(StateStoreError) -> [String] {
         // An independent open description keeps enumeration from changing the anchor's offset.
         // fdopendir takes ownership only on success; closedir then closes that descriptor.
         let descriptor = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -78,7 +79,7 @@ enum StateSnapshotTemporaries {
                 guard errno == 0 else { throw .fileUnreadable(name: .stateDirectory) }
                 return names
             }
-            guard inspected < maximumDirectoryEntries else { throw .fileUnreadable(name: .stateDirectory) }
+            guard inspected < entryLimit else { throw .fileUnreadable(name: .stateDirectory) }
             inspected += 1 // Includes unrelated entries and the directory's dot entries.
             let length = Int(entry.pointee.d_namlen)
             guard length == StateSnapshotPublication.temporaryPrefix.utf8.count + 36

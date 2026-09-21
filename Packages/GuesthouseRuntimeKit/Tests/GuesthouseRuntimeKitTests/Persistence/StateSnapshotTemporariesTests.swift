@@ -292,6 +292,57 @@ import Testing
         }
     }
 
+    @Test func fullDirectoryBudgetRefusesBeforeQuarantineOrPublication() throws {
+        let fixture = try Fixture(), candidate = try fixture.temporary()
+        // One candidate plus unrelated entries and the two dot entries fills the scan.
+        for index in 0..<(StateSnapshotTemporaries.maximumDirectoryEntries - 3) {
+            try fixture.evidence.write(to: fixture.state.appending(path: "unrelated-\(index)"))
+        }
+        let inventory = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        #expect(inventory.count == 4_094)
+        for _ in 0..<2 {
+            let reopened = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: reopened,
+                    createTemporary: { _, _, _, _ in Issue.record("Full directory must refuse before creation"); return -1 })
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == inventory)
+            for name in inventory { #expect(try Data(contentsOf: fixture.state.appending(path: name)) == fixture.evidence) }
+        }
+        #expect(try Data(contentsOf: candidate) == fixture.evidence)
+        // Standalone collection requires no extra namespace slot and still admits the bound.
+        #expect(try fixture.collect() == 1)
+    }
+
+    @Test func failedPublicationUsesOnlyItsReservedDirectoryEntry() throws {
+        let fixture = try Fixture(), failure = StateStoreError.fileUnwritable(name: .snapshot)
+        _ = try fixture.temporary()
+        for index in 0..<(StateSnapshotTemporaries.maximumDirectoryEntries - 4) {
+            try fixture.evidence.write(to: fixture.state.appending(path: "unrelated-\(index)"))
+        }
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { _, _ in throw failure })
+        }
+        let inventory = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        #expect(inventory.count == 4_094) // Plus two dot entries: exactly the scan bound.
+        #expect(try fixture.quarantined().count == 1)
+        let temporary = try #require(inventory.first(where: StateSnapshotTemporaries.isManagedName))
+        let bytes = try Data(contentsOf: fixture.state.appending(path: temporary))
+        #expect(!bytes.isEmpty)
+        for _ in 0..<2 {
+            let reopened = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: reopened,
+                    createTemporary: { _, _, _, _ in Issue.record("No directory slot remains"); return -1 })
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == inventory)
+            #expect(try Data(contentsOf: fixture.state.appending(path: temporary)) == bytes)
+            for name in inventory where name != temporary {
+                #expect(try Data(contentsOf: fixture.state.appending(path: name)) == fixture.evidence)
+            }
+        }
+    }
+
     @Test func activeWriterIsSkippedWithoutWaiting() throws {
         let fixture = try Fixture(), live = try fixture.temporary()
         let descriptor = open(live.path, O_RDONLY | O_EXLOCK | O_NOFOLLOW | O_CLOEXEC)
