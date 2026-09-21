@@ -497,6 +497,7 @@ import Testing
         _ = try await store.replay()
         let completed = Self.record(matching: started, outcome: .notApplied)
         try await store.append(completed)
+        #expect(try await store.replay().records == [started, completed])
         let reopened = try await fixture.open(), replay = try await reopened.replay()
         #expect(replay.records == [started, completed] && replay.inFlight.isEmpty && !replay.truncatedTail)
         #expect(try fixture.bytes().starts(with: prefix))
@@ -535,6 +536,59 @@ import Testing
         let evidence = try fixture.bytes(), replay = try await store.replay()
         #expect(evidence.count == 12 && replay.records.isEmpty && replay.truncatedTail)
         #expect(try fixture.bytes() == evidence)
+    }
+
+    @Test(arguments: [false, true])
+    func substitutedObservedTailCannotAuthorizeAppend(truncate: Bool) async throws {
+        let fixture = try Fixture(), writes = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        let started = Self.record(), encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let prefix = try encoder.encode(started) + Data([10])
+        let original = prefix + (try encoder.encode(Self.record())).dropLast()
+        try fixture.write(original)
+        #expect(try await store.replay().truncatedTail)
+        let next = truncate ? prefix : prefix + (try encoder.encode(Self.record())) + Data([10])
+        try fixture.write(next)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.append(Self.record(matching: started, outcome: .notApplied))
+            }
+        }
+        #expect(writes.withLock { $0 } == 0)
+        #expect(try fixture.bytes() == next)
+    }
+
+    @Test func failedAuthorizedTailRepairLeavesOwnerClosed() async throws {
+        let fixture = try Fixture(), writes = Mutex(0)
+        let failure = StateStoreError.fileUnwritable(name: .journal)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, Data(bytes.prefix(12)), name: .journal)
+            throw failure
+        }))
+        let started = Self.record()
+        let original = try JSONEncoder().encode(started) + Data("\n{\"format\":".utf8)
+        try fixture.write(original)
+        #expect(try await store.replay().truncatedTail)
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: failure)) {
+            try await store.append(Self.record(matching: started, outcome: .notApplied))
+        }
+        let visible = try fixture.bytes()
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+        }
+        #expect(try fixture.bytes() == visible)
+        try fixture.write(original)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        #expect(writes.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == original)
     }
 
     @Test func sameLengthSubstitutionBeforeVersionCaptureNeverAuthorizesBegin() async throws {
