@@ -13,7 +13,7 @@ enum StateSnapshotPublication {
     static func save(
         _ snapshot: EnvironmentsSnapshot, to anchor: StateDirectoryAnchor,
         migrator: SnapshotMigrator = .standard,
-        requireExisting: Bool = false, didObserve: () -> Void = {},
+        requireExisting: @autoclosure () -> Bool = false, didObserve: () -> Void = {},
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         fileBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         directoryBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
@@ -39,7 +39,9 @@ enum StateSnapshotPublication {
         try anchor.withPublicationOwnership { directory in
             let existing = try existingVersion(in: anchor, migrator: migrator,
                 permissionBarrier: permissionBarrier, didObserve: didObserve)
-            guard existing != nil || !requireExisting else {
+            // Evaluate shared observation after acquiring publication ownership, not when
+            // the caller first starts encoding or waits to enter this transaction.
+            guard existing != nil || !requireExisting() else {
                 throw StateStoreError.fileUnwritable(name: .snapshot)
             }
             try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
