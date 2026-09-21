@@ -126,6 +126,7 @@ public actor StateStore {
     /// inspected recovery; complete invalid/unsupported records refuse the whole result.
     /// Observing these records is not proof of their durability or any mutation's outcome.
     public func replay() throws(StateStoreError) -> JournalReplay {
+        try journalObservation.requireReadable()
         var enteredBody = false
         var completedBody = false
         do {
@@ -147,7 +148,9 @@ public actor StateStore {
         } catch {
             // A parsed candidate cannot settle uncertainty from a later binding failure.
             // Parse failures retain their own raw evidence rather than taking this path.
-            if journalWasObserved && (!enteredBody || completedBody) {
+            // Even a first borrow may fail before observation callbacks or after a missing
+            // result's outer checks. Neither failure establishes trustworthy empty history.
+            if !enteredBody || completedBody {
                 journalObservation.recordUnreadFailure()
             }
             journal = StateJournalCache()
