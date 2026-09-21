@@ -86,6 +86,44 @@ import Testing
         #expect(try fixture.bytes() == bytes)
     }
 
+    @Test func emptyIntermediateSavesCannotEraseUnknownPlacement() async throws {
+        let fixture = try Fixture(), store = try await fixture.open()
+        let environment = DevelopmentEnvironment(name: "Retain unknown placement")
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let original = EnvironmentsSnapshot(environments: [environment], slots: slots)
+        try await store.saveSnapshot(original)
+        let reopened = try await fixture.open()
+        var recaptured = try selected()
+        recaptured.environments = original.environments
+        recaptured.slots = original.slots
+        let bytes = try fixture.bytes(), names = try fixture.names()
+        for owner in [store, reopened] {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.storageSelectionChanged) {
+                    try await owner.saveSnapshot(.empty)
+                }
+                await #expect(throws: StateStoreError.storageSelectionChanged) {
+                    try await owner.saveSnapshot(recaptured)
+                }
+                #expect(try fixture.bytes() == bytes)
+                #expect(try fixture.names() == names)
+                #expect(try fixture.inspect() == original)
+            }
+            // Preserving unselected, nonempty work remains an ordinary save, not a reset.
+            try await owner.saveSnapshot(original)
+            #expect(try await owner.loadSnapshot() == original)
+        }
+    }
+
+    @Test func genuinelyEmptyUnselectedStateCanStillAcquireItsFirstSelection() async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), value = try selected()
+        try await store.saveSnapshot(.empty)
+        let reopened = try await fixture.open()
+        try await reopened.saveSnapshot(value)
+        #expect(try fixture.inspect() == value)
+    }
+
     @Test(arguments: [false, true]) func journalHistoryBlocksFirstSelectionEvenWithoutASnapshot(torn: Bool) async throws {
         let fixture = try Fixture(), store = try await fixture.open(), value = try selected()
         if torn {

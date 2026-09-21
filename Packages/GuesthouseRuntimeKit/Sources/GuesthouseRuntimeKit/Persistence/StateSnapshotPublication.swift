@@ -120,8 +120,11 @@ enum StateSnapshotPublication {
             // with a newly observed UUID. Explicit relocation/recovery is a separate workflow.
             if let selected = saved.storageSelection {
                 guard snapshot.storageSelection == selected else { throw StateStoreError.storageSelectionChanged }
-            } else if snapshot.storageSelection != nil, !saved.environments.isEmpty {
-                throw StateStoreError.storageSelectionChanged
+            } else if !saved.environments.isEmpty {
+                // Ordinary saves cannot erase unknown placement and then recapture a volume.
+                guard snapshot.storageSelection == nil, !snapshot.environments.isEmpty else {
+                    throw StateStoreError.storageSelectionChanged
+                }
             }
             return (try StateFileIO.version(descriptor, name: .snapshot), saved.storageSelection)
         })
