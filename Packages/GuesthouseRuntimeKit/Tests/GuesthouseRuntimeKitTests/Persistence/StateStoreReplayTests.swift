@@ -502,6 +502,16 @@ import Testing
         }))
         let record = Self.record(), bytes = try Self.lines([record])
         try fixture.write(bytes)
+        do {
+            _ = try await store.replay()
+            Issue.record("Reattachment must reject the first read or its outer binding check")
+        } catch {
+            // A changed descriptor version can fail the read-consistency check first;
+            // otherwise the following entry/directory check reports the original failure.
+            #expect(error == .fileUnreadable(name: .journal)
+                    || error == .fileUnwritable(name: .journal)
+                    || error == .insecureDirectory(reason: .changed))
+        }
         for _ in 0..<2 {
             await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
         }
