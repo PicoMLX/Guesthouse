@@ -331,8 +331,8 @@ import Testing
         #expect(try Data(contentsOf: retained) == bytes)
     }
 
-    @Test(arguments: [false, true], ["write", "fileBarrier", "directoryBarrier"])
-    func failedContentVerificationRemainsUnreadAfterRestoration(wrongLength: Bool, stage: String) async throws {
+    @Test(arguments: ["length", "appended", "priorHistory"], ["write", "fileBarrier", "directoryBarrier"])
+    func failedContentVerificationRemainsUnreadAfterRestoration(corruption: String, stage: String) async throws {
         let fixture = try Fixture(), first = try await fixture.open(), prior = Self.record(), next = Self.record()
         try await first.append(prior)
         let original = try fixture.bytes(), attempts = Mutex(0)
@@ -343,8 +343,22 @@ import Testing
             operation: next.operation, timestamp: next.timestamp, outcome: next.outcome)
         let changed = try encoder.encode(conflicting) + Data([10])
         try #require(changed.count == expected.count && changed != expected)
-        let substituted = wrongLength ? expected + Data([10]) : changed
-        let alter: @Sendable () throws -> Void = { try fixture.write(original + substituted) }
+        let substituted = corruption == "length" ? expected + Data([10]) : changed
+        let otherPrior = JournalRecord(id: OperationID(), environmentID: prior.environmentID,
+            operation: prior.operation, timestamp: prior.timestamp, outcome: prior.outcome)
+        let changedPrior = try encoder.encode(otherPrior) + Data([10])
+        try #require(changedPrior.count == original.count && changedPrior != original)
+        let retained = corruption == "priorHistory" ? changedPrior + expected : original + substituted
+        let alter: @Sendable () throws -> Void = {
+            if corruption == "priorHistory" {
+                let other = Darwin.open(fixture.journal.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+                try #require(other >= 0)
+                defer { close(other) }
+                try #require(fcntl(other, F_GETFL) & O_APPEND == 0)
+                try StateFileIO.writeAll(other, changedPrior, name: .journal)
+            } else { try fixture.write(retained) }
+            try #require(try fixture.bytes() == retained)
+        }
         let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
             try StateFileIO.fullySynchronize(fd, name: name)
             if stage == "directoryBarrier" { try alter() }
@@ -353,13 +367,18 @@ import Testing
             if stage == "fileBarrier" { try alter() }
         }, journalWrite: { fd, bytes in
             attempts.withLock { $0 += 1 }
+            try #require(bytes == expected && fcntl(fd, F_GETFL) & O_APPEND != 0)
             try StateFileIO.writeAll(fd, bytes, name: .journal)
             if stage == "write" { try alter() }
         }))
-        await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+        // Prior-history mismatch must be reported by the full-prefix check, not length,
+        // appended-range or later timestamp checks (which report fileUnwritable).
+        let cause: StateStoreError = corruption == "priorHistory"
+            ? .fileUnreadable(name: .journal) : .fileUnwritable(name: .journal)
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: cause)) {
             try await store.append(next)
         }
-        #expect(try fixture.bytes() == original + substituted)
+        #expect(try fixture.bytes() == retained)
         // Restore before ANY replay; no subsequent parse/prefix failure may mask the check.
         try fixture.write(original)
         let later = try await fixture.open()
