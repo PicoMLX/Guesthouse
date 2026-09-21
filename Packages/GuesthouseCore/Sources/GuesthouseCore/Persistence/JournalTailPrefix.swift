@@ -188,7 +188,18 @@ struct JournalTailPrefix {
         }
         // Rounding can require a further mantissa digit AND an exponent. Checking either
         // extension alone misses genuine prefixes of e.g. 4.6728494007670807e+303.
-        let markers = token.contains("e") ? [""] : ["e"] + (0...9).map { String($0) + "e" }
+        if let marker = token.firstIndex(of: "e") {
+            // Enumerate whole exponents, not integer suffixes: after e+3 the
+            // completion of e+303 is "03", which String(3) cannot produce.
+            let mantissa = String(token[...marker])
+            for exponent in 0...324 {
+                for sign in ["", "-", "+"] {
+                    if canonicalDate(mantissa + sign + String(exponent))?.hasPrefix(token) == true { return true }
+                }
+            }
+            return false
+        }
+        let markers = ["e"] + (0...9).map { String($0) + "e" }
         for marker in markers {
             for exponent in 0...324 {
                 for sign in ["", "-", "+"] {
