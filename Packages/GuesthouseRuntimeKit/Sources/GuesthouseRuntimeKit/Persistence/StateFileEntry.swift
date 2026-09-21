@@ -59,7 +59,8 @@ enum StateFileEntry {
         // future caller accidentally pairs the policy with a journal write operation.
         guard protection != .verifyOnly || !access.creates else { throw access.failure }
         // Once a journal was observed, disappearance must not silently create a new history.
-        let flags = (access.creates ? O_RDWR : O_RDONLY)
+        // Append placement must not overwrite a competing write after a prior EOF seek.
+        let flags = (access.creates ? O_RDWR | O_APPEND : O_RDONLY)
             | (access.creates && !requireExisting ? O_CREAT : 0) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         // Pin the namespace before every verify-only open: success, absence and permission
         // guidance must all describe the same observation, not a replacement entry.
