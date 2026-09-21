@@ -30,7 +30,8 @@ enum StateSnapshotTemporaries {
     /// bounds retention; exhaustion refuses until explicit inspection outside this API.
     /// Native locks coordinate cooperating writers, not arbitrary same-user namespace races.
     @discardableResult static func collect(
-        in directory: Int32, validateStore: (StateFileVersion?) throws -> Void,
+        in directory: Int32, reservingPublicationTemporary: Bool = false,
+        validateStore: (StateFileVersion?) throws -> Void,
         beforeRemoval: (Int32, String) throws -> Void = { _, _ in },
         moveToQuarantine: (Int32, String, String) throws -> Int32 = {
             renameatx_np($0, $1, $0, $2, UInt32(RENAME_EXCL))
@@ -40,7 +41,10 @@ enum StateSnapshotTemporaries {
             try validateStore(nil)
             // Snapshot names before moving; never rely on readdir's unspecified ordering
             // or on a stream's position while its directory entries are changing.
-            let names = try candidates(in: directory)
+            // Publication may leave its new temporary behind on failure. Reserve that
+            // retained name before ANY move, not after collecting the existing inventory.
+            let limit = maximumCandidates - (reservingPublicationTemporary ? 1 : 0)
+            let names = try candidates(in: directory, limit: limit)
             var quarantined = 0
             for name in names {
                 try validateStore(nil)
@@ -55,7 +59,7 @@ enum StateSnapshotTemporaries {
         catch { throw .fileUnwritable(name: .snapshot) }
     }
 
-    private static func candidates(in directory: Int32) throws(StateStoreError) -> [String] {
+    private static func candidates(in directory: Int32, limit: Int) throws(StateStoreError) -> [String] {
         // An independent open description keeps enumeration from changing the anchor's offset.
         // fdopendir takes ownership only on success; closedir then closes that descriptor.
         let descriptor = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -90,7 +94,7 @@ enum StateSnapshotTemporaries {
             }
             // d_type is deliberately ignored: it is optional filesystem-supplied evidence.
             if let name, isManagedName(name) || hasGeneratedSuffix(name, prefix: quarantinePrefix) {
-                guard retained < maximumCandidates else { throw .fileUnreadable(name: .stateDirectory) }
+                guard retained < limit else { throw .fileUnreadable(name: .stateDirectory) }
                 retained += 1
                 if isManagedName(name) { names.append(name) }
             }
