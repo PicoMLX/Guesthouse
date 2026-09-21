@@ -86,7 +86,7 @@ import Testing
         let identity = try anchor.verifyCurrent().identity
         var first: StateSnapshotObservation? = StateSnapshotObservation(identity: identity)
         var peer: StateSnapshotObservation? = StateSnapshotObservation(identity: identity)
-        weak var releasedFirst = first
+        weak let releasedFirst = first
         first?.record()
         first = nil
         #expect(releasedFirst == nil)
