@@ -81,7 +81,7 @@ struct StateJournalCache {
 
 /// Monotonic evidence, separate from the disposable replay cache. Never reset on a failed
 /// read, parse, barrier or outer binding check. Observation is not durability or authorization.
-/// The retained complete-byte prefix is bounded by maximumJournalBytes. A torn suffix is not
+/// The retained raw-byte prefix is bounded by maximumJournalBytes. A torn suffix is not
 /// promoted to complete history; only the existing history-aware append repair can replace it.
 struct StateJournalObservation {
     private var identity: StateFileIdentity?
@@ -119,9 +119,18 @@ struct StateJournalObservation {
             didRead: { prefix = $0 }, didFailRead: { unreadObservation = true }, read: read)
         // Failed I/O may have hidden newer evidence even when an earlier prefix is known.
         // No subsequent read or cache reset can clear that uncertainty for this owner.
-        // Only a successful parse can release a proven torn suffix for inspected repair.
-        // A corrupt/unsupported complete record pins the whole bounded input instead.
-        prefix = candidate.validatedBytes
+        // Even successfully recognized torn bytes remain evidence during ordinary replay.
+        // Only the explicit append transaction can authorize removing that exact suffix.
         return candidate
+    }
+
+    /// Only after the locked append has validated its record and capacity. The caller must
+    /// latch uncertainty if truncation or any subsequent publication check fails; lowering
+    /// this prefix alone never authorizes a later retry or confirms an operation outcome.
+    mutating func authorizeTailRepair(_ candidate: StateJournalCache) throws(StateStoreError) {
+        try requireReadable()
+        guard candidate.truncatedTail, prefix.count > candidate.validatedBytes.count,
+              prefix.starts(with: candidate.validatedBytes) else { throw .fileUnreadable(name: .journal) }
+        prefix = candidate.validatedBytes
     }
 }
