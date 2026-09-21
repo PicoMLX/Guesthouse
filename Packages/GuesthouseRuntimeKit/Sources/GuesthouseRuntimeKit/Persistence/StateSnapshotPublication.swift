@@ -49,7 +49,7 @@ enum StateSnapshotPublication {
             // ownership, BEFORE collecting evidence or creating a temporary. Merely reading
             // the current file during this preflight must not authorize a stale replacement.
             try validateExpectedVersion(existing)
-            try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
+            try StateSnapshotTemporaries.collect(in: directory, reservingPublicationTemporary: true, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
                 try requireUnchangedSnapshot(in: directory, expected: existing,
                     requireExisting: requireExisting, didObserve: didObserve)
