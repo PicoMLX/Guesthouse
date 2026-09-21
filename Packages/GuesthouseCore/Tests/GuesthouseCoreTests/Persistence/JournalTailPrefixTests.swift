@@ -1,5 +1,5 @@
 import Foundation
-@testable import GuesthouseCore
+import GuesthouseCore
 import Testing
 
 @Suite struct JournalTailPrefixTests {
@@ -18,7 +18,7 @@ import Testing
         let fields = ["\"operation\":" + operationJSON, "\"outcome\":" + outcomeJSON]
         let ordered = outcomeFirst ? Array(fields.reversed()) : fields
         let tail = Data(("{" + ordered.joined(separator: ",")).utf8)
-        #expect(!JournalTailPrefix.accepts(tail))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
     }
 
     @Test(arguments: ["operationOutcomeUnknown", "guestNotReachable", "hostKeyChanged"], [false, true])
@@ -44,14 +44,19 @@ import Testing
                       "\"outcome\":" + String(decoding: try JSONEncoder().encode(outcome), as: UTF8.self)]
         let ordered = outcomeFirst ? Array(fields.reversed()) : fields
         let tail = Data(("{" + ordered.joined(separator: ",")).utf8)
-        #expect(!JournalTailPrefix.accepts(tail))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
         // The conflicting UUID is already impossible before its closing quote/braces.
         let lastQuote = try #require(tail.lastIndex(of: 34))
-        #expect(!JournalTailPrefix.accepts(Data(tail.prefix(upTo: lastQuote))))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) {
+            try JournalReplayChunk(Data(tail.prefix(upTo: lastQuote)))
+        }
         let consistent = Data(String(decoding: tail, as: UTF8.self)
             .replacingOccurrences(of: different.uuidString, with: original.uuidString).utf8)
+        var history = JournalHistory()
+        try history.append(JournalRecord(id: operation, environmentID: environment,
+                                         operation: .startEnvironment, timestamp: Date(), outcome: .started))
         for length in 1...consistent.count {
-            #expect(JournalTailPrefix.accepts(Data(consistent.prefix(length))))
+            #expect(try JournalReplayChunk(Data(consistent.prefix(length)), following: history).truncatedTail)
         }
     }
 
@@ -78,12 +83,19 @@ import Testing
     }
 
     private func checkEveryCut(_ record: JournalRecord) throws {
+        var history = JournalHistory()
+        if record.outcome != .started {
+            try history.append(JournalRecord(id: record.id, environmentID: record.environmentID,
+                operation: record.operation, timestamp: record.timestamp, outcome: .started))
+        }
         for sorted in [false, true] {
             let encoder = JSONEncoder()
             if sorted { encoder.outputFormatting = [.sortedKeys] }
             let bytes = try encoder.encode(record)
             for length in 1..<bytes.count {
-                #expect(JournalTailPrefix.accepts(Data(bytes.prefix(length))))
+                let chunk = try JournalReplayChunk(Data(bytes.prefix(length)), following: history)
+                #expect(chunk.truncatedTail)
+                #expect(chunk.validatedByteCount == 0 && chunk.history.records == history.records)
             }
         }
     }
@@ -102,12 +114,12 @@ import Testing
     @Test(arguments: ["1.00,", "1E+20", "1e+020", "-0.00,", "01", "+1", "1e999", "1.00e-2"])
     func noncanonicalDateTokensCannotGrantRepair(token: String) {
         let tail = Data(("{\"timestamp\":" + token).utf8)
-        #expect(!JournalTailPrefix.accepts(tail))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
     }
 
     @Test func fractionalEOFIsNotProofThatTheNumberWasComplete() throws {
         // These bytes can come from a genuine interruption while encoding 1.001.
-        #expect(JournalTailPrefix.accepts(Data("{\"timestamp\":1.00".utf8)))
+        #expect(try JournalReplayChunk(Data("{\"timestamp\":1.00".utf8)).truncatedTail)
     }
 
     @Test func interruptedDateCanRequireADigitOtherThanZeroOrOne() throws {
@@ -115,7 +127,9 @@ import Testing
         let encoded = String(decoding: try JSONEncoder().encode(timestamp), as: UTF8.self)
         let prefix = "792938037.314730"
         try #require(encoded.hasPrefix(prefix) && encoded.count > prefix.count)
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
+        let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
+        #expect(chunk.truncatedTail)
+        #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
     }
 
     @Test func interruptedDateMayNeedBothMantissaContinuationAndExponent() throws {
@@ -123,7 +137,9 @@ import Testing
             Date(timeIntervalSinceReferenceDate: 4.6728494007670807e+303)), as: UTF8.self)
         let prefix = "4.672849400767080"
         try #require(encoded.hasPrefix(prefix) && encoded.contains("e"))
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
+        let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
+        #expect(chunk.truncatedTail)
+        #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
     }
 
     @Test func interruptedDateBeforeExponentMarkerHasAnEncoderWitness() throws {
@@ -131,7 +147,7 @@ import Testing
             Date(timeIntervalSinceReferenceDate: -9.084938291167941e+48)), as: UTF8.self)
         let exponent = try #require(encoded.firstIndex(of: "e"))
         let mantissa = String(encoded[..<exponent])
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + mantissa).utf8)))
+        #expect(try JournalReplayChunk(Data(("{\"timestamp\":" + mantissa).utf8)).truncatedTail)
     }
 
     @Test(arguments: [4.6728494007670807e+303, -4.6728494007670807e+303])
@@ -141,7 +157,9 @@ import Testing
         try #require(encoded.hasSuffix("e+303"))
         let prefix = String(encoded.dropLast(2))
         try #require(prefix.hasSuffix("e+3"))
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
+        let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
+        #expect(chunk.truncatedTail)
+        #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
     }
 
     @Test(arguments: ["id", "environmentID"])
@@ -150,8 +168,8 @@ import Testing
         let canonical = String(decoding: try JSONEncoder().encode(uuid), as: UTF8.self)
         try #require(canonical == "\"ABCDEF12-ABCD-ABCD-ABCD-ABCDEF123456\"")
         let tail = Data(("{\"" + key + "\":" + canonical.lowercased()).utf8)
-        #expect(!JournalTailPrefix.accepts(tail))
-        #expect(JournalTailPrefix.accepts(Data(("{\"" + key + "\":" + canonical).utf8)))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
+        #expect(try JournalReplayChunk(Data(("{\"" + key + "\":" + canonical).utf8)).truncatedTail)
     }
 
     @Test(arguments: [
@@ -162,12 +180,20 @@ import Testing
         "{\"id\":\"\\q", "{\"format\":2,}", "{}garbage"
     ])
     func impossibleUnterminatedBytesDoNotGrantTruncation(tail: String) throws {
-        #expect(!JournalTailPrefix.accepts(Data(tail.utf8)))
+        let start = JournalRecord(id: OperationID(), environmentID: EnvironmentID(), operation: .startEnvironment,
+                                  timestamp: Date(), outcome: .started)
+        var bytes = try JSONEncoder().encode(start)
+        bytes.append(10)
+        let prefix = try JournalReplayChunk(bytes)
+        #expect(throws: StateStoreError.corruptJournal(line: 2)) {
+            try JournalReplayChunk(Data(tail.utf8), following: prefix.history)
+        }
+        #expect(prefix.history.inFlight[start.id] == start)
     }
 
     @Test(arguments: [Data([123, 0]), Data([123, 34, 0xff]), Data([123, 34, 0xc3])])
     func invalidUTF8AndNULRemainEvidence(bytes: Data) {
-        #expect(!JournalTailPrefix.accepts(bytes))
+        #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(bytes) }
     }
 
     @Test(arguments: [UInt8(9), 13, 32])
@@ -177,7 +203,7 @@ import Testing
         let encoded = try JSONEncoder().encode(record)
         for damaged in [Data([123, whitespace]), Data(encoded.dropLast()) + Data([whitespace]),
                         Data([123, whitespace]) + Data(encoded.dropFirst().dropLast())] {
-            #expect(!JournalTailPrefix.accepts(damaged))
+            #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(damaged) }
         }
     }
 }
