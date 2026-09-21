@@ -3,8 +3,9 @@ import Dispatch
 import Foundation
 import GuesthouseCore
 
-/// Runtime-owned persistence, migrated from #57/#76 (MVP-PLAN.md §3). One owner per managed
-/// state area; the GUI sees only Core values/errors, never a root URL or borrowed descriptor.
+/// Runtime-owned persistence, migrated from #57/#76 (MVP-PLAN.md §3). Live stores retain
+/// private handles and share snapshot observations by directory identity. The GUI sees only
+/// Core values/errors, never a root URL or borrowed descriptor.
 /// Snapshot and journal operations are complete synchronous actor transactions: there is no
 /// suspension between validation and publication. They never execute the recorded mutation.
 public actor StateStore {
@@ -16,8 +17,9 @@ public actor StateStore {
     // This observation survives cache invalidation and failed parsing/post-checks.
     private var journalWasObserved = false
     // Observation survives failed reads/publications. Absence after observation is evidence
-    // loss, never an empty new store. This is actor-confined and never reset by an error.
-    private var snapshotWasObserved = false
+    // loss, never an empty new store. All live owners of this directory share the evidence.
+    private let snapshotObservation: StateSnapshotObservation
+    private var snapshotWasObserved: Bool { snapshotObservation.wasObserved }
     private nonisolated let queue: DispatchSerialQueue
 
     /// Native descriptor IO/flushes and advisory lock waits may block. Use Dispatch's supplied
@@ -25,11 +27,13 @@ public actor StateStore {
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
     private init(anchor: sending StateDirectoryAnchor, migrator: SnapshotMigrator,
-                 hooks: StateStoreHooks, queue: DispatchSerialQueue) {
+                 hooks: StateStoreHooks, queue: DispatchSerialQueue,
+                 snapshotObservation: StateSnapshotObservation) {
         self.anchor = anchor
         self.migrator = migrator
         self.hooks = hooks
         self.queue = queue
+        self.snapshotObservation = snapshotObservation
     }
 
     /// Select and prepare the runtime's fixed managed storage. No caller-selected path API.
@@ -56,7 +60,9 @@ public actor StateStore {
                     // No actor reference escapes until ALL preparation barriers succeed.
                     // A failed preparation releases the local anchor and preserves disk evidence.
                     try anchor.synchronizePreparation(barrier: hooks.preparation)
-                    result = .success(StateStore(anchor: anchor, migrator: migrator, hooks: hooks, queue: queue))
+                    let observation = StateSnapshotObservation(identity: try anchor.verifyCurrent().identity)
+                    result = .success(StateStore(anchor: anchor, migrator: migrator, hooks: hooks,
+                                                 queue: queue, snapshotObservation: observation))
                 } catch let failure as StateStoreError { result = .failure(failure) }
                 catch StorageFailure.protectionDrift { result = .failure(.insecureDirectory(reason: .permissions)) }
                 catch StorageFailure.unsafeStructure { result = .failure(.insecureDirectory(reason: .changed)) }
@@ -72,7 +78,7 @@ public actor StateStore {
     /// Explicit migrations run in memory; reading never rewrites their source document.
     public func loadSnapshot() throws(StateStoreError) -> EnvironmentsSnapshot {
         let snapshot = try anchor.withFile(.readSnapshot, permissionBarrier: hooks.permission,
-            didObserve: { self.snapshotWasObserved = true }, body: { descriptor in
+            didObserve: { self.snapshotObservation.record() }, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try migrator.migrate(raw)
             do { return try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
@@ -88,7 +94,7 @@ public actor StateStore {
     /// assume a failed save restored the old bytes or blindly repeat the associated operation.
     public func saveSnapshot(_ snapshot: EnvironmentsSnapshot) throws(StateStoreError) {
         try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
-            requireExisting: snapshotWasObserved, didObserve: { self.snapshotWasObserved = true },
+            requireExisting: snapshotWasObserved, didObserve: { self.snapshotObservation.record() },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
 
