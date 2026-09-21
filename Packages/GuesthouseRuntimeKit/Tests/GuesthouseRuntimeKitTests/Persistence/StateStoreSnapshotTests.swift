@@ -246,6 +246,37 @@ import Testing
         #expect(try fixture.mode(fixture.snapshot) == 0o600)
     }
 
+    // Retains #57's actual-store counter regression under #166's full-range contract.
+    @Test(arguments: [
+        (UInt64(9_223_372_036_854_775_807), UInt64(9_223_372_036_854_775_808)),
+        (9_223_372_036_854_775_808, 9_223_372_036_854_775_809),
+        (UInt64.max - 1, UInt64.max),
+        (UInt64.max, nil),
+    ] as [(UInt64, UInt64?)])
+    func highCountersRemainPersistableAcrossReopening(counter: UInt64, next: UInt64?) async throws {
+        let fixture = try Fixture()
+        var value = try sample()
+        let environment = try #require(value.environments.first).id
+        value.provisioning[environment] = ProvisioningState(
+            stage: .first, status: .awaitingInspection(EffectToken(counter)), issuedEffects: counter
+        )
+        let store = try await fixture.open()
+        try await store.saveSnapshot(value)
+        let bytes = try fixture.bytes()
+        #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: bytes) == value)
+        let reopened = try await fixture.open()
+        let restored = try await reopened.loadSnapshot()
+        #expect(restored == value)
+        let state = try #require(restored.provisioning[environment])
+        #expect(state.issuedEffects == counter)
+        #expect(state.status.pendingEffect == EffectToken(counter))
+        #expect(state.nextEffectToken?.value == next)
+        #expect(try fixture.bytes() == bytes)
+        try await reopened.saveSnapshot(restored)
+        #expect(try fixture.bytes() == bytes)
+        #expect(try fixture.names() == ["environments.json"])
+    }
+
     @MainActor @Test func mainActorCallerDoesNotPerformStorageOrBarrierWork() async throws {
         let fixture = try Fixture()
         let visited = Mutex<Set<String>>([])
