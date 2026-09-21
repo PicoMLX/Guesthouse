@@ -40,6 +40,23 @@ import Testing
         #expect(try fixture.mode(.writeJournal) == 0o600)
     }
 
+    @Test func requiredJournalDisappearanceCannotRecreateThroughAnchor() throws {
+        let fixture = try Fixture(), file = fixture.file(.writeJournal)
+        try evidence.write(to: file)
+        #expect(try fixture.anchor.withFile(.writeJournal, requireExisting: true,
+            body: { try StateFileIO.readAll($0, from: 0, name: .journal) }) == evidence)
+        let detached = fixture.state.appending(path: "detached")
+        try #require(rename(file.path, detached.path) == 0)
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnwritable(name: .journal)) {
+                try fixture.anchor.withFile(.writeJournal, requireExisting: true,
+                    body: { _ in Issue.record("Recreated previously observed journal") })
+            }
+            #expect(!FileManager.default.fileExists(atPath: file.path))
+            #expect(try Data(contentsOf: detached) == evidence)
+        }
+    }
+
     @Test(arguments: [(StateFileAccess.readSnapshot, Int32(O_RDONLY), "environments.json"),
                       (.readJournal, O_RDONLY, "journal.ndjson"), (.writeJournal, O_RDWR, "journal.ndjson")])
     func accessIsFixedNonblockingAndCloseOnExec(access: StateFileAccess, mode: Int32, name: String) throws {
