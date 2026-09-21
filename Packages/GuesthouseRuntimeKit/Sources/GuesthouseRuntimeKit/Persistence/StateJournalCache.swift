@@ -98,7 +98,7 @@ struct StateJournalCache {
 /// read, parse, barrier or outer binding check. Observation is not durability or authorization.
 /// The retained raw-byte prefix is bounded by maximumJournalBytes. A torn suffix is not
 /// promoted to complete history; only the existing history-aware append repair can replace it.
-struct StateJournalObservation {
+struct StateJournalObservation: Sendable {
     private var identity: StateFileIdentity?
     private var prefix = Data()
     private var unboundObservation = false

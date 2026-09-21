@@ -422,6 +422,61 @@ import Testing
         #expect(try fixture.bytes() == settled)
     }
 
+    @Test(arguments: [false, true])
+    func peerCannotRecreateOrReplaceAnObservedJournal(replace: Bool) async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), writes = Mutex(0)
+        let peer = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        let started = Self.record()
+        try await first.append(started)
+        let evidence = try fixture.bytes(), detached = fixture.base.appending(path: "retained")
+        try #require(rename(fixture.journal.path, detached.path) == 0)
+        if replace { try fixture.write(Data()) }
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.self) {
+                try await peer.begin(.startEnvironment, for: started.environmentID)
+            }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await first.replay()
+            }
+        }
+        #expect(writes.withLock { $0 } == 0)
+        #expect(try Data(contentsOf: detached) == evidence)
+        if replace { #expect(try fixture.bytes().isEmpty) }
+        else { #expect(!FileManager.default.fileExists(atPath: fixture.journal.path)) }
+    }
+
+    @Test(arguments: [false, true])
+    func tailRepairResultIsSharedWithAlreadyOpenPeers(failBarrier: Bool) async throws {
+        let fixture = try Fixture(), peer = try await fixture.open(), started = Self.record()
+        let writer = try await fixture.open(hooks: StateStoreHooks(journalFile: { fd, name in
+            if failBarrier { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }))
+        let completed = Self.record(matching: started, outcome: .completed)
+        let original = try JSONEncoder().encode(started) + Data([10]) + JSONEncoder().encode(completed).dropLast()
+        try fixture.write(original)
+        #expect(try await peer.replay().truncatedTail)
+        if failBarrier {
+            await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+                try await writer.append(completed)
+            }
+            let preserved = try fixture.bytes()
+            for owner in [peer, writer] {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.replay() }
+            }
+            #expect(try fixture.bytes() == preserved)
+        } else {
+            try await writer.append(completed)
+            for owner in [peer, writer] {
+                let replay = try await owner.replay()
+                #expect(replay.records == [started, completed] && !replay.truncatedTail && replay.inFlight.isEmpty)
+            }
+        }
+    }
+
     @Test func twoStoresPublishOrRefuseContentionWithoutRetry() async throws {
         let fixture = try Fixture(), first = try await fixture.open(), second = try await fixture.open()
         let ids = await withTaskGroup(of: OperationID?.self) { group in
@@ -720,7 +775,13 @@ import Testing
         let evidence = try Data(contentsOf: retained)
         #expect(!evidence.isEmpty)
         let reopened = try await fixture.open()
-        #expect(try await reopened.replay().records == [conflicting])
+        if directory {
+            // A genuinely different directory inode has an independent evidence lifetime.
+            #expect(try await reopened.replay().records == [conflicting])
+        } else {
+            // Reopening the SAME directory must not forget another live owner's failed binding.
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await reopened.replay() }
+        }
         let originalPath = directory ? fixture.state : fixture.journal
         try #require(rename(originalPath.path, quarantined.path) == 0)
         try #require(rename(detached.path, originalPath.path) == 0)
@@ -765,9 +826,11 @@ import Testing
             try await store.begin(.startEnvironment, for: environment)
         }
         let evidence = try fixture.bytes(), reopened = try await fixture.open()
-        let replay = try await reopened.replay()
+        // Pure byte inspection does not reopen a poisoned owner or acknowledge durability.
+        let replay = try JournalReplayChunk(evidence).history
         let uncertain = try #require(replay.inFlight.values.first)
         #expect(replay.records.count == 1 && uncertain.environmentID == environment)
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await reopened.replay() }
         for _ in 0..<2 {
             await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
             await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
