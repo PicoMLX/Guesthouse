@@ -145,6 +145,32 @@ import Testing
         #expect(try fixture.inspect().storageSelection == value.storageSelection)
     }
 
+    @Test(arguments: [false, true])
+    func peerJournalEvidencePreventsFirstSelectionAfterDisappearance(replace: Bool) async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), peer = try await fixture.open()
+        let value = try selected()
+        _ = try await first.begin(.startEnvironment, for: EnvironmentID())
+        let bytes = try Data(contentsOf: fixture.journal), detached = fixture.state.appending(path: "retained")
+        try #require(rename(fixture.journal.path, detached.path) == 0)
+        if replace {
+            try Data().write(to: fixture.journal)
+            try #require(chmod(fixture.journal.path, 0o600) == 0)
+        }
+        let names = try fixture.names().sorted()
+        for owner in [peer, first] {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                    try await owner.saveSnapshot(value)
+                }
+                #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+                #expect(try fixture.names().sorted() == names)
+                #expect(try Data(contentsOf: detached) == bytes)
+            }
+        }
+        if replace { #expect(try Data(contentsOf: fixture.journal).isEmpty) }
+        else { #expect(!FileManager.default.fileExists(atPath: fixture.journal.path)) }
+    }
+
     @Test func failedFinalBarrierPreservesVisibleSelectionAndReportsFailure() async throws {
         let fixture = try Fixture(), value = try selected()
         let store = try await fixture.open(hooks: StateStoreHooks(directory: { _, _ in throw Failure.barrier }))
