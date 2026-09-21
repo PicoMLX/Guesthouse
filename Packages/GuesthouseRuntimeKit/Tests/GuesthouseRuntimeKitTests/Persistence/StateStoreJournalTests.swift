@@ -373,6 +373,47 @@ import Testing
         #expect(attempts.withLock { $0 } == 1)
     }
 
+    @Test(arguments: [false, true])
+    func competingAppendAfterSeekIsPreservedAndLatchesUncertainty(existing: Bool) async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), next = Self.record()
+        if existing { try await first.append(Self.record()) }
+        let original = existing ? try fixture.bytes() : Data(), attempts = Mutex(0)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let ownLine = try encoder.encode(next) + Data([10])
+        let competing = JournalRecord(id: OperationID(), environmentID: next.environmentID,
+            operation: next.operation, timestamp: next.timestamp, outcome: next.outcome)
+        let otherLine = try encoder.encode(competing) + Data([10])
+        try #require(otherLine.count == ownLine.count && otherLine != ownLine)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            attempts.withLock { $0 += 1 }
+            try #require(lseek(fd, 0, SEEK_CUR) == off_t(original.count))
+            let other = Darwin.open(fixture.journal.path, O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC)
+            try #require(other >= 0)
+            defer { close(other) }
+            // Deliberately ignore flock, after this transaction's final EOF seek.
+            try StateFileIO.writeAll(other, otherLine, name: .journal)
+            try #require(lseek(fd, 0, SEEK_CUR) == off_t(original.count))
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+            try await store.append(next)
+        }
+        let retained = original + otherLine + ownLine
+        #expect(try fixture.bytes() == retained)
+        // Restore before any replay: the failed post-write check itself must be sticky.
+        try fixture.write(original)
+        let later = try await fixture.open()
+        for owner in [store, first, later] {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.append(next) }
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.replay() }
+                #expect(try fixture.bytes() == original)
+            }
+        }
+        #expect(attempts.withLock { $0 } == 1)
+    }
+
     @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
         let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
         try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
