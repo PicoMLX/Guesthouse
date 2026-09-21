@@ -9,6 +9,59 @@ import Testing
 /// Actual actor composition of the retained #57 snapshot contracts, not just helper tests.
 /// Every root is an isolated fixture; never call the default App Support factory here.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreSnapshotTests {
+    @Test(arguments: [0, 1, 2, 3])
+    func separateStoresShareSuccessfulAndFailedSnapshotObservations(scenario: Int) async throws {
+        let fixture = try Fixture()
+        let peer = try await fixture.open() // Open BEFORE the other actor observes anything.
+        let first = try await fixture.open(hooks: scenario == 3
+            ? StateStoreHooks(directory: { _, _ in throw StateStoreError.fileUnwritable(name: .stateDirectory) })
+            : StateStoreHooks())
+        switch scenario {
+        case 0:
+            try await first.saveSnapshot(.empty)
+        case 1:
+            try fixture.write(JSONEncoder().encode(EnvironmentsSnapshot.empty))
+            #expect(try await first.loadSnapshot() == .empty)
+        case 2:
+            try fixture.write(Data("corrupt shared snapshot evidence".utf8))
+            await #expect(throws: StateStoreError.corruptSnapshot) { try await first.loadSnapshot() }
+        default:
+            await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) {
+                try await first.saveSnapshot(.empty)
+            }
+        }
+        // This peer has never read/saved a snapshot itself.
+        try await requireMissingSnapshotRefusal(peer, fixture: fixture)
+        let later = try await fixture.open()
+        await #expect(throws: StateStoreError.fileUnreadable(name: .snapshot)) { try await later.loadSnapshot() }
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await later.saveSnapshot(.empty) }
+        let separateFixture = try Fixture(), separate = try await separateFixture.open()
+        #expect(try await separate.loadSnapshot() == .empty)
+        try await separate.saveSnapshot(.empty)
+    }
+
+    @Test func sharedObservationLivesUntilItsLastLeaseIsReleased() throws {
+        let fixture = try Fixture()
+        let anchor = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.root))
+        let identity = try anchor.verifyCurrent().identity
+        var first: StateSnapshotObservation? = StateSnapshotObservation(identity: identity)
+        var peer: StateSnapshotObservation? = StateSnapshotObservation(identity: identity)
+        weak var releasedFirst = first
+        first?.record()
+        first = nil
+        #expect(releasedFirst == nil)
+        #expect(peer?.wasObserved == true)
+        var later: StateSnapshotObservation? = StateSnapshotObservation(identity: identity)
+        #expect(later?.wasObserved == true)
+        peer = nil
+        #expect(later?.wasObserved == true)
+        later = nil
+        // Process-local evidence ends only with the last lease; a genuinely fresh owner
+        // must inspect disk again. No reset API exists for a still-live owner.
+        let fresh = StateSnapshotObservation(identity: identity)
+        #expect(!fresh.wasObserved)
+    }
+
     @Test(arguments: [false, true])
     func observedSnapshotDisappearanceNeverBecomesEmptyOrRecreated(observedBySave: Bool) async throws {
         let fixture = try Fixture(), writer = try await fixture.open(), value = try sample()
