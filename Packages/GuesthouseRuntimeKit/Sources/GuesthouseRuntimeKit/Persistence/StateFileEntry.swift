@@ -20,6 +20,7 @@ extension StateDirectoryAnchor {
     /// as uncertain, and only publish cache/operation results after this entire call succeeds.
     func withFile<Result>(
         _ access: StateFileAccess, requireExisting: Bool = false,
+        protection: StateFileEntry.Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         didOpen: () -> Void = {},
         didObserve: () -> Void = {},
@@ -28,6 +29,7 @@ extension StateDirectoryAnchor {
     ) throws(StateStoreError) -> Result? {
         try withDescriptor { directory in
             try StateFileEntry.withDescriptor(in: directory, access: access, requireExisting: requireExisting,
+                protection: protection,
                 permissionBarrier: permissionBarrier, didOpen: didOpen, didObserve: didObserve,
                 didIdentify: didIdentify,
                 validateDirectory: { try self.verifyCurrent(version: $0) }, body: body)
@@ -40,37 +42,71 @@ extension StateDirectoryAnchor {
 /// mid-transaction. Darwin flock(2) releases the previous lock during either conversion.
 /// This serializes cooperating stores, not arbitrary same-user namespace changes.
 enum StateFileEntry {
+    enum Protection { case prepare, verifyOnly }
+
     static func withDescriptor<Result>(
         in directory: Int32, access: StateFileAccess, requireExisting: Bool = false,
+        protection: Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier,
+        openFile: (Int32, String, Int32, mode_t) -> Int32 = { openat($0, $1, $2, $3) },
         didOpen: () -> Void = {},
         didObserve: () -> Void = {},
         didIdentify: (StateFileIdentity?) -> Bool = { _ in true },
         validateDirectory: (StateFileVersion?) throws -> Void,
         body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result? {
+        // Verify-only callers never open a writable/create-capable descriptor, even if a
+        // future caller accidentally pairs the policy with a journal write operation.
+        guard protection != .verifyOnly || !access.creates else { throw access.failure }
         // Once a journal was observed, disappearance must not silently create a new history.
         let flags = (access.creates ? O_RDWR : O_RDONLY)
             | (access.creates && !requireExisting ? O_CREAT : 0) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
-        var descriptor = openat(directory, access.name, flags, 0o600)
+        // Pin the namespace before every verify-only open: success, absence and permission
+        // guidance must all describe the same observation, not a replacement entry.
+        let openingDirectoryVersion: StateFileVersion?
+        if protection == .verifyOnly {
+            openingDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+        } else { openingDirectoryVersion = nil }
+        var descriptor = openFile(directory, access.name, flags, 0o600)
         // Retained bounded retry for a transient missing entry during creation. No bytes are
         // truncated and no VM/Git mutation is retried. Missing read-only files remain absent.
         var remaining = 4
         while descriptor < 0, access.creates, !requireExisting, errno == ENOENT, remaining > 0 {
             remaining -= 1
-            descriptor = openat(directory, access.name, flags, 0o600)
+            descriptor = openFile(directory, access.name, flags, 0o600)
         }
         guard descriptor >= 0 else {
-            // Only a stabilized ENOENT proves absence. Other failures may hide an existing
-            // entry (permission drift, symlink, descriptor exhaustion); retain that uncertainty.
-            let openError = errno
-            if openError != ENOENT {
+            let openFailure = errno
+            // Non-ENOENT failures may hide an entry. Keep uncertainty even when verify-only
+            // classification or protection checks below fail; this does not grant access.
+            if openFailure != ENOENT {
                 didObserve()
                 guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
             }
-            if openError == ENOENT, !access.creates {
+            if openFailure == EACCES, protection == .verifyOnly {
                 do {
-                    let version = try StateFileIO.version(directory, name: .stateDirectory)
+                    guard let version = openingDirectoryVersion else { throw access.failure }
+                    try validateDirectory(version)
+                    var denied = stat(), current = stat()
+                    guard fstatat(directory, access.name, &denied, AT_SYMLINK_NOFOLLOW) == 0 else {
+                        throw access.failure
+                    }
+                    try StateFileProtection.validateStructure(denied, kind: .regularFile)
+                    try validateDirectory(version)
+                    guard fstatat(directory, access.name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                          StateFileVersion(denied) == StateFileVersion(current) else {
+                        throw StateStoreError.insecureDirectory(reason: .changed)
+                    }
+                    try StateFileProtection.validateStructure(current, kind: .regularFile)
+                    // A bound, owned regular file denied O_RDONLY access. Both restrictive
+                    // modes and deny-read ACLs need protection guidance, never silent repair.
+                    throw StateStoreError.insecureDirectory(reason: .permissions)
+                } catch let failure as StateStoreError { throw failure }
+                catch { throw access.failure }
+            }
+            if openFailure == ENOENT, !access.creates {
+                do {
+                    let version = try openingDirectoryVersion ?? StateFileIO.version(directory, name: .stateDirectory)
                     try validateDirectory(version)
                     var entry = stat()
                     // Stabilize the missing observation before publishing an empty value. A
@@ -89,7 +125,7 @@ enum StateFileEntry {
                     throw access.failure
                 }
             }
-            if openError == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
+            if openFailure == ELOOP { throw .insecureDirectory(reason: .symbolicLink) }
             throw access.failure
         }
         defer { close(descriptor) } // Closing the sole open description also releases its lock.
@@ -107,17 +143,22 @@ enum StateFileEntry {
             guard StateFileIO.lock(descriptor, LOCK_EX) else { throw access.failure }
             // Creation, if needed, precedes this boundary. File-content writes never need
             // to change the directory namespace; pin it across preparation and the body.
-            let transactionDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+            let transactionDirectoryVersion = try openingDirectoryVersion ?? StateFileIO.version(directory, name: .stateDirectory)
             try validateDirectory(transactionDirectoryVersion)
             try requireBinding(descriptor, in: directory, access: access)
-            try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
-                synchronize: { descriptor, label in
-                    let fileVersion = try StateFileIO.version(descriptor, name: label)
-                    let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
-                    try permissionBarrier(descriptor, label)
-                    try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
-                    try validateDirectory(directoryVersion)
-                })
+            switch protection {
+            case .verifyOnly:
+                try StateFileProtection.verify(descriptor, kind: .regularFile)
+            case .prepare:
+                try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
+                    synchronize: { descriptor, label in
+                        let fileVersion = try StateFileIO.version(descriptor, name: label)
+                        let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+                        try permissionBarrier(descriptor, label)
+                        try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
+                        try validateDirectory(directoryVersion)
+                    })
+            }
             try validateDirectory(transactionDirectoryVersion)
             let prepared = try verifyCurrent(descriptor, in: directory, access: access)
             let result = try body(descriptor)

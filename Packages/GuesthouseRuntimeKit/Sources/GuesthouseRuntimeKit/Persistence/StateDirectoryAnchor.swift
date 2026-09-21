@@ -140,8 +140,9 @@ final class StateDirectoryAnchor {
         return actual
     }
 
-    private static func currentPath(_ storage: RuntimeStorage,
-                                    didObserve: (StateFileIdentity) -> Void = { _ in }) throws(StateStoreError) -> String {
+    private static func currentPath(
+        _ storage: RuntimeStorage, didObserve: (StateFileIdentity) -> Void = { _ in }
+    ) throws(StateStoreError) -> String {
         do { return try StorageProtection.path(storage.location(for: .state, didObserve: didObserve)) }
         catch StorageFailure.protectionDrift { throw .insecureDirectory(reason: .permissions) }
         catch StorageFailure.unsafeStructure { throw .insecureDirectory(reason: .changed) }

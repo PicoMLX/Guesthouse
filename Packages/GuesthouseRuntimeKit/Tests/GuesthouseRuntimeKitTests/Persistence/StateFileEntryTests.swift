@@ -324,6 +324,85 @@ import Testing
         #expect(try Data(contentsOf: fixture.file(access)) == evidence)
     }
 
+    @Test(arguments: [StateFileAccess.readSnapshot, .readJournal], [false, true])
+    func deniedReadClassificationRetainsPreOpenNamespace(access: StateFileAccess, replace: Bool) throws {
+        let fixture = try Fixture(), file = fixture.file(access)
+        let detached = fixture.base.appending(path: "denied-original")
+        let replacement = fixture.base.appending(path: "replacement")
+        let other = Data("distinct readable evidence".utf8)
+        try evidence.write(to: file)
+        try other.write(to: replacement)
+        try #require(chmod(replacement.path, 0o600) == 0)
+        try #require(chmod(file.path, 0) == 0)
+        defer { _ = chmod(file.path, 0o600); _ = chmod(detached.path, 0o600) }
+        var observed = 0, opened = 0
+        let failure = StateStoreError.insecureDirectory(reason: replace ? .changed : .permissions)
+        #expect(throws: failure) {
+            try fixture.anchor.withFile(access, protection: .verifyOnly,
+                permissionBarrier: { _, _ in Issue.record("Inspection must not repair protection") },
+                didOpen: { opened += 1 }, didObserve: {
+                    observed += 1
+                    if replace {
+                        #expect(rename(file.path, detached.path) == 0)
+                        #expect(rename(replacement.path, file.path) == 0)
+                    }
+                }, body: { _ in Issue.record("Denied open must not enter the body") })
+        }
+        #expect(observed == 1 && opened == 0)
+        let retained = replace ? detached : file
+        var info = stat()
+        try #require(lstat(retained.path, &info) == 0)
+        #expect(info.st_mode & 0o7777 == 0)
+        try #require(chmod(retained.path, 0o600) == 0)
+        #expect(try Data(contentsOf: retained) == evidence)
+        #expect(try Data(contentsOf: replace ? file : replacement) == other)
+        #expect(try fixture.mode(access) == 0o600)
+    }
+
+    @Test(arguments: [StateFileAccess.readSnapshot, .readJournal], [false, true])
+    func verifyOnlyRetainsNamespaceAcrossOpen(access: StateFileAccess, replace: Bool) throws {
+        let fixture = try Fixture(), file = fixture.file(access)
+        let detached = fixture.base.appending(path: "original-before-open")
+        let replacement = fixture.base.appending(path: "replacement-before-open")
+        let other = Data("distinct replacement bytes".utf8)
+        try evidence.write(to: file)
+        try other.write(to: replacement)
+        try #require(chmod(file.path, 0o600) == 0 && chmod(replacement.path, 0o600) == 0)
+        var opens = 0, observations = 0
+        #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+            try fixture.anchor.withDescriptor { directory in
+                try StateFileEntry.withDescriptor(in: directory, access: access, protection: .verifyOnly,
+                    permissionBarrier: { _, _ in Issue.record("Read-only inspection must not repair") },
+                    openFile: { fd, name, flags, mode in
+                        opens += 1
+                        #expect(rename(file.path, detached.path) == 0)
+                        if replace { #expect(rename(replacement.path, file.path) == 0) }
+                        return openat(fd, name, flags, mode)
+                    }, didObserve: { observations += 1 },
+                    validateDirectory: { try fixture.anchor.verifyCurrent(version: $0) },
+                    body: { _ in Issue.record("Changed namespace must not publish contents") })
+            }
+        }
+        #expect(opens == 1 && observations == 1)
+        #expect(try Data(contentsOf: detached) == evidence)
+        #expect(try Data(contentsOf: replace ? file : replacement) == other)
+        if !replace { #expect(!FileManager.default.fileExists(atPath: file.path)) }
+    }
+
+    @Test(arguments: [StateFileAccess.readSnapshot, .readJournal], [false, true])
+    func unchangedVerifyOnlyOpenRemainsUsable(access: StateFileAccess, exists: Bool) throws {
+        let fixture = try Fixture(), file = fixture.file(access)
+        if exists {
+            try evidence.write(to: file)
+            try #require(chmod(file.path, 0o600) == 0)
+        }
+        let bytes = try fixture.anchor.withFile(access, protection: .verifyOnly,
+            permissionBarrier: { _, _ in Issue.record("Inspection must not repair") },
+            body: { try StateFileIO.readAll($0, from: 0, name: access.label) })
+        #expect(bytes == (exists ? evidence : nil))
+        #expect(FileManager.default.fileExists(atPath: file.path) == exists)
+    }
+
     private func requireContended(_ descriptor: Int32) throws {
         let result = flock(descriptor, LOCK_EX | LOCK_NB), failure = errno
         try #require(result == -1 && failure == EWOULDBLOCK)
