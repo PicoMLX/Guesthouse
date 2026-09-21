@@ -99,6 +99,56 @@ import Testing
         #expect(try fixture.collect() == 0)
     }
 
+    @Test(arguments: [false, true])
+    func publicationReservesBothInventoryBoundsBeforeCollection(managedNames: Bool) throws {
+        let fixture = try Fixture()
+        _ = try fixture.temporary() // Eligible evidence must survive refusal too.
+        let count = managedNames ? 256 : 4_094 // Total-entry bound includes two dot entries.
+        for index in 1..<count {
+            let entry = managedNames ? try fixture.temporary() : fixture.state.appending(path: "unrelated-\(index)")
+            try fixture.evidence.write(to: entry)
+            try #require(chmod(entry.path, 0o666) == 0) // Ineligible; collection cannot free these slots.
+        }
+        let inventory = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        try #require(inventory.count == count)
+        for _ in 0..<2 {
+            let reopened = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: reopened,
+                    createTemporary: { _, _, _, _ in Issue.record("Full inventory must refuse before creation"); return -1 })
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == inventory)
+            for name in inventory { #expect(try Data(contentsOf: fixture.state.appending(path: name)) == fixture.evidence) }
+        }
+        #expect(try fixture.collect() == 1) // Standalone collection still admits each exact bound.
+    }
+
+    @Test(arguments: [false, true])
+    func failedPublicationCannotConsumeASecondReservedSlot(managedNames: Bool) throws {
+        let fixture = try Fixture(), failure = StateStoreError.fileUnwritable(name: .snapshot)
+        let count = managedNames ? 255 : 4_093
+        for index in 0..<count {
+            let entry = managedNames ? try fixture.temporary() : fixture.state.appending(path: "unrelated-\(index)")
+            try fixture.evidence.write(to: entry)
+            try #require(chmod(entry.path, 0o666) == 0)
+        }
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { _, _ in throw failure })
+        }
+        let inventory = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        try #require(inventory.count == count + 1)
+        let bytes = try inventory.map { try Data(contentsOf: fixture.state.appending(path: $0)) }
+        for _ in 0..<2 {
+            let reopened = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: reopened,
+                    createTemporary: { _, _, _, _ in Issue.record("No second slot is available"); return -1 })
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == inventory)
+            #expect(try inventory.map { try Data(contentsOf: fixture.state.appending(path: $0)) } == bytes)
+        }
+    }
+
     @Test func candidateOverflowRefusesBeforeAnyRemovalOrPublication() throws {
         let fixture = try Fixture()
         try StateSnapshotPublication.save(.empty, to: fixture.anchor)
