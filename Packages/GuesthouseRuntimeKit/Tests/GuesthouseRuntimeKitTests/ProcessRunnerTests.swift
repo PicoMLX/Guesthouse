@@ -76,11 +76,11 @@ import Testing
         let returned = ContinuousClock.now
         let report = try await run.waitForExit()
         let finished = ContinuousClock.now
-        #expect(report.timedOut && !report.canceled)
-        #expect(try report.childExit?.get() == .signal(SIGTERM))
-        if supplyInput { #expect(report.input != .delivered) }
-        #expect(finished - began < .seconds(3),
-            "supplyInput=\(supplyInput); run return=\(returned - began); report wait=\(finished - returned); inputClosed=\(report.inputClosed); outputComplete=\(report.outputComplete)")
+        let evidence: Comment = "supplyInput=\(supplyInput); run return=\(returned - began); report wait=\(finished - returned); exit=\(report.childExit); timedOut=\(report.timedOut); canceled=\(report.canceled); inputClosed=\(report.inputClosed); outputComplete=\(report.outputComplete)"
+        #expect(report.timedOut && !report.canceled, evidence)
+        #expect(report.childExit == .success(.signal(SIGTERM)), evidence)
+        if supplyInput { #expect(report.input != .delivered, evidence) }
+        #expect(finished - began < .seconds(3), evidence)
     }
 
     @Test func earlyExitReportsUndeliveredInput() async throws {

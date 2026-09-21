@@ -26,21 +26,29 @@ import Testing
     private func drain(_ pipe: Pipe, maximumBytes: Int = 4096) async throws -> Data {
         let fd = pipe.fileHandleForReading.fileDescriptor
         #expect(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0)
-        let deadline = ContinuousClock.now + .seconds(2)
+        let began = ContinuousClock.now
+        let deadline = began + .seconds(2)
         var result = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
+        var attempts = 0, lastCount: Int?, lastError: Int32?
+        var lastRead = began
         while ContinuousClock.now < deadline {
             let count = read(fd, &buffer, buffer.count)
+            let readError = count < 0 ? errno : nil
+            attempts += 1
+            lastCount = count
+            lastError = readError
+            lastRead = ContinuousClock.now
             if count == 0 { return result }
             if count > 0 {
                 result.append(contentsOf: buffer.prefix(count))
                 try #require(result.count <= maximumBytes)
             } else {
-                try #require(errno == EAGAIN || errno == EINTR)
+                try #require(readError == EAGAIN || readError == EINTR)
                 try await Task.sleep(for: .milliseconds(5))
             }
         }
-        Issue.record("The owned spawn retained a pipe writer after exit or failure")
+        Issue.record("EOF not observed within two seconds; attempts=\(attempts); lastCount=\(lastCount); lastErrno=\(lastError); bytes=\(result.count); lastRead=\(lastRead - began); elapsed=\(ContinuousClock.now - began)")
         return result
     }
 
