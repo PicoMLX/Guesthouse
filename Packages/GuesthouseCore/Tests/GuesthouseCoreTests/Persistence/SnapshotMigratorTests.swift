@@ -6,10 +6,10 @@ import Testing
     struct TransformFailure: Error {}
 
     @Test func currentDataIsReturnedByteForByte() throws {
-        let source = Data("{ \"schemaVersion\" : 2, \"unknownField\": \"test-only\" }\n".utf8)
+        let source = Data("{ \"schemaVersion\" : 3, \"unknownField\": \"test-only\" }\n".utf8)
         let result = try SnapshotMigrator.standard.migrate(source)
         #expect(result.data == source)
-        #expect(result.from == SchemaVersion(2))
+        #expect(result.from == SchemaVersion(3))
         #expect(SnapshotMigrator.standard.current == EnvironmentsSnapshot.currentSchema)
     }
 
@@ -53,6 +53,7 @@ import Testing
     @Test(arguments: [
         ("{}", SchemaVersion.unversioned),
         ("{\"schemaVersion\":1}", SchemaVersion(1)!),
+        ("{\"schemaVersion\":2}", SchemaVersion(2)!),
     ])
     func standardDoesNotRestampPrototypeRecords(json: String, version: SchemaVersion) {
         #expect(throws: StateStoreError.migrationMissing(from: version)) {
@@ -60,9 +61,9 @@ import Testing
         }
     }
 
-    @Test(arguments: [3, 99, Int.max])
+    @Test(arguments: [4, 99, Int.max])
     func futureVersionIsRefusedBeforeItsRecordShapeIsRead(version: Int) {
-        #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(version)!, current: SchemaVersion(2)!)) {
+        #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(version)!, current: SchemaVersion(3)!)) {
             try SnapshotMigrator.standard.migrate(Data("{\"schemaVersion\":\(version)}".utf8))
         }
     }
@@ -82,7 +83,7 @@ import Testing
     }
 
     @Test func explicitTransformsRunInVersionOrderNotRegistrationOrder() throws {
-        let migrator = SnapshotMigrator(migrations: [
+        let migrator = SnapshotMigrator(current: SchemaVersion(2)!, migrations: [
             .init(from: SchemaVersion(1)!) { data in
                 var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
                 try #require(object["firstStep"] as? Bool == true)
@@ -175,7 +176,7 @@ import Testing
             .init(from: SchemaVersion(1)!) { _ in throw TransformFailure() },
             .init(from: SchemaVersion(2)!) { _ in throw TransformFailure() },
         ])
-        let source = Data("{\"schemaVersion\":2}".utf8)
+        let source = Data("{\"schemaVersion\":3}".utf8)
         let result = try migrator.migrate(source)
         #expect(result.data == source)
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(EnvironmentsSnapshot.self, from: result.data) }

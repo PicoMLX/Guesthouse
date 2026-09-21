@@ -192,7 +192,7 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: fixture.state.path))
     }
 
-    @Test(arguments: ["{", "{}", "{\"schemaVersion\":1}", "{\"schemaVersion\":2}", "{\"schemaVersion\":99}"])
+    @Test(arguments: ["{", "{}", "{\"schemaVersion\":1}", "{\"schemaVersion\":2}", "{\"schemaVersion\":3}", "{\"schemaVersion\":99}"])
     func rejectedDocumentsKeepTheirBytesAndMetadata(raw: String) throws {
         let fixture = try Fixture()
         try fixture.prepare(bytes: Data(raw.utf8))

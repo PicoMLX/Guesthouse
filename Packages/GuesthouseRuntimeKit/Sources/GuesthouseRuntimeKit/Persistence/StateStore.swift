@@ -111,6 +111,15 @@ public actor StateStore {
             validateExpectedVersion: { version in
                 guard version == self.snapshotVersion else { throw StateStoreError.fileUnwritable(name: .snapshot) }
             },
+            validateFirstSelection: {
+                // An empty/missing snapshot can follow a crashed operation. Existing journal
+                // evidence, including a torn first record, blocks new selection. The hook
+                // runs after pure encoding/old-state validation and before any publication.
+                let evidence = try self.replay()
+                guard evidence.records.isEmpty, !evidence.truncatedTail else {
+                    throw StateStoreError.storageSelectionChanged
+                }
+            },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
 

@@ -24,16 +24,16 @@ import Testing
     }
 
     @Test(arguments: [
-        #"{"schemaVersion":2,"nested":{"schemaVersion":1},"list":[{"schemaVersion":3}]}"#,
-        #"{"nested":{"schemaVersion":1},"schema\u0056ersion":2}"#,
-        #"{"text":"\"schemaVersion\":1,{}[]","schemaVersion":2}"#,
-        #"{"schemaVersion":2,"text":"trailing\\","next":"value"}"#,
-        #"{"schemaVersion":2,"schemaVersionSuffix":1}"#,
+        #"{"schemaVersion":3,"nested":{"schemaVersion":1},"list":[{"schemaVersion":2}]}"#,
+        #"{"nested":{"schemaVersion":1},"schema\u0056ersion":3}"#,
+        #"{"text":"\"schemaVersion\":1,{}[]","schemaVersion":3}"#,
+        #"{"schemaVersion":3,"text":"trailing\\","next":"value"}"#,
+        #"{"schemaVersion":3,"schemaVersionSuffix":1}"#,
     ])
     func nestedKeysAndQuotedTextDoNotCreateEnvelopeMembers(json: String) throws {
         let source = Data(json.utf8)
         let migrated = try SnapshotMigrator.standard.migrate(source)
-        #expect(migrated.from == SchemaVersion(2))
+        #expect(migrated.from == EnvironmentsSnapshot.currentSchema)
         #expect(migrated.data == source)
     }
 

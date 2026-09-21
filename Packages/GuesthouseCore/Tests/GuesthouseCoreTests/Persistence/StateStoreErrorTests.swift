@@ -4,7 +4,7 @@ import Testing
 
 @Suite struct StateStoreErrorTests {
     @Test(arguments: [
-        StateStoreError.insecureDirectory(reason: .symbolicLink), .corruptSnapshot,
+        StateStoreError.insecureDirectory(reason: .symbolicLink), .corruptSnapshot, .storageSelectionChanged,
         .inconsistentSnapshot(reason: .slotsDisagree), .corruptJournal(line: 1),
         .unsupportedJournalFormat(line: 1, format: 1),
         .unsupportedSnapshotVersion(found: SchemaVersion(1)!, current: SchemaVersion(2)!),

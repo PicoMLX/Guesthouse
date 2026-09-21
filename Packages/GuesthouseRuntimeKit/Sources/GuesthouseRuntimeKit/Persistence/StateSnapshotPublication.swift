@@ -15,6 +15,7 @@ enum StateSnapshotPublication {
         migrator: SnapshotMigrator = .standard,
         requireExisting: @autoclosure () -> Bool = false, didObserve: () -> Void = {},
         validateExpectedVersion: (StateFileVersion?) throws -> Void = { _ in },
+        validateFirstSelection: () throws -> Void = {},
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         fileBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         directoryBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
@@ -38,8 +39,8 @@ enum StateSnapshotPublication {
         // Refuse existing unsupported/corrupt bytes as well as unsafe file structure.
         // A valid in-memory value is not permission to erase an unreadable saved version.
         return try anchor.withPublicationOwnership { directory in
-            let existing = try existingVersion(in: anchor, migrator: migrator,
-                permissionBarrier: permissionBarrier, didObserve: didObserve)
+            let existing = try existingVersion(in: anchor, replacingWith: snapshot,
+                migrator: migrator, permissionBarrier: permissionBarrier, didObserve: didObserve)
             // Evaluate shared observation after acquiring publication ownership, not when
             // the caller first starts encoding or waits to enter this transaction.
             guard existing != nil || !requireExisting() else {
@@ -48,10 +49,15 @@ enum StateSnapshotPublication {
             // Compare with the caller's last completed read/save while holding publication
             // ownership, BEFORE collecting evidence or creating a temporary. Merely reading
             // the current file during this preflight must not authorize a stale replacement.
-            try validateExpectedVersion(existing)
+            try validateExpectedVersion(existing?.version)
+            if snapshot.storageSelection != nil, existing?.selection == nil {
+                do { try validateFirstSelection() }
+                catch let failure as StateStoreError { throw failure }
+                catch { throw StateStoreError.storageSelectionChanged }
+            }
             try StateSnapshotTemporaries.collect(in: directory, reservingPublicationTemporary: true, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
-                try requireUnchangedSnapshot(in: directory, expected: existing,
+                try requireUnchangedSnapshot(in: directory, expected: existing?.version,
                     requireExisting: requireExisting, didObserve: didObserve)
             })
             let name = temporaryPrefix + UUID().uuidString
@@ -76,7 +82,7 @@ enum StateSnapshotPublication {
             let written = try StateFileIO.version(descriptor, name: .snapshot)
             let beforePublication = try anchor.verifyCurrent()
             try synchronize(descriptor, name: .snapshot, using: fileBarrier)
-            try requireUnchangedSnapshot(in: directory, expected: existing,
+            try requireUnchangedSnapshot(in: directory, expected: existing?.version,
                 requireExisting: requireExisting, didObserve: didObserve)
             try verifyTemporary(descriptor, in: directory, name: name, version: written)
             try anchor.verifyCurrent(version: beforePublication)
@@ -105,16 +111,28 @@ enum StateSnapshotPublication {
     }
 
     private static func existingVersion(
-        in anchor: StateDirectoryAnchor, migrator: SnapshotMigrator,
+        in anchor: StateDirectoryAnchor, replacingWith snapshot: EnvironmentsSnapshot, migrator: SnapshotMigrator,
         permissionBarrier: StateFileProtection.Barrier, didObserve: () -> Void
-    ) throws(StateStoreError) -> StateFileVersion? {
+    ) throws(StateStoreError) -> (version: StateFileVersion, selection: HostStorageSelection?)? {
         try anchor.withFile(.readSnapshot, permissionBarrier: permissionBarrier, didObserve: didObserve, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try migrator.migrate(raw)
-            do { _ = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
+            let saved: EnvironmentsSnapshot
+            do { saved = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
             catch let failure as StateStoreError { throw failure }
             catch { throw StateStoreError.corruptSnapshot }
-            return try StateFileIO.version(descriptor, name: .snapshot)
+            // Ordinary snapshot saves must retain the original binding, including when a
+            // caller supplies an otherwise-empty replacement. Never bless preexisting work
+            // with a newly observed UUID. Explicit relocation/recovery is a separate workflow.
+            if let selected = saved.storageSelection {
+                guard snapshot.storageSelection == selected else { throw StateStoreError.storageSelectionChanged }
+            } else if !saved.environments.isEmpty {
+                // Ordinary saves cannot erase unknown placement and then recapture a volume.
+                guard snapshot.storageSelection == nil, !snapshot.environments.isEmpty else {
+                    throw StateStoreError.storageSelectionChanged
+                }
+            }
+            return (try StateFileIO.version(descriptor, name: .snapshot), saved.storageSelection)
         })
     }
 

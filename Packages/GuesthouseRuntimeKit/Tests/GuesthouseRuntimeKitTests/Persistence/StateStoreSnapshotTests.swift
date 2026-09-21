@@ -241,7 +241,7 @@ import Testing
         let json = try #require(JSONSerialization.jsonObject(with: fixture.bytes()) as? [String: Any])
         let provisioning = try #require(json["provisioning"] as? [String: Any])
         #expect(Set(provisioning.keys) == [value.environments[0].id.uuid.uuidString])
-        #expect(json["schemaVersion"] as? Int == 2)
+        #expect(json["schemaVersion"] as? Int == 3)
         #expect(try fixture.mode(fixture.state) == 0o700)
         #expect(try fixture.mode(fixture.snapshot) == 0o600)
     }
@@ -399,8 +399,9 @@ import Testing
         ("{", StateStoreError.corruptSnapshot),
         ("{}", .migrationMissing(from: .unversioned)),
         ("{\"schemaVersion\":1}", .migrationMissing(from: SchemaVersion(1)!)),
-        ("{\"schemaVersion\":2}", .corruptSnapshot),
-        ("{\"schemaVersion\":99}", .newerSchemaVersion(found: SchemaVersion(99)!, current: SchemaVersion(2)!)),
+        ("{\"schemaVersion\":2}", .migrationMissing(from: SchemaVersion(2)!)),
+        ("{\"schemaVersion\":3}", .corruptSnapshot),
+        ("{\"schemaVersion\":99}", .newerSchemaVersion(found: SchemaVersion(99)!, current: SchemaVersion(3)!)),
     ])
     func rejectedSnapshotReadsAndSavesPreserveOriginal(raw: String, failure: StateStoreError) async throws {
         let fixture = try Fixture(), store = try await fixture.open(), bytes = Data(raw.utf8)
@@ -432,6 +433,7 @@ import Testing
         let migrator = SnapshotMigrator(migrations: [
             .init(from: .unversioned) { try Self.settingVersion(1, in: $0) },
             .init(from: SchemaVersion(1)!) { try Self.settingVersion(2, in: $0) },
+            .init(from: SchemaVersion(2)!) { try Self.settingVersion(3, in: $0) },
         ])
         let store = try await fixture.open(migrator: migrator)
         #expect(try await store.loadSnapshot() == .empty)
@@ -468,8 +470,8 @@ import Testing
         try await initial.saveSnapshot(sample())
         let bytes = try fixture.bytes()
         let failed = try await fixture.open(hooks: StateStoreHooks(snapshotFile: { _, _ in throw FixtureFailure.opaque }))
-        _ = try await failed.loadSnapshot() // Establish the generation before exercising the write barrier.
-        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await failed.saveSnapshot(.empty) }
+        let replacement = try await failed.loadSnapshot() // Retain both the generation and unknown placement.
+        await #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) { try await failed.saveSnapshot(replacement) }
         #expect(try fixture.bytes() == bytes)
         #expect(try fixture.names().count == 2)
     }
@@ -523,7 +525,7 @@ import Testing
         let store = try await fixture.open(migrator: SnapshotMigrator(current: future, migrations: []))
         let bytes = Data("{\"schemaVersion\":99}".utf8)
         try fixture.write(bytes)
-        await #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: future, current: SchemaVersion(2)!)) {
+        await #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: future, current: SchemaVersion(3)!)) {
             try await store.loadSnapshot()
         }
         #expect(try fixture.bytes() == bytes)
