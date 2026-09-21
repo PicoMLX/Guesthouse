@@ -7,6 +7,34 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
+    @Test(arguments: [false, true], [false, true])
+    func preBorrowDirectoryFailureRemainsClosedAfterRestoration(priorRead: Bool, initiallyMissing: Bool) async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let original = try Self.lines([Self.record()]), other = try Self.lines([Self.record()])
+        if !initiallyMissing { try fixture.write(original) }
+        if priorRead { _ = try await store.replay() }
+        let detached = fixture.base.appending(path: "retained-directory")
+        let conflicting = fixture.base.appending(path: "conflicting-directory")
+        try #require(rename(fixture.state.path, detached.path) == 0)
+        try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        try fixture.write(other)
+        await #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) { try await store.replay() }
+        try #require(rename(fixture.state.path, conflicting.path) == 0)
+        try #require(rename(detached.path, fixture.state.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(reads.withLock { $0 } == (priorRead && !initiallyMissing ? 1 : 0))
+        if initiallyMissing { #expect(!FileManager.default.fileExists(atPath: fixture.journal.path)) }
+        else { #expect(try fixture.bytes() == original) }
+        #expect(try Data(contentsOf: conflicting.appending(path: "journal.ndjson")) == other)
+    }
+
     @Test(arguments: [false, true])
     func firstPreparationFailureCannotAcceptSameInodeChanges(truncate: Bool) async throws {
         let fixture = try Fixture(), fail = Mutex(true), reads = Mutex(0)
@@ -112,6 +140,16 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: fixture.journal.path))
         try #require(chmod(retained.path, 0o600) == 0)
         #expect(try Data(contentsOf: retained) == evidence)
+    }
+
+    @Test func unreadBorrowCannotBeClearedByMissingOrNewIdentity() throws {
+        var observation = StateJournalObservation()
+        observation.recordUnreadFailure()
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try observation.requireReadable()
+            }
+        }
     }
 
     @Test func budgetCountsFinalLinesBeforeDecoding() throws {
