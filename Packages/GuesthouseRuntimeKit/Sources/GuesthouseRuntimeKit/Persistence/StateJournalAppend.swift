@@ -25,7 +25,7 @@ enum StateJournalAppend {
         var writeAttempted = false
         var tailRepairAuthorized = false
         var observedEntry = false, enteredBody = false
-        var checkingBinding = false, completedBody = false
+        var checkingEvidence = false, completedBody = false
         var outerBindingFailed = false
         do {
             // Shares the snapshot/first-volume-selection transaction boundary. Contention
@@ -62,32 +62,32 @@ enum StateJournalAppend {
                     do { try hooks.journalWrite(descriptor, line) }
                     catch let failure as StateStoreError { throw failure }
                     catch { throw StateStoreError.fileUnwritable(name: .journal) }
+                    checkingEvidence = true
                     try requireLength(descriptor, expected: expectedLength)
                     let written = try StateFileIO.version(descriptor, name: .journal)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
-                    checkingBinding = true
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     let directoryVersion = try anchor.verifyCurrent()
-                    checkingBinding = false
+                    checkingEvidence = false
                     try synchronize(descriptor, name: .journal, barrier: hooks.journalFile)
+                    checkingEvidence = true
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
-                    checkingBinding = true
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
-                    checkingBinding = false
+                    checkingEvidence = false
                     // Every record needs an entry barrier, even when the journal already
                     // exists: a restore can reattach the same inode before our write.
                     try synchronize(directory, name: .stateDirectory, barrier: hooks.directory)
+                    checkingEvidence = true
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
-                    checkingBinding = true
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
-                    checkingBinding = false
+                    checkingEvidence = false
                     let candidate = try current.appending(record, bytes: line, version: written)
                     completedBody = true
                     return candidate
@@ -95,13 +95,13 @@ enum StateJournalAppend {
                 return candidate
             }
         } catch {
-            // A failed binding check can hide another journal even after a complete read.
+            // Failed content/version/binding checks can hide another journal or operation.
             // Restoring the old path must not clear that uncertainty. Plain write/barrier
-            // failures retain their existing explicit-inspection policy when binding was
+            // failures retain their existing explicit-inspection policy when evidence was
             // not checked and found inconsistent; this never claims the mutation succeeded.
             // Directory binding can fail before any file callback. The anchor reports only
             // its binding checks, never ordinary nonblocking lock contention/reentrancy.
-            if tailRepairAuthorized || outerBindingFailed || (observedEntry && !enteredBody) || checkingBinding || completedBody {
+            if tailRepairAuthorized || outerBindingFailed || (observedEntry && !enteredBody) || checkingEvidence || completedBody {
                 observation.recordUnreadFailure()
             }
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
