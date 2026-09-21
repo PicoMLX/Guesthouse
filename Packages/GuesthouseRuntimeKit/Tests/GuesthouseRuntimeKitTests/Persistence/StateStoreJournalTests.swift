@@ -813,6 +813,37 @@ import Testing
         #expect(try Data(contentsOf: quarantined.appending(path: "journal.ndjson")) == otherBytes)
     }
 
+    @Test func shorterAppendCannotEraseATailWhoseCompletionExceedsOriginalCapacity() async throws {
+        let fixture = try Fixture(), writes = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        let start = Self.record()
+        let longFinish = Self.record(matching: start,
+            outcome: .failed(.unsupportedHost(.insufficientMemory(foundBytes: .max, minimumBytes: .max))))
+        let shortFinish = Self.record(matching: start, outcome: .notApplied)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let first = try encoder.encode(start), completion = try encoder.encode(longFinish)
+        let shortLine = try encoder.encode(shortFinish) + Data([10])
+        let prefix = first + Data(repeating: 32,
+            count: StateFileIO.maximumJournalBytes - completion.count - first.count - 1) + Data([10])
+        let original = prefix + completion.dropLast()
+        // The replacement fits; the observed record needs one byte more than the remaining
+        // budget once its closing brace AND newline are counted. It must remain evidence.
+        try StateJournalAppend.requireCapacity(bytes: prefix.count, records: 1, additionalBytes: shortLine.count)
+        try fixture.write(original)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.append(shortFinish) }
+            #expect(writes.withLock { $0 } == 0)
+            #expect(try fixture.bytes() == original)
+        }
+        let reopened = try await fixture.open()
+        await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await reopened.append(shortFinish) }
+        #expect(try fixture.bytes() == original)
+    }
+
     private static func record() -> JournalRecord {
         JournalRecord(id: OperationID(), environmentID: EnvironmentID(), operation: .startEnvironment,
                       timestamp: Date(timeIntervalSinceReferenceDate: 800_000_000), outcome: .started)
