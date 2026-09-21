@@ -157,7 +157,9 @@ import Testing
         try #require(encoded.hasSuffix("e+303"))
         let prefix = String(encoded.dropLast(2))
         try #require(prefix.hasSuffix("e+3"))
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
+        let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
+        #expect(chunk.truncatedTail)
+        #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
     }
 
     @Test(arguments: ["id", "environmentID"])
