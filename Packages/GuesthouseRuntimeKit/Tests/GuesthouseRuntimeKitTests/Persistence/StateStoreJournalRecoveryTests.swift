@@ -105,11 +105,12 @@ import Testing
             }
             #expect(try fixture.bytes() == evidence)
         }
-        // A fresh owner can inspect visible evidence; it cannot retroactively acknowledge the failed write.
-        let reopened = try await fixture.open(), records = try await reopened.replay().records
+        // Pure decoding can describe retained bytes, not clear shared binding uncertainty.
+        let reopened = try await fixture.open(), records = try JournalReplayChunk(evidence).history.records
         let started = try #require(records.first)
         #expect(records.count == 1 && started.outcome == .started)
-        await #expect(throws: StateStoreError.operationUnresolved(started.id)) {
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await reopened.replay() }
+        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
             try await reopened.begin(.startEnvironment, for: started.environmentID)
         }
         #expect(try fixture.bytes() == evidence)
