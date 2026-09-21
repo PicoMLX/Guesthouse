@@ -28,7 +28,7 @@ final class StateDirectoryAnchor {
         let descriptor = openDirectory(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw .insecureDirectory(reason: .unopenable) }
         let identity: StateFileIdentity
-        do {
+        do throws(StateStoreError) {
             identity = StateFileIdentity(try StateFileProtection.verify(descriptor, kind: .directory))
             guard identity == observed else { throw StateStoreError.insecureDirectory(reason: .changed) }
             try Self.verify(storage, descriptor: descriptor, identity: identity, version: nil)
