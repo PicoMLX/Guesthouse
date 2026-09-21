@@ -73,11 +73,14 @@ import Testing
         let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"),
             arguments: ["60"], standardInput: supplyInput ? .data(Data(repeating: 65, count: 4 << 20)) : .none,
             timeout: .milliseconds(100), terminationGracePeriod: .milliseconds(100)))
+        let returned = ContinuousClock.now
         let report = try await run.waitForExit()
+        let finished = ContinuousClock.now
         #expect(report.timedOut && !report.canceled)
         #expect(try report.childExit?.get() == .signal(SIGTERM))
         if supplyInput { #expect(report.input != .delivered) }
-        #expect(ContinuousClock.now - began < .seconds(3))
+        #expect(finished - began < .seconds(3),
+            "supplyInput=\(supplyInput); run return=\(returned - began); report wait=\(finished - returned); inputClosed=\(report.inputClosed); outputComplete=\(report.outputComplete)")
     }
 
     @Test func earlyExitReportsUndeliveredInput() async throws {
@@ -118,23 +121,43 @@ import Testing
     }
 
     @Test(arguments: [false, true]) func droppedFacadePreservesItsDeadline(_ stopAlreadyPending: Bool) async throws {
+        let observations = Mutex<(term: ContinuousClock.Instant?, kill: ContinuousClock.Instant?,
+                                  reap: ContinuousClock.Instant?, watchdog: Bool)>((nil, nil, nil, false))
         var calls = OwnedChild.SystemCalls.live
-        if stopAlreadyPending {
-            calls.signal = { pid, signal in
-                signal == SIGTERM ? .delivered : OwnedChild.SystemCalls.live.signal(pid, signal)
+        calls.signal = { pid, signal in
+            let now = ContinuousClock.now
+            observations.withLock { value in
+                if signal == SIGTERM { value.term = now }
+                if signal == SIGKILL { value.kill = now }
             }
+            return stopAlreadyPending && signal == SIGTERM
+                ? .delivered : OwnedChild.SystemCalls.live.signal(pid, signal)
         }
-        let fixture = try Fixture(calls: calls)
+        calls.reap = { pid in
+            let result = OwnedChild.SystemCalls.live.reap(pid)
+            let now = ContinuousClock.now
+            observations.withLock { $0.reap = now }
+            return result
+        }
+        let fixture = try Fixture(calls: calls,
+            didWatchdogFire: { observations.withLock { $0.watchdog = true } })
         defer { fixture.closeWriters() }
         var run: ProcessRun? = ProcessRun(child: fixture.child, readers: fixture.readers, input: nil, grace: .zero)
         weak let facade = run
         let began = ContinuousClock.now
         await run?.start(deadline: .now + .milliseconds(100), input: nil)
+        let armed = ContinuousClock.now
         if stopAlreadyPending { await run?.terminate(gracePeriod: .seconds(60)) }
         run = nil
         #expect(facade == nil)
         #expect(try await fixture.child.waitForReapedExit().get() == .signal(stopAlreadyPending ? SIGKILL : SIGTERM))
-        #expect(ContinuousClock.now - began < .seconds(3)) // The invocation deadline, not the fixture watchdog.
+        let finished = ContinuousClock.now
+        let observed = observations.withLock { $0 }
+        // Keep the invocation bound. Fixed stage evidence distinguishes signal scheduling,
+        // native reaping and waiter resumption; it never includes a PID, path or raw output.
+        #expect(finished - began < .seconds(3),
+            "pendingStop=\(stopAlreadyPending); armed=\(armed - began); term=\(observed.term.map { $0 - began }); kill=\(observed.kill.map { $0 - began }); reap=\(observed.reap.map { $0 - began }); watchdog=\(observed.watchdog)")
+        #expect(!observed.watchdog, "The fixture watchdog must not satisfy the invocation deadline test")
     }
 
     @Test func zeroExitDoesNotEraseCancellation() async throws {
@@ -226,7 +249,8 @@ import Testing
         let child: OwnedChild, readers = OutputReaders()
         let stdout = Pipe(), stderr = Pipe(), stdin = Pipe()
         let watchdog: Task<Void, Never>
-        init(executable: String = "/bin/cat", calls: OwnedChild.SystemCalls = .live) throws {
+        init(executable: String = "/bin/cat", calls: OwnedChild.SystemCalls = .live,
+             didWatchdogFire: @escaping @Sendable () -> Void = {}) throws {
             try readers.attach(stdout.fileHandleForReading, kind: .stdout)
             try readers.attach(stderr.fileHandleForReading, kind: .stderr)
             let child = try OwnedChild.spawn(executable: URL(fileURLWithPath: executable),
@@ -236,6 +260,7 @@ import Testing
             self.child = child
             watchdog = Task {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                didWatchdogFire()
                 child.signal(SIGKILL)
             }
             try stdin.fileHandleForReading.close()

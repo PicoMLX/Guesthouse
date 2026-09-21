@@ -338,10 +338,17 @@ import Testing
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: mode])
         }
         func addACL(_ rule: String, at url: URL) async throws {
+            let began = ContinuousClock.now
             let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/chmod"),
                 arguments: ["+a", rule, url.path], timeout: .seconds(5)))
+            let returned = ContinuousClock.now
             let report = try await run.waitForExit()
-            try #require(try report.childExit?.get() == .status(0) && !report.timedOut && !report.canceled)
+            let finished = ContinuousClock.now
+            let childExit = try report.childExit?.get()
+            let evidence: Comment = "ACL fixture run return=\(returned - began); report wait=\(finished - returned); exit=\(childExit); timedOut=\(report.timedOut); canceled=\(report.canceled); terminationRefused=\(report.terminationRefused); inputClosed=\(report.inputClosed); outputComplete=\(report.outputComplete)"
+            // Distinguish preparation failure from the storage assertions that depend on it.
+            // Retain the same prerequisite and timeout; never continue with an unproven ACL.
+            try #require(childExit == .status(0) && !report.timedOut && !report.canceled, evidence)
         }
     }
 }
