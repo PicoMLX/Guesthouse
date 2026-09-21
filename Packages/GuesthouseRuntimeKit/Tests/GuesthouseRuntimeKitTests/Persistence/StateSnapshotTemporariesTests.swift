@@ -92,6 +92,47 @@ import Testing
         #expect(try Data(contentsOf: live) == fixture.evidence)
     }
 
+    @Test func exactCandidateBudgetCanBeCollected() throws {
+        let fixture = try Fixture()
+        for _ in 0..<StateSnapshotTemporaries.maximumCandidates { _ = try fixture.temporary() }
+        #expect(try fixture.collect() == StateSnapshotTemporaries.maximumCandidates)
+        #expect(try fixture.collect() == 0)
+    }
+
+    @Test func candidateOverflowRefusesBeforeAnyRemovalOrPublication() throws {
+        let fixture = try Fixture()
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        let snapshot = fixture.state.appending(path: "environments.json")
+        let saved = try Data(contentsOf: snapshot)
+        var candidates: [URL] = []
+        for _ in 0...StateSnapshotTemporaries.maximumCandidates { candidates.append(try fixture.temporary()) }
+        let names = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try fixture.collect { _, _ in Issue.record("Overflow must refuse before candidate removal") }
+            }
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+            }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == names)
+        #expect(try Data(contentsOf: snapshot) == saved)
+        for candidate in candidates { #expect(try Data(contentsOf: candidate) == fixture.evidence) }
+    }
+
+    @Test func unrelatedEntriesAlsoHaveABoundedScan() throws {
+        let fixture = try Fixture(), candidate = try fixture.temporary()
+        for index in 0..<StateSnapshotTemporaries.maximumDirectoryEntries {
+            try fixture.evidence.write(to: fixture.state.appending(path: "unrelated-\(index)"))
+        }
+        #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+            try fixture.collect { _, _ in Issue.record("Scan overflow must refuse before removal") }
+        }
+        #expect(try Data(contentsOf: candidate) == fixture.evidence)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).count
+                == StateSnapshotTemporaries.maximumDirectoryEntries + 1)
+    }
+
     @Test(arguments: [1, 64]) func packedDirectoryRecordsAndLongUnrelatedNamesAreHandled(count: Int) throws {
         let fixture = try Fixture()
         for _ in 0..<count { _ = try fixture.temporary() }
