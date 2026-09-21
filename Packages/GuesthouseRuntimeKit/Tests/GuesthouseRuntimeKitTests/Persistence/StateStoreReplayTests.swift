@@ -28,6 +28,30 @@ import Testing
         }
     }
 
+    @Test(arguments: [false, true])
+    func tornCompletionMustFitTheRemainingFileBudget(fits: Bool) async throws {
+        let fixture = try Fixture(), store = try await fixture.open(), start = Self.record()
+        let finish = Self.record(id: start.id, environment: start.environmentID,
+            outcome: .failed(.unsupportedHost(.insufficientMemory(foundBytes: .max, minimumBytes: .max))))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let first = try encoder.encode(start), completion = try encoder.encode(finish)
+        let remaining = completion.count + (fits ? 1 : 0)
+        let prefix = first + Data(repeating: 32,
+            count: StateFileIO.maximumJournalBytes - remaining - first.count - 1) + Data([10])
+        let bytes = prefix + completion.dropLast()
+        try fixture.write(bytes)
+        for _ in 0..<2 {
+            if fits {
+                let replay = try await store.replay()
+                #expect(replay.records == [start] && replay.truncatedTail)
+            } else {
+                await #expect(throws: StateStoreError.corruptJournal(line: 2)) { try await store.replay() }
+            }
+            #expect(try fixture.bytes() == bytes)
+        }
+    }
+
     @Test func oversizedJournalRefusesBeforeCallingTheReader() async throws {
         let fixture = try Fixture(), reads = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { _, _ in

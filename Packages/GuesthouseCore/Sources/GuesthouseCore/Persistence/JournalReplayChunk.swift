@@ -17,7 +17,11 @@ public struct JournalReplayChunk: Sendable {
     /// A valid final record has no newline. Its next append needs the missing separator.
     public let unterminatedRecord: Bool
 
-    public init(_ data: Data, following prefix: JournalHistory = JournalHistory()) throws(StateStoreError) {
+    /// `maximumByteCount` is the remaining capacity for this chunk, including record newlines.
+    /// The runtime subtracts any previously retained file prefix before passing a smaller chunk.
+    public init(_ data: Data, following prefix: JournalHistory = JournalHistory(),
+                maximumByteCount: Int = .max) throws(StateStoreError) {
+        guard data.count <= maximumByteCount else { throw .fileUnreadable(name: .journal) }
         var history = prefix
         var byteCount = 0
         var truncatedTail = false
@@ -48,7 +52,8 @@ public struct JournalReplayChunk: Sendable {
             } else {
                 // Only a prefix of the closed encoder shapes can authorize tail repair.
                 // Malformed or complete-invalid bytes remain evidence, not missing bytes.
-                guard JournalTailPrefix.accepts(unterminated, following: history) else {
+                guard JournalTailPrefix.accepts(unterminated, following: history,
+                    maximumRecordBytes: maximumByteCount - byteCount - 1) else {
                     throw .corruptJournal(line: number)
                 }
                 truncatedTail = true
