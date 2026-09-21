@@ -246,6 +246,52 @@ import Testing
         }
     }
 
+    @Test(arguments: [false, true])
+    func fullRetainedBudgetRefusesPublicationBeforeMovingOrCreating(quarantined: Bool) throws {
+        let fixture = try Fixture()
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        let snapshot = fixture.state.appending(path: "environments.json"), saved = try Data(contentsOf: snapshot)
+        for _ in 0..<StateSnapshotTemporaries.maximumCandidates { _ = try fixture.temporary() }
+        if quarantined { #expect(try fixture.collect() == StateSnapshotTemporaries.maximumCandidates) }
+        let inventory = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        for _ in 0..<2 {
+            let reopened = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: reopened,
+                    createTemporary: { _, _, _, _ in Issue.record("Full budget must refuse before creation"); return -1 })
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == inventory)
+            #expect(try Data(contentsOf: snapshot) == saved)
+            for name in inventory where name != "environments.json" {
+                #expect(try Data(contentsOf: fixture.state.appending(path: name)) == fixture.evidence)
+            }
+        }
+    }
+
+    @Test func failedPublicationUsesOnlyItsReservedRetainedSlot() throws {
+        let fixture = try Fixture(), failure = StateStoreError.fileUnwritable(name: .snapshot)
+        for _ in 0..<(StateSnapshotTemporaries.maximumCandidates - 1) { _ = try fixture.temporary() }
+        #expect(throws: failure) {
+            try StateSnapshotPublication.save(.empty, to: fixture.anchor, fileBarrier: { _, _ in throw failure })
+        }
+        let inventory = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+        #expect(inventory.count == StateSnapshotTemporaries.maximumCandidates)
+        #expect(try fixture.quarantined().count == StateSnapshotTemporaries.maximumCandidates - 1)
+        let temporary = try #require(inventory.first(where: StateSnapshotTemporaries.isManagedName))
+        let bytes = try Data(contentsOf: fixture.state.appending(path: temporary))
+        #expect(!bytes.isEmpty)
+        for _ in 0..<2 {
+            let reopened = try StateDirectoryAnchor(storage: RuntimeStorage(root: fixture.base.appending(path: "Guesthouse")))
+            #expect(throws: StateStoreError.fileUnreadable(name: .stateDirectory)) {
+                try StateSnapshotPublication.save(.empty, to: reopened,
+                    createTemporary: { _, _, _, _ in Issue.record("No second retained slot is available"); return -1 })
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted() == inventory)
+            #expect(try Data(contentsOf: fixture.state.appending(path: temporary)) == bytes)
+            for entry in try fixture.quarantined() { #expect(try Data(contentsOf: entry) == fixture.evidence) }
+        }
+    }
+
     @Test func activeWriterIsSkippedWithoutWaiting() throws {
         let fixture = try Fixture(), live = try fixture.temporary()
         let descriptor = open(live.path, O_RDONLY | O_EXLOCK | O_NOFOLLOW | O_CLOEXEC)
