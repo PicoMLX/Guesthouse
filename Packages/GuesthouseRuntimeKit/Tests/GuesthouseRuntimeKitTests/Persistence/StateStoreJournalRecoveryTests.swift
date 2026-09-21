@@ -97,11 +97,20 @@ import Testing
         }))
         let expected = StateStoreError.journalWriteUncertain(cause: .insecureDirectory(reason: .changed))
         await #expect(throws: expected) { try await store.begin(.startEnvironment, for: EnvironmentID()) }
-        let evidence = try fixture.bytes(), records = try await store.replay().records
+        let evidence = try fixture.bytes()
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: EnvironmentID())
+            }
+            #expect(try fixture.bytes() == evidence)
+        }
+        // A fresh owner can inspect visible evidence; it cannot retroactively acknowledge the failed write.
+        let reopened = try await fixture.open(), records = try await reopened.replay().records
         let started = try #require(records.first)
         #expect(records.count == 1 && started.outcome == .started)
         await #expect(throws: StateStoreError.operationUnresolved(started.id)) {
-            try await store.begin(.startEnvironment, for: started.environmentID)
+            try await reopened.begin(.startEnvironment, for: started.environmentID)
         }
         #expect(try fixture.bytes() == evidence)
     }
