@@ -39,6 +39,14 @@ enum StateJournalAppend {
                     didIdentify: { observation.identify($0) },
                     validateDirectory: { try anchor.verifyCurrent(version: $0) }, body: { descriptor in
                     enteredBody = true
+                    defer {
+                        // A throwing write/barrier skips the file borrow's success post-check.
+                        // Preserve its error, but retain any independently observed binding loss.
+                        if !completedBody {
+                            do { try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal) }
+                            catch { outerBindingFailed = true }
+                        }
+                    }
                     let current = try observation.refreshed(descriptor, read: hooks.journalRead)
                     try current.history.validateAppend(record)
                     if current.unterminatedRecord { line.insert(0x0A, at: line.startIndex) }
