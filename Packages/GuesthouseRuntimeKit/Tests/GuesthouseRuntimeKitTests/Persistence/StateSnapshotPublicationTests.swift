@@ -86,9 +86,10 @@ import Testing
     @Test(arguments: [SchemaVersion.unversioned, SchemaVersion(1)!, SchemaVersion(99)!])
     func rejectedValuePreservesSavedBytesAndAllTemporaries(version: SchemaVersion) throws {
         let fixture = try Fixture()
-        let original = Data("original fixture".utf8), stale = fixture.state.appending(path: ".environments.json.tmp-preserved")
+        let original = Data("original fixture".utf8), stale = fixture.state.appending(path: ".environments.json.tmp-\(UUID().uuidString)")
         try original.write(to: fixture.snapshot)
         try original.write(to: stale)
+        try #require(chmod(stale.path, 0o600) == 0)
         #expect(throws: StateStoreError.unsupportedSnapshotVersion(found: version, current: SchemaVersion(2)!)) {
             try StateSnapshotPublication.save(EnvironmentsSnapshot(schemaVersion: version), to: fixture.anchor,
                 createTemporary: { _, _, _, _ in Issue.record("Created a rejected value"); return -1 })
@@ -362,18 +363,19 @@ import Testing
         #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: Data(contentsOf: fixture.snapshot)) == .empty)
     }
 
-    @Test func thisPublicationDoesNotCollectOtherWritersOrStaleEvidence() throws {
+    @Test func publicationCollectsPrivateStaleFilesButPreservesLiveWriters() throws {
         let fixture = try Fixture(), evidence = Data("retained temporary".utf8)
         let live = fixture.state.appending(path: ".environments.json.tmp-\(UUID().uuidString)")
         let stale = fixture.state.appending(path: ".environments.json.tmp-\(UUID().uuidString)")
         try evidence.write(to: live)
         try evidence.write(to: stale)
+        try #require(chmod(live.path, 0o600) == 0 && chmod(stale.path, 0o600) == 0)
         let held = open(live.path, O_RDONLY | O_EXLOCK | O_NOFOLLOW | O_CLOEXEC)
         try #require(held >= 0)
         defer { close(held) }
         try StateSnapshotPublication.save(.empty, to: fixture.anchor)
         #expect(try Data(contentsOf: live) == evidence)
-        #expect(try Data(contentsOf: stale) == evidence)
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
     }
 
     private func requireContended(_ path: URL) throws {
