@@ -414,6 +414,54 @@ import Testing
         #expect(attempts.withLock { $0 } == 1)
     }
 
+    @Test(arguments: ["write", "fileBarrier", "directoryBarrier"])
+    func throwingMutationRetainsReplacedDirectoryUncertainty(stage: String) async throws {
+        let fixture = try Fixture(), peer = try await fixture.open(), prior = Self.record(), next = Self.record()
+        try await peer.append(prior)
+        let original = try fixture.bytes(), writes = Mutex(0)
+        let detached = fixture.base.appending(path: "detached-state")
+        let conflicting = fixture.base.appending(path: "conflicting-state")
+        let otherBytes = try JSONEncoder().encode(Self.record()) + Data([10])
+        let failure = StateStoreError.fileUnwritable(name: .journal)
+        let replaceAndFail: @Sendable () throws -> Void = {
+            try FileManager.default.moveItem(at: fixture.state, to: detached)
+            try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: false,
+                                                   attributes: [.posixPermissions: 0o700])
+            try fixture.write(otherBytes)
+            throw failure
+        }
+        let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
+            if stage == "directoryBarrier" { try replaceAndFail() }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }, journalFile: { fd, name in
+            if stage == "fileBarrier" { try replaceAndFail() }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }, journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            if stage == "write" { try replaceAndFail() }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        await #expect(throws: StateStoreError.journalWriteUncertain(cause: failure)) {
+            try await store.append(next)
+        }
+        let retained = try Data(contentsOf: detached.appending(path: "journal.ndjson"))
+        #expect(retained.starts(with: original))
+        #expect(try fixture.bytes() == otherBytes)
+        // Restore before any replay; a later failed inspection must not supply the latch.
+        try FileManager.default.moveItem(at: fixture.state, to: conflicting)
+        try FileManager.default.moveItem(at: detached, to: fixture.state)
+        let later = try await fixture.open()
+        for owner in [store, peer, later] {
+            for _ in 0..<2 {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.append(next) }
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.replay() }
+                #expect(try fixture.bytes() == retained)
+            }
+        }
+        #expect(try Data(contentsOf: conflicting.appending(path: "journal.ndjson")) == otherBytes)
+        #expect(writes.withLock { $0 } == 1)
+    }
+
     @Test func appendBudgetAllowsExactBoundaryAndRefusesOverflow() throws {
         let limit = StateFileIO.maximumJournalBytes, records = StateJournalCache.maximumRecords
         try StateJournalAppend.requireCapacity(bytes: limit - 10, records: records - 1, additionalBytes: 10)
@@ -799,9 +847,14 @@ import Testing
         } else { changed[changed.startIndex] = 120 }
         let replacement = changed
         let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
-            try #require(lseek(fd, 0, SEEK_SET) == 0)
-            try StateFileIO.writeAll(fd, replacement, name: .journal)
+            let other = Darwin.open(fixture.journal.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+            try #require(other >= 0)
+            defer { close(other) }
+            try #require(fcntl(other, F_GETFL) & O_APPEND == 0)
+            try StateFileIO.writeAll(other, replacement, name: .journal)
+            try #require(try fixture.bytes() == replacement)
             try StateFileIO.writeAll(fd, bytes, name: .journal)
+            try #require(try fixture.bytes() == replacement + bytes)
         }))
         do {
             _ = try await store.begin(.startEnvironment, for: EnvironmentID())
