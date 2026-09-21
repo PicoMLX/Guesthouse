@@ -10,15 +10,16 @@ import GuesthouseCore
 enum StateSnapshotPublication {
     static let temporaryPrefix = ".environments.json.tmp-"
 
-    static func save(
+    @discardableResult static func save(
         _ snapshot: EnvironmentsSnapshot, to anchor: StateDirectoryAnchor,
         migrator: SnapshotMigrator = .standard,
         requireExisting: @autoclosure () -> Bool = false, didObserve: () -> Void = {},
+        validateExpectedVersion: (StateFileVersion?) throws -> Void = { _ in },
         permissionBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         fileBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         directoryBarrier: StateFileProtection.Barrier = { try StateFileIO.fullySynchronize($0, name: $1) },
         createTemporary: (Int32, String, Int32, mode_t) -> Int32 = { openat($0, $1, $2, $3) }
-    ) throws(StateStoreError) {
+    ) throws(StateStoreError) -> StateFileVersion {
         // Validate and encode before touching any saved state or temporary, including on
         // rejected prototype/newer values. Encoding can independently reject nonfinite dates.
         try snapshot.validate()
@@ -36,7 +37,7 @@ enum StateSnapshotPublication {
 
         // Refuse existing unsupported/corrupt bytes as well as unsafe file structure.
         // A valid in-memory value is not permission to erase an unreadable saved version.
-        try anchor.withPublicationOwnership { directory in
+        return try anchor.withPublicationOwnership { directory in
             let existing = try existingVersion(in: anchor, migrator: migrator,
                 permissionBarrier: permissionBarrier, didObserve: didObserve)
             // Evaluate shared observation after acquiring publication ownership, not when
@@ -44,6 +45,10 @@ enum StateSnapshotPublication {
             guard existing != nil || !requireExisting() else {
                 throw StateStoreError.fileUnwritable(name: .snapshot)
             }
+            // Compare with the caller's last completed read/save while holding publication
+            // ownership, BEFORE collecting evidence or creating a temporary. Merely reading
+            // the current file during this preflight must not authorize a stale replacement.
+            try validateExpectedVersion(existing)
             try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
                 try requireUnchangedSnapshot(in: directory, expected: existing,
@@ -85,6 +90,7 @@ enum StateSnapshotPublication {
             try synchronize(directory, name: .stateDirectory, using: directoryBarrier)
             try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .readSnapshot, version: published)
             try anchor.verifyCurrent(version: directoryVersion)
+            return published
         }
         // Cleanup runs only after valid preflight, before this attempt creates a temporary.
         // Its failed write and live/unsafe/unknown files are never deleted on the error path.
