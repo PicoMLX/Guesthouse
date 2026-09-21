@@ -344,11 +344,11 @@ import Testing
             let returned = ContinuousClock.now
             let report = try await run.waitForExit()
             let finished = ContinuousClock.now
-            let childExit = try report.childExit?.get()
-            let evidence: Comment = "ACL fixture run return=\(returned - began); report wait=\(finished - returned); exit=\(childExit); timedOut=\(report.timedOut); canceled=\(report.canceled); terminationRefused=\(report.terminationRefused); inputClosed=\(report.inputClosed); outputComplete=\(report.outputComplete)"
+            let evidence = ProcessFixtureEvidence(report: report,
+                runReturn: returned - began, reportWait: finished - returned)
             // Distinguish preparation failure from the storage assertions that depend on it.
             // Retain the same prerequisite and timeout; never continue with an unproven ACL.
-            try #require(childExit == .status(0) && !report.timedOut && !report.canceled, evidence)
+            try #require(evidence.succeeded, evidence.comment)
         }
     }
 }

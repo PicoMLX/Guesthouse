@@ -155,10 +155,15 @@ import Testing
                     acl_free(UnsafeMutableRawPointer(empty))
                 } else { Issue.record("Could not clear the owned fixture ACL") }
             }
+            let began = ContinuousClock.now
             let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/chmod"),
                 arguments: ["+a", rule, url.path], timeout: .seconds(5)))
+            let returned = ContinuousClock.now
             let report = try await run.waitForExit()
-            try #require(try report.childExit?.get() == .status(0) && !report.timedOut && !report.canceled)
+            let finished = ContinuousClock.now
+            let evidence = ProcessFixtureEvidence(report: report,
+                runReturn: returned - began, reportWait: finished - returned)
+            try #require(evidence.succeeded, evidence.comment)
             try body()
         }
     }
