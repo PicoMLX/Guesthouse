@@ -23,6 +23,7 @@ enum StateJournalAppend {
         // Tail truncation also changes disk state; a later failure must not claim no write.
         var writeAttempted = false
         var observedEntry = false, enteredBody = false
+        var checkingBinding = false, completedBody = false
         do {
             // Shares the snapshot/first-volume-selection transaction boundary. Contention
             // refuses before opening or creating a journal; it never waits or retries.
@@ -59,28 +60,42 @@ enum StateJournalAppend {
                     let written = try StateFileIO.version(descriptor, name: .journal)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
+                    checkingBinding = true
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     let directoryVersion = try anchor.verifyCurrent()
+                    checkingBinding = false
                     try synchronize(descriptor, name: .journal, barrier: hooks.journalFile)
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
+                    checkingBinding = true
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
+                    checkingBinding = false
                     // Every record needs an entry barrier, even when the journal already
                     // exists: a restore can reattach the same inode before our write.
                     try synchronize(directory, name: .stateDirectory, barrier: hooks.directory)
                     try requireLength(descriptor, expected: expectedLength)
                     try requireBytes(descriptor, from: current.byteCount, expected: line)
                     try requireHistory(descriptor, expected: current.history.records + [record], observation: &observation)
+                    checkingBinding = true
                     try StateFileEntry.verifyCurrent(descriptor, in: directory, access: .writeJournal, version: written)
                     try anchor.verifyCurrent(version: directoryVersion)
-                    return try current.appending(record, bytes: line, version: written)
+                    checkingBinding = false
+                    let candidate = try current.appending(record, bytes: line, version: written)
+                    completedBody = true
+                    return candidate
                 }) else { throw StateStoreError.fileUnwritable(name: .journal) }
                 return candidate
             }
         } catch {
-            if observedEntry && !enteredBody { observation.recordUnreadFailure() }
+            // A failed binding check can hide another journal even after a complete read.
+            // Restoring the old path must not clear that uncertainty. Plain write/barrier
+            // failures retain their existing explicit-inspection policy when binding was
+            // not checked and found inconsistent; this never claims the mutation succeeded.
+            if (observedEntry && !enteredBody) || checkingBinding || completedBody {
+                observation.recordUnreadFailure()
+            }
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
             throw error
         }
