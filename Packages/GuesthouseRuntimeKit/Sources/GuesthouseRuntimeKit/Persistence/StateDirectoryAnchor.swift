@@ -22,12 +22,14 @@ final class StateDirectoryAnchor {
         openDirectory: (String, Int32) -> Int32 = { open($0, $1) },
         closeDirectory: @escaping (Int32) -> Void = { close($0) }
     ) throws(StateStoreError) {
-        let path = try Self.currentPath(storage)
+        var observed: StateFileIdentity?
+        let path = try Self.currentPath(storage, didObserve: { observed = $0 })
         let descriptor = openDirectory(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw .insecureDirectory(reason: .unopenable) }
         let identity: StateFileIdentity
         do {
             identity = StateFileIdentity(try StateFileProtection.verify(descriptor, kind: .directory))
+            guard identity == observed else { throw StateStoreError.insecureDirectory(reason: .changed) }
             try Self.verify(storage, descriptor: descriptor, identity: identity, version: nil)
         } catch {
             closeDirectory(descriptor)
@@ -83,8 +85,9 @@ final class StateDirectoryAnchor {
         return actual
     }
 
-    private static func currentPath(_ storage: RuntimeStorage) throws(StateStoreError) -> String {
-        do { return try StorageProtection.path(storage.location(for: .state)) }
+    private static func currentPath(_ storage: RuntimeStorage,
+                                    didObserve: (StateFileIdentity) -> Void = { _ in }) throws(StateStoreError) -> String {
+        do { return try StorageProtection.path(storage.location(for: .state, didObserve: didObserve)) }
         catch StorageFailure.protectionDrift { throw .insecureDirectory(reason: .permissions) }
         catch StorageFailure.unsafeStructure { throw .insecureDirectory(reason: .changed) }
         catch { throw .insecureDirectory(reason: .unreadable) }
