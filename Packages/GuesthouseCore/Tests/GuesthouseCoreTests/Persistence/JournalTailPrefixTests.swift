@@ -93,7 +93,8 @@ import Testing
             if sorted { encoder.outputFormatting = [.sortedKeys] }
             let bytes = try encoder.encode(record)
             for length in 1..<bytes.count {
-                let chunk = try JournalReplayChunk(Data(bytes.prefix(length)), following: history)
+                let chunk = try JournalReplayChunk(Data(bytes.prefix(length)), following: history,
+                    maximumByteCount: bytes.count + 1)
                 #expect(chunk.truncatedTail)
                 #expect(chunk.validatedByteCount == 0 && chunk.history.records == history.records)
             }
