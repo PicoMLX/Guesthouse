@@ -23,6 +23,7 @@ enum StateJournalAppend {
         // This flag surrounds the COMPLETE borrow, including its outer post-checks.
         // Tail truncation also changes disk state; a later failure must not claim no write.
         var writeAttempted = false
+        var tailRepairAuthorized = false
         var observedEntry = false, enteredBody = false
         var checkingBinding = false, completedBody = false
         var outerBindingFailed = false
@@ -47,6 +48,8 @@ enum StateJournalAppend {
                                         additionalBytes: line.count)
                     let expectedLength = current.byteCount + line.count // Capacity check makes this bounded.
                     if current.truncatedTail {
+                        try observation.authorizeTailRepair(current)
+                        tailRepairAuthorized = true
                         writeAttempted = true
                         guard ftruncate(descriptor, off_t(current.byteCount)) == 0 else {
                             throw StateStoreError.fileUnwritable(name: .journal)
@@ -98,7 +101,7 @@ enum StateJournalAppend {
             // not checked and found inconsistent; this never claims the mutation succeeded.
             // Directory binding can fail before any file callback. The anchor reports only
             // its binding checks, never ordinary nonblocking lock contention/reentrancy.
-            if outerBindingFailed || (observedEntry && !enteredBody) || checkingBinding || completedBody {
+            if tailRepairAuthorized || outerBindingFailed || (observedEntry && !enteredBody) || checkingBinding || completedBody {
                 observation.recordUnreadFailure()
             }
             if writeAttempted { throw .journalWriteUncertain(cause: error) }
