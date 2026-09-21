@@ -105,7 +105,10 @@ enum StateFileEntry {
             // opening an unexpected FIFO from waiting for a peer before this inspection.
             try requireBinding(descriptor, in: directory, access: access)
             guard StateFileIO.lock(descriptor, LOCK_EX) else { throw access.failure }
-            try validateDirectory(nil)
+            // Creation, if needed, precedes this boundary. File-content writes never need
+            // to change the directory namespace; pin it across preparation and the body.
+            let transactionDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+            try validateDirectory(transactionDirectoryVersion)
             try requireBinding(descriptor, in: directory, access: access)
             try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
                 synchronize: { descriptor, label in
@@ -115,11 +118,11 @@ enum StateFileEntry {
                     try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
                     try validateDirectory(directoryVersion)
                 })
-            try validateDirectory(nil)
+            try validateDirectory(transactionDirectoryVersion)
             let prepared = try verifyCurrent(descriptor, in: directory, access: access)
             let result = try body(descriptor)
             try verifyCurrent(descriptor, in: directory, access: access, version: access.creates ? nil : prepared)
-            try validateDirectory(nil)
+            try validateDirectory(transactionDirectoryVersion)
             return result
         } catch let error as StateStoreError { throw error }
         catch { throw access.failure }
