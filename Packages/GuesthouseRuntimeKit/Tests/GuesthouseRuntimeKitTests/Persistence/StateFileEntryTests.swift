@@ -70,6 +70,7 @@ import Testing
         try evidence.write(to: fixture.file(access))
         let bytes = try fixture.anchor.withFile(access, body: { fd in
             #expect(fcntl(fd, F_GETFL) & O_ACCMODE == mode)
+            #expect((fcntl(fd, F_GETFL) & O_APPEND != 0) == access.creates)
             #expect(fcntl(fd, F_GETFL) & O_NONBLOCK != 0)
             #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0)
             return try StateFileIO.readAll(fd, from: 0, name: access.label)
