@@ -178,8 +178,8 @@ import Testing
             try #require(try report.childExit?.get() == .status(0) && !report.timedOut && !report.canceled)
         } else { try #require(chmod(url.path, target == "snapshot" ? 0o640 : 0o750) == 0) }
         let before = try fixture.version(url), bytes = try Data(contentsOf: fixture.snapshot)
-        #expect(throws: StateStoreError.self) { try fixture.inspect() }
-        #expect(throws: StateStoreError.self) { try fixture.inspect() }
+        #expect(throws: StateStoreError.insecureDirectory(reason: .permissions)) { try fixture.inspect() }
+        #expect(throws: StateStoreError.insecureDirectory(reason: .permissions)) { try fixture.inspect() }
         #expect(try fixture.version(url) == before)
         #expect(try Data(contentsOf: fixture.snapshot) == bytes)
     }
