@@ -54,13 +54,14 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: absent.path))
     }
 
-    @Test(arguments: ["observed", "verified", "opening"], [false, true])
-    func observedRootReplacementCannotSwitchInventory(phase: String, emptyReplacement: Bool) throws {
+    @Test(arguments: ["observed", "verified", "opening", "state-opening"], [false, true])
+    func observedDirectoryReplacementCannotSwitchInventory(phase: String, emptyReplacement: Bool) throws {
         let fixture = try Fixture()
         try fixture.prepare()
         #expect(try fixture.inspect() == .empty) // Unchanged-root control.
         let original = try Data(contentsOf: fixture.snapshot)
         let retained = fixture.base.appending(path: "retained-root")
+        let stateOnly = phase == "state-opening"
         let replacement = fixture.base.appending(path: "replacement-root")
         _ = try RuntimeStorage(root: replacement)
         let replacementSnapshot = replacement.appending(path: "state/environments.json")
@@ -74,10 +75,11 @@ import Testing
             try #require(chmod(replacementSnapshot.path, 0o600) == 0)
         }
         func replaceRoot() throws {
-            try FileManager.default.moveItem(at: fixture.root, to: retained)
-            try FileManager.default.moveItem(at: replacement, to: fixture.root)
+            let source = stateOnly ? fixture.state : fixture.root
+            try FileManager.default.moveItem(at: source, to: retained)
+            try FileManager.default.moveItem(at: stateOnly ? replacement.appending(path: "state") : replacement, to: source)
         }
-        if phase == "opening" {
+        if phase.hasSuffix("opening") {
             let storage = try #require(RuntimeStorage.existing(root: fixture.root))
             #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
                 try StateDirectoryAnchor(storage: storage, openDirectory: { path, flags in
@@ -86,7 +88,9 @@ import Testing
                     return open(path, flags)
                 })
             }
-            for _ in 0..<2 {
+            // The failed anchor is never returned. A new leaf discovery is a separate read;
+            // root-bound storage alone does not retain a failed anchor's leaf observation.
+            for _ in 0..<(stateOnly ? 0 : 2) {
                 #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
                     try StateStore.inspectSnapshot(storage: { storage })
                 }
@@ -102,7 +106,7 @@ import Testing
                 })
             }
         }
-        #expect(try Data(contentsOf: retained.appending(path: "state/environments.json")) == original)
+        #expect(try Data(contentsOf: retained.appending(path: stateOnly ? "environments.json" : "state/environments.json")) == original)
         if emptyReplacement { #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path)) }
         else { #expect(try Data(contentsOf: fixture.snapshot) == otherBytes) }
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
