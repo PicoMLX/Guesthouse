@@ -58,7 +58,7 @@ struct StateJournalCache {
         }
         didRead(fresh) // Bounded raw evidence survives record-budget or decoding failure.
         try Self.validateBudget(fresh)
-        let chunk = try JournalReplayChunk(fresh)
+        let chunk = try JournalReplayChunk(fresh, maximumByteCount: StateFileIO.maximumJournalBytes)
         candidate.history = chunk.history
         candidate.byteCount = chunk.validatedByteCount
         candidate.truncatedTail = chunk.truncatedTail
