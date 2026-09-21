@@ -847,9 +847,14 @@ import Testing
         } else { changed[changed.startIndex] = 120 }
         let replacement = changed
         let store = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
-            try #require(lseek(fd, 0, SEEK_SET) == 0)
-            try StateFileIO.writeAll(fd, replacement, name: .journal)
+            let other = Darwin.open(fixture.journal.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+            try #require(other >= 0)
+            defer { close(other) }
+            try #require(fcntl(other, F_GETFL) & O_APPEND == 0)
+            try StateFileIO.writeAll(other, replacement, name: .journal)
+            try #require(try fixture.bytes() == replacement)
             try StateFileIO.writeAll(fd, bytes, name: .journal)
+            try #require(try fixture.bytes() == replacement + bytes)
         }))
         do {
             _ = try await store.begin(.startEnvironment, for: EnvironmentID())
