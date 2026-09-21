@@ -7,11 +7,14 @@ import GuesthouseCore
 /// private handles and share snapshot observations by directory identity. The GUI sees only
 /// Core values/errors, never a root URL or borrowed descriptor.
 /// Snapshot operations are complete synchronous actor transactions: there is no suspension
-/// between validation and publication. Journal/recovery integration is still a separate step.
+/// between validation and publication. Journal append/durability integration is a separate step.
 public actor StateStore {
     private let anchor: StateDirectoryAnchor
     private let migrator: SnapshotMigrator
     private let hooks: StateStoreHooks
+    private var journal = StateJournalCache()
+    // Shared evidence survives another live owner's failed parsing/binding or creation.
+    private let journalOwnership: StateJournalOwnership
     // Observation survives failed reads/publications. Absence after observation is evidence
     // loss, never an empty new store. All live owners of this directory share the evidence.
     private let snapshotObservation: StateSnapshotObservation
@@ -27,12 +30,13 @@ public actor StateStore {
 
     private init(anchor: sending StateDirectoryAnchor, migrator: SnapshotMigrator,
                  hooks: StateStoreHooks, queue: DispatchSerialQueue,
-                 snapshotObservation: StateSnapshotObservation) {
+                 snapshotObservation: StateSnapshotObservation, journalOwnership: StateJournalOwnership) {
         self.anchor = anchor
         self.migrator = migrator
         self.hooks = hooks
         self.queue = queue
         self.snapshotObservation = snapshotObservation
+        self.journalOwnership = journalOwnership
     }
 
     /// Select and prepare the runtime's fixed managed storage. No caller-selected path API.
@@ -59,9 +63,12 @@ public actor StateStore {
                     // No actor reference escapes until ALL preparation barriers succeed.
                     // A failed preparation releases the local anchor and preserves disk evidence.
                     try anchor.synchronizePreparation(barrier: hooks.preparation)
-                    let observation = StateSnapshotObservation(identity: try anchor.verifyCurrent().identity)
+                    let identity = try anchor.verifyCurrent().identity
+                    let observation = StateSnapshotObservation(identity: identity)
+                    let journalOwnership = StateJournalOwnership(identity: identity)
                     result = .success(StateStore(anchor: anchor, migrator: migrator, hooks: hooks,
-                                                 queue: queue, snapshotObservation: observation))
+                                                 queue: queue, snapshotObservation: observation,
+                                                 journalOwnership: journalOwnership))
                 } catch let failure as StateStoreError { result = .failure(failure) }
                 catch StorageFailure.protectionDrift { result = .failure(.insecureDirectory(reason: .permissions)) }
                 catch StorageFailure.unsafeStructure { result = .failure(.insecureDirectory(reason: .changed)) }
@@ -106,6 +113,51 @@ public actor StateStore {
             },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
+
+    /// Replay never creates or truncates the journal. Torn bytes remain available for later
+    /// inspected recovery; complete invalid/unsupported records refuse the whole result.
+    /// Observing these records is not proof of their durability or any mutation's outcome.
+    public func replay() throws(StateStoreError) -> JournalReplay {
+        try journalOwnership.withObservation { (observation, wasObserved) throws(StateStoreError) in
+            try replay(observation: &observation, wasObserved: &wasObserved)
+        }
+    }
+
+    private func replay(
+        observation journalObservation: inout StateJournalObservation,
+        wasObserved journalWasObserved: inout Bool
+    ) throws(StateStoreError) -> JournalReplay {
+        try journalObservation.requireReadable()
+        var enteredBody = false
+        var completedBody = false
+        do {
+            let candidate = try anchor.withFile(.readJournal, permissionBarrier: hooks.permission,
+                                                didObserve: { journalWasObserved = true },
+                                                didIdentify: { journalObservation.identify($0) }) {
+                enteredBody = true
+                let candidate = try journalObservation.refreshed($0, read: hooks.journalRead)
+                completedBody = true
+                return candidate
+            }
+            guard candidate != nil || !journalWasObserved else {
+                throw StateStoreError.fileUnreadable(name: .journal)
+            }
+            // Adoption happens only after all outer entry and directory checks. Missing
+            // state is empty only before this owner has ever observed a journal.
+            journal = candidate ?? StateJournalCache()
+            return journal.replay
+        } catch {
+            // A parsed candidate cannot settle uncertainty from a later binding failure.
+            // Parse failures retain their own raw evidence rather than taking this path.
+            // Even a first borrow may fail before observation callbacks or after a missing
+            // result's outer checks. Neither failure establishes trustworthy empty history.
+            if !enteredBody || completedBody {
+                journalObservation.recordUnreadFailure()
+            }
+            journal = StateJournalCache()
+            throw error
+        }
+    }
 }
 
 /// Internal synchronous fault/lifetime seams, not a diagnostic sink or an XPC API.
@@ -116,5 +168,6 @@ struct StateStoreHooks: Sendable {
     var permission: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var snapshotFile: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
     var directory: Barrier = { try StateFileIO.fullySynchronize($0, name: $1) }
+    var journalRead: StateJournalCache.Reader = { try StateFileIO.readAll($0, from: $1, name: .journal) }
     var didCloseDirectory: @Sendable () -> Void = {}
 }
