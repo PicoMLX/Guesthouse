@@ -92,8 +92,8 @@ enum StateSnapshotPublication {
             try anchor.verifyCurrent(version: directoryVersion)
             return published
         }
-        // Cleanup runs only after valid preflight, before this attempt creates a temporary.
-        // Its failed write and live/unsafe/unknown files are never deleted on the error path.
+        // Bounded quarantine runs after valid preflight, before creating a temporary.
+        // Recovery evidence is never deleted, even after later publication/barrier failure.
     }
 
     private static func synchronize(
