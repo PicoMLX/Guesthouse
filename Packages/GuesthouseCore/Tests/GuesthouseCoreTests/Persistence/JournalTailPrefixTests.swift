@@ -137,7 +137,9 @@ import Testing
             Date(timeIntervalSinceReferenceDate: 4.6728494007670807e+303)), as: UTF8.self)
         let prefix = "4.672849400767080"
         try #require(encoded.hasPrefix(prefix) && encoded.contains("e"))
-        #expect(JournalTailPrefix.accepts(Data(("{\"timestamp\":" + prefix).utf8)))
+        let chunk = try JournalReplayChunk(Data(("{\"timestamp\":" + prefix).utf8))
+        #expect(chunk.truncatedTail)
+        #expect(chunk.validatedByteCount == 0 && chunk.history.records.isEmpty)
     }
 
     @Test func interruptedDateBeforeExponentMarkerHasAnEncoderWitness() throws {
