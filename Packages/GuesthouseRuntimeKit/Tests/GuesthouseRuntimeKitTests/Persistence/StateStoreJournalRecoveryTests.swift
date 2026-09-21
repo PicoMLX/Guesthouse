@@ -95,6 +95,8 @@ import Testing
             try StateFileIO.fullySynchronize(fd, name: name)
             try fixture.reattachStateDirectory()
         }))
+        // The peer must overlap this poisoned lease, not open after its last owner disappears.
+        defer { withExtendedLifetime(store) {} }
         let expected = StateStoreError.journalWriteUncertain(cause: .insecureDirectory(reason: .changed))
         await #expect(throws: expected) { try await store.begin(.startEnvironment, for: EnvironmentID()) }
         let evidence = try fixture.bytes()
