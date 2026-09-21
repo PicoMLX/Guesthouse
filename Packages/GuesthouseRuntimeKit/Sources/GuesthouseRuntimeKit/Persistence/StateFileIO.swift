@@ -18,9 +18,12 @@ enum StateFileIO {
     /// Injected calls are synchronous test seams with the same return/errno contract as Darwin.
     static func readAll(
         _ descriptor: Int32, from offset: off_t, name: StateStoreError.File,
+        maximumBytes: Int? = nil,
         readBytes: (Int32, UnsafeMutableRawPointer?, Int) -> Int = Darwin.read
     ) throws(StateStoreError) -> Data {
-        let limit = name == .snapshot ? maximumSnapshotBytes : maximumJournalBytes
+        if let maximumBytes, maximumBytes < 0 { throw .fileUnreadable(name: name) }
+        let ordinaryLimit = name == .snapshot ? maximumSnapshotBytes : maximumJournalBytes
+        let limit = min(maximumBytes ?? ordinaryLimit, ordinaryLimit)
         guard offset >= 0, offset <= off_t(limit) else { throw .fileUnreadable(name: name) }
         let remaining = limit - Int(offset)
         var info = stat()
@@ -33,7 +36,7 @@ enum StateFileIO {
             let count = buffer.withUnsafeMutableBytes { readBytes(descriptor, $0.baseAddress, $0.count) }
             if count > 0 {
                 guard count <= buffer.count else { throw .fileUnreadable(name: name) }
-                if count > remaining - data.count {
+                if data.count > remaining || count > remaining - data.count {
                     throw .fileUnreadable(name: name)
                 }
                 data.append(contentsOf: buffer.prefix(count))

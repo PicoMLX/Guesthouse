@@ -15,10 +15,59 @@ struct RuntimeStorage: Sendable {
         var excludedFromBackup: Bool { self == .staging || self == .downloads }
     }
     private let root: URL
+    // Read-only discovery retains the first root and namespace version across anchor construction.
+    // Prepared layouts retain their existing semantics; this is not a persistent lease.
+    private let observedRoot: StateFileVersion?
     typealias BackupWriter = @Sendable (URL, Bool) throws -> Void
 
     init() throws { try self.init(root: Self.defaultRoot()) }
     init(root: URL) throws { try self.init(root: root, backup: Self.writeBackupExclusion) }
+
+    /// Inspection must not create folders, repair permissions or change backup metadata.
+    /// Missing root means no managed layout; an existing unsafe root remains a failure.
+    /// Individual areas still require location(for:); this is not mutation admission.
+    static func existing() throws -> RuntimeStorage? { try existing(root: defaultRoot()) }
+
+    static func existing(
+        root: URL, afterMissingRoot: () throws -> Void = {},
+        afterObservedRoot: () throws -> Void = {}
+    ) throws -> RuntimeStorage? {
+        let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
+        try StorageProtection.existingAncestors(of: root)
+        var info = stat()
+        if lstat(root.path(percentEncoded: false), &info) != 0 {
+            guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
+            // Runtime-only synchronous seam for namespace-race fixtures. Repeat both ancestry
+            // and absence checks; an appearing root is uncertainty, not an automatic read retry.
+            // These remain point-in-time observations, not a lease against same-user changes.
+            try afterMissingRoot()
+            try StorageProtection.existingAncestors(of: root)
+            guard lstat(root.path(percentEncoded: false), &info) != 0 else {
+                throw StorageFailure.unsafeStructure
+            }
+            guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
+            return nil
+        }
+        let storage = RuntimeStorage(verifiedRoot: root, version: StateFileVersion(info))
+        try afterObservedRoot()
+        try storage.verifyObservedRoot()
+        try verify(root, excluded: false)
+        try storage.verifyObservedRoot()
+        return storage
+    }
+
+    private init(verifiedRoot: URL, version: StateFileVersion) {
+        root = verifiedRoot
+        observedRoot = version
+    }
+
+    private func verifyObservedRoot() throws {
+        guard let observedRoot else { return }
+        let current = try StorageProtection.structure(root)
+        // An unchanged root inode does not prove its state entry is the one first observed.
+        // Fail closed on namespace drift; a fresh discovery is a separate observation.
+        guard StateFileVersion(current) == observedRoot else { throw StorageFailure.unsafeStructure }
+    }
 
     /// Runtime-only injection for isolated fixtures; never exposed in an XPC request.
     init(root: URL, backup: BackupWriter) throws {
@@ -26,6 +75,7 @@ struct RuntimeStorage: Sendable {
         let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
         try StorageProtection.existingAncestors(of: root) // Validate the original decoded path first.
         self.root = root
+        observedRoot = nil
         // Inspect the entire existing managed layout BEFORE changing any protection or creating
         // siblings. A link/file/unsafe ancestor anywhere causes a preservation-first refusal.
         let layout = [(root, false)] + Self.components(root: root)
@@ -45,8 +95,9 @@ struct RuntimeStorage: Sendable {
 
     /// Each use rechecks the root, every managed intermediate, and the selected leaf, including
     /// backup-policy drift. Returning this URL does not authorize arbitrary child paths or writes.
-    /// Reports the first observed leaf synchronously so an anchor can bind its later open.
+    /// The synchronous leaf observation lets an anchor bind its later open to this inspection.
     func location(for area: Area, didObserve: (StateFileIdentity) -> Void = { _ in }) throws -> URL {
+        try verifyObservedRoot()
         try Self.verify(root, excluded: false)
         var result = root
         let parts = area.rawValue.split(separator: "/")
@@ -57,6 +108,7 @@ struct RuntimeStorage: Sendable {
             try Self.verify(result, excluded: index == parts.count - 1 && area.excludedFromBackup)
             try Self.verifyIdentity(result, expected: observed)
         }
+        try verifyObservedRoot()
         return result
     }
 
