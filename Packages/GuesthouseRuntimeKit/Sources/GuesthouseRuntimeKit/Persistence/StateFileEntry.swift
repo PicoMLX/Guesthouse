@@ -48,6 +48,7 @@ enum StateFileEntry {
         in directory: Int32, access: StateFileAccess, requireExisting: Bool = false,
         protection: Protection = .prepare,
         permissionBarrier: StateFileProtection.Barrier,
+        openFile: (Int32, String, Int32, mode_t) -> Int32 = { openat($0, $1, $2, $3) },
         didOpen: () -> Void = {},
         didObserve: () -> Void = {},
         didIdentify: (StateFileIdentity?) -> Bool = { _ in true },
@@ -60,19 +61,19 @@ enum StateFileEntry {
         // Once a journal was observed, disappearance must not silently create a new history.
         let flags = (access.creates ? O_RDWR : O_RDONLY)
             | (access.creates && !requireExisting ? O_CREAT : 0) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
-        // A denied open has no descriptor identity. Pin the namespace before attempting it,
-        // so later permission guidance cannot accidentally describe a replacement entry.
+        // Pin the namespace before every verify-only open: success, absence and permission
+        // guidance must all describe the same observation, not a replacement entry.
         let openingDirectoryVersion: StateFileVersion?
         if protection == .verifyOnly {
             openingDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
         } else { openingDirectoryVersion = nil }
-        var descriptor = openat(directory, access.name, flags, 0o600)
+        var descriptor = openFile(directory, access.name, flags, 0o600)
         // Retained bounded retry for a transient missing entry during creation. No bytes are
         // truncated and no VM/Git mutation is retried. Missing read-only files remain absent.
         var remaining = 4
         while descriptor < 0, access.creates, !requireExisting, errno == ENOENT, remaining > 0 {
             remaining -= 1
-            descriptor = openat(directory, access.name, flags, 0o600)
+            descriptor = openFile(directory, access.name, flags, 0o600)
         }
         guard descriptor >= 0 else {
             let openFailure = errno
@@ -105,7 +106,7 @@ enum StateFileEntry {
             }
             if openFailure == ENOENT, !access.creates {
                 do {
-                    let version = try StateFileIO.version(directory, name: .stateDirectory)
+                    let version = try openingDirectoryVersion ?? StateFileIO.version(directory, name: .stateDirectory)
                     try validateDirectory(version)
                     var entry = stat()
                     // Stabilize the missing observation before publishing an empty value. A
@@ -142,7 +143,7 @@ enum StateFileEntry {
             guard StateFileIO.lock(descriptor, LOCK_EX) else { throw access.failure }
             // Creation, if needed, precedes this boundary. File-content writes never need
             // to change the directory namespace; pin it across preparation and the body.
-            let transactionDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+            let transactionDirectoryVersion = try openingDirectoryVersion ?? StateFileIO.version(directory, name: .stateDirectory)
             try validateDirectory(transactionDirectoryVersion)
             try requireBinding(descriptor, in: directory, access: access)
             switch protection {
