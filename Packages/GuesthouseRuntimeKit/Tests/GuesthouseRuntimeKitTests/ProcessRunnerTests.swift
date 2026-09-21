@@ -150,14 +150,15 @@ import Testing
         if stopAlreadyPending { await run?.terminate(gracePeriod: .seconds(60)) }
         run = nil
         #expect(facade == nil)
-        #expect(try await fixture.child.waitForReapedExit().get() == .signal(stopAlreadyPending ? SIGKILL : SIGTERM))
+        let exit = await fixture.child.waitForReapedExit()
         let finished = ContinuousClock.now
         let observed = observations.withLock { $0 }
         // Keep the invocation bound. Fixed stage evidence distinguishes signal scheduling,
         // native reaping and waiter resumption; it never includes a PID, path or raw output.
-        #expect(finished - began < .seconds(3),
-            "pendingStop=\(stopAlreadyPending); armed=\(armed - began); term=\(observed.term.map { $0 - began }); kill=\(observed.kill.map { $0 - began }); reap=\(observed.reap.map { $0 - began }); watchdog=\(observed.watchdog)")
-        #expect(!observed.watchdog, "The fixture watchdog must not satisfy the invocation deadline test")
+        let evidence: Comment = "exit=\(exit); pendingStop=\(stopAlreadyPending); elapsed=\(finished - began); armed=\(armed - began); term=\(observed.term.map { $0 - began }); kill=\(observed.kill.map { $0 - began }); reap=\(observed.reap.map { $0 - began }); watchdog=\(observed.watchdog)"
+        #expect(exit == .success(.signal(stopAlreadyPending ? SIGKILL : SIGTERM)), evidence)
+        #expect(finished - began < .seconds(3), evidence)
+        #expect(!observed.watchdog, evidence) // The watchdog must not satisfy the deadline test.
     }
 
     @Test func zeroExitDoesNotEraseCancellation() async throws {
