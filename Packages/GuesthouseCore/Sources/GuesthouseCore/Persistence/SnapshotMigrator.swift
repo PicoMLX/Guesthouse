@@ -89,7 +89,7 @@ public struct SnapshotMigrator: Sendable {
 
     static func version(of data: Data) throws(StateStoreError) -> SchemaVersion {
         let object = try object(in: data)
-        try requireUnambiguousVersion(in: data)
+        try requireUnambiguousMembers(in: data)
         guard let raw = object["schemaVersion"] else { return .unversioned }
         // `true` and `false` arrive as boolean `NSNumber`s, which cast to 1 and 0. A document
         // whose version reads `false` would otherwise look unversioned and be rewritten as
@@ -104,21 +104,20 @@ public struct SnapshotMigrator: Sendable {
     }
 
     /// Foundation validates the grammar above but collapses duplicate object members.
-    /// Scan only the original top-level keys before choosing a transform. Persisted metadata
+    /// Scan original keys in every object before choosing a transform. Persisted metadata
     /// and transform output use UTF-8 (as JSONEncoder does); refuse other encodings rather
     /// than scan a different representation from the one being returned or transformed.
-    private static func requireUnambiguousVersion(in data: Data) throws(StateStoreError) {
+    private static func requireUnambiguousMembers(in data: Data) throws(StateStoreError) {
         guard String(data: data, encoding: .utf8) != nil, !data.contains(0) else {
             throw .corruptSnapshot
         }
         let bytes = Array(data)
         var index = 0
-        var depth = 0
-        var foundVersion = false
+        var objects: [Set<String>] = []
         while index < bytes.count {
             switch bytes[index] {
-            case 123, 91: depth += 1 // { [
-            case 125, 93: depth -= 1 // } ]
+            case 123: objects.append([]) // Each object has its own member namespace.
+            case 125: objects.removeLast() // Grammar was validated before this scan.
             case 34:
                 let start = index
                 index += 1
@@ -127,17 +126,14 @@ public struct SnapshotMigrator: Sendable {
                     index += 1
                 }
                 guard index < bytes.count else { throw .corruptSnapshot }
-                if depth == 1 {
+                if !objects.isEmpty {
                     var next = index + 1
                     while next < bytes.count && [9, 10, 13, 32].contains(bytes[next]) { next += 1 }
                     if next < bytes.count && bytes[next] == 58 { // Only a member name precedes ':'.
                         guard let key = try? JSONDecoder().decode(String.self, from: Data(bytes[start...index])) else {
                             throw .corruptSnapshot
                         }
-                        if key == "schemaVersion" {
-                            guard !foundVersion else { throw .corruptSnapshot }
-                            foundVersion = true
-                        }
+                        guard objects[objects.count - 1].insert(key).inserted else { throw .corruptSnapshot }
                     }
                 }
             default: break
