@@ -6,9 +6,26 @@ struct JournalTailPrefix {
     private enum Identity: Hashable, Sendable { case operation, environment }
     private indirect enum Shape: Sendable {
         case object([String: Shape]), choice([Shape]), literal([UInt8]), uuid(Identity?), unsigned, signed, date
+
+        /// Upper bound for compact encoder output, including every delimiter. Keys in
+        /// this closed schema are unescaped ASCII; UUIDs include their two quotes.
+        var maximumByteCount: Int {
+            switch self {
+            case .object(let fields):
+                return 2 + max(0, fields.count - 1) + fields.reduce(0) {
+                    $0 + $1.key.utf8.count + 3 + $1.value.maximumByteCount
+                }
+            case .choice(let choices): return choices.map(\.maximumByteCount).max() ?? 0
+            case .literal(let bytes): return bytes.count
+            case .uuid: return 38
+            case .unsigned, .signed: return 20 // UInt64.max and Int64.min
+            case .date: return 32 // conservative bound for finite binary64's shortest spelling
+            }
+        }
     }
     private enum Stop: Error { case incomplete, invalid }
     private static let shape: Shape? = try? makeShape()
+    private static let maximumRecordByteCount = shape?.maximumByteCount
     private static let startShape: Shape? = try? makeShape(starting: true)
     private static let continuationShapes = Dictionary(uniqueKeysWithValues: JournalOperation.allCases.map {
         ($0, try? makeShape(operation: $0, starting: false))
@@ -19,35 +36,44 @@ struct JournalTailPrefix {
     private var excluded: [Identity: Set<[UInt8]>] = [:]
 
     static func accepts(_ data: Data) -> Bool {
-        accepts(data, shape: shape)
+        guard let bytes = boundedBytes(data) else { return false }
+        return accepts(bytes, shape: shape)
     }
 
     /// A tail must have some completion that the already-staged history could append.
     /// New starts exclude all used operation IDs and currently occupied environments;
     /// continuations bind every identity and the operation to an unresolved record.
     static func accepts(_ data: Data, following history: JournalHistory) -> Bool {
+        // Reject impossible lengths before enumerating history. ASCII validation and
+        // materialization happen once, not once per unresolved operation. Candidate
+        // matching may still scale with history, but never with an arbitrary file-sized tail.
+        guard let input = boundedBytes(data) else { return false }
         func bytes<T: Encodable>(_ value: T) -> [UInt8] {
             Array((try? JSONEncoder().encode(value)) ?? Data())
         }
-        if accepts(data, shape: startShape, excluded: [
+        if accepts(input, shape: startShape, excluded: [
             .operation: Set(history.records.map { bytes($0.id) }),
             .environment: Set(history.inFlight.values.map { bytes($0.environmentID) })
         ]) { return true }
         for record in history.inFlight.values {
-            if accepts(data, shape: continuationShapes[record.operation] ?? nil, identities: [
+            if accepts(input, shape: continuationShapes[record.operation] ?? nil, identities: [
                 .operation: bytes(record.id), .environment: bytes(record.environmentID)
             ]) { return true }
         }
         return false
     }
 
-    private static func accepts(_ data: Data, shape: Shape?,
+    private static func boundedBytes(_ data: Data) -> [UInt8]? {
+        guard let maximumRecordByteCount, data.count <= maximumRecordByteCount,
+              data.first == 123, data.allSatisfy({ $0 < 128 && $0 != 0 }) else { return nil }
+        return Array(data)
+    }
+
+    private static func accepts(_ bytes: [UInt8], shape: Shape?,
                                 identities: [Identity: [UInt8]] = [:],
                                 excluded: [Identity: Set<[UInt8]>] = [:]) -> Bool {
-        // These closed types emit ASCII; invalid/partial UTF-8 and NUL are not encoder tails.
-        guard data.first == 123, data.allSatisfy({ $0 < 128 && $0 != 0 }),
-              let shape else { return false }
-        var parser = Self(bytes: Array(data), identities: identities, excluded: excluded)
+        guard let shape else { return false }
+        var parser = Self(bytes: bytes, identities: identities, excluded: excluded)
         do { try parser.value(shape); return false }
         catch Stop.incomplete { return true }
         catch { return false }
