@@ -572,6 +572,9 @@ import Testing
     @Test(arguments: [false, true])
     func replacementDuringFinalBarrierNeverReturnsAuthorization(directory: Bool) async throws {
         let fixture = try Fixture(), detached = fixture.base.appending(path: "retained")
+        let quarantined = fixture.base.appending(path: "conflicting"), conflicting = Self.record()
+        let otherBytes = try JSONEncoder().encode(conflicting) + Data([10])
+        let reads = Mutex(0), writes = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
             try StateFileIO.fullySynchronize(fd, name: name)
             if directory {
@@ -580,8 +583,14 @@ import Testing
                                                        attributes: [.posixPermissions: 0o700])
             } else {
                 try FileManager.default.moveItem(at: fixture.journal, to: detached)
-                try fixture.write(Data())
             }
+            try fixture.write(otherBytes)
+        }, journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }, journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
         }))
         do {
             _ = try await store.begin(.startEnvironment, for: EnvironmentID())
@@ -594,9 +603,23 @@ import Testing
             #expect(error.recoveryActions.first == .inspectState)
         }
         let retained = directory ? detached.appending(path: "journal.ndjson") : detached
-        #expect(try !Data(contentsOf: retained).isEmpty)
+        let evidence = try Data(contentsOf: retained)
+        #expect(!evidence.isEmpty)
         let reopened = try await fixture.open()
-        #expect(try await reopened.replay().records.isEmpty)
+        #expect(try await reopened.replay().records == [conflicting])
+        let originalPath = directory ? fixture.state : fixture.journal
+        try #require(rename(originalPath.path, quarantined.path) == 0)
+        try #require(rename(detached.path, originalPath.path) == 0)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: conflicting.environmentID)
+            }
+        }
+        #expect(reads.withLock { $0 } == 1 && writes.withLock { $0 } == 1)
+        #expect(try fixture.bytes() == evidence)
+        let otherPath = directory ? quarantined.appending(path: "journal.ndjson") : quarantined
+        #expect(try Data(contentsOf: otherPath) == otherBytes)
     }
 
     @Test func reattachedJournalAndLaterConfirmedWritesAreReread() async throws {
@@ -614,22 +637,30 @@ import Testing
         #expect(try await store.replay().inFlight[accepted]?.operation == .stopEnvironment)
     }
 
-    @Test func sameInodeReattachmentAfterBarrierIsUncertainUntilInspected() async throws {
-        let fixture = try Fixture()
+    @Test func sameInodeReattachmentAfterBarrierLeavesOwnerClosed() async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
         let store = try await fixture.open(hooks: StateStoreHooks(directory: { fd, name in
             try StateFileIO.fullySynchronize(fd, name: name)
             try fixture.reattachJournal()
+        }, journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
         }))
         let environment = EnvironmentID()
         await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
             try await store.begin(.startEnvironment, for: environment)
         }
-        let evidence = try fixture.bytes(), replay = try await store.replay()
+        let evidence = try fixture.bytes(), reopened = try await fixture.open()
+        let replay = try await reopened.replay()
         let uncertain = try #require(replay.inFlight.values.first)
         #expect(replay.records.count == 1 && uncertain.environmentID == environment)
-        await #expect(throws: StateStoreError.operationUnresolved(uncertain.id)) {
-            try await store.begin(.startEnvironment, for: environment)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await store.begin(.startEnvironment, for: environment)
+            }
         }
+        #expect(reads.withLock { $0 } == 1)
         #expect(try fixture.bytes() == evidence)
     }
 
