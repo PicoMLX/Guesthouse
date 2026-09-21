@@ -434,8 +434,10 @@ import Testing
         let evidence = try fixture.bytes(), detached = fixture.base.appending(path: "retained")
         try #require(rename(fixture.journal.path, detached.path) == 0)
         if replace { try fixture.write(Data()) }
-        for _ in 0..<2 {
-            await #expect(throws: StateStoreError.self) {
+        for attempt in 0..<2 {
+            let failure = attempt == 0 ? StateStoreError.fileUnwritable(name: .journal)
+                : StateStoreError.fileUnreadable(name: .journal)
+            await #expect(throws: failure) {
                 try await peer.begin(.startEnvironment, for: started.environmentID)
             }
             await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
