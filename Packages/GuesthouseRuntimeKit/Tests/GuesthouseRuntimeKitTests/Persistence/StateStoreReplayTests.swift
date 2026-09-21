@@ -305,19 +305,48 @@ import Testing
         #expect(try fixture.bytes() == before)
     }
 
-    @Test func replacementAndShrinkCannotEraseObservedHistory() async throws {
+    @Test func replacementCannotEraseObservedHistory() async throws {
         let fixture = try Fixture(), store = try await fixture.open(), first = Self.record(), second = Self.record()
         let original = try Self.lines([first])
         try fixture.write(original)
         #expect(try await store.replay().records == [first])
         let detached = fixture.state.appending(path: "retained")
         try #require(rename(fixture.journal.path, detached.path) == 0)
-        try fixture.write(Self.lines([second]))
-        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
-        try fixture.write(Data())
-        await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
-        #expect(try fixture.bytes().isEmpty)
+        let replacement = try Self.lines([second])
+        try fixture.write(replacement)
+        try #require(try fixture.identity(fixture.journal) != fixture.identity(detached))
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try fixture.bytes() == replacement)
         #expect(try Data(contentsOf: detached) == original)
+    }
+
+    @Test(arguments: [0, 1])
+    func directSameInodeShrinkCannotEraseObservedHistory(retainedRecords: Int) async throws {
+        let fixture = try Fixture(), reads = Mutex(0)
+        let store = try await fixture.open(hooks: StateStoreHooks(journalRead: { fd, offset in
+            reads.withLock { $0 += 1 }
+            return try StateFileIO.readAll(fd, from: offset, name: .journal)
+        }))
+        let first = Self.record(), second = Self.record(), original = try Self.lines([first, second])
+        try fixture.write(original)
+        let identity = try fixture.identity(fixture.journal)
+        try #require(try await store.replay().records == [first, second])
+        let shortened = try Self.lines(Array([first, second].prefix(retainedRecords)))
+        try fixture.write(shortened) // First failure is the shrink, never a prior replacement.
+        try #require(try fixture.identity(fixture.journal) == identity)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+            #expect(try fixture.bytes() == shortened)
+        }
+        try fixture.write(original)
+        for _ in 0..<2 {
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.replay() }
+        }
+        #expect(try fixture.identity(fixture.journal) == identity)
+        #expect(try fixture.bytes() == original)
+        #expect(reads.withLock { $0 } == 2)
     }
 
     @Test(arguments: [false, true])
