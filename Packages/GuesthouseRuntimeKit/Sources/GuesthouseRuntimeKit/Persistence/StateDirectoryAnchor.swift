@@ -103,8 +103,8 @@ final class StateDirectoryAnchor {
         try Self.verify(storage, descriptor: descriptor, identity: identity, version: version)
     }
 
-    /// Checks protection/current binding before entry and after successful work. If work throws,
-    /// its closed failure is preserved. A post-check failure does not undo any attempted write.
+    /// Checks binding even after a throwing body, while publication ownership is still held.
+    /// Preserve the body's closed failure, but report binding uncertainty independently.
     func withDescriptor<Result>(
         didFailBinding: () -> Void = {}, _ body: (Int32) throws -> Result
     ) throws(StateStoreError) -> Result {
@@ -112,8 +112,12 @@ final class StateDirectoryAnchor {
         catch { didFailBinding(); throw error }
         let result: Result
         do { result = try body(descriptor) }
-        catch let error as StateStoreError { throw error }
-        catch { throw .fileUnwritable(name: .stateDirectory) }
+        catch {
+            let failure = (error as? StateStoreError) ?? .fileUnwritable(name: .stateDirectory)
+            do { try verifyCurrent() }
+            catch { didFailBinding() }
+            throw failure
+        }
         do { try verifyCurrent() }
         catch { didFailBinding(); throw error }
         return result
