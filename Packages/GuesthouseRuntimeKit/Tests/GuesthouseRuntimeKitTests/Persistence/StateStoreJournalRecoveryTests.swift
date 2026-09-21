@@ -57,7 +57,7 @@ import Testing
         #expect(try fixture.bytes() == evidence)
         // Repaired metadata is not evidence that unread operation bytes stayed unchanged.
         await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await store.append(settled) }
-        #expect(barriers.withLock { $0 } == 2 && writes.withLock { $0 } == 0)
+        #expect(barriers.withLock { $0 } == 1 && writes.withLock { $0 } == 0)
         #expect(try fixture.bytes() == evidence)
     }
 
@@ -85,7 +85,7 @@ import Testing
         } else {
             try await Self.readFixture(access, store: store, record: started)
         }
-        #expect(barriers.withLock { $0 } == 2)
+        #expect(barriers.withLock { $0 } == (access == .readJournal ? 1 : 2))
         #expect(try Data(contentsOf: file) == evidence)
     }
 

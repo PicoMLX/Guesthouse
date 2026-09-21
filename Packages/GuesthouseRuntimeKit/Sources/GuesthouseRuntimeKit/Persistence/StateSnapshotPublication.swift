@@ -52,7 +52,8 @@ enum StateSnapshotPublication {
             }
             try StateSnapshotTemporaries.collect(in: directory, validateStore: { version in
                 try anchor.verifyCurrent(version: version)
-                try requireUnchangedSnapshot(in: directory, expected: existing?.version, didObserve: didObserve)
+                try requireUnchangedSnapshot(in: directory, expected: existing?.version,
+                    requireExisting: requireExisting, didObserve: didObserve)
             })
             let name = temporaryPrefix + UUID().uuidString
             let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK
@@ -76,7 +77,8 @@ enum StateSnapshotPublication {
             let written = try StateFileIO.version(descriptor, name: .snapshot)
             let beforePublication = try anchor.verifyCurrent()
             try synchronize(descriptor, name: .snapshot, using: fileBarrier)
-            try requireUnchangedSnapshot(in: directory, expected: existing?.version, didObserve: didObserve)
+            try requireUnchangedSnapshot(in: directory, expected: existing?.version,
+                requireExisting: requireExisting, didObserve: didObserve)
             try verifyTemporary(descriptor, in: directory, name: name, version: written)
             try anchor.verifyCurrent(version: beforePublication)
             guard renameat(directory, name, directory, StateFileAccess.readSnapshot.name) == 0 else {
@@ -128,7 +130,8 @@ enum StateSnapshotPublication {
     /// This is a last pre-publication check, not a compare-and-swap or a namespace lock.
     /// Publication ownership excludes cooperating writers; arbitrary same-user changes remain outside it.
     private static func requireUnchangedSnapshot(
-        in directory: Int32, expected: StateFileVersion?, didObserve: () -> Void
+        in directory: Int32, expected: StateFileVersion?,
+        requireExisting: () -> Bool, didObserve: () -> Void
     ) throws(StateStoreError) {
         var entry = stat()
         let result = fstatat(directory, StateFileAccess.readSnapshot.name, &entry, AT_SYMLINK_NOFOLLOW)
@@ -138,7 +141,11 @@ enum StateSnapshotPublication {
             guard result == 0, StateFileVersion(entry) == expected else { throw .fileUnwritable(name: .snapshot) }
             try StateFileProtection.validateStructure(entry, kind: .regularFile)
         } else {
-            guard result == -1, entryError == ENOENT else { throw .fileUnwritable(name: .snapshot) }
+            // A peer can observe evidence after preflight. Reevaluate the live predicate
+            // at each absence check; the initial false value is not a publication lease.
+            guard result == -1, entryError == ENOENT, !requireExisting() else {
+                throw .fileUnwritable(name: .snapshot)
+            }
         }
     }
 

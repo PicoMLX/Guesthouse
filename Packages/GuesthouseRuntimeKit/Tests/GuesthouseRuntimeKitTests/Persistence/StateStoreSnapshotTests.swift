@@ -9,6 +9,46 @@ import Testing
 /// Actual actor composition of the retained #57 snapshot contracts, not just helper tests.
 /// Every root is an isolated fixture; never call the default App Support factory here.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreSnapshotTests {
+    @Test func peerObservationDuringPublicationRevokesExpectedAbsence() throws {
+        let fixture = try Fixture(), storage = try RuntimeStorage(root: fixture.root)
+        let writer = try StateDirectoryAnchor(storage: storage), peer = try StateDirectoryAnchor(storage: storage)
+        try writer.synchronizePreparation()
+        try peer.synchronizePreparation()
+        let identity = try writer.verifyCurrent().identity
+        let writerObservation = StateSnapshotObservation(identity: identity)
+        let peerObservation = StateSnapshotObservation(identity: identity)
+        let evidence = try JSONEncoder().encode(EnvironmentsSnapshot.empty)
+        let retained = fixture.base.appending(path: "retained-peer-snapshot")
+        #expect(!writerObservation.wasObserved)
+        #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+            try StateSnapshotPublication.save(.empty, to: writer,
+                requireExisting: writerObservation.wasObserved, didObserve: { writerObservation.record() },
+                fileBarrier: { fd, name in
+                    try StateFileIO.fullySynchronize(fd, name: name)
+                    try fixture.write(evidence)
+                    let observed = try peer.withFile(.readSnapshot, didObserve: { peerObservation.record() }) {
+                        try StateFileIO.readAll($0, from: 0, name: .snapshot)
+                    }
+                    try #require(observed == evidence)
+                    try #require(rename(fixture.snapshot.path, retained.path) == 0)
+                })
+        }
+        #expect(writerObservation.wasObserved && peerObservation.wasObserved)
+        let names = try FileManager.default.contentsOfDirectory(atPath: fixture.state.path)
+        try #require(names.count == 1 && names.allSatisfy { $0.hasPrefix(StateSnapshotPublication.temporaryPrefix) })
+        let temporary = fixture.state.appending(path: names[0]), attempted = try Data(contentsOf: temporary)
+        for _ in 0..<2 {
+            #expect(throws: StateStoreError.fileUnwritable(name: .snapshot)) {
+                try StateSnapshotPublication.save(.empty, to: writer,
+                    requireExisting: writerObservation.wasObserved)
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path) == names)
+            #expect(try Data(contentsOf: temporary) == attempted)
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path))
+        #expect(try Data(contentsOf: retained) == evidence)
+    }
+
     @Test(arguments: [0, 1, 2, 3])
     func separateStoresShareSuccessfulAndFailedSnapshotObservations(scenario: Int) async throws {
         let fixture = try Fixture()
