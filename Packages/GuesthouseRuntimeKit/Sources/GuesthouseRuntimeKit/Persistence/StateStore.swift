@@ -19,6 +19,9 @@ public actor StateStore {
     // loss, never an empty new store. All live owners of this directory share the evidence.
     private let snapshotObservation: StateSnapshotObservation
     private var snapshotWasObserved: Bool { snapshotObservation.wasObserved }
+    // Nil authorizes only first creation. Existing state must first be loaded by this
+    // owner; a peer's read or save never advances our expected publication generation.
+    private var snapshotVersion: StateFileVersion?
     private nonisolated let queue: DispatchSerialQueue
 
     /// Native descriptor IO/flushes and advisory lock waits may block. Use Dispatch's supplied
@@ -84,20 +87,30 @@ public actor StateStore {
             didObserve: { self.snapshotObservation.record() }, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try migrator.migrate(raw)
-            do { return try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }
+            do {
+                let value = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data)
+                return (value: value, version: try StateFileIO.version(descriptor, name: .snapshot))
+            }
             catch let failure as StateStoreError { throw failure }
             catch { throw StateStoreError.corruptSnapshot }
         })
         guard snapshot != nil || !snapshotWasObserved else { throw .fileUnreadable(name: .snapshot) }
-        return snapshot ?? .empty
+        // Adopt only after the complete file/directory borrow passed its outer checks.
+        snapshotVersion = snapshot?.version
+        return snapshot?.value ?? .empty
     }
 
     /// Return only after the full verified publication completes. Cancellation does not abort
     /// an in-progress synchronous transaction. On failure retain evidence and inspect; never
     /// assume a failed save restored the old bytes or blindly repeat the associated operation.
+    /// Replacing existing state requires this owner's completed load (or successful save).
+    /// A peer publication refuses stale writes; reload and reconcile, never blindly retry.
     public func saveSnapshot(_ snapshot: EnvironmentsSnapshot) throws(StateStoreError) {
-        try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
+        snapshotVersion = try StateSnapshotPublication.save(snapshot, to: anchor, migrator: migrator,
             requireExisting: snapshotWasObserved, didObserve: { self.snapshotObservation.record() },
+            validateExpectedVersion: { version in
+                guard version == self.snapshotVersion else { throw StateStoreError.fileUnwritable(name: .snapshot) }
+            },
             permissionBarrier: hooks.permission, fileBarrier: hooks.snapshotFile, directoryBarrier: hooks.directory)
     }
 
