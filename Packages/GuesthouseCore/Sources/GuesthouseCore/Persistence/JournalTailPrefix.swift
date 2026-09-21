@@ -37,6 +37,24 @@ struct JournalTailPrefix {
         }
     }
     private enum Stop: Error { case incomplete(additionalBytes: Int), invalid }
+    /// One recognition call owns this memo. Parser copies and history candidates share
+    /// only token-derived witnesses, never identities, history or capacity decisions.
+    private final class DateCompletions {
+        private enum Witness { case missing, found(Int) }
+        private var witnesses: [String: Witness] = [:]
+        private(set) var searches = 0
+
+        func additionalBytes(_ token: String) -> Int? {
+            if let witness = witnesses[token] {
+                if case .found(let bytes) = witness { return bytes }
+                return nil
+            }
+            searches += 1
+            let additional = JournalTailPrefix.dateCompletionBytes(token)
+            witnesses[token] = additional.map(Witness.found) ?? .missing
+            return additional
+        }
+    }
     private static let shape: Shape? = try? makeShape()
     private static let maximumRecordByteCount = shape?.maximumByteCount
     private static let startShape: Shape? = try? makeShape(starting: true)
@@ -47,6 +65,7 @@ struct JournalTailPrefix {
     private var index = 0
     private var identities: [Identity: [UInt8]] = [:]
     private var excluded: [Identity: Set<[UInt8]>] = [:]
+    private let dateCompletions: DateCompletions
 
     static func accepts(_ data: Data) -> Bool {
         guard let bytes = boundedBytes(data) else { return false }
@@ -58,6 +77,20 @@ struct JournalTailPrefix {
     /// continuations bind every identity and the operation to an unresolved record.
     static func accepts(_ data: Data, following history: JournalHistory,
                         maximumRecordBytes: Int = .max) -> Bool {
+        evaluate(data, following: history, maximumRecordBytes: maximumRecordBytes).accepted
+    }
+
+    /// Internal work-count evidence avoids elapsed-time assertions on busy CI workers.
+    static func evaluate(_ data: Data, following history: JournalHistory,
+                         maximumRecordBytes: Int = .max) -> (accepted: Bool, dateCompletionSearches: Int) {
+        let memo = DateCompletions()
+        let accepted = accepts(data, following: history, maximumRecordBytes: maximumRecordBytes,
+                               dateCompletions: memo)
+        return (accepted, memo.searches)
+    }
+
+    private static func accepts(_ data: Data, following history: JournalHistory,
+                                maximumRecordBytes: Int, dateCompletions: DateCompletions) -> Bool {
         // Reject impossible lengths before enumerating history. ASCII validation and
         // materialization happen once, not once per unresolved operation. Candidate
         // matching may still scale with history, but never with an arbitrary file-sized tail.
@@ -68,12 +101,12 @@ struct JournalTailPrefix {
         if accepts(input, shape: startShape, maximumRecordBytes: maximumRecordBytes, excluded: [
             .operation: Set(history.records.map { bytes($0.id) }),
             .environment: Set(history.inFlight.values.map { bytes($0.environmentID) })
-        ]) { return true }
+        ], dateCompletions: dateCompletions) { return true }
         for record in history.inFlight.values {
             if accepts(input, shape: continuationShapes[record.operation] ?? nil,
                        maximumRecordBytes: maximumRecordBytes, identities: [
                 .operation: bytes(record.id), .environment: bytes(record.environmentID)
-            ]) { return true }
+            ], dateCompletions: dateCompletions) { return true }
         }
         return false
     }
@@ -87,9 +120,11 @@ struct JournalTailPrefix {
     private static func accepts(_ bytes: [UInt8], shape: Shape?,
                                 maximumRecordBytes: Int = .max,
                                 identities: [Identity: [UInt8]] = [:],
-                                excluded: [Identity: Set<[UInt8]>] = [:]) -> Bool {
+                                excluded: [Identity: Set<[UInt8]>] = [:],
+                                dateCompletions: DateCompletions = DateCompletions()) -> Bool {
         guard let shape else { return false }
-        var parser = Self(bytes: bytes, identities: identities, excluded: excluded)
+        var parser = Self(bytes: bytes, identities: identities, excluded: excluded,
+                          dateCompletions: dateCompletions)
         do { try parser.value(shape); return false }
         catch Stop.incomplete(let additional) {
             return maximumRecordBytes >= bytes.count && additional <= maximumRecordBytes - bytes.count
@@ -224,7 +259,7 @@ struct JournalTailPrefix {
                       let number = Int(token), String(number) == token else { throw Stop.invalid }
             default:
                 if Self.canonicalDate(token) != token {
-                    guard index == bytes.count, let additional = Self.dateCompletionBytes(token) else { throw Stop.invalid }
+                    guard index == bytes.count, let additional = dateCompletions.additionalBytes(token) else { throw Stop.invalid }
                     throw Stop.incomplete(additionalBytes: additional)
                 }
             }
