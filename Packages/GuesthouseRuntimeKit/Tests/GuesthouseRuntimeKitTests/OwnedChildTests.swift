@@ -22,26 +22,70 @@ import Testing
         }
     }
 
-    /// Bounded, nonblocking EOF observation: leaked writer copies fail rather than hang.
-    private func drain(_ pipe: Pipe, maximumBytes: Int = 4096) async throws -> Data {
+    private enum DrainFailure: Error, Equatable {
+        case read(Int32)
+        case byteLimit
+        case interruptionLimit
+    }
+
+    /// Call only after writer closure is established by close, failed spawn, or reaping.
+    /// A closed pipe returns buffered bytes followed by EOF synchronously (Darwin pipe(2)).
+    /// Do not turn a task-resumption delay into a descriptor-leak assertion, or wait for
+    /// an erroneously retained writer to close later and mask the ownership violation.
+    private func drainClosedPipe(_ pipe: Pipe, maximumBytes: Int = 4096) throws -> Data {
+        defer { withExtendedLifetime(pipe) {} }
         let fd = pipe.fileHandleForReading.fileDescriptor
-        #expect(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0)
-        let deadline = ContinuousClock.now + .seconds(2)
+        let flags = fcntl(fd, F_GETFL)
+        try #require(flags >= 0)
+        try #require(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0)
         var result = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
-        while ContinuousClock.now < deadline {
+        var interruptions = 0
+        while true {
             let count = read(fd, &buffer, buffer.count)
             if count == 0 { return result }
             if count > 0 {
+                guard count <= maximumBytes - result.count else { throw DrainFailure.byteLimit }
                 result.append(contentsOf: buffer.prefix(count))
-                try #require(result.count <= maximumBytes)
             } else {
-                try #require(errno == EAGAIN || errno == EINTR)
-                try await Task.sleep(for: .milliseconds(5))
+                let error = errno
+                guard error == EINTR else { throw DrainFailure.read(error) }
+                interruptions += 1
+                guard interruptions <= 16 else { throw DrainFailure.interruptionLimit }
             }
         }
-        Issue.record("The owned spawn retained a pipe writer after exit or failure")
-        return result
+    }
+
+    @Test(arguments: [0, 32])
+    func closedPipeDrainRequiresEOFAfterBufferedBytes(byteCount: Int) throws {
+        let pipe = Pipe(), expected = Data(repeating: 65, count: byteCount)
+        try pipe.fileHandleForWriting.write(contentsOf: expected)
+        try pipe.fileHandleForWriting.close()
+        #expect(try drainClosedPipe(pipe) == expected)
+    }
+
+    @Test(arguments: [0, 32])
+    func closedPipeDrainRejectsARetainedWriter(byteCount: Int) throws {
+        let pipe = Pipe()
+        let retained = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_DUPFD_CLOEXEC, 3)
+        try #require(retained >= 0)
+        var retainedIsOpen = true
+        defer { if retainedIsOpen { close(retained) } }
+        try pipe.fileHandleForWriting.write(contentsOf: Data(repeating: 65, count: byteCount))
+        try pipe.fileHandleForWriting.close()
+        // Buffered data must not be mistaken for EOF while any writer remains open.
+        #expect(throws: DrainFailure.read(EAGAIN)) { try drainClosedPipe(pipe) }
+        let closed = close(retained)
+        retainedIsOpen = false
+        try #require(closed == 0)
+        #expect(try drainClosedPipe(pipe).isEmpty)
+    }
+
+    @Test func closedPipeDrainPreservesTheByteLimit() throws {
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.write(contentsOf: Data(repeating: 65, count: 33))
+        try pipe.fileHandleForWriting.close()
+        #expect(throws: DrainFailure.byteLimit) { try drainClosedPipe(pipe, maximumBytes: 32) }
     }
 
     @Test func rapidExitIsObservedAndReapedExactlyOnce() async throws {
@@ -167,9 +211,9 @@ import Testing
         let child = try spawn("/bin/cat", arguments: ["marker"], directory: pinned, output: output, error: error)
         try output.fileHandleForWriting.close()
         try error.fileHandleForWriting.close()
-        #expect(await child.waitForReapedExit() == .success(.status(0)))
-        #expect(try await drain(output) == Data("owned".utf8))
-        #expect(try await drain(error).isEmpty)
+        try #require(await child.waitForReapedExit() == .success(.status(0)))
+        #expect(try drainClosedPipe(output) == Data("owned".utf8))
+        #expect(try drainClosedPipe(error).isEmpty)
         #expect(throws: OwnedChild.Failure.self) { try PinnedWorkingDirectory(original) }
     }
 
@@ -178,7 +222,7 @@ import Testing
         let output = Pipe(), error = Pipe()
         if succeed {
             let child = try spawn(output: output, error: error)
-            #expect(await child.waitForReapedExit() == .success(.status(0)))
+            try #require(await child.waitForReapedExit() == .success(.status(0)))
         } else {
             #expect(throws: OwnedChild.Failure.systemCall(.spawn, ENOENT)) {
                 try spawn("/nonexistent-owned-child-fixture", output: output, error: error)
@@ -188,8 +232,8 @@ import Testing
         #expect(fcntl(error.fileHandleForWriting.fileDescriptor, F_GETFD) >= 0)
         try output.fileHandleForWriting.close()
         try error.fileHandleForWriting.close()
-        #expect(try await drain(output).isEmpty)
-        #expect(try await drain(error).isEmpty)
+        #expect(try drainClosedPipe(output).isEmpty)
+        #expect(try drainClosedPipe(error).isEmpty)
     }
 
     @Test func environmentIsExplicit() async throws {
@@ -197,9 +241,9 @@ import Testing
         let child = try spawn("/usr/bin/env", environment: ["OWNED_FIXTURE": "present"], output: output, error: error)
         try output.fileHandleForWriting.close()
         try error.fileHandleForWriting.close()
-        #expect(await child.waitForReapedExit() == .success(.status(0)))
-        #expect(try await drain(output) == Data("OWNED_FIXTURE=present\n".utf8))
-        #expect(try await drain(error).isEmpty)
+        try #require(await child.waitForReapedExit() == .success(.status(0)))
+        #expect(try drainClosedPipe(output) == Data("OWNED_FIXTURE=present\n".utf8))
+        #expect(try drainClosedPipe(error).isEmpty)
     }
 
     @Test func unrelatedDescriptorsAreClosedWhileTheChildIsStillAlive() async throws {
@@ -208,10 +252,13 @@ import Testing
         #expect(fcntl(unrelated.fileHandleForWriting.fileDescriptor, F_SETFD, 0) == 0)
         let child = try spawn("/bin/cat", input: input.fileHandleForReading, output: Pipe(), error: Pipe())
         try unrelated.fileHandleForWriting.close()
-        #expect(try await drain(unrelated).isEmpty)
+        // Observe EOF while the child is live, but finish fixture cleanup before surfacing
+        // a read failure. A leaked unrelated writer must not abandon the /bin/cat fixture.
+        let drained = Result { try drainClosedPipe(unrelated) }
         #expect(child.signal(0) == .delivered)
         try input.fileHandleForWriting.close()
         #expect(await child.waitForReapedExit() == .success(.status(0)))
+        #expect(try drained.get().isEmpty)
     }
 
     @Test func invalidCStringsFailBeforeSpawning() {
