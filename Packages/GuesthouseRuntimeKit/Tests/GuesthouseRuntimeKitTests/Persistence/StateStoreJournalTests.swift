@@ -270,6 +270,63 @@ import Testing
         #expect(try fixture.bytes() == settled)
     }
 
+    @Test(arguments: [false, true])
+    func peerCannotRecreateOrReplaceAnObservedJournal(replace: Bool) async throws {
+        let fixture = try Fixture(), first = try await fixture.open(), writes = Mutex(0)
+        let peer = try await fixture.open(hooks: StateStoreHooks(journalWrite: { fd, bytes in
+            writes.withLock { $0 += 1 }
+            try StateFileIO.writeAll(fd, bytes, name: .journal)
+        }))
+        let started = Self.record()
+        try await first.append(started)
+        let evidence = try fixture.bytes(), detached = fixture.base.appending(path: "retained")
+        try #require(rename(fixture.journal.path, detached.path) == 0)
+        if replace { try fixture.write(Data()) }
+        for attempt in 0..<2 {
+            let failure = attempt == 0 ? StateStoreError.fileUnwritable(name: .journal)
+                : StateStoreError.fileUnreadable(name: .journal)
+            await #expect(throws: failure) {
+                try await peer.begin(.startEnvironment, for: started.environmentID)
+            }
+            await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                try await first.replay()
+            }
+        }
+        #expect(writes.withLock { $0 } == 0)
+        #expect(try Data(contentsOf: detached) == evidence)
+        if replace { #expect(try fixture.bytes().isEmpty) }
+        else { #expect(!FileManager.default.fileExists(atPath: fixture.journal.path)) }
+    }
+
+    @Test(arguments: [false, true])
+    func tailRepairResultIsSharedWithAlreadyOpenPeers(failBarrier: Bool) async throws {
+        let fixture = try Fixture(), peer = try await fixture.open(), started = Self.record()
+        let writer = try await fixture.open(hooks: StateStoreHooks(journalFile: { fd, name in
+            if failBarrier { throw StateStoreError.fileUnwritable(name: .journal) }
+            try StateFileIO.fullySynchronize(fd, name: name)
+        }))
+        let completed = Self.record(matching: started, outcome: .completed)
+        let original = try JSONEncoder().encode(started) + Data([10]) + JSONEncoder().encode(completed).dropLast()
+        try fixture.write(original)
+        #expect(try await peer.replay().truncatedTail)
+        if failBarrier {
+            await #expect(throws: StateStoreError.journalWriteUncertain(cause: .fileUnwritable(name: .journal))) {
+                try await writer.append(completed)
+            }
+            let preserved = try fixture.bytes()
+            for owner in [peer, writer] {
+                await #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try await owner.replay() }
+            }
+            #expect(try fixture.bytes() == preserved)
+        } else {
+            try await writer.append(completed)
+            for owner in [peer, writer] {
+                let replay = try await owner.replay()
+                #expect(replay.records == [started, completed] && !replay.truncatedTail && replay.inFlight.isEmpty)
+            }
+        }
+    }
+
     @Test func twoStoresPublishOrRefuseContentionWithoutRetry() async throws {
         let fixture = try Fixture(), first = try await fixture.open(), second = try await fixture.open()
         let ids = await withTaskGroup(of: OperationID?.self) { group in
