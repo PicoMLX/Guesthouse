@@ -54,6 +54,61 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: absent.path))
     }
 
+    @Test(arguments: ["observed", "verified", "opening"], [false, true])
+    func observedRootReplacementCannotSwitchInventory(phase: String, emptyReplacement: Bool) throws {
+        let fixture = try Fixture()
+        try fixture.prepare()
+        #expect(try fixture.inspect() == .empty) // Unchanged-root control.
+        let original = try Data(contentsOf: fixture.snapshot)
+        let retained = fixture.base.appending(path: "retained-root")
+        let replacement = fixture.base.appending(path: "replacement-root")
+        _ = try RuntimeStorage(root: replacement)
+        let replacementSnapshot = replacement.appending(path: "state/environments.json")
+        let environment = DevelopmentEnvironment(name: "Replacement inventory")
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let otherBytes = try JSONEncoder().encode(EnvironmentsSnapshot(environments: [environment], slots: slots,
+            provisioning: [environment.id: .initial]))
+        if !emptyReplacement {
+            try otherBytes.write(to: replacementSnapshot)
+            try #require(chmod(replacementSnapshot.path, 0o600) == 0)
+        }
+        func replaceRoot() throws {
+            try FileManager.default.moveItem(at: fixture.root, to: retained)
+            try FileManager.default.moveItem(at: replacement, to: fixture.root)
+        }
+        if phase == "opening" {
+            let storage = try #require(RuntimeStorage.existing(root: fixture.root))
+            #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+                try StateDirectoryAnchor(storage: storage, openDirectory: { path, flags in
+                    do { try replaceRoot() }
+                    catch { Issue.record("Fixture root replacement failed"); return -1 }
+                    return open(path, flags)
+                })
+            }
+            for _ in 0..<2 {
+                #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+                    try StateStore.inspectSnapshot(storage: { storage })
+                }
+            }
+        } else {
+            #expect(throws: StateStoreError.insecureDirectory(reason: .changed)) {
+                try StateStore.inspectSnapshot(storage: {
+                    let storage = try RuntimeStorage.existing(root: fixture.root, afterObservedRoot: {
+                        if phase == "observed" { try replaceRoot() }
+                    })
+                    if phase == "verified" { try replaceRoot() }
+                    return storage
+                })
+            }
+        }
+        #expect(try Data(contentsOf: retained.appending(path: "state/environments.json")) == original)
+        if emptyReplacement { #expect(!FileManager.default.fileExists(atPath: fixture.snapshot.path)) }
+        else { #expect(try Data(contentsOf: fixture.snapshot) == otherBytes) }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.state.path).sorted()
+                == (emptyReplacement ? [] : ["environments.json"]))
+    }
+
     @Test(arguments: [mode_t(0), 0o200])
     func unreadableSnapshotModeRetainsPermissionGuidance(mode: mode_t) throws {
         let fixture = try Fixture()

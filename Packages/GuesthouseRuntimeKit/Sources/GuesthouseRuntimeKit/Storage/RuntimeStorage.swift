@@ -15,6 +15,9 @@ struct RuntimeStorage: Sendable {
         var excludedFromBackup: Bool { self == .staging || self == .downloads }
     }
     private let root: URL
+    // Read-only discovery retains the first root, including across anchor construction.
+    // Prepared layouts retain their existing semantics; this is not a persistent lease.
+    private let observedRoot: StateFileIdentity?
     typealias BackupWriter = @Sendable (URL, Bool) throws -> Void
 
     init() throws { try self.init(root: Self.defaultRoot()) }
@@ -25,7 +28,10 @@ struct RuntimeStorage: Sendable {
     /// Individual areas still require location(for:); this is not mutation admission.
     static func existing() throws -> RuntimeStorage? { try existing(root: defaultRoot()) }
 
-    static func existing(root: URL, afterMissingRoot: () throws -> Void = {}) throws -> RuntimeStorage? {
+    static func existing(
+        root: URL, afterMissingRoot: () throws -> Void = {},
+        afterObservedRoot: () throws -> Void = {}
+    ) throws -> RuntimeStorage? {
         let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
         try StorageProtection.existingAncestors(of: root)
         var info = stat()
@@ -42,11 +48,24 @@ struct RuntimeStorage: Sendable {
             guard errno == ENOENT else { throw StorageFailure.inspectionFailed }
             return nil
         }
+        let storage = RuntimeStorage(verifiedRoot: root, identity: StateFileIdentity(info))
+        try afterObservedRoot()
+        try storage.verifyObservedRoot()
         try verify(root, excluded: false)
-        return RuntimeStorage(verifiedRoot: root)
+        try storage.verifyObservedRoot()
+        return storage
     }
 
-    private init(verifiedRoot: URL) { root = verifiedRoot }
+    private init(verifiedRoot: URL, identity: StateFileIdentity) {
+        root = verifiedRoot
+        observedRoot = identity
+    }
+
+    private func verifyObservedRoot() throws {
+        guard let observedRoot else { return }
+        let current = try StorageProtection.structure(root)
+        guard StateFileIdentity(current) == observedRoot else { throw StorageFailure.unsafeStructure }
+    }
 
     /// Runtime-only injection for isolated fixtures; never exposed in an XPC request.
     init(root: URL, backup: BackupWriter) throws {
@@ -54,6 +73,7 @@ struct RuntimeStorage: Sendable {
         let root = URL(fileURLWithPath: try StorageProtection.path(root), isDirectory: false)
         try StorageProtection.existingAncestors(of: root) // Validate the original decoded path first.
         self.root = root
+        observedRoot = nil
         // Inspect the entire existing managed layout BEFORE changing any protection or creating
         // siblings. A link/file/unsafe ancestor anywhere causes a preservation-first refusal.
         let layout = [(root, false)] + Self.components(root: root)
@@ -74,6 +94,7 @@ struct RuntimeStorage: Sendable {
     /// Each use rechecks the root, every managed intermediate, and the selected leaf, including
     /// backup-policy drift. Returning this URL does not authorize arbitrary child paths or writes.
     func location(for area: Area) throws -> URL {
+        try verifyObservedRoot()
         try Self.verify(root, excluded: false)
         var result = root
         let parts = area.rawValue.split(separator: "/")
@@ -81,6 +102,7 @@ struct RuntimeStorage: Sendable {
             result.append(path: String(part))
             try Self.verify(result, excluded: index == parts.count - 1 && area.excludedFromBackup)
         }
+        try verifyObservedRoot()
         return result
     }
 
