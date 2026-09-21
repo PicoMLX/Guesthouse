@@ -7,12 +7,28 @@ import Testing
 
 /// Adapts retained #57 replay/recovery tests without pretending the pending append API exists.
 @Suite(.timeLimit(.minutes(1))) struct StateStoreReplayTests {
-    @Test func unreadBorrowCannotBeClearedByMissingOrNewIdentity() throws {
-        var observation = StateJournalObservation()
-        observation.recordUnreadFailure()
-        for _ in 0..<2 {
-            #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
-                try observation.requireReadable()
+    @Test(arguments: [false, true])
+    func unreadBorrowCannotBeClearedByMissingOrNewIdentity(wasIdentified: Bool) throws {
+        var info = stat()
+        info.st_dev = 1; info.st_ino = 1
+        let original = StateFileIdentity(info)
+        info.st_ino = 2
+        let replacement = StateFileIdentity(info)
+        var failed = StateJournalObservation()
+        if wasIdentified { try #require(failed.identify(original)) }
+        failed.recordUnreadFailure()
+        #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try failed.requireReadable() }
+        for identity in [nil, original, replacement] as [StateFileIdentity?] {
+            // Independent copies prevent identify(nil)'s unbound latch from masking
+            // a later identity transition that accidentally clears unread evidence.
+            var observation = failed
+            _ = observation.identify(identity)
+            #expect(throws: StateStoreError.fileUnreadable(name: .journal)) { try observation.requireReadable() }
+            _ = observation.identify(original)
+            for _ in 0..<2 {
+                #expect(throws: StateStoreError.fileUnreadable(name: .journal)) {
+                    try observation.requireReadable()
+                }
             }
         }
     }
