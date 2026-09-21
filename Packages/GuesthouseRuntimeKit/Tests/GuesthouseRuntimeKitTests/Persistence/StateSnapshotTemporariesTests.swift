@@ -19,6 +19,54 @@ import Testing
         #expect(StateSnapshotTemporaries.isManagedName(name) == expected)
     }
 
+    @Test(arguments: [
+        ("00000000-0000-0000-0000-000000000000", false),
+        ("AAAAAAAA-BBBB-1CCC-8DDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-3CCC-8DDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-5CCC-8DDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-7CCC-8DDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-4CCC-0DDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-4CCC-4DDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-4CCC-CDDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-4CCC-FDDD-EEEEEEEEEEEE", false),
+        ("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", true),
+        ("AAAAAAAA-BBBB-4CCC-9DDD-EEEEEEEEEEEE", true),
+        ("AAAAAAAA-BBBB-4CCC-ADDD-EEEEEEEEEEEE", true),
+        ("AAAAAAAA-BBBB-4CCC-BDDD-EEEEEEEEEEEE", true),
+    ])
+    func onlyGeneratedUUIDShapesQualify(id: String, expected: Bool) {
+        #expect(StateSnapshotTemporaries.isManagedName(StateSnapshotPublication.temporaryPrefix + id) == expected)
+    }
+
+    @Test(arguments: ["00000000-0000-0000-0000-000000000000", "AAAAAAAA-BBBB-4CCC-CDDD-EEEEEEEEEEEE"])
+    func foreignUUIDArtifactsSurviveCollectionAndPublication(id: String) throws {
+        let fixture = try Fixture()
+        let candidate = fixture.state.appending(path: StateSnapshotPublication.temporaryPrefix + id)
+        try fixture.evidence.write(to: candidate)
+        try #require(chmod(candidate.path, 0o600) == 0)
+        #expect(try fixture.collect() == 0)
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        #expect(try fixture.collect() == 0)
+        #expect(try Data(contentsOf: candidate) == fixture.evidence)
+    }
+
+    @Test(arguments: [UInt32(UF_IMMUTABLE), UInt32(UF_APPEND)], [false, true])
+    func flaggedArtifactsSurviveCollectionAndPublication(flag: UInt32, duringCheck: Bool) throws {
+        let fixture = try Fixture(), candidate = try fixture.temporary()
+        // Only this isolated fixture's flags are changed; production never repairs them.
+        defer { _ = chflags(candidate.path, 0) }
+        if !duringCheck { try #require(chflags(candidate.path, flag) == 0) }
+        #expect(try fixture.collect { descriptor, _ in
+            if duringCheck { try #require(fchflags(descriptor, flag) == 0) }
+        } == 0)
+        #expect(try fixture.collect() == 0)
+        try StateSnapshotPublication.save(.empty, to: fixture.anchor)
+        var info = stat()
+        try #require(lstat(candidate.path, &info) == 0)
+        #expect(info.st_flags == flag)
+        #expect(try Data(contentsOf: candidate) == fixture.evidence)
+    }
+
     @Test func removesOnlyPrivateStaleFilesAndCanEnumerateAgain() throws {
         let fixture = try Fixture()
         let first = try fixture.temporary(), second = try fixture.temporary()

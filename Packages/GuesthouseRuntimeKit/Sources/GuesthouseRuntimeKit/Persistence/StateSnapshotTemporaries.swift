@@ -9,7 +9,10 @@ enum StateSnapshotTemporaries {
     static func isManagedName(_ name: String) -> Bool {
         let prefix = StateSnapshotPublication.temporaryPrefix
         guard name.hasPrefix(prefix), let id = UUID(uuidString: String(name.dropFirst(prefix.count))) else { return false }
-        return name == prefix + id.uuidString
+        // UUID() produces RFC 4122 variant, version 4 identifiers. Canonical spelling
+        // alone also admits nil/foreign UUIDs and must not grant deletion authority.
+        let bytes = id.uuid
+        return name == prefix + id.uuidString && bytes.6 & 0xF0 == 0x40 && bytes.8 & 0xC0 == 0x80
     }
 
     /// A successful unlink is not rollback-capable. Failures preserve remaining entries; no
@@ -100,6 +103,9 @@ enum StateSnapshotTemporaries {
         guard let opened = try? StateFileProtection.verify(descriptor, kind: .regularFile) else { return nil }
         var entry = stat()
         guard fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+              // Preserve all flagged artifacts, including immutable/append/no-unlink
+              // evidence. Never clear flags or attempt deletion to discover eligibility.
+              opened.st_flags == 0, entry.st_flags == 0,
               StateFileVersion(opened) == StateFileVersion(entry) else { return nil }
         return StateFileVersion(opened)
     }
