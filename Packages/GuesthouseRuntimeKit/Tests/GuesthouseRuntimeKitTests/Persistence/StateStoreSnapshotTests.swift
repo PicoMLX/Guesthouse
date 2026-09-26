@@ -47,7 +47,13 @@ import Testing
         var store: StateStore? = try await fixture.open()
         weak let observer = store
         store = nil
-        #expect(observer == nil)
+        // The factory's queue callback can still retain its result after resuming us.
+        // Wait for that transient reference, while still detecting a leaked owner.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while observer != nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(observer == nil)
         let reopened = try await fixture.open()
         await reopened.close()
     }
