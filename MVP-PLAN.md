@@ -4,6 +4,8 @@
 
 > **Current roadmap — September 20, 2026 (UTC):** Start with [ROADMAP.md](ROADMAP.md) and [issue #48](https://github.com/PicoMLX/Guesthouse/issues/48). The additions below cover guest GUI verification, separate readiness capabilities, supported Codex connection links, console takeover, network reachability and task handoff. They do not select Lume, pass hardware gates, or lift the package-workflow hold in [#16](https://github.com/PicoMLX/Guesthouse/issues/16).
 
+> **Lifecycle decision — September 26, 2026:** [ADR 0004](docs/decisions/0004-disposable-environments-persistent-work.md) establishes disposable environments with files retained across normal Stop/Start. A fresh environment or discard is explicit. Recovery preserves disks and inspects uncertain state; continuous execution, automatic job resumption and lossless power-failure recovery are outside MVP scope. This is an accepted requirement, not implemented or measured behavior.
+
 Build a native macOS app that prepares an isolated development Mac, connects it to the existing Codex desktop app, and manages multi-repository Xcode workspaces. The developer should not need Terminal, Homebrew, an SSH configuration tutorial, or a hand-written environment manifest.
 
 The proposed implementation is a sandboxed SwiftUI app with a narrowly scoped, non-sandboxed XPC runtime service around the official Tart executable and OpenSSH. GitHub CLI and Codex CLI run inside the guest. Do not build a new chat interface, fork Tart or Codex, or implement a virtualization engine for the MVP.
@@ -29,7 +31,7 @@ Use the existing Codex desktop experience for conversations, code review, and ag
 | Placement | Codex desktop and Guesthouse on the same physical Mac initially |
 | Host process boundary | Sandboxed GUI plus an embedded, non-sandboxed, ordinary-user XPC runtime service; prove the signed arrangement in phase zero |
 | Virtualization | Official Tart application launched by the runtime service; private app-managed VM store |
-| Lifecycle | Closing the main window keeps Guesthouse running; normal Quit stops VMs before exit; survival after app exit/crash is not promised |
+| Lifecycle | Stop/Start retains the same VM disk and saved work; closing the main window keeps Guesthouse running; normal Quit stops VMs before exit; continued execution after exit/crash is not promised |
 | Console | Tart's native window for first boot/recovery; validate headless operation with reconnectable guest Screen Sharing for daily use |
 | macOS images | Create locally from an Apple restore image; do not distribute an image containing accounts or Xcode |
 | VM limit | At most two app-managed installed VM bundles, including stopped or recovery-preserved VMs; first working slice uses one |
@@ -41,7 +43,7 @@ Use the existing Codex desktop experience for conversations, code review, and ag
 | Updates | Tested runtime set, checks at every connection, user-approved guest maintenance; no unconditional boot-time upgrades |
 | Distribution | Signed and notarized downloadable macOS app; not the Mac App Store |
 
-The same-Mac starting point and stop-on-Quit behavior are proposed MVP scope choices, not requirements of virtualization. Confirm them before phase-one implementation. A laptop controlling a separate Mac mini, or VMs that must survive Guesthouse exiting, needs an additional host-supervisor milestone described in section 12. Neither changes the workspace model.
+The same-Mac starting point and stop-on-Quit behavior are MVP scope choices, not requirements of virtualization. ADR 0004 confirms the stop/start contract; implementation still requires provider validation. A laptop controlling a separate Mac mini, or VMs that must survive Guesthouse exiting, needs an additional host-supervisor milestone described in section 12. Neither changes the workspace model.
 
 The VM cap is a conservative product constraint, not a complete interpretation of Apple's software license. Check the applicable macOS agreement before release, including other virtualization software installed on the host. Avoid a hidden third “golden image,” clone, or bootable recovery copy. Guesthouse can enforce its own inventory limit, not certify the host's total license compliance. [Apple software license agreements](https://www.apple.com/legal/sla/).
 
@@ -55,6 +57,7 @@ The VM cap is a conservative product constraint, not a complete interpretation o
 - Arbitrary Xcode project layouts, package registries, generated-project tools, CocoaPods, submodules, and Git LFS until explicitly tested and supported.
 - Snapshot trees, shared VM templates, and automatic delete-and-recreate repair.
 - Guaranteed continuous execution after Guesthouse quits, crashes, the user logs out, or the host restarts; a persistent supervisor is a separate design decision.
+- Automatic resumption of interrupted builds/agent jobs, restoration of VM memory state, lossless power-failure recovery, and metadata defenses against deliberate same-user modification of private runtime files (ADR 0004).
 
 These exclusions do not mean “CLI product.” The app uses command-line programs internally; the supported user journey remains graphical throughout.
 
@@ -79,7 +82,11 @@ Stable macOS installation still involves guest setup in Tart's documented workfl
 
 The main window shows environment cards with running state, readiness, disk usage, tool versions, and account status. Selecting an environment shows its workspaces and their repositories, branches, build results, and PR links.
 
-Primary actions are **Start**, **Open in Codex**, **Open Mac console**, **Test workspace**, and **Publish draft PRs**. Put **Repair**, **Export work**, and **Delete environment** in a secondary menu. Do not make deletion look like a routine fix.
+Primary actions are **Start**, **Stop**, **Open in Codex**, **Open Mac console**, **Test workspace**, and **Publish draft PRs**. Put **Repair**, **Export work**, **Start fresh**, and **Delete environment** in a secondary menu. Do not make deletion look like a routine fix.
+
+**Stop** shuts down the guest while retaining its disk, installed tools, repositories and saved task files. **Start** boots that same environment and checks readiness; it never resets repositories or reinstalls tools merely because the VM was stopped. Builds, Simulator sessions and agent processes may end on Stop; saved files remain available for continuing the work, but unsaved work may be lost.
+
+A fresh environment is an explicit choice for new work. Existing environments can contain multiple workspaces and be reused across agent tasks. **Start fresh** follows §9's export/preserve/discard checks before replacing an environment; it is not a recovery shortcut. Finishing a task, passing tests or publishing a PR does not automatically delete anything. Reuse the verified tool-setup procedure and approved installation artifacts; template/clone storage and hidden extra bootable images remain excluded.
 
 Closing the main window leaves Guesthouse and its runtime connection active in the menu bar. Normal Quit offers **Stop environments and quit** or **Cancel**; do not offer a keep-running option before a persistent supervisor is proven. Wait for the guest and Tart to stop before exiting. If graceful stop fails, offer cancellation or an explicitly warned force-stop. Warn that external Codex tasks may be interrupted: Guesthouse cannot reliably enumerate them through an undocumented desktop interface.
 
@@ -171,6 +178,10 @@ Keep SwiftUI view state on the main actor and long-running host operations in th
 A small backend protocol is useful for testing and a possible future direct-Apple implementation. Do not build a general plugin system before a second backend exists.
 
 Use JSON metadata and an appendable operation journal initially. A database is unnecessary for two environments and a modest number of workspaces. Persist operation identifiers and completed checkpoints before updating the UI. On relaunch, reconcile actual VM, guest, and Git state; a saved “ready” flag is not proof.
+
+Under ADR 0004, use one runtime-owned store and an exclusive lock on its private state directory; a second runtime must refuse concurrent mutation. Keep versioned records, atomic metadata replacement and minimal operation tracking. Check persistence errors before acknowledging success. Corrupt or unsupported state is preserved for explicit repair; an incomplete journal tail may require inspection rather than automatic reconstruction. These metadata records describe operations and ownership; the guest's files live on its retained VM disk.
+
+Persistence does not promise lossless recovery after arbitrary power failure or protection against deliberate same-user edits to private metadata. Do not add shared-owner observation machinery or exhaustive file-substitution race handling to satisfy that excluded threat model. Ordinary I/O failures, private-file permissions, path/symlink validation and duplicate-start prevention remain required.
 
 ### Local storage
 
@@ -517,6 +528,8 @@ Offer targeted repair for SSH/IP changes, locked credentials, expired login, mis
 
 ### Protect unpublished work
 
+Environments are disposable when the developer chooses to finish with them, while their saved files persist across ordinary Stop/Start. Retaining the same disk is the default. **Start fresh** and **Delete environment** share the protections below; neither task completion nor publication is consent to discard. At the two-environment limit, creating another requires explicitly retiring an existing environment through those protections. Preserving it continues to consume a slot; never silently evict one.
+
 Before deleting a workspace or environment, inventory every registered repository for working changes, untracked and ignored files, local branches, and unpushed commits. Offer an export to a user-selected location. A Git bundle alone does not preserve all working-tree files.
 
 Before export, ask the developer to stop active agent edits and quiesce app-managed jobs. Record source inventories and content hashes before and after export; fail and retry if the source changed. The app cannot enforce an external Codex task lock. Export complete selected workspace data with a manifest and integrity checks, explicitly identifying any excluded caches or artifacts. Test restoration, not merely archive creation. If unpacking guest data on the host, reject path traversal and unsafe symlink behavior and use an isolated destination.
@@ -529,7 +542,9 @@ If the guest cannot boot or answer SSH, preserve its disk and describe recovery 
 
 Gracefully shut down the guest before lifecycle operations when possible. Force-stop requires a separate warning. Saved VM execution state is not a substitute for a disk snapshot or a work backup.
 
-The lifecycle experiment must save new unpushed work, stop normally, cold-boot and verify that work remains intact. Test interrupted shutdown separately: preserve the disk and reconcile uncertain outcomes. Confirm completion of owned operations and required durable writes before reporting normal stop complete. This requires no custom snapshot service.
+The lifecycle experiment must save uncommitted edits, untracked/ignored files and unpushed commits, stop normally, cold-boot the same environment and verify those files and commits remain intact without repeating tool/account setup. Confirm guest shutdown and completion of required metadata writes before reporting normal Stop complete. This requires no custom snapshot service or preservation of running processes.
+
+Test interrupted shutdown separately: preserve the disk, inspect actual state and refuse duplicate starts or uncertain mutations. After a crash or power loss, recent writes and unsaved work may be lost and manual repair may be necessary. Missing/corrupt metadata must never trigger automatic disk deletion, replacement or job replay. Safe reopening is the MVP requirement; uninterrupted execution and lossless power-failure recovery are not.
 
 Sign-out removes local credentials where supported and links to provider revocation controls. Do not claim that deleting the VM or running a CLI logout revokes every server-side token or session.
 
@@ -633,6 +648,8 @@ Run unit and parser tests without booting VMs. Run real virtualization tests on 
 | Runtime integrity | Bad download digest/signature, partial archive, unsupported host, existing unrelated Tart installation |
 | XPC boundary | Unauthorized caller, malformed/oversized request, path traversal/symlink escape, arbitrary-executable rejection, idle transaction lifetime, helper protocol mismatch, signed Finder-launched app |
 | Lifecycle | Native first-boot console from broker, native-window closure, headless startup, Screen Sharing close/reopen, main-window close, Quit/cancel/force-stop, broker/GUI crash, surviving child and reused PID |
+| Task-file retention | Saved edits, untracked/ignored files and unpushed commits survive normal Stop/Start on the same disk; fresh-start/discard requires explicit choice; canceled discard retains work; finished tasks/PRs do not trigger deletion |
+| Metadata persistence | Exclusive writer/second-runtime refusal, atomic replacement and I/O error handling, corrupt/unsupported record preservation, incomplete-tail inspection and uncertain-operation refusal under ADR 0004 |
 | Sleep and power | Idle-sleep assertion release, display sleep, battery transition, manual sleep/lid closure, wake with changed guest IP, expired session, interrupted transfer/build, uncertain push/PR outcome |
 | SSH | Existing complex config, external desktop access to exported development keys, hidden maintenance aliases, wrong first-use target, changed host key, missing key, locked host Keychain, no agent forwarding |
 | Provider auth | Disabled device flow, callback port occupied, expired code, canceled browser flow, wrong account, revoked access |
