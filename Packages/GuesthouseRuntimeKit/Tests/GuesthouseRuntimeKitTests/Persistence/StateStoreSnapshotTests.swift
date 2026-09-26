@@ -29,7 +29,9 @@ import Testing
         let fixture = try Fixture()
         defer { fixture.remove() }
         let first = try await fixture.open()
+        let version = try StateDirectoryAnchor(storage: fixture.storage).verifyCurrent()
         await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) { _ = try await fixture.open() }
+        #expect(try StateDirectoryAnchor(storage: fixture.storage).verifyCurrent() == version)
         #expect(try await first.loadSnapshot() == .empty)
         await first.close()
         let second = try await fixture.open()
@@ -48,6 +50,21 @@ import Testing
         #expect(observer == nil)
         let reopened = try await fixture.open()
         await reopened.close()
+    }
+
+    @Test(arguments: [false, true])
+    func reopeningDoesNotRepairOrRecreateStorage(missing: Bool) async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        if missing { try FileManager.default.removeItem(at: fixture.state) }
+        else { try #require(chmod(fixture.state.path, 0o755) == 0) }
+        await #expect(throws: StateStoreError.self) { _ = try await fixture.open() }
+        var info = stat()
+        if missing { #expect(lstat(fixture.state.path, &info) == -1 && errno == ENOENT) }
+        else {
+            try #require(lstat(fixture.state.path, &info) == 0)
+            #expect(info.st_mode & 0o777 == 0o755)
+        }
     }
 
     @Test func savingRequiresLoadAndReplacesRatherThanTruncates() async throws {
@@ -170,7 +187,7 @@ import Testing
             storage = try RuntimeStorage(root: base.appending(path: "Guesthouse"))
         }
         func open(hooks: StateStoreHooks = StateStoreHooks()) async throws -> StateStore {
-            try await StateStore.open(storage: { storage }, hooks: hooks)
+            try await StateStore.open(storage: { try RuntimeStorage(existingRoot: base.appending(path: "Guesthouse")) }, hooks: hooks)
         }
         func write(_ bytes: Data) throws {
             try bytes.write(to: snapshot)

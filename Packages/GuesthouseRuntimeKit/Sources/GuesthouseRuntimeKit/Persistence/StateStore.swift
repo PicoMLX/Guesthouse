@@ -20,9 +20,10 @@ public actor StateStore {
         self.queue = queue
     }
 
-    /// Runtime-selected storage only. Opening neither creates a snapshot nor establishes readiness.
+    /// Reopen the runtime-selected, already prepared layout without creating or repairing it.
+    /// Missing/insecure storage requires explicit setup/repair; opening establishes no readiness.
     public static func open() async throws(StateStoreError) -> StateStore {
-        try await open(storage: { try RuntimeStorage() })
+        try await open(storage: { try RuntimeStorage(existingRoot: RuntimeStorage.defaultRoot()) })
     }
 
     static func open(storage: @escaping @Sendable () throws -> RuntimeStorage,
