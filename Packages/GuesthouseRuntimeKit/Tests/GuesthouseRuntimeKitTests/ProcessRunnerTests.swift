@@ -69,7 +69,6 @@ import Testing
     }
 
     @Test(arguments: [false, true]) func unreadInputCannotBlockDeadline(_ supplyInput: Bool) async throws {
-        let began = ContinuousClock.now
         let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"),
             arguments: ["60"], standardInput: supplyInput ? .data(Data(repeating: 65, count: 4 << 20)) : .none,
             timeout: .milliseconds(100), terminationGracePeriod: .milliseconds(100)))
@@ -77,7 +76,8 @@ import Testing
         #expect(report.timedOut && !report.canceled)
         #expect(try report.childExit?.get() == .signal(SIGTERM))
         if supplyInput { #expect(report.input != .delivered) }
-        #expect(ContinuousClock.now - began < .seconds(3))
+        // timedOut and SIGTERM distinguish deadline termination from the 60-second
+        // natural exit. Whole-test elapsed time also includes unrelated CI scheduling.
     }
 
     @Test func earlyExitReportsUndeliveredInput() async throws {
@@ -128,13 +128,20 @@ import Testing
         defer { fixture.closeWriters() }
         var run: ProcessRun? = ProcessRun(child: fixture.child, readers: fixture.readers, input: nil, grace: .zero)
         weak let facade = run
-        let began = ContinuousClock.now
         await run?.start(deadline: .now + .milliseconds(100), input: nil)
         if stopAlreadyPending { await run?.terminate(gracePeriod: .seconds(60)) }
         run = nil
         #expect(facade == nil)
         #expect(try await fixture.child.waitForReapedExit().get() == .signal(stopAlreadyPending ? SIGKILL : SIGTERM))
-        #expect(ContinuousClock.now - began < .seconds(3)) // The invocation deadline, not the fixture watchdog.
+        fixture.watchdog.cancel()
+        #expect(await fixture.watchdog.value != .delivered) // The invocation deadline, not watchdog cleanup.
+    }
+
+    @Test func watchdogCleanupCannotMasqueradeAsTheInvocationDeadline() async throws {
+        let fixture = try Fixture(watchdogDelay: .zero)
+        defer { fixture.closeWriters() }
+        #expect(try await fixture.child.waitForReapedExit().get() == .signal(SIGKILL))
+        #expect(await fixture.watchdog.value == .delivered)
     }
 
     @Test func zeroExitDoesNotEraseCancellation() async throws {
@@ -225,8 +232,9 @@ import Testing
     private struct Fixture {
         let child: OwnedChild, readers = OutputReaders()
         let stdout = Pipe(), stderr = Pipe(), stdin = Pipe()
-        let watchdog: Task<Void, Never>
-        init(executable: String = "/bin/cat", calls: OwnedChild.SystemCalls = .live) throws {
+        let watchdog: Task<OwnedChild.SignalResult?, Never>
+        init(executable: String = "/bin/cat", calls: OwnedChild.SystemCalls = .live,
+             watchdogDelay: Duration = .seconds(5)) throws {
             try readers.attach(stdout.fileHandleForReading, kind: .stdout)
             try readers.attach(stderr.fileHandleForReading, kind: .stderr)
             let child = try OwnedChild.spawn(executable: URL(fileURLWithPath: executable),
@@ -235,8 +243,8 @@ import Testing
                 standardError: stderr.fileHandleForWriting.fileDescriptor, calls: calls)
             self.child = child
             watchdog = Task {
-                do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                child.signal(SIGKILL)
+                do { try await Task.sleep(for: watchdogDelay) } catch { return nil }
+                return child.signal(SIGKILL)
             }
             try stdin.fileHandleForReading.close()
         }
