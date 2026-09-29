@@ -11,6 +11,8 @@ public actor StateStore {
     private let hooks: StateStoreHooks
     private var canSave = false
     private var snapshotWasPresent = false
+    private var journalWasPresent = false
+    private var canAppend = false
     private nonisolated let queue: DispatchSerialQueue
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
@@ -54,7 +56,7 @@ public actor StateStore {
 
     /// Releases ownership after earlier synchronous actor transactions complete. No disk is deleted.
     /// The runtime must quiesce its operations before closing. This store cannot be reopened in place.
-    public func close() { canSave = false; anchor = nil }
+    public func close() { canSave = false; canAppend = false; anchor = nil }
 
     /// Missing metadata is an empty inventory, never authority to recreate a VM.
     /// A successful read permits metadata saving, not host/guest mutations or job replay.
@@ -100,6 +102,76 @@ public actor StateStore {
         canSave = true
     }
 
+    /// Inspect saved operation history before admitting any new record. Replay never starts
+    /// an operation or removes bytes. An incomplete tail requires explicit repair (ADR 0004).
+    public func replay() throws(StateStoreError) -> JournalReplay {
+        canAppend = false
+        guard let anchor else { throw .fileUnreadable(name: .journal) }
+        let chunk = try anchor.withFile(.readJournal, didOpen: { self.journalWasPresent = true }) { descriptor in
+            let chunk = try JournalReplayChunk(StateFileIO.readAll(descriptor, from: 0, name: .journal))
+            // A previous failed append may have left complete but unflushed bytes visible.
+            try hooks.synchronize(descriptor, .journal)
+            return chunk
+        }
+        guard chunk != nil || !journalWasPresent else { throw .fileUnreadable(name: .journal) }
+        try anchor.withDescriptor { try hooks.synchronize($0, .stateDirectory) }
+        let value: JournalReplayChunk
+        if let chunk { value = chunk } else { value = try JournalReplayChunk(Data()) }
+        canAppend = !value.truncatedTail
+        return JournalReplay(records: value.history.records, inFlight: value.history.inFlight,
+                             truncatedTail: value.truncatedTail)
+    }
+
+    /// Return an operation identity only after its start record has been saved. If this throws,
+    /// inspect the journal and actual state before retrying any associated host/guest mutation.
+    public func begin(_ operation: JournalOperation, for environmentID: EnvironmentID,
+                      at timestamp: Date = Date()) throws(StateStoreError) -> OperationID {
+        let id = OperationID()
+        try append(JournalRecord(id: id, environmentID: environmentID, operation: operation,
+                                 timestamp: timestamp, outcome: .started))
+        return id
+    }
+
+    /// Reuses the pure history/framing rules from #197/#199 and the in-scope append transaction
+    /// from #214. The lifetime directory lock has one owner; no peer cache/observation registry.
+    /// Whole-file replay is bounded to 16 MiB. Full history is preserved when that budget is met.
+    public func append(_ record: JournalRecord) throws(StateStoreError) {
+        guard let anchor, canAppend else { throw .fileUnwritable(name: .journal) }
+        canAppend = false
+        let encoded: Data
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        do { encoded = try encoder.encode(record) }
+        catch { throw .unencodable(name: .journal) }
+        var attemptedWrite = false
+        do {
+            _ = try anchor.withFile(.writeJournal, requireExisting: journalWasPresent,
+                                    didOpen: { self.journalWasPresent = true }) { descriptor in
+                let bytes = try StateFileIO.readAll(descriptor, from: 0, name: .journal)
+                let chunk = try JournalReplayChunk(bytes)
+                guard !chunk.truncatedTail else {
+                    throw StateStoreError.corruptJournal(line: chunk.history.records.count + 1)
+                }
+                try chunk.history.validateAppend(record)
+                var addition = chunk.unterminatedRecord ? Data([0x0A]) : Data()
+                addition.append(encoded)
+                addition.append(0x0A)
+                guard addition.count <= StateFileIO.maximumJournalBytes - bytes.count else {
+                    throw StateStoreError.fileUnwritable(name: .journal)
+                }
+                // readAll left this private descriptor at EOF. No truncation or repair occurs.
+                attemptedWrite = true
+                try hooks.journalWrite(descriptor, addition)
+                try hooks.synchronize(descriptor, .journal)
+            }
+            try anchor.withDescriptor { try hooks.synchronize($0, .stateDirectory) }
+        } catch {
+            if attemptedWrite { throw .journalWriteUncertain(cause: error) }
+            throw error
+        }
+        canAppend = true
+    }
+
     private func readSnapshot(_ anchor: StateDirectoryAnchor) throws(StateStoreError) -> EnvironmentsSnapshot {
         let value = try anchor.withFile(.readSnapshot, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
@@ -116,6 +188,7 @@ public actor StateStore {
 
 /// Internal synchronous fault seams. Borrowed descriptors never escape or cross a suspension.
 struct StateStoreHooks: Sendable {
+    var journalWrite: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .journal) }
     var write: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .snapshot) }
     var synchronize: @Sendable (Int32, StateStoreError.File) throws -> Void = {
         try StateFileIO.fullySynchronize($0, name: $1)
