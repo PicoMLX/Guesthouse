@@ -57,6 +57,16 @@ import XPC
             : [.authenticated, .diagnostic, .sendAttempt, .sent, .canceled]))
     }
 
+    @Test(arguments: RuntimeSavedStateStatus.allCases)
+    func savedStateStatusCrossesTheAuthenticatedReplyPath(status: RuntimeSavedStateStatus) async throws {
+        let fixture = try Fixture(savedState: status)
+        defer { fixture.cancel() }
+        let reply = try await next(fixture.request(try message(.current)))
+        guard case .runtimeVersion(let info) = reply else { Issue.record("Missing version reply"); return }
+        #expect(info.savedState == status)
+        #expect(fixture.trace.diagnostics.withLock { $0.isEmpty })
+    }
+
     @Test func publicInitializerUsesRealAuthentication() async throws {
         let fixture = try Fixture(usePublicPolicy: true)
         defer { fixture.cancel() }
@@ -334,7 +344,7 @@ private final class Fixture: Sendable {
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
          refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
          deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil,
-         captureLifetime: Bool = false) throws {
+         captureLifetime: Bool = false, savedState: RuntimeSavedStateStatus? = nil) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
         processed = stream
         self.gate = gate
@@ -361,7 +371,7 @@ private final class Fixture: Sendable {
                         plan: { request in
                             trace.record(.registered)
                             let result = NativeRuntimeRequestHandler.queryReply(request, version: badVersion
-                                ? RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(99)) : version)
+                                ? RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(99)) : version, savedState: savedState)
                             guard deferredReplies else { return .immediate(result) }
                             let owner = captureLifetime ? PlanOwner(gate: gate, trace: trace) : nil
                             return .readOnly {

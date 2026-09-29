@@ -5,22 +5,27 @@ public struct RuntimeVersionInfo: Codable, Hashable, Sendable {
     public let protocolVersion: RuntimeProtocolVersion
     /// The inspected runtime, which may be a candidate. This does not select a production provider.
     public let runtime: RuntimeIdentityInfo?
+    /// Optional additive metadata status; absence never implies readiness.
+    public let savedState: RuntimeSavedStateStatus?
 
     public init(serviceVersion: String?, serviceBuild: String?,
-                protocolVersion: RuntimeProtocolVersion = .current, runtime: RuntimeIdentityInfo? = nil) {
+                protocolVersion: RuntimeProtocolVersion = .current, runtime: RuntimeIdentityInfo? = nil,
+                savedState: RuntimeSavedStateStatus? = nil) {
         self.serviceVersion = Self.admit(serviceVersion)
         self.serviceBuild = Self.admit(serviceBuild)
         self.protocolVersion = protocolVersion
         self.runtime = runtime
+        self.savedState = savedState
     }
 
-    private enum CodingKeys: String, CodingKey { case serviceVersion, serviceBuild, protocolVersion, runtime }
+    private enum CodingKeys: String, CodingKey { case serviceVersion, serviceBuild, protocolVersion, runtime, savedState }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(serviceVersion: try c.decodeIfPresent(String.self, forKey: .serviceVersion),
                   serviceBuild: try c.decodeIfPresent(String.self, forKey: .serviceBuild),
                   protocolVersion: try c.decode(RuntimeProtocolVersion.self, forKey: .protocolVersion),
-                  runtime: try c.decodeIfPresent(RuntimeIdentityInfo.self, forKey: .runtime))
+                  runtime: try c.decodeIfPresent(RuntimeIdentityInfo.self, forKey: .runtime),
+                  savedState: try c.decodeIfPresent(RuntimeSavedStateStatus.self, forKey: .savedState))
     }
 
     static func admit(_ value: String?) -> String? {

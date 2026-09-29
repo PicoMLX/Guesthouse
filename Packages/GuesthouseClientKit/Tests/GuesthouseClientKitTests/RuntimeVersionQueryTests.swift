@@ -21,6 +21,14 @@ import Testing
          .failure(.connection(.init(cause: .malformedResponse)))),
     ]
 
+    @Test(arguments: RuntimeSavedStateStatus.allCases)
+    func savedStateStatusReachesTheOwningQuery(status: RuntimeSavedStateStatus) async {
+        let info = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", savedState: status)
+        let session = QuerySession([.success(.runtimeVersion(info))])
+        defer { session.releaseReply() }
+        #expect(await run(session) == .success(info))
+    }
+
     @Test(arguments: cases)
     func onlyTheExpectedResponseIsSuccess(event: RuntimeEvent, expected: RuntimeVersionQuery.Outcome) async {
         let session = QuerySession([.success(event)])
