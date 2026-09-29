@@ -20,6 +20,18 @@ struct RuntimeStorage: Sendable {
     init() throws { try self.init(root: Self.defaultRoot()) }
     init(root: URL) throws { try self.init(root: root, backup: Self.writeBackupExclusion) }
 
+    /// Read-only startup for an already prepared layout. A prospective StateStore owner must
+    /// not repair directories before acquiring ownership. Creation/repair belongs to explicit,
+    /// separately serialized runtime setup, never ordinary store reopening or a losing opener.
+    init(existingRoot: URL) throws {
+        let root = URL(fileURLWithPath: try StorageProtection.path(existingRoot), isDirectory: false)
+        try StorageProtection.existingAncestors(of: root)
+        self.root = root
+        for (url, excluded) in [(root, false)] + Self.components(root: root) {
+            try Self.verify(url, excluded: excluded)
+        }
+    }
+
     /// Runtime-only injection for isolated fixtures; never exposed in an XPC request.
     init(root: URL, backup: BackupWriter) throws {
         // Use the same validated, trailing-separator-free spelling for inspection AND writes.

@@ -67,6 +67,8 @@ bash Tests/CI/test-package-hook.sh
 
 ## Conventions
 
+- Follow [ADR 0004](docs/decisions/0004-disposable-environments-persistent-work.md) for lifecycle and persistence scope: Stop/Start retains the same VM disk and saved task files; fresh environments and discard are explicit actions. Finishing a task or publishing a PR never authorizes automatic deletion.
+- Keep metadata persistence bounded: one runtime writer, exclusive locking, atomic replacement, minimal operation tracking and explicit repair for corrupt/unsupported state. Preserve disks and inspect unknown outcomes after interruption. Do not expand the MVP into automatic job resumption, lossless power-failure recovery or defense against deliberate same-user edits to private state. Host/guest isolation, access protection and duplicate-start prevention remain required.
 - Swift 6 language mode everywhere. Zero new warnings.
 - Core package types are `Sendable` and nonisolated. Do not add `@MainActor` to core types.
 - No third-party dependencies. If one seems necessary, open an issue that justifies it first.

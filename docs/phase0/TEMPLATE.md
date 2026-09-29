@@ -51,6 +51,8 @@ Before capture/model transmission, record the allowed app/window scope, user dis
 
 ## Measurements
 
+For the lifecycle proof, follow [ADR 0004](../decisions/0004-disposable-environments-persistent-work.md): compare saved edits, untracked/ignored files and unpushed commits before normal Stop and after Start on the same disk. Record retained tool/account setup separately from renewed readiness checks. Interrupted shutdown is a separate disk-preservation and safe-reopening check, not proof of uninterrupted execution or lossless power-failure recovery.
+
 For #35 record normal-stop work durability, viewer reopen/resize and input-to-visible-result behavior while idle and under build/memory load, plus how human takeover stops agent input. For #38 record first and subsequent Simulator launch time. For #36/#40/#41 distinguish connection, credential, build, desktop and automation capability results, including unknown/unavailable states. #42 cites the GUI-automation and network-baseline studies and the chosen release scope. These fields describe evidence to collect, never inferred passes.
 
 | Measure | Value |

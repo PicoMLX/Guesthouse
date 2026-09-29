@@ -8,6 +8,8 @@ A gate record is evidence, not a plan. It is written only from an actual run, ne
 
 ## Current planning additions
 
+[ADR 0004](../decisions/0004-disposable-environments-persistent-work.md) bounds lifecycle persistence: #35 must verify saved edits, untracked/ignored files and unpushed commits across normal Stop/Start on the same disk. Interruption checks require disk preservation, actual-state inspection and no duplicate starts or blind retries. They do not require continued execution, restored process memory or lossless power-failure recovery. Explicit fresh-start/discard protections remain required; this decision records no gate result.
+
 Read [the roadmap](../../ROADMAP.md) before choosing work. The gate registry remains eight prerequisite gates plus #42. Add console takeover/responsiveness and fresh-work durability to #35; distinguish credential, desktop and automation readiness in #36/#40/#41; add Simulator warmup/stateful fixture evidence to #38 and supported SSH registration to #41. Provider-specific procedures still require the provider-selection decision under #82; these planning additions do not approve a provider or make legacy Tart commands a Lume runbook.
 
 The separate GUI-automation and network-baseline studies are human-run prerequisites for #42's scope decision, not new formal gate records. Store their actual observations under `docs/research/` when run, with exact versions, checked-out revision, operator, evidence and unresolved results. Do not create placeholder results. #42 must cite both studies, record whether the first release includes interactive verification, and repeat the selected workflow; a build/test-only decision cannot waive any original gate. Multi-repo task handoff remains a deferred follow-on outside phase zero.
