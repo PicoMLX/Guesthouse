@@ -51,6 +51,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
     private var environmentInventory = RuntimeEnvironmentInventory.available([])
+    private var xcodeSelection = XcodeSelectionResult.rejected(.unavailable)
 
     /// What a `hostPreflight` query answers with. A ready report by default, so a preview or a
     /// test that never scripts one sees the wizard proceed; `setHostPreflight` scripts a blocked
@@ -128,6 +129,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     public func setEnvironmentInventory(_ inventory: RuntimeEnvironmentInventory) { environmentInventory = inventory }
+    /// Explicit simulation for selection previews; never performs file access or import.
+    public func setXcodeSelectionResult(_ result: XcodeSelectionResult) { xcodeSelection = result }
 
     public func setVersionInfo(_ info: RuntimeVersionInfo) {
         versionInfo = info
@@ -190,7 +193,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 } else if case .listEnvironments = request {
                     continuation.yield(.environments(environmentInventory))
                 } else if case .inspectXcode = request {
-                    continuation.yield(.xcodeSelection(.rejected(.unavailable)))
+                    continuation.yield(.xcodeSelection(xcodeSelection))
                 } else if case .hostPreflight = request {
                     continuation.yield(.hostPreflight(hostPreflight))
                 } else {
