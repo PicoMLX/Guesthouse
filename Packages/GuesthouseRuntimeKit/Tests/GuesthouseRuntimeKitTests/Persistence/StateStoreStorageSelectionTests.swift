@@ -66,14 +66,15 @@ import Testing
         await store.close()
     }
 
-    @Test func oldSnapshotLoadsWithoutPublicationOrIdentityInference() async throws {
+    @Test(arguments: [2, 3]) func oldSnapshotLoadsWithoutPublicationOrIdentityInference(version: Int) async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        let json = String(decoding: try JSONEncoder().encode(EnvironmentsSnapshot.empty), as: UTF8.self)
-        let original = Data(json.replacingOccurrences(of: "\"schemaVersion\":3", with: "\"schemaVersion\":2").utf8)
+        let expected = EnvironmentsSnapshot(storageSelection: version == 3 ? HostStorageSelection(volumeID: UUID()) : nil)
+        let json = String(decoding: try JSONEncoder().encode(expected), as: UTF8.self)
+        let original = Data(json.replacingOccurrences(of: "\"schemaVersion\":4", with: "\"schemaVersion\":\(version)").utf8)
         try fixture.write(original, to: fixture.snapshot)
         let store = try await fixture.open()
-        #expect(try await store.loadSnapshot() == .empty)
+        #expect(try await store.loadSnapshot() == expected)
         #expect(try Data(contentsOf: fixture.snapshot) == original)
         await store.close()
     }

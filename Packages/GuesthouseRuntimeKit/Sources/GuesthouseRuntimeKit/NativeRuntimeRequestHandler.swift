@@ -65,6 +65,9 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
                     ?? RuntimeHostPreflight(storageRoot: nil, expectedVolume: nil).check())
             }
         }
+        if case .environmentStatus(let id) = request {
+            return .readOnly { .status(state?.environmentStatus(id) ?? RuntimeEnvironmentInspector.unavailable(id)) }
+        }
         return .immediate(queryReply(request, version: version, savedState: state?.status))
     }
 

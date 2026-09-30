@@ -20,6 +20,7 @@ public final class RuntimeStateLoader: Sendable {
     }
     private let state = Mutex(State())
     private let open: @Sendable () async throws(StateStoreError) -> StateStore
+    private let inspector: RuntimeEnvironmentInspector
 
     private let create: @Sendable () async throws(StateStoreError) -> StateStore
 
@@ -27,13 +28,23 @@ public final class RuntimeStateLoader: Sendable {
 
     // Package-only fixture injection; GUI requests never supply paths or storage factories.
     init(open: @escaping @Sendable () async throws(StateStoreError) -> StateStore,
-         create: @escaping @Sendable () async throws(StateStoreError) -> StateStore = { throw .setupRequiresInspection }) {
+         create: @escaping @Sendable () async throws(StateStoreError) -> StateStore = { throw .setupRequiresInspection },
+         inspector: RuntimeEnvironmentInspector = RuntimeEnvironmentInspector()) {
         self.open = open
         self.create = create
+        self.inspector = inspector
     }
 
     public var status: RuntimeSavedStateStatus { state.withLock { $0.status } }
     var loadedState: LoadedState? { state.withLock { $0.loaded } }
+
+    /// Called only on the bounded read-only worker, outside session registration. Reinspect
+    /// on every request; saved metadata and earlier observations never stand in for live proof.
+    func environmentStatus(_ id: EnvironmentID) -> EnvironmentStatus {
+        let (loaded, usable) = state.withLock { ($0.loaded, $0.status == .loaded) }
+        guard let loaded else { return RuntimeEnvironmentInspector.unavailable(id) }
+        return inspector.status(for: id, snapshot: loaded.snapshot, journal: loaded.journal, metadataUsable: usable)
+    }
 
     /// Called on the bounded read-only worker, never inside the session gate. Missing,
     /// loading or rejected metadata cannot supply a new selection. Every probe rereads facts.
