@@ -45,6 +45,8 @@ final class StateDirectoryAnchor {
 
     deinit { closeDirectory(descriptor) }
 
+    func storageDestination() throws -> URL { try storage.location(for: .vms) }
+
     /// Retains #57's startup barriers even for already-visible directories left by an interrupted
     /// preparation. Call before accepting store operations; there is no cached "already durable"
     /// flag. This flushes the state directory and its ancestry, not other managed storage areas.

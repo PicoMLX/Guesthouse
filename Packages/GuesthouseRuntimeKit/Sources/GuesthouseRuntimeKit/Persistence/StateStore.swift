@@ -9,6 +9,7 @@ import GuesthouseCore
 public actor StateStore {
     private var anchor: StateDirectoryAnchor?
     private let hooks: StateStoreHooks
+    private var selectingStorage = false
     private var canSave = false
     private var snapshotWasPresent = false
     private var journalWasPresent = false
@@ -79,7 +80,10 @@ public actor StateStore {
         catch { throw .unencodable(name: .snapshot) }
         guard data.count <= StateFileIO.maximumSnapshotBytes else { throw .unencodable(name: .snapshot) }
         // Preserve unsupported/corrupt on-disk records even if the proposed value is valid.
-        _ = try readSnapshot(anchor)
+        let existing = try readSnapshot(anchor)
+        guard existing.storageSelection == snapshot.storageSelection || selectingStorage else {
+            throw StateStoreError.storageSelectionChanged
+        }
         try anchor.withDescriptor { directory in
             // One fixed exclusive temporary bounds interrupted-save debris. An existing entry
             // requires explicit repair; never collect or overwrite evidence from another attempt.
@@ -100,6 +104,33 @@ public actor StateStore {
             try hooks.synchronize(directory, .stateDirectory)
         }
         canSave = true
+    }
+
+    /// Explicit setup only. Unknown identity may be selected only for an empty inventory,
+    /// empty journal and empty VM directory. Ordinary saves can neither select nor replace it.
+    /// No GUI path or UUID is accepted; the existing runtime-chosen destination supplies both.
+    func selectStorageVolume() throws(StateStoreError) -> EnvironmentsSnapshot {
+        guard let anchor else { throw .fileUnreadable(name: .stateDirectory) }
+        var snapshot = try loadSnapshot()
+        guard snapshot.storageSelection == nil else { return snapshot }
+        let journal = try replay()
+        guard snapshot.environments.isEmpty, journal.records.isEmpty, !journal.truncatedTail else {
+            throw .storageSelectionChanged
+        }
+        let selection: HostStorageSelection
+        do {
+            let destination = try anchor.storageDestination()
+            guard try FileManager.default.contentsOfDirectory(atPath: destination.path).isEmpty,
+                  let value = HostStorageSelection(volumeID: try SystemStorageProbe.identifyVolume(atExistingDirectory: destination)) else {
+                throw StateStoreError.storageSelectionChanged
+            }
+            selection = value
+        } catch { throw .storageSelectionChanged }
+        snapshot.storageSelection = selection
+        selectingStorage = true
+        defer { selectingStorage = false }
+        try saveSnapshot(snapshot)
+        return snapshot
     }
 
     /// Inspect saved operation history before admitting any new record. Replay never starts

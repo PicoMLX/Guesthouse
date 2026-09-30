@@ -28,6 +28,7 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
 
     case insecureDirectory(reason: ProtectionFailure)
     case corruptSnapshot
+    case storageSelectionChanged
     case inconsistentSnapshot(reason: SnapshotInconsistency)
     case corruptJournal(line: Int)
     /// Unsupported can mean an older prototype or a newer format; never skip the record.
@@ -50,6 +51,7 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     public var userMessage: String {
         switch self {
         case .insecureDirectory: "Guesthouse could not verify the protection of its saved state."
+        case .storageSelectionChanged: "Guesthouse cannot replace or infer the storage-volume identity for saved work."
         case .corruptSnapshot: "The saved list of development Macs could not be read."
         case .inconsistentSnapshot: "The saved development Mac records disagree with one another."
         case .corruptJournal: "The operation journal contains a damaged record."
