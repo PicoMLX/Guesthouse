@@ -91,6 +91,7 @@ public actor StateStore {
     public func close() { canSave = false; canAppend = false; anchor = nil }
 
     /// Missing metadata is an empty inventory, never authority to recreate a VM.
+    /// Verification never repairs file permissions. Drift requires explicit repair.
     /// A successful read permits metadata saving, not host/guest mutations or job replay.
     public func loadSnapshot() throws(StateStoreError) -> EnvironmentsSnapshot {
         canSave = false
@@ -175,7 +176,7 @@ public actor StateStore {
     public func replay() throws(StateStoreError) -> JournalReplay {
         canAppend = false
         guard let anchor else { throw .fileUnreadable(name: .journal) }
-        let chunk = try anchor.withFile(.readJournal, didOpen: { self.journalWasPresent = true }) { descriptor in
+        let chunk = try anchor.withFile(.inspectJournal, didOpen: { self.journalWasPresent = true }) { descriptor in
             let chunk = try JournalReplayChunk(StateFileIO.readAll(descriptor, from: 0, name: .journal))
             // A previous failed append may have left complete but unflushed bytes visible.
             try hooks.synchronize(descriptor, .journal)
@@ -241,7 +242,7 @@ public actor StateStore {
     }
 
     private func readSnapshot(_ anchor: StateDirectoryAnchor) throws(StateStoreError) -> EnvironmentsSnapshot {
-        let value = try anchor.withFile(.readSnapshot, body: { descriptor in
+        let value = try anchor.withFile(.inspectSnapshot, body: { descriptor in
             let raw = try StateFileIO.readAll(descriptor, from: 0, name: .snapshot)
             let migrated = try SnapshotMigrator.standard.migrate(raw)
             do { return try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) }

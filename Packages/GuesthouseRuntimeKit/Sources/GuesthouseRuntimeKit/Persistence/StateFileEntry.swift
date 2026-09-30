@@ -3,10 +3,11 @@ import GuesthouseCore
 
 /// Fixed runtime operations, never arbitrary GUI/repository names or snapshot-in-place writes.
 enum StateFileAccess: Sendable, CaseIterable {
-    case readSnapshot, readJournal, writeJournal
+    case readSnapshot, readJournal, writeJournal, inspectSnapshot, inspectJournal
 
-    var name: String { self == .readSnapshot ? "environments.json" : "journal.ndjson" }
-    var label: StateStoreError.File { self == .readSnapshot ? .snapshot : .journal }
+    var name: String { label == .snapshot ? "environments.json" : "journal.ndjson" }
+    var label: StateStoreError.File { self == .readSnapshot || self == .inspectSnapshot ? .snapshot : .journal }
+    var inspects: Bool { self == .inspectSnapshot || self == .inspectJournal }
     var creates: Bool { self == .writeJournal }
     var failure: StateStoreError { creates ? .fileUnwritable(name: label) : .fileUnreadable(name: label) }
 }
@@ -110,14 +111,19 @@ enum StateFileEntry {
             let transactionDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
             try validateDirectory(transactionDirectoryVersion)
             try requireBinding(descriptor, in: directory, access: access)
-            try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
-                synchronize: { descriptor, label in
-                    let fileVersion = try StateFileIO.version(descriptor, name: label)
-                    let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
-                    try permissionBarrier(descriptor, label)
-                    try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
-                    try validateDirectory(directoryVersion)
-                })
+            if access.inspects {
+                // Inspection neither repairs permissions nor invokes a preparation barrier.
+                try StateFileProtection.verify(descriptor, kind: .regularFile)
+            } else {
+                try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
+                    synchronize: { descriptor, label in
+                        let fileVersion = try StateFileIO.version(descriptor, name: label)
+                        let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+                        try permissionBarrier(descriptor, label)
+                        try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
+                        try validateDirectory(directoryVersion)
+                    })
+            }
             try validateDirectory(transactionDirectoryVersion)
             let prepared = try verifyCurrent(descriptor, in: directory, access: access)
             let result = try body(descriptor)

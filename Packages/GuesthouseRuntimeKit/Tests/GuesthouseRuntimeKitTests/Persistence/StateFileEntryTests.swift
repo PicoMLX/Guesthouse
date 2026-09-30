@@ -58,11 +58,13 @@ import Testing
     }
 
     @Test(arguments: [(StateFileAccess.readSnapshot, Int32(O_RDONLY), "environments.json"),
-                      (.readJournal, O_RDONLY, "journal.ndjson"), (.writeJournal, O_RDWR, "journal.ndjson")])
+                      (.readJournal, O_RDONLY, "journal.ndjson"), (.writeJournal, O_RDWR, "journal.ndjson"),
+                      (.inspectSnapshot, O_RDONLY, "environments.json"), (.inspectJournal, O_RDONLY, "journal.ndjson")])
     func accessIsFixedNonblockingAndCloseOnExec(access: StateFileAccess, mode: Int32, name: String) throws {
         let fixture = try Fixture()
         #expect(access.name == name)
         try evidence.write(to: fixture.file(access))
+        try #require(chmod(fixture.file(access).path, 0o600) == 0)
         let bytes = try fixture.anchor.withFile(access, body: { fd in
             #expect(fcntl(fd, F_GETFL) & O_ACCMODE == mode)
             #expect(fcntl(fd, F_GETFL) & O_NONBLOCK != 0)
@@ -72,7 +74,7 @@ import Testing
         #expect(bytes == evidence)
     }
 
-    @Test(arguments: [StateFileAccess.readSnapshot, .readJournal, .writeJournal], [false, true])
+    @Test(arguments: StateFileAccess.allCases, [false, true])
     func finalSymlinksAreRefusedWithoutChangingDestinations(access: StateFileAccess, dangling: Bool) throws {
         let fixture = try Fixture()
         let target = fixture.state.appending(path: "outside")
@@ -119,7 +121,7 @@ import Testing
 
     // Read paths repair private metadata under the same exclusive lock as their body. There
     // is no shared/exclusive conversion gap. Contention is tested with an independent open.
-    @Test(arguments: StateFileAccess.allCases)
+    @Test(arguments: StateFileAccess.allCases.filter { !$0.inspects })
     func permissionBarrierAndBodyShareOneExclusiveLock(access: StateFileAccess) throws {
         let fixture = try Fixture()
         try evidence.write(to: fixture.file(access))
@@ -173,7 +175,7 @@ import Testing
         #expect(first == second)
     }
 
-    @Test(arguments: StateFileAccess.allCases)
+    @Test(arguments: StateFileAccess.allCases.filter { !$0.inspects })
     func fileReplacementDuringPermissionBarrierIsRefused(access: StateFileAccess) throws {
         let fixture = try Fixture()
         try evidence.write(to: fixture.file(access))
@@ -187,7 +189,7 @@ import Testing
         #expect(try Data(contentsOf: detached) == evidence)
     }
 
-    @Test(arguments: StateFileAccess.allCases)
+    @Test(arguments: StateFileAccess.allCases.filter { !$0.inspects })
     func sameInodeReattachmentDuringPermissionBarrierIsRefused(access: StateFileAccess) throws {
         let fixture = try Fixture()
         try evidence.write(to: fixture.file(access))
@@ -278,6 +280,7 @@ import Testing
         enum Failure: Error { case interrupted }
         let fixture = try Fixture()
         try evidence.write(to: fixture.file(access))
+        try #require(chmod(fixture.file(access).path, 0o600) == 0)
         #expect(throws: access.failure) {
             try fixture.anchor.withFile(access, body: { _ in throw Failure.interrupted })
         }
@@ -292,7 +295,7 @@ import Testing
         try #require(lstat(fixture.file(access).path, &original) == 0)
         var identity: StateFileIdentity?
         var observations = 0
-        let failure = StateStoreError.fileUnwritable(name: access.label)
+        let failure: StateStoreError = access.inspects ? .insecureDirectory(reason: .permissions) : .fileUnwritable(name: access.label)
         #expect(throws: failure) {
             try fixture.anchor.withFile(access, permissionBarrier: { _, _ in throw failure },
                 didOpen: { observations += 1 }, didIdentify: { identity = $0; return true },
