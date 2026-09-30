@@ -100,7 +100,7 @@ import Testing
         #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(data) }
     }
 
-    @Test(arguments: [1, 3, 99], [false, true])
+    @Test(arguments: [1, 4, 99], [false, true])
     func unsupportedPositiveFormatsArePreservedAsUnsupported(format: Int, terminated: Bool) throws {
         let first = try JournalReplayChunk(line(record(.started)))
         let data = Data(("{\"format\":\(format)}" + (terminated ? "\n" : "")).utf8)

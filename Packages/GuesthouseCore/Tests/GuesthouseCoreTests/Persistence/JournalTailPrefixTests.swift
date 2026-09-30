@@ -176,7 +176,7 @@ import Testing
     }
 
     @Test(arguments: [
-        "not json", "{]", " ", "{\"unknown", "{\"format\":3", "{\"format\":\"",
+        "not json", "{]", " ", "{\"unknown", "{\"format\":4", "{\"format\":\"",
         "{\"id\":\"not-a-uuid", "{\"operation\":{\"invented", "{\"timestamp\":01",
         "{\"timestamp\":1e+x", "{\"format\":2,\"format", "{\"outcome\":[",
         "{\"outcome\":{\"failed\":{\"_0\":{\"vmSlotUnavailable\":{\"maximum\":9223372036854775808",

@@ -226,7 +226,13 @@ struct JournalTailPrefix {
     }
 
     private static func makeShape(operation: JournalOperation? = nil, starting: Bool? = nil) throws -> Shape {
-        let errors: [GuesthouseError] = [
+        .choice(try [2, JournalRecord.currentFormat].map {
+            try makeShape(format: $0, operation: operation, starting: starting)
+        })
+    }
+
+    private static func makeShape(format: Int, operation: JournalOperation?, starting: Bool?) throws -> Shape {
+        var errors: [GuesthouseError] = [
             .unsupportedHost(.notAppleSilicon), .unsupportedHost(.unknownArchitecture),
             .unsupportedHost(.macOSTooOld), .unsupportedHost(.insufficientMemory(foundBytes: 0, minimumBytes: 0)),
             .insufficientDisk(requiredBytes: 0, availableBytes: 0),
@@ -240,13 +246,14 @@ struct JournalTailPrefix {
             .invalidRuntimeReply(.malformed), .invalidRuntimeReply(.oversized)
         ] + GuesthouseError.Tool.allCases.map { .toolMismatch(tool: $0) }
           + GuesthouseError.InvalidRequestReason.allCases.map { .invalidRequest($0) }
+        if format == 2 { errors.removeAll { if case .guestShutdownRefused = $0 { true } else { false } } }
         var outcomes: [JournalRecord.Outcome] = [.started, .completed, .unknown, .notApplied]
             + errors.map { .failed($0) }
         if starting == true { outcomes = [.started] }
         if starting == false { outcomes.removeFirst() }
         func record(operation: Shape, outcome: Shape) -> Shape {
             .object([
-                "format": .literal(Array(String(JournalRecord.currentFormat).utf8)),
+                "format": .literal(Array(String(format).utf8)),
                 "id": .uuid(.operation), "environmentID": .uuid(.environment), "timestamp": .date,
                 "operation": operation, "outcome": outcome
             ])

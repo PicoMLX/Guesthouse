@@ -97,9 +97,9 @@ import Testing
 
     @Test func structuredJournalFormatIsIndependentAndExplicit() throws {
         let original = record(.started)
-        #expect(JournalRecord.currentFormat == 2)
-        #expect(original.format == 2)
-        #expect(try object(original)["format"] as? Int == 2)
+        #expect(JournalRecord.currentFormat == 3)
+        #expect(original.format == 3)
+        #expect(try object(original)["format"] as? Int == 3)
         #expect(JournalRecord.canRead(2))
     }
 
@@ -135,7 +135,7 @@ import Testing
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(JournalRecord.self, from: data) }
     }
 
-    @Test(arguments: [-1, 0, 1, 3, 99, Int.max])
+    @Test(arguments: [-1, 0, 1, 4, 99, Int.max])
     func unsupportedFormatsIncludingTheLegacyPrototypeAreRefused(format: Int) throws {
         var fixture = try object(record(.started))
         fixture["format"] = format
