@@ -56,7 +56,7 @@ public final class XPCRuntimeTransport: Sendable {
         let mayMutate: Bool
         switch envelope.request {
         case .runtimeVersion, .hostPreflight, .environmentStatus: mayMutate = false
-        case .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation: mayMutate = true
+        case .prepareStorage, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation: mayMutate = true
         }
         // Retain the registry, not self: deinit can cancel pending work, while late callbacks
         // still preserve learned operation IDs. Native sessions capture the registry weakly.

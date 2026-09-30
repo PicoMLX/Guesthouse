@@ -20,7 +20,7 @@ import Testing
         #expect(try RuntimeEventEnvelope.decode(data) == envelope)
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(Set(object.keys) == ["protocolVersion", "event"])
-        #expect(object["protocolVersion"] as? Int == 13)
+        #expect(object["protocolVersion"] as? Int == 14)
     }
 
     @Test(arguments: events)
@@ -58,10 +58,10 @@ import Testing
         #expect(key.stringValue == "protocolVersion")
     }
 
-    @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, Int.max])
+    @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, Int.max])
     func foreignHeaderPrecedesUnknownEvent(version: Int) {
         let data = Data("{\"event\":{\"futureReply\":{}},\"protocolVersion\":\(version)}".utf8)
-        #expect(throws: GuesthouseError.protocolMismatch(client: 13, service: version)) {
+        #expect(throws: GuesthouseError.protocolMismatch(client: 14, service: version)) {
             try RuntimeEventEnvelope.decode(data)
         }
     }
@@ -71,7 +71,7 @@ import Testing
         let mismatch = try #require(throws: RuntimeEventEnvelope.ProtocolMismatch.self) {
             try JSONDecoder().decode(RuntimeEventEnvelope.self, from: data)
         }
-        #expect(mismatch.error == .protocolMismatch(client: 13, service: 7))
+        #expect(mismatch.error == .protocolMismatch(client: 14, service: 7))
     }
 
     @Test func contradictoryNestedVersionIsMalformedOnBothPaths() throws {
@@ -81,15 +81,15 @@ import Testing
         #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) { try RuntimeEventEnvelope.decode(forged) }
         #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) { try envelope.encoded() }
         let foreign = RuntimeEventEnvelope(protocolVersion: RuntimeProtocolVersion(7), event: Self.events[0])
-        #expect(throws: GuesthouseError.protocolMismatch(client: 13, service: 7)) { try foreign.encoded() }
+        #expect(throws: GuesthouseError.protocolMismatch(client: 14, service: 7)) { try foreign.encoded() }
         let foreignBytes = try JSONEncoder().encode(foreign)
-        #expect(throws: GuesthouseError.protocolMismatch(client: 13, service: 7)) { try RuntimeEventEnvelope.decode(foreignBytes) }
+        #expect(throws: GuesthouseError.protocolMismatch(client: 14, service: 7)) { try RuntimeEventEnvelope.decode(foreignBytes) }
     }
 
-    @Test(arguments: ["{}", "null", "not-json", #"{"protocolVersion":13}"#,
-                      #"{"protocolVersion":"13","event":{}}"#,
-                      #"{"protocolVersion":13,"event":{"log":{"_0":null,"_1":"private-marker"}}}"#,
-                      #"{"protocolVersion":13,"event":{"futureReply":{}}}"#])
+    @Test(arguments: ["{}", "null", "not-json", #"{"protocolVersion":14}"#,
+                      #"{"protocolVersion":"14","event":{}}"#,
+                      #"{"protocolVersion":14,"event":{"log":{"_0":null,"_1":"private-marker"}}}"#,
+                      #"{"protocolVersion":14,"event":{"futureReply":{}}}"#])
     func malformedOrRawLogRepliesAreFixedErrors(json: String) {
         #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) {
             try RuntimeEventEnvelope.decode(Data(json.utf8))
@@ -135,7 +135,7 @@ import Testing
         var event = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.diagnostic)) as? [String: Any])
         event["message"] = "private-marker"
         event["stderr"] = "private-marker"
-        let object: [String: Any] = ["protocolVersion": 13, "event": ["diagnostic": ["_0": event]]]
+        let object: [String: Any] = ["protocolVersion": 14, "event": ["diagnostic": ["_0": event]]]
         let decoded = try RuntimeEventEnvelope.decode(JSONSerialization.data(withJSONObject: object))
         #expect(decoded.event.diagnosticEvent == Self.diagnostic)
         #expect(!String(decoding: try decoded.encoded(), as: UTF8.self).contains("private-marker"))
@@ -168,7 +168,7 @@ import Testing
 
     @Test(arguments: ["", "private marker", "0.1\u{1B}[31m", String(repeating: "1", count: 257)])
     func malformedMetadataBecomesUnknownWithoutInventingIdentity(value: String) throws {
-        let raw: [String: Any] = ["serviceVersion": value, "serviceBuild": value, "protocolVersion": 13,
+        let raw: [String: Any] = ["serviceVersion": value, "serviceBuild": value, "protocolVersion": 14,
                                   "runtime": ["provider": "lume", "version": value, "verified": true]]
         let info = try JSONDecoder().decode(RuntimeVersionInfo.self, from: JSONSerialization.data(withJSONObject: raw))
         #expect(info.serviceVersion == nil)
@@ -186,7 +186,7 @@ import Testing
         let failed = RuntimeIdentityInfo(provider: .lume, version: "0.5.3", verified: true, problem: .runtimeMissing)
         #expect(!failed.verified)
         #expect(failed.problem == .runtimeMissing)
-        let missing = try JSONDecoder().decode(RuntimeVersionInfo.self, from: Data(#"{"protocolVersion":13}"#.utf8))
+        let missing = try JSONDecoder().decode(RuntimeVersionInfo.self, from: Data(#"{"protocolVersion":14}"#.utf8))
         #expect(missing.runtime == nil)
         #expect(missing.serviceVersion == nil)
         #expect(missing.serviceBuild == nil)

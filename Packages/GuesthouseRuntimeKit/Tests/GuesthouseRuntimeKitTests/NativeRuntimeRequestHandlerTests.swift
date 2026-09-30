@@ -101,6 +101,69 @@ import XPC
         #expect(fixture.trace.steps.withLock { $0.filter { $0 == .sent }.count } == 2)
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func setupRequiresAuthenticationAndKeepsOneServiceWideClaim(authorized: Bool, disconnect: Bool) async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "guesthouse-native-setup-\(UUID())")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appending(path: "Guesthouse")
+        let (entered, signal) = AsyncStream<Void>.makeStream()
+        let (release, resume) = AsyncStream<Void>.makeStream()
+        defer { signal.finish(); resume.finish() }
+        let calls = Mutex(0)
+        let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in
+            try await StateStore.open(storage: { try RuntimeStorage(existingRoot: root) })
+        }, create: { () async throws(StateStoreError) -> StateStore in
+            calls.withLock { $0 += 1 }; signal.yield(())
+            for await _ in release { break }
+            return try await StateStore.createFresh(root: { root })
+        })
+        await loader.load()
+        let fixture = try Fixture(authorized: authorized, productionPlan: true, runtimeState: loader)
+        defer { fixture.cancel() }
+        let bytes = try JSONEncoder().encode(RuntimeRequestEnvelope(request: .prepareStorage))
+        let frame = try RawRuntimeFrame.encode(bytes, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue))
+        let response = fixture.request(frame)
+        _ = try await next(fixture.processed)
+        if !authorized {
+            #expect(failure(try await next(response)) == .unauthorizedCaller)
+            #expect(calls.withLock { $0 } == 0)
+            #expect(!FileManager.default.fileExists(atPath: root.path))
+            return
+        }
+        for await _ in entered { break }
+        let other = try Fixture(productionPlan: true, runtimeState: loader)
+        defer { other.cancel() }
+        let during = try await next(other.request(frame))
+        guard case .runtimeVersion(let pending) = during else { Issue.record("Missing pending status"); resume.yield(()); return }
+        #expect(pending.savedState == .loading)
+        #expect(calls.withLock { $0 } == 1)
+        if disconnect { fixture.cancel() }
+        resume.yield(())
+        let finished: RuntimeVersionInfo
+        if disconnect {
+            // Admission survives the original session. Wait for observable completion, not a
+            // scheduling delay, then inspect through a different authenticated session.
+            let deadline = ContinuousClock.now + .seconds(5)
+            while loader.status == .loading, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            try #require(loader.status == .loaded)
+            let inspected = try await next(other.request(try message(.current)))
+            guard case .runtimeVersion(let info) = inspected else { Issue.record("Missing inspection"); return }
+            finished = info
+        } else {
+            let reply = try await next(response)
+            guard case .runtimeVersion(let info) = reply else { Issue.record("Missing setup result"); return }
+            finished = info
+        }
+        #expect(finished.savedState == .loaded)
+        #expect(loader.loadedState?.snapshot.storageSelection != nil)
+        #expect(try await next(other.request(frame)) == .runtimeVersion(finished))
+        #expect(calls.withLock { $0 } == 1)
+        await loader.loadedState?.store.close()
+    }
+
     @Test func productionPlanKeepsMutationsUnsupported() {
         let request = RuntimeRequest.startEnvironment(EnvironmentID(), StartOptions())
         guard case .immediate(let event) = NativeRuntimeRequestHandler.queryPlan(request, version: version, state: nil) else {
@@ -378,7 +441,7 @@ private final class Fixture: Sendable {
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
          refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
          deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil,
-         captureLifetime: Bool = false, productionPlan: Bool = false, savedState: RuntimeSavedStateStatus? = nil) throws {
+         captureLifetime: Bool = false, productionPlan: Bool = false, runtimeState: RuntimeStateLoader? = nil, savedState: RuntimeSavedStateStatus? = nil) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
         processed = stream
         self.gate = gate
@@ -404,7 +467,7 @@ private final class Fixture: Sendable {
                         },
                         plan: { request in
                             trace.record(.registered)
-                            if productionPlan { return NativeRuntimeRequestHandler.queryPlan(request, version: version, state: nil) }
+                            if productionPlan { return NativeRuntimeRequestHandler.queryPlan(request, version: version, state: runtimeState) }
                             let result = NativeRuntimeRequestHandler.queryReply(request, version: badVersion
                                 ? RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(99)) : version, savedState: savedState)
                             guard deferredReplies else { return .immediate(result) }

@@ -216,13 +216,13 @@ extension RuntimeRequest {
     var environment: EnvironmentID? {
         switch self {
         case .environmentStatus(let id), .startEnvironment(let id, _), .stopEnvironment(let id, _), .importXcode(let id, _): id
-        case .runtimeVersion, .hostPreflight, .cancelOperation: nil
+        case .runtimeVersion, .hostPreflight, .prepareStorage, .cancelOperation: nil
         }
     }
     var acceptsOperation: Bool {
         switch self {
         case .startEnvironment, .stopEnvironment, .importXcode: true
-        case .runtimeVersion, .hostPreflight, .environmentStatus, .cancelOperation: false
+        case .runtimeVersion, .hostPreflight, .prepareStorage, .environmentStatus, .cancelOperation: false
         }
     }
     var cancellationTarget: OperationID? {
@@ -231,7 +231,7 @@ extension RuntimeRequest {
     func acceptsReply(_ event: RuntimeEvent) -> Bool {
         if case .failed = event { return true } // Correlated service rejection, not a live registration.
         switch (self, event) {
-        case (.runtimeVersion, .runtimeVersion(let info)): return info.protocolVersion == .current
+        case (.runtimeVersion, .runtimeVersion(let info)), (.prepareStorage, .runtimeVersion(let info)): return info.protocolVersion == .current
         case (.hostPreflight, .hostPreflight(let report)): return report.isComplete
         case (.environmentStatus(let id), .status(let status)): return status.environmentID == id
         case (.cancelOperation, .completed): return true // Cancel-request acknowledgement, not proof its target stopped.

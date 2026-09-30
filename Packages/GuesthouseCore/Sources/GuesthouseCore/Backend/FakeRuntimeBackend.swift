@@ -193,6 +193,12 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             }
             return
 
+        case .prepareStorage:
+            advanceTurn()
+            continuation.yield(.failed(OperationID(), .invalidRequest(.unsupportedOperation)))
+            continuation.finish()
+            return
+
         case .cancelOperation(let id):
             advanceTurn()
             await pause()
@@ -382,7 +388,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 environmentID: environment, vm: .uncertain(reason: .inspectionFailed), readiness: .checking
             )
             statuses[environment] = settingOperation(id, on: status)
-        case .runtimeVersion, .hostPreflight, .environmentStatus, .cancelOperation:
+        case .runtimeVersion, .hostPreflight, .prepareStorage, .environmentStatus, .cancelOperation:
             break
         }
     }

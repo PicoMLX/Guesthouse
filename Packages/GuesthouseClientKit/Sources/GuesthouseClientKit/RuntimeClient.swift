@@ -2,7 +2,7 @@ import Foundation
 import GuesthouseCore
 
 /// Native backend owner migrated from #67/#103 (MVP-PLAN.md §3, ADR 0003).
-/// The public configuration remains query-only until runtime mutations/recovery integrate.
+/// The public configuration permits queries and explicit metadata setup; VM mutations remain disabled.
 /// Keep the backend alive while inspecting reconciliation; dropping it retires its transport.
 public final class RuntimeClient: RuntimeBackend {
     typealias Deadline = @Sendable () async throws -> Void
@@ -38,7 +38,7 @@ public final class RuntimeClient: RuntimeBackend {
             inbox.ended(key, reason) // End callback only enqueues; never performs native cleanup.
         }
         do {
-            if !permitsOperations, request != .runtimeVersion, request != .hostPreflight {
+            if !permitsOperations, request != .runtimeVersion, request != .hostPreflight, request != .prepareStorage {
                 throw GuesthouseError.invalidRequest(.unsupportedOperation)
             }
             let envelope = RuntimeRequestEnvelope(request: request)

@@ -216,6 +216,37 @@ import Testing
     }
 }
 
+@Suite(.timeLimit(.minutes(1))) struct RuntimeStorageSetupTests {
+    @Test(arguments: RuntimeSavedStateStatus.allCases)
+    func onlySettledSetupSucceeds(status: RuntimeSavedStateStatus) async {
+        let info = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", savedState: status)
+        let session = QuerySession([.success(.runtimeVersion(info))], expectedRequest: .prepareStorage)
+        defer { session.releaseReply() }
+        let result = await RuntimeStorageSetup.perform(connect: { _, _ in session }, deadline: waitForCancellation)
+        #expect(result == (status == .loaded ? .success(info) : .failure(.needsInspection(status))))
+        #expect(session.sends.withLock { $0 } == 1)
+        #expect(session.cancellations.withLock { $0 } == 1)
+    }
+
+    @Test func lostSetupReplyIsAMutationWithUnknownOutcome() async {
+        let session = QuerySession([.failure(.init(cause: .connectionLost))], expectedRequest: .prepareStorage)
+        defer { session.releaseReply() }
+        let result = await RuntimeVersionQuery.perform(request: .prepareStorage, connect: { _, _ in session }, deadline: waitForCancellation)
+        #expect(result == .failure(.connection(.init(cause: .connectionLost, mayHaveMutated: true))))
+        #expect(session.sends.withLock { $0 } == 1)
+    }
+
+    @Test func timeoutDoesNotResendOrAcceptLateSuccess() async {
+        let session = QuerySession([], expectedRequest: .prepareStorage)
+        defer { session.releaseReply() }
+        let result = await RuntimeStorageSetup.perform(connect: { _, _ in session }, deadline: {})
+        #expect(result == .failure(.unconfirmed))
+        session.answerLate(.success(.runtimeVersion(.init(serviceVersion: "1", serviceBuild: "1", savedState: .loaded))))
+        #expect(session.sends.withLock { $0 } == 1)
+        #expect(!RuntimeStorageSetup.Failure.unconfirmed.recoveryMessage.isEmpty)
+    }
+}
+
 private func runPreflight(_ session: QuerySession,
                          deadline: @escaping @Sendable () async throws -> Void = waitForCancellation) async -> RuntimeHostPreflightQuery.Outcome {
     await RuntimeHostPreflightQuery.perform(connect: { _, _ in session }, deadline: deadline)
@@ -240,7 +271,7 @@ private final class QuerySession: RuntimeClientSession {
     func cancel() { cancellations.withLock { $0 += 1 } }
     func send(_ payload: Data, reply: @escaping Reply) {
         do { let request = try RequestValidator.decode(payload); #expect(request.request == expectedRequest) }
-        catch { Issue.record("The check must send its expected valid read-only request.") }
+        catch { Issue.record("The facade must send its expected valid named request.") }
         sends.withLock { $0 += 1 }
         self.reply.withLock { $0 = reply }
         didSend()
