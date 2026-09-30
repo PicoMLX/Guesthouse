@@ -12,7 +12,7 @@ struct RuntimeSavedStateStatusTests {
     }
 
     @Test func olderVersionReplyDoesNotInventSuccessfulLoading() throws {
-        let bytes = Data("{\"serviceVersion\":\"1\",\"serviceBuild\":\"2\",\"protocolVersion\":16}".utf8)
+        let bytes = Data("{\"serviceVersion\":\"1\",\"serviceBuild\":\"2\",\"protocolVersion\":17}".utf8)
         #expect(try JSONDecoder().decode(RuntimeVersionInfo.self, from: bytes).savedState == nil)
     }
 }
