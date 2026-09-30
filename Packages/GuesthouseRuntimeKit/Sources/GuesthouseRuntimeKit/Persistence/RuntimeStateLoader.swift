@@ -128,7 +128,7 @@ public final class RuntimeStateLoader: Sendable {
              .migrationMissing, .migrationProducedWrongVersion, .migrationFailed, .duplicateMigration:
             .incompatible
         case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord,
-             .setupRequiresInspection, .storageSelectionChanged:
+             .setupRequiresInspection, .storageSelectionChanged, .insecureDirectory(reason: .permissions):
             .repairRequired
         default: .unavailable
         }
