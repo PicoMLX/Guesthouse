@@ -52,8 +52,8 @@ final class QuitCoordinator {
 
     var canForceStop: Bool {
         guard case .failed(.stop(.guestShutdownRefused(let id))) = flow,
-              gracefulFailures.contains(id) else { return false }
-        if case .interrupted = model.checkState { return false }
+              gracefulFailures.contains(id), model.checkState == .checked,
+              model.statuses[id]?.vm == .running, model.statuses[id]?.inFlightOperation == nil else { return false }
         return true
     }
 
@@ -81,14 +81,21 @@ final class QuitCoordinator {
     @discardableResult
     func inspectBeforeContinuing() -> Task<Void, Never>? {
         guard case .failed = flow else { return nil }
+        let refusal: Failure?
+        if case .failed(.stop(.guestShutdownRefused(let id))) = flow, gracefulFailures.contains(id) {
+            refusal = .stop(.guestShutdownRefused(id))
+        } else { refusal = nil }
         attempt = UUID(); let current = attempt
         flow = .checking
         task = Task { [weak self] in
             guard let self else { return }
-            await model.checkForQuit()
-            guard attempt == current, !Task.isCancelled else { return }
-            flow = model.checkState == .checked ? .confirming : .failed(.check(model.checkState))
-            task = nil
+            defer { if attempt == current { task = nil } }
+            do {
+                guard try await inspect(attempt: current) else { return }
+                if case .stop(.guestShutdownRefused(let id))? = refusal, model.statuses[id]?.vm == .running {
+                    flow = .failed(.stop(.guestShutdownRefused(id)))
+                } else { flow = .confirming }
+            } catch { if attempt == current { flow = .failed(error as? Failure ?? .stop(.invalidRuntimeReply(.malformed))) } }
         }
         return task
     }
@@ -106,41 +113,51 @@ final class QuitCoordinator {
 
     private func stopAfterInspection(force: Bool, attempt current: UUID) async {
         defer { if attempt == current { task = nil } }
+        var attempted: Set<EnvironmentID> = []
         do {
-            await model.checkForQuit()
-            guard attempt == current, !Task.isCancelled else { return }
-            try validateInspection()
-            let targets = model.environments.filter { model.statuses[$0.id]?.vm == .running }
-            for environment in targets {
-                guard attempt == current else { return }
-                if cancelRequested || Task.isCancelled { finishCancel(); return }
-                if model.checkState != .checked {
-                    await model.checkForQuit()
-                    guard attempt == current, !Task.isCancelled else { return }
-                    try validateInspection()
+            while try await inspect(attempt: current) {
+                guard let environment = model.environments.first(where: { model.statuses[$0.id]?.vm == .running }) else {
+                    flow = .terminating; terminationDecision(true); return
                 }
-                guard model.statuses[environment.id]?.vm == .running else { continue }
+                // At most two distinct targets per confirmed attempt. Never blindly repeat a
+                // completed stop if its VM is running again, or chase an unbounded changing list.
+                guard attempted.count < 2, attempted.insert(environment.id).inserted else { throw Failure.stillRunning }
                 let useForce = force && gracefulFailures.contains(environment.id)
                 if useForce { gracefulFailures.remove(environment.id) }
                 model.invalidateStatusForMutation()
                 try await stop(environment.id, force: useForce)
                 gracefulFailures.remove(environment.id)
             }
-            guard attempt == current else { return }
-            if cancelRequested || Task.isCancelled { finishCancel(); return }
-            // A terminal operation reply alone does not prove that every VM is now stopped.
-            flow = .checking
-            await model.checkForQuit()
-            guard attempt == current, !Task.isCancelled else { return }
-            try validateInspection()
-            guard !model.statuses.values.contains(where: { $0.vm == .running }) else { throw Failure.stillRunning }
-            flow = .terminating
-            terminationDecision(true)
         } catch {
             guard attempt == current else { return }
             if cancelRequested || Task.isCancelled { finishCancel(); return }
-            flow = .failed(error as? Failure ?? .stop(.invalidRuntimeReply(.malformed)))
+            let failure = error as? Failure ?? .stop(.invalidRuntimeReply(.malformed))
+            if case .stop(.guestShutdownRefused(let id)) = failure, gracefulFailures.contains(id) {
+                do {
+                    // Consent is offered only after post-refusal inspection. Force itself also
+                    // rechecks because the user may leave the warning open for some time.
+                    guard try await inspect(attempt: current) else { return }
+                    if model.statuses[id]?.vm != .running {
+                        gracefulFailures.remove(id); flow = .confirming; return
+                    }
+                } catch {
+                    if attempt == current { flow = .failed(error as? Failure ?? .stop(.invalidRuntimeReply(.malformed))) }
+                    return
+                }
+            }
+            flow = .failed(failure)
         }
+    }
+
+    private func inspect(attempt current: UUID) async throws -> Bool {
+        guard attempt == current else { return false }
+        if cancelRequested || Task.isCancelled { finishCancel(); return false }
+        flow = .checking
+        await model.checkForQuit()
+        guard attempt == current else { return false }
+        if cancelRequested || Task.isCancelled { finishCancel(); return false }
+        try validateInspection()
+        return true
     }
 
     private func validateInspection() throws {

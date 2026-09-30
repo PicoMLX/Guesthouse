@@ -29,13 +29,20 @@ struct QuitCoordinatorTests {
             .stopEnvironment(environment.id, .graceful(deadline: .seconds(60))), .listEnvironments, .environmentStatus(environment.id)])
     }
 
-    @Test func confirmedRefusalOffersForceOnlyForThatAttemptAndRechecksBeforeForcing() async throws {
+    @Test(arguments: [false, true])
+    func confirmedRefusalOffersForceOnlyForThatAttemptAndRechecksBeforeForcing(stoppedBeforeConsent: Bool) async throws {
         let backend = await configuredFake(), decision = Decision()
         await backend.script("stopEnvironment", .fail(error: .guestShutdownRefused(environment.id)))
         let quit = QuitCoordinator(model: AppModel(backend: backend), terminationDecision: decision.record)
         _ = quit.requestQuit()
         await quit.confirmStopAndQuit()?.value
         #expect(quit.canForceStop && decision.values.isEmpty)
+        if stoppedBeforeConsent {
+            await backend.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+            await quit.inspectBeforeContinuing()?.value
+            #expect(quit.flow == .confirming && !quit.canForceStop && decision.values.isEmpty)
+            return
+        }
         await backend.script("stopEnvironment", .succeed(status: .init(environmentID: environment.id, vm: .stopped, readiness: .checking)))
         await quit.forceStopAndQuit()?.value
         #expect(decision.values == [true])
@@ -141,6 +148,50 @@ struct QuitCoordinatorTests {
         #expect(decision.values.isEmpty && !quit.canForceStop)
     }
 
+    @Test(arguments: [false, true])
+    func freshInspectionFindsNewTargetsAndCancellationBetweenStopsAlwaysCompletes(cancel: Bool) async throws {
+        let fake = await configuredFake(), second = DevelopmentEnvironment(name: "Discovered Mac"), decision = Decision()
+        let backend = HeldStopBackend(fake: fake, operation: operation, holdInventory: 2)
+        let quit = QuitCoordinator(model: AppModel(backend: backend), terminationDecision: decision.record)
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var stops = backend.stopped.makeAsyncIterator(), inspections = backend.inspected.makeAsyncIterator()
+        _ = await stops.next()
+        await fake.setEnvironmentInventory(.available([environment, second]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        await fake.setStatus(.init(environmentID: second.id, vm: .running, readiness: .checking))
+        backend.finish()
+        _ = await inspections.next()
+        #expect(quit.flow == .checking)
+        if cancel { quit.cancelQuit(); #expect(decision.values == [false]) }
+        backend.answerInventory([environment, second])
+        if !cancel {
+            _ = await stops.next()
+            await fake.setStatus(.init(environmentID: second.id, vm: .stopped, readiness: .checking))
+            backend.finish()
+        }
+        await work.value
+        #expect(quit.flow == (cancel ? .idle : .terminating))
+        #expect(decision.values == [!cancel])
+        #expect(backend.stopRequests == (cancel ? [environment] : [environment, second]).map {
+            .stopEnvironment($0.id, .graceful(deadline: .seconds(60)))
+        })
+    }
+
+    @Test func postRefusalInspectionMustFinishAndProveOwnershipBeforeForceIsOffered() async throws {
+        let fake = await configuredFake(), backend = HeldStopBackend(fake: fake, operation: operation, holdInventory: 2)
+        let quit = QuitCoordinator(model: AppModel(backend: backend), terminationDecision: { _ in })
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var stops = backend.stopped.makeAsyncIterator(), inspections = backend.inspected.makeAsyncIterator()
+        _ = await stops.next()
+        backend.answer([.accepted(operation), .failed(operation, .guestShutdownRefused(environment.id))])
+        _ = await inspections.next()
+        #expect(quit.flow == .checking && !quit.canForceStop)
+        await fake.setStatus(.init(environmentID: environment.id, vm: .uncertain(reason: .ownershipUnproven), readiness: .checking))
+        backend.answerInventory([environment])
+        await work.value
+        #expect(quit.flow == .failed(.ownership(environment.id, .ownershipUnproven)) && !quit.canForceStop)
+    }
+
     @Test func canceledQuitBeforeItsCheckStartsCannotResurrect() async {
         let backend = await configuredFake(), decision = Decision()
         let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
@@ -166,22 +217,44 @@ private nonisolated final class HeldStopBackend: RuntimeBackend {
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }
     let stopped: AsyncStream<Void>
     private let signal: AsyncStream<Void>.Continuation
-    private let pending = Mutex<AsyncThrowingStream<RuntimeEvent, any Error>.Continuation?>(nil)
-    init(fake: FakeRuntimeBackend, operation: OperationID) {
-        self.fake = fake; self.operation = operation
+    private let pending = Mutex<(OperationID, AsyncThrowingStream<RuntimeEvent, any Error>.Continuation)?>(nil)
+    private let inventory = Mutex<AsyncThrowingStream<RuntimeEvent, any Error>.Continuation?>(nil)
+    private let counts = Mutex((inventories: 0, stops: [RuntimeRequest]()))
+    private let holdInventory: Int?
+    let inspected: AsyncStream<Void>
+    private let inspectionSignal: AsyncStream<Void>.Continuation
+    var stopRequests: [RuntimeRequest] { counts.withLock { $0.stops } }
+    init(fake: FakeRuntimeBackend, operation: OperationID, holdInventory: Int? = nil) {
+        self.fake = fake; self.operation = operation; self.holdInventory = holdInventory
+        (inspected, inspectionSignal) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         (stopped, signal) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
-    deinit { signal.finish() }
+    deinit { signal.finish(); inspectionSignal.finish() }
     func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
+        if case .listEnvironments = request {
+            let number = counts.withLock { $0.inventories += 1; return $0.inventories }
+            if number == holdInventory {
+                let (events, continuation) = AsyncThrowingStream<RuntimeEvent, any Error>.makeStream()
+                inventory.withLock { $0 = continuation }; inspectionSignal.yield(()); return events
+            }
+        }
         guard case .stopEnvironment = request else { return fake.send(request) }
+        let id = counts.withLock { state in defer { state.stops.append(request) }; return state.stops.isEmpty ? operation : OperationID() }
         let (events, continuation) = AsyncThrowingStream<RuntimeEvent, any Error>.makeStream()
-        pending.withLock { $0 = continuation }
+        pending.withLock { $0 = (id, continuation) }
         signal.yield(())
         return events
     }
-    func finish() { answer([.accepted(operation), .completed(operation)]) }
+    func finish() {
+        guard let id = pending.withLock({ $0?.0 }) else { return }
+        answer([.accepted(id), .progress(id, .init(kind: .stoppingVM, cancelable: true)), .completed(id)])
+    }
+    func answerInventory(_ records: [DevelopmentEnvironment]) {
+        let reply = inventory.withLock { state in defer { state = nil }; return state }
+        reply?.yield(.environments(.available(records))); reply?.finish()
+    }
     func answer(_ events: [RuntimeEvent]) {
-        let continuation = pending.withLock { state in defer { state = nil }; return state }
+        let continuation = pending.withLock { state in defer { state = nil }; return state?.1 }
         for event in events { continuation?.yield(event) }
         continuation?.finish()
     }
