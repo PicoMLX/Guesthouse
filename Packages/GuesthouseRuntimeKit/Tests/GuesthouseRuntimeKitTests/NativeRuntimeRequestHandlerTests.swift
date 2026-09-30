@@ -101,8 +101,9 @@ import XPC
         #expect(fixture.trace.steps.withLock { $0.filter { $0 == .sent }.count } == 2)
     }
 
-    @Test(arguments: [false, true], [false, true])
-    func setupRequiresAuthenticationAndKeepsOneServiceWideClaim(authorized: Bool, disconnect: Bool) async throws {
+    @Test(arguments: [(false, false), (false, true), (true, false), (true, true)], [false, true])
+    func setupRequiresAuthenticationAndKeepsOneServiceWideClaim(session: (Bool, Bool), failSetup: Bool) async throws {
+        let (authorized, disconnect) = session
         let base = FileManager.default.temporaryDirectory.appending(path: "guesthouse-native-setup-\(UUID())")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: base) }
@@ -111,15 +112,23 @@ import XPC
         let (release, resume) = AsyncStream<Void>.makeStream()
         defer { signal.finish(); resume.finish() }
         let calls = Mutex(0)
+        let transactions = Mutex<[Int]>([])
+        let (ended, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
+        defer { completion.finish() }
+        let supervisor = OperationSupervisor(begin: { transactions.withLock { $0.append(1) } }, finish: {
+            transactions.withLock { $0.append(-1) }
+            completion.yield(true); completion.finish()
+        })
         let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in
             try await StateStore.open(storage: { try RuntimeStorage(existingRoot: root) })
         }, create: { () async throws(StateStoreError) -> StateStore in
             calls.withLock { $0 += 1 }; signal.yield(())
             for await _ in release { break }
+            if failSetup { throw .setupRequiresInspection }
             return try await StateStore.createFresh(root: { root })
         })
         await loader.load()
-        let fixture = try Fixture(authorized: authorized, productionPlan: true, runtimeState: loader)
+        let fixture = try Fixture(authorized: authorized, productionPlan: true, runtimeState: loader, supervisor: supervisor)
         defer { fixture.cancel() }
         let bytes = try JSONEncoder().encode(RuntimeRequestEnvelope(request: .prepareStorage))
         let frame = try RawRuntimeFrame.encode(bytes, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue))
@@ -128,17 +137,19 @@ import XPC
         if !authorized {
             #expect(failure(try await next(response)) == .unauthorizedCaller)
             #expect(calls.withLock { $0 } == 0)
+            #expect(transactions.withLock { $0.isEmpty })
             #expect(!FileManager.default.fileExists(atPath: root.path))
             return
         }
         for await _ in entered { break }
-        let other = try Fixture(productionPlan: true, runtimeState: loader)
+        let other = try Fixture(productionPlan: true, runtimeState: loader, supervisor: supervisor)
         defer { other.cancel() }
         let during = try await next(other.request(frame))
         guard case .runtimeVersion(let pending) = during else { Issue.record("Missing pending status"); resume.yield(()); return }
         #expect(pending.savedState == .loading)
         #expect(calls.withLock { $0 } == 1)
         if disconnect { fixture.cancel() }
+        #expect(transactions.withLock { $0 } == [1], "Disconnect cannot release active work")
         resume.yield(())
         let finished: RuntimeVersionInfo
         if disconnect {
@@ -148,7 +159,7 @@ import XPC
             while loader.status == .loading, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(5))
             }
-            try #require(loader.status == .loaded)
+            try #require(loader.status == (failSetup ? .repairRequired : .loaded))
             let inspected = try await next(other.request(try message(.current)))
             guard case .runtimeVersion(let info) = inspected else { Issue.record("Missing inspection"); return }
             finished = info
@@ -157,10 +168,13 @@ import XPC
             guard case .runtimeVersion(let info) = reply else { Issue.record("Missing setup result"); return }
             finished = info
         }
-        #expect(finished.savedState == .loaded)
-        #expect(loader.loadedState?.snapshot.storageSelection != nil)
+        _ = try await next(ended)
+        #expect(transactions.withLock { $0 } == [1, -1])
+        #expect(finished.savedState == (failSetup ? .repairRequired : .loaded))
+        #expect((loader.loadedState?.snapshot.storageSelection != nil) == !failSetup)
         #expect(try await next(other.request(frame)) == .runtimeVersion(finished))
         #expect(calls.withLock { $0 } == 1)
+        #expect(transactions.withLock { $0 } == [1, -1], "A repeated setup creates no new activity")
         await loader.loadedState?.store.close()
     }
 
@@ -441,7 +455,7 @@ private final class Fixture: Sendable {
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
          refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
          deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil,
-         captureLifetime: Bool = false, productionPlan: Bool = false, runtimeState: RuntimeStateLoader? = nil, savedState: RuntimeSavedStateStatus? = nil) throws {
+         captureLifetime: Bool = false, productionPlan: Bool = false, runtimeState: RuntimeStateLoader? = nil, supervisor: OperationSupervisor = OperationSupervisor(), savedState: RuntimeSavedStateStatus? = nil) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
         processed = stream
         self.gate = gate
@@ -458,7 +472,7 @@ private final class Fixture: Sendable {
                 let native: NativeRuntimeRequestHandler
                 if usePublicPolicy { native = NativeRuntimeRequestHandler(session: session, version: version, diagnostic: log) }
                 else {
-                    native = NativeRuntimeRequestHandler(gate: gate, worker: worker,
+                    native = NativeRuntimeRequestHandler(gate: gate, worker: worker, supervisor: supervisor,
                         authenticate: { _ in trace.record(.authenticated); return authorized },
                         decode: { bytes, count in
                             trace.record(.decoded)
