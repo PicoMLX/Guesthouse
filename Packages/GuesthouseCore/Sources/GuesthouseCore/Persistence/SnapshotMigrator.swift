@@ -39,11 +39,12 @@ public struct SnapshotMigrator: Sendable {
         ambiguousVersion = ambiguous
     }
 
-    /// Format 2 upgrades known records with an explicitly unknown storage selection. Loading
+    /// Format 2 adds an unknown storage selection; format 3 adds no invented process identities. Loading
     /// transforms only in memory; publication remains an explicit StateStore save. Prototypes
     /// are still refused because their raw error/resume data has no supported transformation.
     public static let standard = SnapshotMigrator(migrations: [
         .init(from: SchemaVersion(2)!, apply: EnvironmentsSnapshot.migrateVersion2),
+        .init(from: SchemaVersion(3)!, apply: EnvironmentsSnapshot.migrateVersion3),
     ])
 
     /// Returns the document at `current`, and the version it was found at.

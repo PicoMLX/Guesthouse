@@ -11,32 +11,37 @@ import Foundation
 /// records controlling one VM). `validate()` runs before encoding and after decoding.
 /// The concrete runtime store owns durability, permissions and preservation of rejected files.
 public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
-    /// Format 3 retains host storage identity. Older writers must refuse it rather than
-    /// silently discard that identity. Format 2 has an explicit migration that retains records with unknown selection.
-    public static let currentSchema = SchemaVersion(3)!
+    /// Format 4 retains process ownership evidence. Older writers must refuse it rather
+    /// than silently discard identities. Formats 2 and 3 have explicit migrations.
+    public static let currentSchema = SchemaVersion(4)!
     public var schemaVersion: SchemaVersion
     public var environments: [DevelopmentEnvironment]
     public var slots: VMSlotInventory
     public var provisioning: [EnvironmentID: ProvisioningState]
     /// Nil means unselected/unknown, never permission to infer a replacement for saved work.
     public var storageSelection: HostStorageSelection?
+    /// Historical evidence only. An absent record never proves that an environment is stopped.
+    /// Runtime inspection must reconcile these identities before reporting live state (§4).
+    public var processIdentities: [EnvironmentID: ProcessIdentity]
 
     public init(
         schemaVersion: SchemaVersion = EnvironmentsSnapshot.currentSchema,
         environments: [DevelopmentEnvironment] = [],
         slots: VMSlotInventory = VMSlotInventory(),
         provisioning: [EnvironmentID: ProvisioningState] = [:],
-        storageSelection: HostStorageSelection? = nil
+        storageSelection: HostStorageSelection? = nil,
+        processIdentities: [EnvironmentID: ProcessIdentity] = [:]
     ) {
         self.schemaVersion = schemaVersion
         self.environments = environments
         self.slots = slots
         self.provisioning = provisioning
         self.storageSelection = storageSelection
+        self.processIdentities = processIdentities
     }
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, environments, slots, provisioning, storageSelection
+        case schemaVersion, environments, slots, provisioning, storageSelection, processIdentities
     }
 
     public init(from decoder: any Decoder) throws {
@@ -54,8 +59,9 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
             environments: try c.decode([DevelopmentEnvironment].self, forKey: .environments),
             slots: try c.decode(VMSlotInventory.self, forKey: .slots),
             provisioning: try Self.decodeProvisioning(from: c),
-            storageSelection: version == Self.currentSchema
-                ? try c.decodeIfPresent(HostStorageSelection.self, forKey: .storageSelection) : nil
+            storageSelection: version.rawValue >= 3
+                ? try c.decodeIfPresent(HostStorageSelection.self, forKey: .storageSelection) : nil,
+            processIdentities: version.rawValue >= 4 ? try Self.decodeProcessIdentities(from: c) : [:]
         )
         do {
             try validate()
@@ -73,19 +79,60 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
                 snapshot = try EnvironmentsSnapshot(from: decoder, expectedVersion: SchemaVersion(2)!)
             }
         }
-        do { return try JSONEncoder().encode(JSONDecoder().decode(Version2.self, from: data).snapshot) }
+        do {
+            let snapshot = try JSONDecoder().decode(Version2.self, from: data).snapshot
+            return try JSONEncoder().encode(Version3Encoding(snapshot: snapshot))
+        }
         catch let failure as StateStoreError { throw failure }
         catch { throw StateStoreError.corruptSnapshot }
     }
 
+    /// Upgrade one version at a time, preserving the selected volume and exact typed counters.
+    static func migrateVersion3(_ data: Data) throws -> Data {
+        struct Version3: Decodable {
+            let snapshot: EnvironmentsSnapshot
+            init(from decoder: any Decoder) throws {
+                snapshot = try EnvironmentsSnapshot(from: decoder, expectedVersion: SchemaVersion(3)!)
+            }
+        }
+        do { return try JSONEncoder().encode(JSONDecoder().decode(Version3.self, from: data).snapshot) }
+        catch let failure as StateStoreError { throw failure }
+        catch { throw StateStoreError.corruptSnapshot }
+    }
+
+    private struct Version3Encoding: Encodable {
+        let snapshot: EnvironmentsSnapshot
+        func encode(to encoder: any Encoder) throws { try snapshot.encode(to: encoder, version: SchemaVersion(3)!) }
+    }
+
     public func encode(to encoder: any Encoder) throws {
+        try encode(to: encoder, version: Self.currentSchema)
+    }
+
+    private func encode(to encoder: any Encoder, version: SchemaVersion) throws {
         try validate()
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(schemaVersion, forKey: .schemaVersion)
+        try c.encode(version, forKey: .schemaVersion)
         try c.encode(environments, forKey: .environments)
         try c.encode(slots, forKey: .slots)
         try c.encode(provisioning, forKey: .provisioning)
         try c.encodeIfPresent(storageSelection, forKey: .storageSelection)
+        if version.rawValue >= 4 { try c.encode(processIdentities, forKey: .processIdentities) }
+    }
+
+    private static func decodeProcessIdentities(from container: KeyedDecodingContainer<CodingKeys>) throws -> [EnvironmentID: ProcessIdentity] {
+        let object = try container.nestedContainer(keyedBy: UUIDKey.self, forKey: .processIdentities)
+        var identities: [EnvironmentID: ProcessIdentity] = [:]
+        for key in object.allKeys {
+            guard let id = EnvironmentID(codingKey: key) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: object, debugDescription: "A process key is not a development Mac identifier.")
+            }
+            let identity = try object.decode(ProcessIdentity.self, forKey: key)
+            guard identities.updateValue(identity, forKey: id) == nil else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: object, debugDescription: "Two process entries name one development Mac.")
+            }
+        }
+        return identities
     }
 
     /// Reads the provisioning object one key at a time instead of straight into a dictionary.
@@ -134,6 +181,14 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         }
         guard Set(provisioning.keys).isSubset(of: slotIDs) else {
             throw .inconsistentSnapshot(reason: .unknownProvisioningEnvironment)
+        }
+        guard Set(processIdentities.keys).isSubset(of: slotIDs) else {
+            throw .inconsistentSnapshot(reason: .unknownProcessEnvironment)
+        }
+        for (id, identity) in processIdentities {
+            guard id == identity.environmentID, identity.isConsistent else {
+                throw .inconsistentSnapshot(reason: .processIdentity)
+            }
         }
         // A record's own version is checked too. The outer version says what this build wrote;
         // an environment carrying a different one was never understood by whatever produced it
