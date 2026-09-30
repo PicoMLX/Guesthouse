@@ -14,16 +14,23 @@ public final class RuntimeStateLoader: Sendable {
     }
     private struct State: Sendable {
         var started = false
+        var setupAttempted = false
         var status: RuntimeSavedStateStatus = .loading
         var loaded: LoadedState?
     }
     private let state = Mutex(State())
     private let open: @Sendable () async throws(StateStoreError) -> StateStore
 
-    public convenience init() { self.init(open: StateStore.open) }
+    private let create: @Sendable () async throws(StateStoreError) -> StateStore
+
+    public convenience init() { self.init(open: StateStore.open, create: StateStore.createFresh) }
 
     // Package-only fixture injection; GUI requests never supply paths or storage factories.
-    init(open: @escaping @Sendable () async throws(StateStoreError) -> StateStore) { self.open = open }
+    init(open: @escaping @Sendable () async throws(StateStoreError) -> StateStore,
+         create: @escaping @Sendable () async throws(StateStoreError) -> StateStore = { throw .setupRequiresInspection }) {
+        self.open = open
+        self.create = create
+    }
 
     public var status: RuntimeSavedStateStatus { state.withLock { $0.status } }
     var loadedState: LoadedState? { state.withLock { $0.loaded } }
@@ -64,12 +71,53 @@ public final class RuntimeStateLoader: Sendable {
         }
     }
 
+    /// A deliberate setup action, separate from startup and host checks. Only one attempt
+    /// per service lifetime; an uncertain failure needs a reopen/inspection, never a blind retry.
+    public func prepareStorage() async -> RuntimeSavedStateStatus {
+        guard let claim = reserveSetup() else { return status }
+        return await completeSetup(claim)
+    }
+
+    struct SetupClaim: Sendable { fileprivate let loaded: LoadedState? }
+
+    /// In-memory admission for authenticated native registration. A claimed setup must run
+    /// outside the session gate, even if its caller disconnects; never reserve then abandon it.
+    func reserveSetup() -> SetupClaim? {
+        state.withLock { value in
+            guard !value.setupAttempted, value.status == .unavailable || value.status == .loaded else { return nil }
+            value.setupAttempted = true
+            value.status = .loading
+            return SetupClaim(loaded: value.loaded)
+        }
+    }
+
+    func completeSetup(_ claim: SetupClaim) async -> RuntimeSavedStateStatus {
+        var opened = claim.loaded?.store
+        do {
+            let store: StateStore
+            if let opened { store = opened } else { store = try await create(); opened = store }
+            let snapshot = try await store.selectStorageVolume()
+            let journal = try await store.replay()
+            let destination = try await store.storageDestination()
+            state.withLock {
+                $0.loaded = LoadedState(snapshot: snapshot, journal: journal, store: store, storageDestination: destination)
+                $0.status = journal.truncatedTail ? .repairRequired : .loaded
+            }
+        } catch {
+            // Existing owners retain the lock and evidence; a failed new owner is released.
+            if claim.loaded == nil { await opened?.close() }
+            state.withLock { $0.status = Self.status(for: error) }
+        }
+        return status
+    }
+
     private static func status(for error: StateStoreError) -> RuntimeSavedStateStatus {
         switch error {
         case .unsupportedJournalFormat, .unsupportedSnapshotVersion, .newerSchemaVersion,
              .migrationMissing, .migrationProducedWrongVersion, .migrationFailed, .duplicateMigration:
             .incompatible
-        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord:
+        case .corruptSnapshot, .inconsistentSnapshot, .corruptJournal, .inconsistentRecord,
+             .setupRequiresInspection, .storageSelectionChanged:
             .repairRequired
         default: .unavailable
         }

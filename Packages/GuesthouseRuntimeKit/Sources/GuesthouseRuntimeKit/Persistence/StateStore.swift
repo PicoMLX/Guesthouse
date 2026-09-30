@@ -31,13 +31,44 @@ public actor StateStore {
 
     static func open(storage: @escaping @Sendable () throws -> RuntimeStorage,
                      hooks: StateStoreHooks = StateStoreHooks()) async throws(StateStoreError) -> StateStore {
+        try await make(anchor: { try StateDirectoryAnchor(storage: storage()) }, hooks: hooks)
+    }
+
+    /// Explicit first setup only, at the service-owned location. Success means both layout
+    /// ownership and volume metadata are retained. Failure preserves partial state for inspection.
+    public static func createFresh() async throws(StateStoreError) -> StateStore {
+        try await createFresh(root: RuntimeStorage.defaultRoot)
+    }
+
+    static func createFresh(root: @escaping @Sendable () throws -> URL,
+                            backup: @escaping RuntimeStorage.BackupWriter = RuntimeStorage.writeBackupExclusion,
+                            hooks: StateStoreHooks = StateStoreHooks()) async throws(StateStoreError) -> StateStore {
+        let store = try await make(anchor: {
+            try RuntimeStorage.withFreshLayout(at: root(), backup: backup) { storage, descriptor in
+                // dup retains the SAME flock ownership across handoff; no unlock/relock gap.
+                try StateDirectoryAnchor(storage: storage, openDirectory: { _, _ in
+                    fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
+                })
+            }
+        }, hooks: hooks)
+        do {
+            _ = try await store.selectStorageVolume()
+            return store
+        } catch {
+            await store.close()
+            throw error
+        }
+    }
+
+    private static func make(anchor makeAnchor: @escaping @Sendable () throws -> StateDirectoryAnchor,
+                             hooks: StateStoreHooks) async throws(StateStoreError) -> StateStore {
         // Keep blocking filesystem calls off the cooperative pool and the GUI's main actor.
         let queue = DispatchSerialQueue(label: "ai.picomlx.guesthouse.state-store", qos: .utility)
         let result: Result<StateStore, StateStoreError> = await withCheckedContinuation { continuation in
             queue.async {
                 let result: Result<StateStore, StateStoreError>
                 do {
-                    let anchor = try StateDirectoryAnchor(storage: storage())
+                    let anchor = try makeAnchor()
                     try anchor.withDescriptor { descriptor in
                         guard StateFileIO.lock(descriptor, LOCK_EX | LOCK_NB) else {
                             throw StateStoreError.fileUnwritable(name: .stateDirectory)
