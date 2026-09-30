@@ -21,7 +21,7 @@ import Testing
         #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
     }
 
-    @Test(arguments: ["operationOutcomeUnknown", "guestNotReachable", "hostKeyChanged"], [false, true])
+    @Test(arguments: ["operationOutcomeUnknown", "guestNotReachable", "hostKeyChanged", "guestShutdownRefused"], [false, true])
     func inconsistentEmbeddedIdentityCannotAuthorizeRepair(error: String, outcomeFirst: Bool) throws {
         let original = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         let different = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
@@ -35,6 +35,9 @@ import Testing
             key = "id"; identity = try JSONEncoder().encode(operation)
         case "guestNotReachable":
             outcome = .failed(.guestNotReachable(reportedEnvironment))
+            key = "environmentID"; identity = try JSONEncoder().encode(environment)
+        case "guestShutdownRefused":
+            outcome = .failed(.guestShutdownRefused(reportedEnvironment))
             key = "environmentID"; identity = try JSONEncoder().encode(environment)
         default:
             outcome = .failed(.hostKeyChanged(reportedEnvironment))
@@ -64,7 +67,7 @@ import Testing
         let id = OperationID(), environment = EnvironmentID()
         let outcomes: [JournalRecord.Outcome] = [
             .completed, .unknown, .notApplied, .failed(.canceled),
-            .failed(.operationOutcomeUnknown(id)), .failed(.guestNotReachable(environment)),
+            .failed(.operationOutcomeUnknown(id)), .failed(.guestNotReachable(environment)), .failed(.guestShutdownRefused(environment)),
             .failed(.hostKeyChanged(environment)), .failed(.insufficientDisk(requiredBytes: .max, availableBytes: 0)),
             .failed(.unsupportedHost(.insufficientMemory(foundBytes: 0, minimumBytes: .max))),
             .failed(.protocolMismatch(client: .min, service: .max)), .failed(.vmSlotUnavailable(maximum: .max)),

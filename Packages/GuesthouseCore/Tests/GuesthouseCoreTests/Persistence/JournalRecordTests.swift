@@ -70,7 +70,7 @@ import Testing
     }
 
     @Test func environmentErrorsMustNameTheRecordedEnvironment() throws {
-        for error in [GuesthouseError.guestNotReachable(environmentID), .hostKeyChanged(environmentID)] {
+        for error in [GuesthouseError.guestNotReachable(environmentID), .hostKeyChanged(environmentID), .guestShutdownRefused(environmentID)] {
             let original = record(.failed(error))
             #expect(original.isSelfConsistent)
             let restored = try JSONDecoder().decode(JournalRecord.self, from: JSONEncoder().encode(original))
@@ -78,6 +78,7 @@ import Testing
         }
         try expectDecodingRefusal(record(.failed(.guestNotReachable(EnvironmentID()))))
         try expectDecodingRefusal(record(.failed(.hostKeyChanged(EnvironmentID()))))
+        try expectDecodingRefusal(record(.failed(.guestShutdownRefused(EnvironmentID()))))
     }
 
     @Test(arguments: ProvisioningStage.allCases)

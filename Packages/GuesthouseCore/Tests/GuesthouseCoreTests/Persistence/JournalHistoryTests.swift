@@ -125,6 +125,7 @@ import Testing
         rejected(record(.failed(.operationOutcomeUnknown(OperationID()))), by: &history, as: .inconsistentRecord(id))
         rejected(record(.failed(.guestNotReachable(EnvironmentID()))), by: &history, as: .inconsistentRecord(id))
         rejected(record(.failed(.hostKeyChanged(EnvironmentID()))), by: &history, as: .inconsistentRecord(id))
+        rejected(record(.failed(.guestShutdownRefused(EnvironmentID()))), by: &history, as: .inconsistentRecord(id))
         rejected(record(.checkpoint(.guestSecured)), by: &history, as: .inconsistentRecord(id))
         try history.append(record(.checkpoint(.sshPaired)))
         #expect(history.records.count == 2)
