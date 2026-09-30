@@ -13,10 +13,10 @@ import Testing
         let moved = fixture.base.appending(path: "Moved.app")
         try FileManager.default.moveItem(at: fixture.bundle, to: moved)
         try FileManager.default.createDirectory(at: fixture.bundle, withIntermediateDirectories: false)
-        let result = try XcodeBundleMetadata.candidate(borrowing: descriptor)
+        let result = try XcodeBundleInspection.candidate(borrowing: descriptor)
         #expect(result.version == SemanticVersion("26.6"))
         #expect(result.build == "17F113")
-        #expect(result.sizeEstimateBytes == nil)
+        #expect(result.sizeEstimateBytes != nil)
         #expect(fcntl(descriptor, F_GETFD) >= 0)
     }
 
