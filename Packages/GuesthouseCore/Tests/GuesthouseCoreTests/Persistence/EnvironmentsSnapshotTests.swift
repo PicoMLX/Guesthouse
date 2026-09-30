@@ -144,7 +144,7 @@ import Testing
         }
     }
 
-    @Test(arguments: [1, 2, 4, 99])
+    @Test(arguments: [1, 2, 3, 5, 99])
     func unsupportedOuterFormatsAreRefusedBeforeReadingTheirShape(version: Int) throws {
         let schema = try #require(SchemaVersion(version))
         let error = StateStoreError.unsupportedSnapshotVersion(found: schema, current: EnvironmentsSnapshot.currentSchema)
@@ -191,6 +191,6 @@ import Testing
         json["rawOutput"] = "test-only-discarded-output"
         let restored = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
         #expect(restored == original)
-        #expect(Set(try object(restored).keys) == ["schemaVersion", "environments", "slots", "provisioning"])
+        #expect(Set(try object(restored).keys) == ["schemaVersion", "environments", "slots", "provisioning", "processIdentities"])
     }
 }

@@ -18,6 +18,7 @@ import Testing
         await store.close()
         let reopened = try await fixture.open()
         #expect(try await reopened.loadSnapshot() == value)
+        #expect(try await reopened.loadSnapshot().processIdentities.count == 1)
         #expect(try Data(contentsOf: work) == original)
         var info = stat()
         try #require(lstat(fixture.snapshot.path, &info) == 0)
@@ -179,7 +180,12 @@ import Testing
         let environment = DevelopmentEnvironment(name: "Task Mac")
         var slots = VMSlotInventory()
         try slots.reserve(environment.id)
-        return EnvironmentsSnapshot(environments: [environment], slots: slots, provisioning: [environment.id: .initial])
+        let identity = ProcessIdentity(pid: 123, startTime: Date(timeIntervalSince1970: 1_800_000_000.123456),
+            executablePath: "/test/provider", argumentsDigest: "sha256:" + String(repeating: "a", count: 64),
+            vmName: environment.id.managedVMName, environmentID: environment.id,
+            recordedAt: Date(timeIntervalSince1970: 1_800_000_001.654321))
+        return EnvironmentsSnapshot(environments: [environment], slots: slots, provisioning: [environment.id: .initial],
+            processIdentities: [environment.id: identity])
     }
 
     private struct Fixture: Sendable {

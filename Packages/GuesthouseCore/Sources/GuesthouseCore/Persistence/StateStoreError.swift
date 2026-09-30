@@ -11,6 +11,7 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
     public enum SnapshotInconsistency: Hashable, Sendable, CaseIterable {
         case duplicateEnvironments, duplicateSlots, slotsDisagree, unknownProvisioningEnvironment
         case environmentVersion, provisioningVersion, checkpointStage, effectCounter
+        case unknownProcessEnvironment, processIdentity
     }
 
     /// Logical store areas, never user-selected paths or actual filenames.

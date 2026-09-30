@@ -22,12 +22,12 @@ import Testing
         let pending = ProvisioningState(stage: .first, status: .awaitingInspection(EffectToken(UInt64.max)), issuedEffects: UInt64.max)
         let expected = EnvironmentsSnapshot(environments: [environment], slots: slots, provisioning: [environment.id: pending])
         let json = String(decoding: try JSONEncoder().encode(expected), as: UTF8.self)
-        let original = Data(json.replacingOccurrences(of: "\"schemaVersion\":3", with: "\"schemaVersion\":2").utf8)
+        let original = Data(json.replacingOccurrences(of: "\"schemaVersion\":4", with: "\"schemaVersion\":2").utf8)
         let migrated = try SnapshotMigrator.standard.migrate(original)
         #expect(migrated.from == SchemaVersion(2))
         #expect(try JSONDecoder().decode(EnvironmentsSnapshot.self, from: migrated.data) == expected)
         #expect(expected.storageSelection == nil)
-        #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(3)!, current: SchemaVersion(2)!)) {
+        #expect(throws: StateStoreError.newerSchemaVersion(found: EnvironmentsSnapshot.currentSchema, current: SchemaVersion(2)!)) {
             try SnapshotMigrator(current: SchemaVersion(2)!, migrations: []).migrate(migrated.data)
         }
     }

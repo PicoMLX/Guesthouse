@@ -6,7 +6,7 @@ import Testing
     struct TransformFailure: Error {}
 
     @Test func currentDataIsReturnedByteForByte() throws {
-        let source = Data("{ \"schemaVersion\" : 3, \"unknownField\": \"test-only\" }\n".utf8)
+        let source = Data("{ \"schemaVersion\" : 4, \"unknownField\": \"test-only\" }\n".utf8)
         let result = try SnapshotMigrator.standard.migrate(source)
         #expect(result.data == source)
         #expect(result.from == EnvironmentsSnapshot.currentSchema)
@@ -60,7 +60,7 @@ import Testing
         }
     }
 
-    @Test(arguments: [4, 99, Int.max])
+    @Test(arguments: [5, 99, Int.max])
     func futureVersionIsRefusedBeforeItsRecordShapeIsRead(version: Int) {
         #expect(throws: StateStoreError.newerSchemaVersion(found: SchemaVersion(version)!, current: EnvironmentsSnapshot.currentSchema)) {
             try SnapshotMigrator.standard.migrate(Data("{\"schemaVersion\":\(version)}".utf8))
@@ -175,7 +175,7 @@ import Testing
             .init(from: SchemaVersion(1)!) { _ in throw TransformFailure() },
             .init(from: SchemaVersion(2)!) { _ in throw TransformFailure() },
         ])
-        let source = Data("{\"schemaVersion\":3}".utf8)
+        let source = Data("{\"schemaVersion\":4}".utf8)
         let result = try migrator.migrate(source)
         #expect(result.data == source)
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(EnvironmentsSnapshot.self, from: result.data) }
