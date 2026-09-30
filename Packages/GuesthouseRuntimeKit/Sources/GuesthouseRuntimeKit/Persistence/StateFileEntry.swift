@@ -3,10 +3,11 @@ import GuesthouseCore
 
 /// Fixed runtime operations, never arbitrary GUI/repository names or snapshot-in-place writes.
 enum StateFileAccess: Sendable, CaseIterable {
-    case readSnapshot, readJournal, writeJournal
+    case readSnapshot, readJournal, writeJournal, inspectSnapshot, inspectJournal
 
-    var name: String { self == .readSnapshot ? "environments.json" : "journal.ndjson" }
-    var label: StateStoreError.File { self == .readSnapshot ? .snapshot : .journal }
+    var name: String { label == .snapshot ? "environments.json" : "journal.ndjson" }
+    var label: StateStoreError.File { self == .readSnapshot || self == .inspectSnapshot ? .snapshot : .journal }
+    var inspects: Bool { self == .inspectSnapshot || self == .inspectJournal }
     var creates: Bool { self == .writeJournal }
     var failure: StateStoreError { creates ? .fileUnwritable(name: label) : .fileUnreadable(name: label) }
 }
@@ -66,7 +67,14 @@ enum StateFileEntry {
             let openError = errno
             if openError != ENOENT {
                 didObserve()
-                guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
+                let entry = entryMetadata(in: directory, access: access)
+                guard didIdentify(entry.map(StateFileIdentity.init)) else { throw access.failure }
+                if access.inspects, openError == EACCES || openError == EPERM,
+                   let entry, entry.st_mode & S_IFMT == S_IFREG {
+                    // Opening a known metadata file was denied before descriptor verification.
+                    // Preserve it and require repair; this is not missing first-launch storage.
+                    throw StateStoreError.insecureDirectory(reason: .permissions)
+                }
             }
             if openError == ENOENT, !access.creates {
                 do {
@@ -110,14 +118,19 @@ enum StateFileEntry {
             let transactionDirectoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
             try validateDirectory(transactionDirectoryVersion)
             try requireBinding(descriptor, in: directory, access: access)
-            try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
-                synchronize: { descriptor, label in
-                    let fileVersion = try StateFileIO.version(descriptor, name: label)
-                    let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
-                    try permissionBarrier(descriptor, label)
-                    try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
-                    try validateDirectory(directoryVersion)
-                })
+            if access.inspects {
+                // Inspection neither repairs permissions nor invokes a preparation barrier.
+                try StateFileProtection.verify(descriptor, kind: .regularFile)
+            } else {
+                try StateFileProtection.prepare(descriptor, kind: .regularFile, name: access.label,
+                    synchronize: { descriptor, label in
+                        let fileVersion = try StateFileIO.version(descriptor, name: label)
+                        let directoryVersion = try StateFileIO.version(directory, name: .stateDirectory)
+                        try permissionBarrier(descriptor, label)
+                        try verifyCurrent(descriptor, in: directory, access: access, version: fileVersion)
+                        try validateDirectory(directoryVersion)
+                    })
+            }
             try validateDirectory(transactionDirectoryVersion)
             let prepared = try verifyCurrent(descriptor, in: directory, access: access)
             let result = try body(descriptor)
@@ -131,8 +144,12 @@ enum StateFileEntry {
     /// Nofollow metadata for failed opens only. An identity is evidence, not valid contents
     /// or access authority; inability to bind it is reported explicitly to the owner.
     private static func entryIdentity(in directory: Int32, access: StateFileAccess) -> StateFileIdentity? {
+        entryMetadata(in: directory, access: access).map(StateFileIdentity.init)
+    }
+
+    private static func entryMetadata(in directory: Int32, access: StateFileAccess) -> stat? {
         var entry = stat()
-        return fstatat(directory, access.name, &entry, AT_SYMLINK_NOFOLLOW) == 0 ? StateFileIdentity(entry) : nil
+        return fstatat(directory, access.name, &entry, AT_SYMLINK_NOFOLLOW) == 0 ? entry : nil
     }
 
     /// In addition to inode identity, a supplied version detects same-inode reattachment or
