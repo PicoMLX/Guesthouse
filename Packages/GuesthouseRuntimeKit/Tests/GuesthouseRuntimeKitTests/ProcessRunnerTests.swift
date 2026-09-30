@@ -85,7 +85,8 @@ import Testing
             standardInput: .data(Data(repeating: 65, count: 4 << 20))))
         let report = try await run.waitForExit()
         #expect(try report.childExit?.get() == .status(0))
-        #expect(report.input != .delivered && report.inputClosed)
+        #expect(report.input != .delivered)
+        #expect(report.inputClosed)
     }
 
     @Test func canceledWaitStillObservesReapedChild() async throws {
