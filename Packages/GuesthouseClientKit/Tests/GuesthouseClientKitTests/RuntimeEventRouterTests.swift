@@ -13,6 +13,47 @@ import Testing
         .status(.init(environmentID: environment, vm: .running, readiness: .checking, inFlightOperation: id)),
     ]
 
+    @Test(arguments: [RuntimeRequest.runtimeVersion, .startEnvironment(environment, .init()),
+                      .stopEnvironment(environment, .force), .stopEnvironment(environment, .graceful(deadline: .seconds(60)))])
+    func confirmedRefusalCannotArriveAsAPreacceptanceReply(request: RuntimeRequest) async throws {
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router, request: request)
+        let effects = router.reply(.success(.failed(Self.id, .guestShutdownRefused(Self.environment))), to: fixture.key)
+        #expect(effects.contains(.retireConnection))
+        await #expect(throws: RuntimeSessionFailure.self) { try await collectRouting(fixture.stream) }
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func confirmedRefusalRequiresTheOwningGracefulStop(force: Bool, beforeAcceptance: Bool) async throws {
+        var router = RuntimeEventRouter()
+        let request = RuntimeRequest.stopEnvironment(Self.environment, force ? .force : .graceful(deadline: .seconds(60)))
+        let fixture = try start(&router, request: request)
+        let refusal = RuntimeEvent.failed(Self.id, .guestShutdownRefused(Self.environment))
+        if beforeAcceptance { _ = router.incoming(refusal) }
+        let accepted = router.reply(.success(.accepted(Self.id)), to: fixture.key)
+        let effects = beforeAcceptance ? accepted : router.incoming(refusal)
+        if force {
+            #expect(effects.contains(.retireConnection)) // Includes faults discovered while draining buffered events.
+            await #expect(throws: RuntimeSessionFailure.self) { try await collectRouting(fixture.stream) }
+        } else {
+            #expect(effects.isEmpty)
+            #expect(try await collectRouting(fixture.stream) == [.accepted(Self.id), refusal])
+        }
+    }
+
+    @Test func refusalForAnotherEnvironmentOrOperationKindNeverSettlesTheOwner() async throws {
+        for request in [RuntimeRequest.stopEnvironment(Self.environment, .graceful(deadline: .seconds(60))),
+                        .startEnvironment(Self.environment, .init())] {
+            var router = RuntimeEventRouter()
+            let fixture = try start(&router, request: request)
+            _ = router.reply(.success(.accepted(Self.id)), to: fixture.key)
+            let expected = request.caseName == "startEnvironment" ? Self.environment : EnvironmentID()
+            let effects = router.incoming(.failed(Self.id, .guestShutdownRefused(expected)))
+            #expect(effects.contains(.retireConnection))
+            await #expect(throws: RuntimeSessionFailure.self) { try await collectRouting(fixture.stream) }
+        }
+    }
+
     @Test(arguments: traffic, [RuntimeEvent.completed(id), .failed(id, .runtimeMissing)])
     func earlyFloodPreservesAcceptanceAndTerminal(traffic: RuntimeEvent, terminal: RuntimeEvent) async throws {
         var router = RuntimeEventRouter()

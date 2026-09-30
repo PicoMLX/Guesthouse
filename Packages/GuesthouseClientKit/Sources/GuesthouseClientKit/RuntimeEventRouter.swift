@@ -112,8 +112,9 @@ struct RuntimeEventRouter: Sendable {
             entry.awaiting = false; entry.operation = id
             requests[key] = entry; operations[id] = key
             entry.producer.reply(event)
-            for buffered in pending.removeValue(forKey: id) ?? [] { _ = route(buffered) }
-            return []
+            var effects: [Effect] = []
+            for buffered in pending.removeValue(forKey: id) ?? [] { effects += route(buffered) }
+            return effects
         }
     }
 
@@ -157,6 +158,10 @@ struct RuntimeEventRouter: Sendable {
     private mutating func route(_ event: RuntimeEvent) -> [Effect] {
         guard let id = event.routingID else { return [] }
         if let key = operations[id], let entry = requests[key] {
+            if case .failed(_, .guestShutdownRefused(let environment)) = event {
+                guard case .stopEnvironment(let expected, .graceful) = entry.request,
+                      environment == expected else { return fault(.malformedResponse) }
+            }
             guard event.matchesEnvironment(entry.request.environment) else { return [] }
             if event.isTerminal { remove(key, operation: id) }
             entry.producer.push(event)
@@ -229,6 +234,7 @@ extension RuntimeRequest {
         if case .cancelOperation(let id) = self { id } else { nil }
     }
     func acceptsReply(_ event: RuntimeEvent) -> Bool {
+        if case .failed(_, .guestShutdownRefused) = event { return false } // Requires prior acceptance and an owning graceful stop.
         if case .failed = event { return true } // Correlated service rejection, not a live registration.
         switch (self, event) {
         case (.runtimeVersion, .runtimeVersion(let info)), (.prepareStorage, .runtimeVersion(let info)): return info.protocolVersion == .current
@@ -257,6 +263,7 @@ extension RuntimeEvent {
     func matchesEnvironment(_ expected: EnvironmentID?) -> Bool {
         switch self {
         case .status(let status): status.environmentID == expected
+        case .failed(_, .guestShutdownRefused(let id)): id == expected
         case .diagnostic(let event): event.environmentID == nil || event.environmentID == expected
         default: true
         }
