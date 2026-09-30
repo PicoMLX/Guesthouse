@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GuesthouseCore
 import Synchronization
@@ -406,6 +407,89 @@ import XPC
         if !refuse { #expect(try await next(response) == .runtimeVersion(version)) }
         #expect(fixture.trace.steps.withLock { $0.filter { $0 == .released }.count } == 1)
         #expect(fixture.trace.steps.withLock { $0.filter { $0 == .probed }.count } == (refuse ? 0 : 1))
+    }
+
+    @Test(arguments: [false, true])
+    func selectedXcodeIsInspectedFromItsRetainedGrantAfterSenderClose(authorized: Bool) async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "guesthouse-native-selection-\(UUID())")
+        let selected = base.appending(path: "Xcode.app")
+        try FileManager.default.createDirectory(at: selected.appending(path: "Contents/MacOS"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let metadata = ["CFBundlePackageType": "APPL", "CFBundleIdentifier": "com.apple.dt.Xcode",
+            "CFBundleShortVersionString": "26.6", "DTXcodeBuild": "17F113", "CFBundleExecutable": "Xcode"]
+        try PropertyListSerialization.data(fromPropertyList: metadata, format: .binary, options: 0)
+            .write(to: selected.appending(path: "Contents/Info.plist"))
+        let program = selected.appending(path: "Contents/MacOS/Xcode")
+        try Data("fixture, never executed".utf8).write(to: program)
+        try #require(chmod(program.path, 0o700) == 0)
+        let descriptor = open(selected.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        try #require(descriptor >= 0)
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        let fixture = try Fixture(authorized: authorized, productionPlan: true)
+        defer { fixture.cancel() }
+        let response = fixture.request(try selectionMessage(descriptor: descriptor))
+        _ = try await next(fixture.processed)
+        try handle.close()
+        try FileManager.default.moveItem(at: selected, to: base.appending(path: "Moved.app"))
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: false)
+        #expect(fixture.executor.pending.withLock { $0.count } == (authorized ? 1 : 0))
+        fixture.executor.drain()
+        let event = try await next(response)
+        if authorized {
+            guard case .xcodeSelection(.candidate(let candidate)) = event else { Issue.record("Missing candidate"); return }
+            #expect(candidate.version == SemanticVersion("26.6") && candidate.build == "17F113")
+            #expect(candidate.sizeEstimateBytes != nil)
+            #expect(fixture.trace.diagnostics.withLock { $0.isEmpty })
+        } else { #expect(failure(event) == .unauthorizedCaller) }
+    }
+
+    @Test(arguments: ["missing", "integer", "bookmark", "otherRequest", "foreign", "regular", "writable", "wrongExpected", "oneWay", "disconnect"])
+    func selectionGrantRefusalNeverSchedulesAnUnauthorizedRead(kind: String) async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "guesthouse-selection-refusal-\(UUID())")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let file = base.appending(path: "file")
+        try Data("private-fixture-marker".utf8).write(to: file)
+        let descriptor = open((["regular", "writable"].contains(kind) ? file : base).path, (kind == "writable" ? O_RDWR : O_RDONLY) | O_CLOEXEC)
+        try #require(descriptor >= 0)
+        defer { close(descriptor) }
+        let fixture = try Fixture(productionPlan: true)
+        defer { fixture.cancel() }
+        var frame = try selectionMessage(descriptor: kind == "missing" || kind == "integer" ? nil : descriptor,
+            bookmark: kind == "bookmark", otherRequest: kind == "otherRequest", wrongExpected: kind == "wrongExpected")
+        if kind == "integer" { frame["selectedDirectory"] = Int64(descriptor) }
+        if kind == "foreign" { frame["protocolVersion"] = Int64(14) }
+        if kind == "oneWay" {
+            try fixture.client.send(message: frame)
+            _ = try await next(fixture.processed)
+            #expect(fixture.executor.pending.withLock { $0.isEmpty })
+            return
+        }
+        let response = fixture.request(frame)
+        _ = try await next(fixture.processed)
+        #expect(fixture.executor.pending.withLock { $0.count } == (["regular", "writable", "wrongExpected", "disconnect"].contains(kind) ? 1 : 0))
+        if kind == "disconnect" {
+            _ = try await next(fixture.request(try message(.foreignHeader)))
+            _ = try await next(fixture.processed)
+        }
+        fixture.executor.drain()
+        let event = try await next(response)
+        switch kind {
+        case "regular": #expect(event == .xcodeSelection(.rejected(.notAnApplication)))
+        case "writable": #expect(event == .xcodeSelection(.rejected(.unavailable)))
+        case "wrongExpected": #expect(event == .xcodeSelection(.rejected(.notXcode)))
+        case "foreign": #expect(failure(event) == .protocolMismatch(client: 14, service: RuntimeProtocolVersion.current.rawValue))
+        case "disconnect": #expect(failure(event) == .protocolMismatch(client: 99, service: RuntimeProtocolVersion.current.rawValue))
+        default: #expect(failure(event) == .invalidRequest(.malformed))
+        }
+    }
+
+    private func selectionMessage(descriptor: Int32?, bookmark: Bool = false, otherRequest: Bool = false, wrongExpected: Bool = false) throws -> XPCDictionary {
+        let handoff = FileHandoff(kind: bookmark ? .securityScopedBookmark(Data([1])) : .fileDescriptor(token: UUID()), displayName: "Xcode.app", expectedBundleIdentifier: wrongExpected ? "example.other" : nil)
+        let bytes = try JSONEncoder().encode(RuntimeRequestEnvelope(request: otherRequest ? .runtimeVersion : .inspectXcode(handoff)))
+        let frame = try RawRuntimeFrame.encode(bytes, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue))
+        if let descriptor { frame.withUnsafeUnderlyingDictionary { xpc_dictionary_set_fd($0, "selectedDirectory", descriptor) } }
+        return frame
     }
 
     private func message(_ shape: Shape) throws -> XPCDictionary {

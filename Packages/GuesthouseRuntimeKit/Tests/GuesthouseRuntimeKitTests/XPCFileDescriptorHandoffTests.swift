@@ -29,8 +29,8 @@ import XPC
         try FileManager.default.moveItem(at: selected, to: moved)
         try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: false)
         try Data("replacement".utf8).write(to: selected.appending(path: "marker"))
-        // Production framing remains unchanged: an extra descriptor is still refused until
-        // the named import consumer and its protocol migration are implemented together.
+        // Default framing still refuses grants; only the named authenticated inspection
+        // ingress opts in and binds the grant to its decoded request.
         #expect(throws: RawRuntimeFrame.Failure.malformed) {
             try RawRuntimeFrame.payload(message, expectedVersion: Int64(RuntimeProtocolVersion.current.rawValue))
         }

@@ -68,10 +68,10 @@ enum XcodeBundleSize {
 /// Read-only composition. The same borrowed selection descriptor supplies metadata and size.
 /// Import must revalidate its own grant and storage capacity; this result does not authorize it.
 enum XcodeBundleInspection {
-    static func candidate(borrowing bundle: Int32) throws(XcodeSelectionFailure) -> XcodeCandidate {
+    static func candidate(borrowing bundle: Int32, isCanceled: @Sendable () -> Bool = { Task.isCancelled }) throws(XcodeSelectionFailure) -> XcodeCandidate {
         let metadata = try XcodeBundleMetadata.candidate(borrowing: bundle)
         guard let candidate = XcodeCandidate(version: metadata.version, build: metadata.build,
-            sizeEstimateBytes: XcodeBundleSize.measure(borrowing: bundle)) else { throw .metadataUnreadable }
+            sizeEstimateBytes: XcodeBundleSize.measure(borrowing: bundle, isCanceled: isCanceled)) else { throw .metadataUnreadable }
         return candidate
     }
 }

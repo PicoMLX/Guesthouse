@@ -140,7 +140,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         }) { decision = capped }
         else {
             do {
-                let bytes = try RawRuntimeFrame.payload(message, expectedVersion: Self.epoch)
+                let bytes = try RawRuntimeFrame.payload(message, expectedVersion: Self.epoch, allowSelectedDirectory: true)
                 let decoded = decode(bytes, others)
                 // The authoritative outer epoch was current: a foreign nested version is a
                 // contradictory frame, not a handshake from that foreign client version.
@@ -162,18 +162,25 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         case .replyAndClose(let refusal):
             worker.refuse(gate, with: refusal)
             reply.finish(gate.refusal ?? refusal)
-        case .dispatch(let request): dispatch(request, reply: reply)
+        case .dispatch(let request):
+            do {
+                let selection = try RuntimeXcodeSelection.bind(request, message: message)
+                dispatch(request, selection: selection, reply: reply)
+            } catch { reply.finish(.failed(OperationID(), error)) }
         }
         return nil // No implicit second reply/context creation.
     }
 
-    private func dispatch(_ request: RuntimeRequest, reply: RuntimeReplyObligation) {
+    private func dispatch(_ request: RuntimeRequest, selection: RuntimeXcodeSelection?, reply: RuntimeReplyObligation) {
         // A rejected reservation may release its Job inside the gate. Retain the plan's
         // captured owners until AFTER unlocking, including when the worker is full.
         var retainedPlan: ReplyPlan?
         defer { withExtendedLifetime(retainedPlan) {} }
         let registration = gate.commitRegistration(request) { request -> Delivery in
-            let selected = plan(request)
+            let selected: ReplyPlan
+            if let selection {
+                selected = .readOnly { [gate] in selection.inspect(isCanceled: { gate.refusal != nil }) }
+            } else { selected = plan(request) }
             retainedPlan = selected
             switch selected {
             case .immediate(let event): return .immediate(event)
