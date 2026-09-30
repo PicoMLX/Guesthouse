@@ -3,6 +3,8 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
     case runtimeVersion(RuntimeVersionInfo)
     /// Terminal reply to its owning query, never an unsolicited operation event.
     case hostPreflight(PreflightReport)
+    /// Terminal reply to its owning selection query, never an operation or unsolicited push.
+    case xcodeSelection(XcodeSelectionResult)
     /// The service must journal/register the operation before acknowledging acceptance.
     case accepted(OperationID)
     case progress(OperationID, ProgressPhase)
@@ -16,6 +18,7 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
         switch self {
         case .runtimeVersion: "runtimeVersion"
         case .hostPreflight: "hostPreflight"
+        case .xcodeSelection: "xcodeSelection"
         case .accepted: "accepted"
         case .progress: "progress"
         case .diagnostic: "diagnostic"

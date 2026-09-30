@@ -55,7 +55,7 @@ public final class XPCRuntimeTransport: Sendable {
         let lease = try activeSession()
         let mayMutate: Bool
         switch envelope.request {
-        case .runtimeVersion, .hostPreflight, .environmentStatus: mayMutate = false
+        case .runtimeVersion, .hostPreflight, .inspectXcode, .environmentStatus: mayMutate = false
         case .prepareStorage, .startEnvironment, .stopEnvironment, .importXcode, .cancelOperation: mayMutate = true
         }
         // Retain the registry, not self: deinit can cancel pending work, while late callbacks

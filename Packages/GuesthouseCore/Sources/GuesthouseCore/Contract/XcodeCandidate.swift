@@ -24,6 +24,11 @@ public struct XcodeCandidate: Codable, Hashable, Sendable {
     }
 }
 
+public enum XcodeSelectionResult: Codable, Hashable, Sendable {
+    case candidate(XcodeCandidate)
+    case rejected(XcodeSelectionFailure)
+}
+
 /// Selection-specific recovery, with no paths, plist values or underlying errors (ADR 0003).
 public enum XcodeSelectionFailure: String, Error, Codable, Hashable, Sendable, CaseIterable {
     case unavailable, notAnApplication, notXcode, metadataUnreadable

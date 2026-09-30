@@ -34,6 +34,8 @@ import XPC
         #expect(throws: RawRuntimeFrame.Failure.malformed) {
             try RawRuntimeFrame.payload(message, expectedVersion: Int64(RuntimeProtocolVersion.current.rawValue))
         }
+        #expect(try RawRuntimeFrame.payload(message, expectedVersion: Int64(RuntimeProtocolVersion.current.rawValue),
+            allowSelectedDirectory: true) == bytes)
         let fixture = try Fixture(token: token)
         defer { fixture.cancel() }
         let reply = try await fixture.request(message)
