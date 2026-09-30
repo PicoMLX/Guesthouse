@@ -9,6 +9,68 @@ import Testing
     static let environment = EnvironmentID(), id = OperationID()
     static let start = RuntimeRequest.startEnvironment(environment, .init())
 
+    @Test func idleDropInvalidatesWithoutReplayingAndOldPeerCannotInvalidateReplacement() async throws {
+        let fixture = OwnerFixture(), client = fixture.client()
+        var invalidations = client.connectionInterruptions.makeAsyncIterator()
+        var first = client.send(.runtimeVersion).makeAsyncIterator()
+        await client.flush()
+        let oldPeer = try #require(fixture.latest)
+        oldPeer.answer(0, .success(.runtimeVersion(Self.info)))
+        #expect(try await first.next() == .runtimeVersion(Self.info))
+        #expect(try await first.next() == nil)
+        oldPeer.dropped()
+        await client.flush()
+        #expect(await invalidations.next() == .connectionLost)
+        #expect(fixture.connectionCount == 1 && oldPeer.requests.count == 1)
+
+        var second = client.send(.runtimeVersion).makeAsyncIterator()
+        await client.flush()
+        let replacement = try #require(fixture.latest)
+        replacement.answer(0, .success(.runtimeVersion(Self.info)))
+        #expect(try await second.next() == .runtimeVersion(Self.info))
+        #expect(try await second.next() == nil)
+        oldPeer.dropped()
+        await client.flush()
+        // With one buffered cause, an incorrectly delivered stale drop would replace this cause.
+        replacement.incoming(.failure(.init(cause: .oversizedResponse)))
+        await client.flush()
+        oldPeer.dropped()
+        await client.flush()
+        #expect(await invalidations.next() == .oversizedResponse)
+        #expect(fixture.connectionCount == 2 && replacement.cancelCount == 1)
+        await client.close()
+        #expect(await invalidations.next() == .connectionLost)
+        #expect(await invalidations.next() == nil)
+    }
+
+    @Test func interruptedMutationKeepsRequestIdentityOutOfConnectionSignal() async throws {
+        let fixture = OwnerFixture(), client = fixture.client()
+        var invalidations = client.connectionInterruptions.makeAsyncIterator()
+        var operation = client.send(Self.start).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        peer.answer(0, .success(.accepted(Self.id)))
+        #expect(try await operation.next() == .accepted(Self.id))
+        peer.dropped()
+        await client.flush()
+        #expect(await invalidations.next() == .connectionLost)
+        await #expect(throws: RuntimeSessionFailure(cause: .connectionLost, operationID: Self.id, mayHaveMutated: true)) {
+            try await operation.next()
+        }
+        #expect(await client.reconciliation().0.first?.failure.operationID == Self.id)
+        #expect(peer.requests == [Self.start] && fixture.connectionCount == 1)
+    }
+
+    @Test func observationDoesNotRetainClientOrOpenAConnection() async throws {
+        let fixture = OwnerFixture()
+        var client: RuntimeClient? = fixture.client()
+        weak let owner = client
+        var invalidations = try #require(client).connectionInterruptions.makeAsyncIterator()
+        client = nil
+        #expect(await invalidations.next() == nil)
+        #expect(owner == nil && fixture.connectionCount == 0)
+    }
+
     @Test func publicBackendRefusesMutationsWithoutConnecting() async {
         let client: any RuntimeBackend = RuntimeClient()
         var iterator = client.send(Self.start).makeAsyncIterator()
