@@ -52,6 +52,46 @@ import Testing
         #expect(peer.cancelCount == 1)
     }
 
+    @Test(arguments: [false, true])
+    func publicStatusQueriesRequireTheOwningEnvironmentAndKeepUnknownState(wrongEnvironment: Bool) async throws {
+        let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        var query = client.send(.environmentStatus(Self.environment)).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        let status = EnvironmentStatus(environmentID: wrongEnvironment ? EnvironmentID() : Self.environment,
+            vm: .uncertain(reason: .inspectionFailed), readiness: .checking)
+        peer.answer(0, .success(.status(status)))
+        if wrongEnvironment {
+            await #expect(throws: RuntimeSessionFailure(cause: .malformedResponse)) { try await query.next() }
+        } else {
+            #expect(try await query.next() == .status(status))
+            #expect(try await query.next() == nil)
+        }
+        for request in [Self.start, .stopEnvironment(Self.environment, .force),
+                        .inspectXcode(.init(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app"))] {
+            var refused = client.send(request).makeAsyncIterator()
+            await #expect(throws: GuesthouseError.invalidRequest(.unsupportedOperation)) { try await refused.next() }
+        }
+        #expect(peer.requests == [.environmentStatus(Self.environment)])
+        #expect(await client.reconciliation().0.isEmpty)
+        #expect(await client.reconciliation().1.isEmpty)
+        await client.close()
+    }
+
+    @Test func statusTransportFailureDoesNotInventAnUnknownMutationOrReplay() async throws {
+        let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        var query = client.send(.environmentStatus(Self.environment)).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        peer.answer(0, .failure(.init(cause: .connectionLost)))
+        await #expect(throws: RuntimeSessionFailure(cause: .connectionLost)) { try await query.next() }
+        await client.flush()
+        let recovery = await client.reconciliation()
+        #expect(recovery.0.isEmpty && recovery.1.isEmpty)
+        #expect(peer.requests == [.environmentStatus(Self.environment)] && fixture.connectionCount == 1)
+        await client.close()
+    }
+
     @Test func preflightTransportFailureDoesNotInventAnUnknownMutationOrReplay() async throws {
         let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
         var query = client.send(.hostPreflight).makeAsyncIterator()
