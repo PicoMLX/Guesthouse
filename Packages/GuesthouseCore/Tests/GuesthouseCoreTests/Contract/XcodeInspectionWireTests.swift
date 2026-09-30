@@ -4,6 +4,20 @@ import XPC
 @testable import GuesthouseCore
 
 @Suite struct XcodeInspectionWireTests {
+    @Test func fakeInspectionDefaultsToUnavailableAndSupportsExplicitCandidatePreviews() async throws {
+        let backend = FakeRuntimeBackend()
+        let request = RuntimeRequest.inspectXcode(.init(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app"))
+        var first: [RuntimeEvent] = []
+        for try await event in backend.send(request) { first.append(event) }
+        #expect(first == [.xcodeSelection(.rejected(.unavailable))])
+        let candidate = try #require(XcodeCandidate(version: SemanticVersion("26.6")!, build: "17F113", sizeEstimateBytes: .max))
+        await backend.setXcodeSelectionResult(.candidate(candidate))
+        var second: [RuntimeEvent] = []
+        for try await event in backend.send(request) { second.append(event) }
+        #expect(second == [.xcodeSelection(.candidate(candidate))])
+        #expect(await backend.receivedRequests == [request, request])
+    }
+
     @Test func inspectionRequestUsesTheExistingBoundedHandoff() throws {
         let handoff = FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app", expectedBundleIdentifier: "com.apple.dt.Xcode")
         let envelope = RuntimeRequestEnvelope(request: .inspectXcode(handoff))

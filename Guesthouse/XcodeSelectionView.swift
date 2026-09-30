@@ -28,11 +28,7 @@ struct XcodeSelectionView: View {
                 switch outcome {
                 case .success(let candidate):
                     Text("Xcode \(candidate.version.description), build \(candidate.build)").font(.headline)
-                    if let size = candidate.sizeEstimateBytes, let bytes = Int64(exactly: size) {
-                        Text("Estimated disk usage: \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
-                    } else {
-                        Text("Disk usage could not be estimated.")
-                    }
+                    Text(Self.sizeDescription(for: candidate.sizeEstimateBytes))
                     Text("Selection inspected. Copying Xcode and checking guest compatibility are separate steps.")
                         .foregroundStyle(.secondary)
                 case .failure(let error):
@@ -44,6 +40,13 @@ struct XcodeSelectionView: View {
         .textSelection(.enabled)
         .accessibilityIdentifier("xcodeSelectionResult")
         .onDisappear(perform: cancel)
+    }
+
+    static func sizeDescription(for bytes: UInt64?) -> String {
+        guard let bytes else { return "Disk usage could not be estimated." }
+        let formatted = Int64(exactly: bytes).map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+            ?? "\(bytes.formatted()) bytes"
+        return "Estimated disk usage: \(formatted)"
     }
 
     private func choose() {
