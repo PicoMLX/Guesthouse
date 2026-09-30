@@ -52,6 +52,8 @@ struct ContentView: View {
                 StorageSetupView(canPrepare: canPrepareStorage)
                 Divider()
                 HostPreflightView()
+                Divider()
+                XcodeSelectionView()
             }
             .padding(24)
         }
