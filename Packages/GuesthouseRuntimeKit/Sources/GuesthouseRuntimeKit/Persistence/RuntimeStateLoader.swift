@@ -1,3 +1,4 @@
+import Foundation
 import GuesthouseCore
 import Synchronization
 
@@ -9,6 +10,7 @@ public final class RuntimeStateLoader: Sendable {
         let snapshot: EnvironmentsSnapshot
         let journal: JournalReplay
         let store: StateStore
+        let storageDestination: URL?
     }
     private struct State: Sendable {
         var started = false
@@ -26,6 +28,14 @@ public final class RuntimeStateLoader: Sendable {
     public var status: RuntimeSavedStateStatus { state.withLock { $0.status } }
     var loadedState: LoadedState? { state.withLock { $0.loaded } }
 
+    /// Called on the bounded read-only worker, never inside the session gate. Missing,
+    /// loading or rejected metadata cannot supply a new selection. Every probe rereads facts.
+    func hostPreflight() -> PreflightReport {
+        let loaded = state.withLock { $0.status == .loaded ? $0.loaded : nil }
+        return RuntimeHostPreflight(storageRoot: loaded?.storageDestination,
+            expectedVolume: loaded?.snapshot.storageSelection?.volumeID).check()
+    }
+
     /// A second caller does not open another owner or retry a failed load. Failure needs
     /// explicit user-directed recovery and a new service instance, not automatic recreation.
     public func load() async {
@@ -41,7 +51,8 @@ public final class RuntimeStateLoader: Sendable {
             opened = store
             let snapshot = try await store.loadSnapshot()
             let journal = try await store.replay()
-            let loaded = LoadedState(snapshot: snapshot, journal: journal, store: store)
+            let destination = snapshot.storageSelection == nil ? nil : try await store.storageDestination()
+            let loaded = LoadedState(snapshot: snapshot, journal: journal, store: store, storageDestination: destination)
             state.withLock {
                 $0.loaded = loaded
                 $0.status = journal.truncatedTail ? .repairRequired : .loaded

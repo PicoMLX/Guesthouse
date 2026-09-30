@@ -4,7 +4,7 @@ import GuesthouseCore
 
 /// Runtime-internal preflight only. The service must retain the selected volume identity
 /// separately and supply it on EVERY refresh, not recapture identity from the current path.
-/// Selection/persistence, authenticated query and private-layout admission are not activated.
+/// The service supplies saved selection metadata; this observer never selects or prepares storage.
 /// All checks are point-in-time; a report is neither a capacity reservation nor write authority.
 struct SystemStorageProbe: Sendable {
     let storageRoot: URL?

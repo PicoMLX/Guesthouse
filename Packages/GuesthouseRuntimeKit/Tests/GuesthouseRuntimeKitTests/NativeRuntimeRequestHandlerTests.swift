@@ -75,7 +75,41 @@ import XPC
         // The standalone runner is not the GUI. A rejection is not positive signing proof.
     }
 
-    @Test func productionRegistrationSupportsOnlyTheReadOnlyVersionQuery() {
+    @Test(arguments: [false, true])
+    func productionHostCheckRequiresAuthenticationAndDefersItsReply(authorized: Bool) async throws {
+        let fixture = try Fixture(authorized: authorized, productionPlan: true)
+        defer { fixture.cancel() }
+        let bytes = try JSONEncoder().encode(RuntimeRequestEnvelope(request: .hostPreflight))
+        let frame = try RawRuntimeFrame.encode(bytes, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue))
+        let response = fixture.request(frame)
+        _ = try await next(fixture.processed)
+        if !authorized {
+            #expect(fixture.executor.pending.withLock { $0.isEmpty })
+            #expect(failure(try await next(response)) == .unauthorizedCaller)
+            return
+        }
+        #expect(fixture.executor.pending.withLock { $0.count } == 1)
+        #expect(!fixture.trace.steps.withLock { $0.contains(.sent) })
+        // A synchronous version reply is still available while the host probe is queued.
+        #expect(try await next(fixture.request(try message(.current))) == .runtimeVersion(version))
+        fixture.executor.drain()
+        guard case .hostPreflight(let report) = try await next(response) else {
+            Issue.record("Missing host report"); return
+        }
+        #expect(report.isComplete && !report.canProceed)
+        #expect(report.result(.freeDisk) == .diskUnavailable(.storageRootUnknown))
+        #expect(fixture.trace.steps.withLock { $0.filter { $0 == .sent }.count } == 2)
+    }
+
+    @Test func productionPlanKeepsMutationsUnsupported() {
+        let request = RuntimeRequest.startEnvironment(EnvironmentID(), StartOptions())
+        guard case .immediate(let event) = NativeRuntimeRequestHandler.queryPlan(request, version: version, state: nil) else {
+            Issue.record("Mutation was scheduled"); return
+        }
+        #expect(failure(event) == .invalidRequest(.unsupportedOperation))
+    }
+
+    @Test func immediateReplyHelperRejectsDeferredQueriesAndMutations() {
         let environment = EnvironmentID()
         let requests: [RuntimeRequest] = [
             .hostPreflight, .environmentStatus(environment), .startEnvironment(environment, StartOptions()),
@@ -344,7 +378,7 @@ private final class Fixture: Sendable {
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
          refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
          deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil,
-         captureLifetime: Bool = false, savedState: RuntimeSavedStateStatus? = nil) throws {
+         captureLifetime: Bool = false, productionPlan: Bool = false, savedState: RuntimeSavedStateStatus? = nil) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
         processed = stream
         self.gate = gate
@@ -370,6 +404,7 @@ private final class Fixture: Sendable {
                         },
                         plan: { request in
                             trace.record(.registered)
+                            if productionPlan { return NativeRuntimeRequestHandler.queryPlan(request, version: version, state: nil) }
                             let result = NativeRuntimeRequestHandler.queryReply(request, version: badVersion
                                 ? RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1", protocolVersion: .init(99)) : version, savedState: savedState)
                             guard deferredReplies else { return .immediate(result) }

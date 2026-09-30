@@ -105,6 +105,44 @@ import Testing
         }
     }
 
+    @Test(arguments: ["selected", "unknown", "mismatched", "repair"])
+    func hostCheckUsesOnlyLoadedSelectionAndNeverReplacesIt(kind: String) async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try await fixture.open()
+        if kind != "unknown" { _ = try await store.selectStorageVolume() }
+        await store.close()
+        let snapshotURL = fixture.root.appending(path: "state/environments.json")
+        if kind == "mismatched" {
+            let other = EnvironmentsSnapshot(storageSelection: HostStorageSelection(volumeID: UUID()))
+            try JSONEncoder().encode(other).write(to: snapshotURL)
+        }
+        if kind == "repair" {
+            let journal = fixture.root.appending(path: "state/journal.ndjson")
+            try Data("{".utf8).write(to: journal)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journal.path)
+        }
+        let before = try? Data(contentsOf: snapshotURL)
+        let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in try await fixture.open() })
+        #expect(loader.hostPreflight().result(.freeDisk) == .diskUnavailable(.storageRootUnknown))
+        await loader.load()
+        let first = loader.hostPreflight(), second = loader.hostPreflight()
+        #expect(first.isComplete && second.isComplete)
+        #expect(second.checkedAt >= first.checkedAt)
+        if kind == "selected" {
+            switch first.result(.freeDisk) {
+            case .diskSufficient, .insufficientDisk: break // Actual temporary-volume capacity is not fixed.
+            default: Issue.record("Saved selection was not used")
+            }
+        } else {
+            #expect(first.result(.freeDisk) == .diskUnavailable(kind == "mismatched" ? .volumeIdentityChanged : .storageRootUnknown))
+            #expect(!first.canProceed)
+        }
+        #expect((try? Data(contentsOf: snapshotURL)) == before)
+        if kind == "unknown" { #expect(loader.loadedState?.snapshot.storageSelection == nil) }
+        await loader.loadedState?.store.close()
+    }
+
     private struct Fixture: Sendable {
         let base: URL
         var root: URL { base.appending(path: "Guesthouse") }
