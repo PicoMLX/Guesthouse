@@ -130,7 +130,7 @@ struct RuntimeEventRouter: Sendable {
     mutating func incoming(_ event: RuntimeEvent) -> [Effect] {
         guard !requiresRetirement else { return [] }
         switch event {
-        case .accepted, .runtimeVersion, .hostPreflight, .xcodeSelection: return fault(.malformedResponse)
+        case .accepted, .runtimeVersion, .hostPreflight, .xcodeSelection, .environments: return fault(.malformedResponse)
         case .status(let status) where status.inFlightOperation == nil:
             for entry in requests.values where entry.operation != nil && entry.request.environment == status.environmentID {
                 entry.producer.push(event)
@@ -211,18 +211,18 @@ struct RuntimeEventRouter: Sendable {
 
 extension RuntimeRequest {
     var mayMutate: Bool {
-        switch self { case .runtimeVersion, .hostPreflight, .inspectXcode, .environmentStatus: false; default: true }
+        switch self { case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .environmentStatus: false; default: true }
     }
     var environment: EnvironmentID? {
         switch self {
         case .environmentStatus(let id), .startEnvironment(let id, _), .stopEnvironment(let id, _), .importXcode(let id, _): id
-        case .runtimeVersion, .hostPreflight, .inspectXcode, .prepareStorage, .cancelOperation: nil
+        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .cancelOperation: nil
         }
     }
     var acceptsOperation: Bool {
         switch self {
         case .startEnvironment, .stopEnvironment, .importXcode: true
-        case .runtimeVersion, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation: false
+        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation: false
         }
     }
     var cancellationTarget: OperationID? {
@@ -233,6 +233,7 @@ extension RuntimeRequest {
         switch (self, event) {
         case (.runtimeVersion, .runtimeVersion(let info)), (.prepareStorage, .runtimeVersion(let info)): return info.protocolVersion == .current
         case (.hostPreflight, .hostPreflight(let report)): return report.isComplete
+        case (.listEnvironments, .environments(let inventory)): return inventory.isValid
         case (.inspectXcode, .xcodeSelection): return true
         case (.environmentStatus(let id), .status(let status)): return status.environmentID == id
         case (.cancelOperation, .completed): return true // Cancel-request acknowledgement, not proof its target stopped.
@@ -247,7 +248,7 @@ extension RuntimeEvent {
         case .accepted(let id), .progress(let id, _), .completed(let id), .failed(let id, _): id
         case .diagnostic(let event): OperationID(uuid: event.operationID)
         case .status(let status): status.inFlightOperation
-        case .runtimeVersion, .hostPreflight, .xcodeSelection: nil
+        case .runtimeVersion, .hostPreflight, .xcodeSelection, .environments: nil
         }
     }
     var isTerminal: Bool {

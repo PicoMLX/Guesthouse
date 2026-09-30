@@ -36,6 +36,15 @@ public final class RuntimeStateLoader: Sendable {
     }
 
     public var status: RuntimeSavedStateStatus { state.withLock { $0.status } }
+    var environmentInventory: RuntimeEnvironmentInventory {
+        state.withLock { value in
+            guard value.status == .loaded, let loaded = value.loaded else {
+                return .unavailable(value.status == .loaded ? .unavailable : value.status)
+            }
+            let result = RuntimeEnvironmentInventory.available(loaded.snapshot.environments)
+            return result.isValid ? result : .unavailable(.repairRequired)
+        }
+    }
     var loadedState: LoadedState? { state.withLock { $0.loaded } }
 
     /// Called only on the bounded read-only worker, outside session registration. Reinspect

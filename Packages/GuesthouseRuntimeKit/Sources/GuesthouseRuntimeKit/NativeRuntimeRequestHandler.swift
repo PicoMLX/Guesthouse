@@ -59,6 +59,9 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
                 return queryReply(.runtimeVersion, version: version, savedState: status)
             }
         }
+        if case .listEnvironments = request {
+            return .immediate(.environments(state?.environmentInventory ?? .unavailable(.unavailable)))
+        }
         if case .hostPreflight = request {
             return .readOnly {
                 .hostPreflight(state?.hostPreflight()
