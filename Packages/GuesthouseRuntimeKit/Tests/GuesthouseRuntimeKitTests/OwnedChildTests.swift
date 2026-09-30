@@ -50,12 +50,16 @@ import Testing
     @Test func expiredDeadlineStillReadsEOFButRefusesARetainedWriter() async throws {
         let finished = Pipe(), retained = Pipe()
         try finished.fileHandleForWriting.close()
+        // Establish actual EOF first: concurrent spawn tests can temporarily inherit a pipe
+        // before exec closes descriptors. This control tests deadline ordering, not that window.
+        #expect(try await drain(finished).isEmpty)
         let expired = ContinuousClock.now - .seconds(1)
         #expect(try await drain(finished, deadline: expired).isEmpty)
         await #expect(throws: DrainFailure.noEOFObserved) {
             try await drain(retained, deadline: expired)
         }
         try retained.fileHandleForWriting.close()
+        #expect(try await drain(retained).isEmpty)
         #expect(try await drain(retained, deadline: expired).isEmpty)
     }
 
