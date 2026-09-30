@@ -5,6 +5,40 @@ import Testing
 @testable import GuesthouseRuntimeKit
 
 @Suite(.timeLimit(.minutes(1))) struct RuntimeStateLoaderTests {
+    @Test func eachStatusRequestReinspectsSavedIdentityWithoutPublishingReadiness() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let environment = DevelopmentEnvironment(name: "Saved task")
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let identity = ProcessIdentity(pid: 123, startTime: Date(timeIntervalSince1970: 1_800_000_000),
+            executablePath: "/test/provider", argumentsDigest: "sha256:" + String(repeating: "a", count: 64),
+            vmName: environment.id.managedVMName, environmentID: environment.id, recordedAt: Date())
+        let store = try await fixture.open()
+        _ = try await store.loadSnapshot()
+        try await store.saveSnapshot(EnvironmentsSnapshot(environments: [environment], slots: slots,
+            processIdentities: [environment.id: identity]))
+        await store.close()
+        let calls = Mutex(0)
+        let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in try await fixture.open() },
+            inspector: RuntimeEnvironmentInspector(inspect: { record in
+                #expect(record == identity)
+                let first = calls.withLock { count in count += 1; return count == 1 }
+                let process = LiveProcess(pid: record.pid, startTime: record.startTime,
+                    executablePath: record.executablePath, argumentsDigest: record.argumentsDigest, claimedVMName: record.vmName)
+                return .init(processes: first ? [process] : [], complete: true, lockPresent: first)
+            }))
+        await loader.load()
+        #expect(loader.environmentStatus(environment.id).vm == .running)
+        let next = loader.environmentStatus(environment.id)
+        #expect(next.vm == .stopped)
+        #expect(next.readiness == .checking)
+        #expect(calls.withLock { $0 } == 2)
+        #expect(loader.loadedState?.snapshot.processIdentities[environment.id] == identity)
+        #expect(loader.loadedState?.journal.records.isEmpty == true)
+        await loader.loadedState?.store.close()
+    }
+
     @Test func loadsOnceRetainsOwnershipAndKeepsUnfinishedOperations() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
