@@ -53,6 +53,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private nonisolated let configuration = Mutex(Configuration())
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
+    private var xcodeSelection = XcodeSelectionResult.rejected(.unavailable)
 
     /// What a `hostPreflight` query answers with. A ready report by default, so a preview or a
     /// test that never scripts one sees the wizard proceed; `setHostPreflight` scripts a blocked
@@ -138,6 +139,9 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         statuses[status.environmentID] = status
     }
 
+    /// Explicit simulation for selection previews; never performs file access or import.
+    public func setXcodeSelectionResult(_ result: XcodeSelectionResult) { xcodeSelection = result }
+
     public func setVersionInfo(_ info: RuntimeVersionInfo) {
         versionInfo = info
     }
@@ -198,7 +202,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 if case .environmentStatus(let id) = request {
                     continuation.yield(.status(statuses[id] ?? EnvironmentStatus(environmentID: id, vm: .notFound, readiness: .checking)))
                 } else if case .inspectXcode = request {
-                    continuation.yield(.xcodeSelection(.rejected(.unavailable)))
+                    continuation.yield(.xcodeSelection(xcodeSelection))
                 } else if case .hostPreflight = request {
                     continuation.yield(.hostPreflight(hostPreflight))
                 } else {
