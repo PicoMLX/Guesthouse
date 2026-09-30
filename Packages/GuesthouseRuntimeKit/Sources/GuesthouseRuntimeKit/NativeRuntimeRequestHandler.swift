@@ -3,7 +3,7 @@ import GuesthouseCore
 import XPC
 
 /// Native service ingress for #19/#20/#112 (MVP-PLAN.md §3). No listener is activated here.
-/// Only runtimeVersion is implemented: mutations stay unavailable until streaming and
+/// Version and host-preflight queries are implemented: mutations stay unavailable until streaming and
 /// operation correlation/unknown-outcome handling migrate across all native consumers.
 public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     // In-process service policy only. Neither closures nor worker tickets cross XPC.
@@ -32,12 +32,26 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
     ) {
         self.init(
+            gate: RuntimeSessionGate(), worker: .shared,
             authenticate: RuntimeCallerAuthentication.allows,
-            register: { Self.queryReply($0, version: version, savedState: state?.status) },
+            plan: { Self.queryPlan($0, version: version, state: state) },
             send: { try session.send(message: $0) },
             cancel: { session.cancel(reason: "runtime session refused") },
             diagnostic: diagnostic
         )
+    }
+
+    /// Registration constructs only an in-memory plan. Worker reservation and execution use
+    /// the existing bounded admission/reply path; filesystem probes never run under the gate.
+    static func queryPlan(_ request: RuntimeRequest, version: RuntimeVersionInfo,
+                          state: RuntimeStateLoader?) -> ReplyPlan {
+        if case .hostPreflight = request {
+            return .readOnly {
+                .hostPreflight(state?.hostPreflight()
+                    ?? RuntimeHostPreflight(storageRoot: nil, expectedVolume: nil).check())
+            }
+        }
+        return .immediate(queryReply(request, version: version, savedState: state?.status))
     }
 
     static func queryReply(_ request: RuntimeRequest, version: RuntimeVersionInfo,

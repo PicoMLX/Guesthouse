@@ -106,6 +106,12 @@ public actor StateStore {
         canSave = true
     }
 
+    func storageDestination() throws(StateStoreError) -> URL {
+        guard let anchor else { throw .fileUnreadable(name: .stateDirectory) }
+        do { return try anchor.storageDestination() }
+        catch { throw .insecureDirectory(reason: .unreadable) }
+    }
+
     /// Explicit setup only. Unknown identity may be selected only for an empty inventory,
     /// empty journal and empty VM directory. Ordinary saves can neither select nor replace it.
     /// No GUI path or UUID is accepted; the existing runtime-chosen destination supplies both.

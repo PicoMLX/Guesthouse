@@ -79,7 +79,7 @@ This procedure covers one caller-identity case. It does not complete gate #34's 
 ## Locate the implementation and software tests
 
 - [Service entry point](Sources/main.swift) installs the fixed listener requirement. [RuntimeCallerAuthentication](../Packages/GuesthouseRuntimeKit/Sources/GuesthouseRuntimeKit/RuntimeCallerAuthentication.swift) also checks the original incoming dictionary; there is no caller-selected identity or PID-based trust.
-- [NativeRuntimeRequestHandler](../Packages/GuesthouseRuntimeKit/Sources/GuesthouseRuntimeKit/NativeRuntimeRequestHandler.swift) authenticates before payload decoding and exposes only the read-only version query in its production constructor. [RuntimeVersionQuery](../Packages/GuesthouseClientKit/Sources/GuesthouseClientKit/RuntimeVersionQuery.swift) is the GUI's actual client path.
+- [NativeRuntimeRequestHandler](../Packages/GuesthouseRuntimeKit/Sources/GuesthouseRuntimeKit/NativeRuntimeRequestHandler.swift) authenticates before payload decoding and exposes the read-only version and host-preflight queries in its production constructor. [RuntimeVersionQuery](../Packages/GuesthouseClientKit/Sources/GuesthouseClientKit/RuntimeVersionQuery.swift) is the GUI's actual client path.
 - Core and native package tests cover malformed/bounded frames, mandatory version envelopes, admission, reply ownership, and injected authentication decisions. Xcode Cloud runs the package hook and shared scheme. These tests do not substitute for the signed Finder-launched app experiment.
 
 ## Saved metadata on service startup
@@ -88,4 +88,10 @@ The service owns one `RuntimeStateLoader` across all client sessions (MVP-PLAN.m
 
 The existing authenticated runtime-version query includes a closed saved-state status. **Check runtime connection** displays that status and recovery guidance; queries perform no filesystem work inside the session gate. A failed load leaves the version query available, preserves files, and exposes no partial inventory. An incomplete journal tail is retained and reported as requiring repair. A second runtime cannot acquire the same store.
 
-Fresh storage creation, explicit repair, storage-volume selection, host-preflight activation and provider-backed reconciliation remain separate prerequisites. Startup does not create or repair a missing layout. Software fixtures cover load/reopen/failure behavior and native reply delivery; they do not establish signed-app or hardware readiness.
+Fresh storage creation and its explicit selection action, repair and provider-backed reconciliation remain separate prerequisites. Startup does not create or repair a missing layout. Software fixtures cover load/reopen/failure behavior and native reply delivery; they do not establish signed-app or hardware readiness.
+
+## Check this Mac
+
+**Check this Mac** invokes the existing authenticated `hostPreflight` query (MVP-PLAN.md §§2–3). The shared bounded runtime worker reads architecture, macOS, memory, Codex installation and selected-volume capacity outside the session gate. Each check rereads facts; its timestamp is an observation, not authority to create or start a VM. The GUI shows fixed result/recovery messages and cancellation, and holds a canceled check until its connection has drained.
+
+The disk probe uses only the volume identity loaded from the runtime snapshot and the service-owned VM directory. Loading, missing selection or rejected saved state yields a blocked disk result; refresh never selects another volume. A mismatched/unavailable volume remains blocked. No path or volume identifier crosses the GUI request boundary. A passing host report does not verify the provider, guest, Codex connection or hardware gates.
