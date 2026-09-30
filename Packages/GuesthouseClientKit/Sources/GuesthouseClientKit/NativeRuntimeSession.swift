@@ -6,8 +6,17 @@ import XPC
 protocol RuntimeClientSession: AnyObject, Sendable {
     func activate() throws
     func send(_ payload: Data, reply: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void)
+    func send(_ payload: Data, selection: XcodeSelectionAccess?, reply: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void)
     /// Must safely dispose of an inactive candidate as well as an active session.
     func cancel()
+}
+
+// Existing injected transports must explicitly support native grants; never silently drop one.
+extension RuntimeClientSession {
+    func send(_ payload: Data, selection: XcodeSelectionAccess?, reply: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void) {
+        guard selection == nil else { reply(.failure(.init(cause: .connectionLost))); return }
+        send(payload, reply: reply)
+    }
 }
 
 /// Owns exactly one initially inactive XPC session. Never expose the native handle.
@@ -43,9 +52,14 @@ final class NativeRuntimeSession: RuntimeClientSession {
     }
 
     func send(_ payload: Data, reply: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void) {
+        send(payload, selection: nil, reply: reply)
+    }
+
+    func send(_ payload: Data, selection: XcodeSelectionAccess?, reply: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void) {
         let sent = phase.withLock { phase in
             guard phase == .active, let frame = try? RawRuntimeFrame.encode(
                 payload, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue)) else { return false }
+            selection?.attach(to: frame)
             native.send(message: frame) { result in
                 switch result {
                 case .success(let message): reply(Self.decode(message))

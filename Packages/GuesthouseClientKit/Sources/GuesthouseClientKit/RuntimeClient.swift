@@ -10,17 +10,18 @@ public final class RuntimeClient: RuntimeBackend {
     private let driver: Driver
     private let drain: Task<Void, Never>
     private let permitsOperations: Bool
+    private let selection: XcodeSelectionAccess?
 
     public convenience init() { self.init(connect: nil, permitsOperations: false) }
 
     init(connect: XPCRuntimeTransport.Connect?, permitsOperations: Bool = true,
-         deadline: Deadline? = { try await Task.sleep(for: .seconds(10)) }) {
+         deadline: Deadline? = { try await Task.sleep(for: .seconds(10)) }, selection: XcodeSelectionAccess? = nil) {
         let inbox = RuntimeClientInbox()
         let transport: XPCRuntimeTransport
         if let connect { transport = .init(incoming: { inbox.incoming($0) }, interrupted: { inbox.interrupted($0) }, connect: connect) }
         else { transport = .init(incoming: { inbox.incoming($0) }, interrupted: { inbox.interrupted($0) }) }
-        let driver = Driver(inbox: inbox, transport: transport, deadline: deadline)
-        self.inbox = inbox; self.driver = driver; self.permitsOperations = permitsOperations
+        let driver = Driver(inbox: inbox, transport: transport, deadline: deadline, selection: selection)
+        self.inbox = inbox; self.driver = driver; self.permitsOperations = permitsOperations; self.selection = selection
         drain = Task { [weak driver] in
             for await _ in inbox.wakeups {
                 if Task.isCancelled { return }
@@ -38,7 +39,8 @@ public final class RuntimeClient: RuntimeBackend {
             inbox.ended(key, reason) // End callback only enqueues; never performs native cleanup.
         }
         do {
-            if !permitsOperations, request != .runtimeVersion, request != .hostPreflight, request != .prepareStorage {
+            if !permitsOperations, request != .runtimeVersion, request != .hostPreflight, request != .prepareStorage,
+               selection.map({ request == .inspectXcode($0.handoff) }) != true {
                 throw GuesthouseError.invalidRequest(.unsupportedOperation)
             }
             let envelope = RuntimeRequestEnvelope(request: request)
@@ -68,14 +70,15 @@ public final class RuntimeClient: RuntimeBackend {
     private actor Driver {
         let inbox: RuntimeClientInbox, transport: XPCRuntimeTransport
         let deadline: Deadline?
+        let selection: XcodeSelectionAccess?
         var router = RuntimeEventRouter()
         var timers: [RuntimeRequestKey: Task<Void, Never>] = [:]
         var cancelStreams: [RuntimeRequestKey: AsyncThrowingStream<RuntimeEvent, any Error>] = [:]
         var uncertain: [RuntimeEventRouter.UncertainRequest] = []
         var inspectTargets: Set<OperationID> = []
         var admissions = 0
-        init(inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: Deadline?) {
-            self.inbox = inbox; self.transport = transport; self.deadline = deadline
+        init(inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: Deadline?, selection: XcodeSelectionAccess?) {
+            self.inbox = inbox; self.transport = transport; self.deadline = deadline; self.selection = selection
         }
         isolated deinit {
             for timer in timers.values { timer.cancel() }
@@ -136,7 +139,9 @@ public final class RuntimeClient: RuntimeBackend {
             defer { withExtendedLifetime(reply) {} } // Keep catch's known-unsent settlement ahead of closure release.
             if let deadline { timers[key] = Self.timer(inbox: inbox, key: key, deadline: deadline) }
             do {
-                try transport.send(.init(request: request), reply: reply)
+                let grant: XcodeSelectionAccess?
+                if case .inspectXcode = request { grant = selection } else { grant = nil }
+                try transport.send(.init(request: request), selection: grant, reply: reply)
                 admissions += 1
             } catch {
                 timers.removeValue(forKey: key)?.cancel()

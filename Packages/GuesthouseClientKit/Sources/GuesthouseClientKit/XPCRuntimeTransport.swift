@@ -43,7 +43,7 @@ public final class XPCRuntimeTransport: Sendable {
         try send(RuntimeRequestEnvelope(request: .runtimeVersion), reply: reply)
     }
 
-    func send(_ envelope: RuntimeRequestEnvelope,
+    func send(_ envelope: RuntimeRequestEnvelope, selection: XcodeSelectionAccess? = nil,
               reply: @escaping @Sendable (Result<RuntimeEvent, RuntimeSessionFailure>) -> Void) throws {
         let bytes: Data
         do {
@@ -52,6 +52,7 @@ public final class XPCRuntimeTransport: Sendable {
             try RequestValidator.validateEncodedSize(bytes)
         } catch let error as RequestValidationError { throw error.guesthouseError }
         catch { throw GuesthouseError.invalidRequest(.malformed) }
+        try XcodeSelectionAccess.validate(envelope.request, selection: selection)
         let lease = try activeSession()
         let mayMutate: Bool
         switch envelope.request {
@@ -60,7 +61,7 @@ public final class XPCRuntimeTransport: Sendable {
         }
         // Retain the registry, not self: deinit can cancel pending work, while late callbacks
         // still preserve learned operation IDs. Native sessions capture the registry weakly.
-        lease.session.send(bytes) { [registry] result in
+        lease.session.send(bytes, selection: selection) { [registry] result in
             if case .failure(let failure) = result { Self.retire(lease.generation, in: registry, failure: failure) }
             registry.deliverReply(result, from: lease.generation) { delivered in
                 reply(delivered.mapError { $0.contextualized(mayHaveMutated: mayMutate) })
