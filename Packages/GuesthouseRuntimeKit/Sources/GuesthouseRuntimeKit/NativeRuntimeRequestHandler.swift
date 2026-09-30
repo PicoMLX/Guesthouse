@@ -20,6 +20,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     }
     private let gate: RuntimeSessionGate
     private let worker: RuntimeReadOnlyWorker
+    private let supervisor: OperationSupervisor
     private let authenticate: @Sendable (XPCDictionary) -> Bool
     private let decode: @Sendable (Data, Int) -> RuntimeDispatcher.Decision
     private let plan: @Sendable (RuntimeRequest) -> ReplyPlan
@@ -32,10 +33,11 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     /// Bundle inspection is done by the owner, outside registration's synchronous gate.
     public convenience init(
         session: XPCSession, version: RuntimeVersionInfo, state: RuntimeStateLoader? = nil,
+        supervisor: OperationSupervisor = OperationSupervisor(),
         diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
     ) {
         self.init(
-            gate: RuntimeSessionGate(), worker: .shared,
+            gate: RuntimeSessionGate(), worker: .shared, supervisor: supervisor,
             authenticate: RuntimeCallerAuthentication.allows,
             plan: { Self.queryPlan($0, version: version, state: state) },
             send: { try session.send(message: $0) },
@@ -94,7 +96,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     // Only named service policy may select work. Construct owners outside the gate;
     // storage setup additionally reserves its one service-lifetime claim during registration.
     init(
-        gate: RuntimeSessionGate, worker: RuntimeReadOnlyWorker,
+        gate: RuntimeSessionGate, worker: RuntimeReadOnlyWorker, supervisor: OperationSupervisor = OperationSupervisor(),
         authenticate: @escaping @Sendable (XPCDictionary) -> Bool,
         decode: @escaping @Sendable (Data, Int) -> RuntimeDispatcher.Decision = RuntimeDispatcher.decide,
         plan: @escaping @Sendable (RuntimeRequest) -> ReplyPlan,
@@ -103,6 +105,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
     ) {
         self.gate = gate; self.authenticate = authenticate; self.decode = decode
+        self.supervisor = supervisor
         self.worker = worker; self.plan = plan; self.send = send; self.cancel = cancel; self.diagnostic = diagnostic
     }
 
@@ -184,7 +187,9 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         case .registered(.storageSetup(let work)):
             // At most one claimed setup per service lifetime, not one Task per request.
             // Once admitted it finishes even after disconnect; a lost reply remains unknown.
+            let activity = supervisor.hold() // Before scheduling; the incoming reply is still retained.
             Task { [gate] in
+                defer { activity.end() }
                 let result = await work()
                 reply.finish(gate.refusal ?? result)
             }

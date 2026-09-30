@@ -101,3 +101,18 @@ The disk probe uses only the volume identity loaded from the runtime snapshot an
 After **Check runtime connection** finishes loading, **Prepare storage** sends the epoch-14 `prepareStorage` request with no path or options (MVP-PLAN.md §3; ADR 0004). The runtime claims a missing root, retains the state lock throughout preparation and saves the volume identity before replying with updated metadata status. Already-loaded empty storage may receive an explicit initial selection; existing disks or operation history prevent identity inference. Partial or incompatible layouts require inspection and are preserved.
 
 Admission reserves at most one setup per service lifetime. Once admitted, setup finishes even if the client disconnects; the client treats a lost/timed-out/canceled reply as unconfirmed and never resends automatically. Reopen and inspect before another attempt. This prepares metadata folders, not a VM; run **Check this Mac** again afterward. The client/service upgrade together, and VM mutations remain unsupported.
+
+## Runtime operation lifetime
+
+Startup loading and each admitted storage setup hold an explicit XPC transaction until
+work and reply handling settle (MVP-PLAN.md §3, #24). The token is acquired before scheduling
+asynchronous work and released exactly once, including failure. A disconnected client does
+not release setup's token or cancel its filesystem work. Read-only requests retain their
+existing reply ownership. No transaction is held merely because metadata is loaded.
+
+[Apple's XPC transaction documentation](https://developer.apple.com/documentation/xpc/xpc_transaction_begin())
+defines automatic activity around incoming messages/replies and explicit activity for work
+outside that lifetime. Swift `XPCSession` exposes no documented promise that retaining an
+arbitrary Swift task prevents idle exit. This protection does not promise survival of a crash,
+forced termination, power loss or app termination. Provider process supervision and signed
+idle-lifetime proof remain outstanding in #24/#34; no VM is launched by this change.
