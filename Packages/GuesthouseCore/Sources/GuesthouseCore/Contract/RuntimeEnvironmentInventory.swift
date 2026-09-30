@@ -10,7 +10,11 @@ public enum RuntimeEnvironmentInventory: Codable, Hashable, Sendable {
         case .unavailable(let status): return status != .loaded
         case .available(let records):
             return records.count <= 2 && Set(records.map(\.id)).count == records.count
-                && records.allSatisfy { $0.schemaVersion == .current && $0.name.utf8.count <= 1024 }
+                && records.allSatisfy {
+                    // These are the record's only variable-length string fields. Bound both
+                    // so even JSON escaping stays comfortably below the 64 KiB reply limit.
+                    $0.schemaVersion == .current && $0.name.utf8.count <= 1024 && $0.preset.name.utf8.count <= 1024
+                }
         }
     }
 }

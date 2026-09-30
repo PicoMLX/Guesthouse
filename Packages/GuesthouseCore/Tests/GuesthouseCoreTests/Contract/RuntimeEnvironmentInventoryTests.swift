@@ -20,8 +20,10 @@ import Testing
 
     @Test func invalidCountsIdentitiesVersionsAndOversizedNamesAreRefusedBothWays() throws {
         let record = DevelopmentEnvironment(name: "App")
+        let oversizedPreset = try #require(ResourcePreset(name: String(repeating: "a", count: 1025), memoryBytes: 1, cpuCount: 1, diskBytes: 1, verification: .experimental))
         let invalid: [RuntimeEnvironmentInventory] = [
             .unavailable(.loaded), .available([record, record]),
+            .available([DevelopmentEnvironment(name: "App", preset: oversizedPreset)]),
             .available((0..<3).map { DevelopmentEnvironment(name: "App \($0)") }),
             .available([DevelopmentEnvironment(name: "App", schemaVersion: SchemaVersion(99)!)]),
             .available([DevelopmentEnvironment(name: String(repeating: "a", count: 1025))])
@@ -33,6 +35,15 @@ import Testing
             let bytes = try JSONEncoder().encode(envelope)
             #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) { try RuntimeEventEnvelope.decode(bytes) }
         }
+    }
+
+    @Test func maximumEscapedNestedNamesStillFitTheReplyBudget() throws {
+        let name = String(repeating: "\0", count: 1024)
+        let preset = try #require(ResourcePreset(name: name, memoryBytes: .max, cpuCount: .max, diskBytes: .max, verification: .experimental))
+        let inventory = RuntimeEnvironmentInventory.available((0..<2).map { _ in DevelopmentEnvironment(name: name, preset: preset) })
+        let bytes = try RuntimeEventEnvelope(event: .environments(inventory)).encoded()
+        #expect(inventory.isValid && bytes.count <= RuntimeEventEnvelope.maximumEncodedSize)
+        #expect(try RuntimeEventEnvelope.decode(bytes).event == .environments(inventory))
     }
 
     @Test func fakeInventoryIsExplicitAndNeverAnOperationAcceptance() async throws {

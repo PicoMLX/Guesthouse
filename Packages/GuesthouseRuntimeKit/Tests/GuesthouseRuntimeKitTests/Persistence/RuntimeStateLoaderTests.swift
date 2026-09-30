@@ -78,6 +78,32 @@ import Testing
         await loaded.store.close()
     }
 
+    @Test func oversizedSavedPresetReturnsRepairInventoryWithoutChangingEvidence() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let preset = try #require(ResourcePreset(name: String(repeating: "a", count: 70_000), memoryBytes: 1, cpuCount: 1, diskBytes: 1, verification: .experimental))
+        let environment = DevelopmentEnvironment(name: "Saved task", preset: preset)
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        let store = try await fixture.open()
+        _ = try await store.loadSnapshot()
+        try await store.saveSnapshot(.init(environments: [environment], slots: slots))
+        await store.close()
+        let path = fixture.root.appending(path: "state/environments.json")
+        let before = try Data(contentsOf: path)
+        let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in try await fixture.open() })
+        await loader.load()
+        #expect(loader.status == .loaded)
+        #expect(loader.environmentInventory == .unavailable(.repairRequired))
+        let plan = NativeRuntimeRequestHandler.queryPlan(.listEnvironments,
+            version: .init(serviceVersion: "1", serviceBuild: "1"), state: loader)
+        guard case .immediate(let event) = plan else { Issue.record("Inventory should reply immediately"); return }
+        #expect(event == .environments(.unavailable(.repairRequired)))
+        #expect(try RuntimeEventEnvelope.decode(RuntimeEventEnvelope(event: event).encoded()).event == event)
+        #expect(try Data(contentsOf: path) == before)
+        await loader.loadedState?.store.close()
+    }
+
     @Test func statusStaysResponsiveWhileOneLoadIsPending() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
