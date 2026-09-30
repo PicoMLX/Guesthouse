@@ -232,7 +232,7 @@ struct JournalTailPrefix {
             .insufficientDisk(requiredBytes: 0, availableBytes: 0),
             .downloadVerificationFailed(check: .digest), .downloadVerificationFailed(check: .signature),
             .downloadVerificationFailed(check: .size), .runtimeMissing, .runtimeIncompatible,
-            .guestNotReachable(EnvironmentID()), .hostKeyChanged(EnvironmentID()),
+            .guestNotReachable(EnvironmentID()), .hostKeyChanged(EnvironmentID()), .guestShutdownRefused(EnvironmentID()),
             .credentialsLocked(.hostKeychain), .credentialsLocked(.guestKeychain),
             .loginExpired(.github), .loginExpired(.codex), .xcodeComponentsIncomplete,
             .vmSlotUnavailable(maximum: -1), .operationOutcomeUnknown(OperationID()), .unauthorizedCaller,
@@ -257,7 +257,7 @@ struct JournalTailPrefix {
                 let identity: Identity?
                 switch outcome {
                 case .failed(.operationOutcomeUnknown): identity = .operation
-                case .failed(.guestNotReachable), .failed(.hostKeyChanged): identity = .environment
+                case .failed(.guestNotReachable), .failed(.hostKeyChanged), .failed(.guestShutdownRefused): identity = .environment
                 default: identity = nil
                 }
                 return try encodedShape(outcome, identity: identity)

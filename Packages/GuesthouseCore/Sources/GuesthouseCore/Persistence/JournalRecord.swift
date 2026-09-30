@@ -127,7 +127,8 @@ public struct JournalRecord: Codable, Hashable, Sendable {
         switch outcome {
         case .failed(.operationOutcomeUnknown(let reported)):
             reported == id
-        case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)):
+        case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)),
+             .failed(.guestShutdownRefused(let reported)):
             reported == environmentID
         case .checkpoint(let reached):
             operation == .provision(stage: reached)
