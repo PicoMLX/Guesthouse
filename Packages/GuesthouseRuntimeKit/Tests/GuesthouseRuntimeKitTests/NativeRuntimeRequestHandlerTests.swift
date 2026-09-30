@@ -567,7 +567,13 @@ private struct ObservingHandler: XPCPeerHandler {
 private enum FixtureFailure: Error { case transport, timeout }
 private func next<T: Sendable>(_ stream: AsyncThrowingStream<T, any Error>) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { var iterator = stream.makeAsyncIterator(); return try #require(await iterator.next()) }
+        group.addTask {
+            var iterator = stream.makeAsyncIterator()
+            if let value = try await iterator.next() { return value }
+            // A watchdog-canceled losing waiter is not a second failed assertion.
+            try Task.checkCancellation()
+            throw FixtureFailure.transport
+        }
         group.addTask { try await Task.sleep(for: .seconds(5)); throw FixtureFailure.timeout }
         defer { group.cancelAll() }
         return try #require(await group.next())
