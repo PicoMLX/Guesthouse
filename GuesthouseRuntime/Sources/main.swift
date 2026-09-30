@@ -18,13 +18,18 @@ do {
         serviceBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
     )
     let state = RuntimeStateLoader()
-    Task { await state.load() }
+    let supervisor = OperationSupervisor()
+    let startup = supervisor.hold() // Acquire before the asynchronous load can be scheduled.
+    Task {
+        defer { startup.end() }
+        await state.load()
+    }
     let listener = try XPCListener(
         service: "com.starlingprotocol.Guesthouse.Runtime",
         requirement: RuntimeCallerAuthentication.listenerRequirement
     ) { request in
         request.accept { session in
-            NativeRuntimeRequestHandler(session: session, version: version, state: state, diagnostic: record)
+            NativeRuntimeRequestHandler(session: session, version: version, state: state, supervisor: supervisor, diagnostic: record)
         }
     }
     // Default initialization already activates the listener. Never activate it a second time.
