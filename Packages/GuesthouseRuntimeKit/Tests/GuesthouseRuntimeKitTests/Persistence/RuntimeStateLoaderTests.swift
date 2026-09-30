@@ -56,6 +56,7 @@ import Testing
             calls.withLock { $0 += 1 }
             return try await fixture.open()
         })
+        #expect(loader.environmentInventory == .unavailable(.loading))
         #expect(loader.status == .loading)
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<4 { group.addTask { await loader.load() } }
@@ -64,6 +65,7 @@ import Testing
         #expect(loader.status == .loaded)
         let loaded = try #require(loader.loadedState)
         #expect(loaded.snapshot == snapshot)
+        #expect(loader.environmentInventory == .available([environment]))
         #expect(loaded.journal.inFlight[id]?.environmentID == environment.id)
         #expect(loaded.journal.inFlight[id]?.outcome == .started)
         let status = loader.environmentStatus(environment.id)
@@ -90,11 +92,13 @@ import Testing
         let task = Task { await loader.load() }
         for await _ in entered { break }
         await loader.load() // Must return without launching another filesystem operation.
+        #expect(loader.environmentInventory == .unavailable(.loading))
         #expect(loader.status == .loading)
         #expect(loader.loadedState == nil)
         #expect(loader.environmentStatus(EnvironmentID()).vm == .uncertain(reason: .inspectionFailed))
         resume.yield(())
         await task.value
+        #expect(loader.environmentInventory == .available([]))
         #expect(loader.status == .loaded)
         await loader.loadedState?.store.close()
     }
@@ -110,6 +114,7 @@ import Testing
         let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in try await fixture.open() })
         await loader.load()
         #expect(loader.status == (kind == "unsupported" ? .incompatible : .repairRequired))
+        #expect(loader.environmentInventory == .unavailable(loader.status))
         #expect(try Data(contentsOf: path) == bytes)
         if kind == "tail" {
             #expect(loader.loadedState?.journal.truncatedTail == true)
@@ -130,6 +135,7 @@ import Testing
         await loader.load()
         await loader.load()
         #expect(loader.status == .unavailable)
+        #expect(loader.environmentInventory == .unavailable(.unavailable))
         #expect(loader.loadedState == nil)
         #expect(!FileManager.default.fileExists(atPath: root.path))
         let version = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")

@@ -50,6 +50,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     private nonisolated let configuration = Mutex(Configuration())
     private var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private var versionInfo: RuntimeVersionInfo
+    private var environmentInventory = RuntimeEnvironmentInventory.available([])
 
     /// What a `hostPreflight` query answers with. A ready report by default, so a preview or a
     /// test that never scripts one sees the wizard proceed; `setHostPreflight` scripts a blocked
@@ -126,6 +127,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         statuses[status.environmentID] = status
     }
 
+    public func setEnvironmentInventory(_ inventory: RuntimeEnvironmentInventory) { environmentInventory = inventory }
+
     public func setVersionInfo(_ info: RuntimeVersionInfo) {
         versionInfo = info
     }
@@ -169,7 +172,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         let scenario = binding.scenario
 
         switch request {
-        case .runtimeVersion, .hostPreflight, .inspectXcode, .environmentStatus:
+        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .environmentStatus:
             advanceTurn()
             await pause()
             switch scenario {
@@ -184,6 +187,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             case .succeed:
                 if case .environmentStatus(let id) = request {
                     continuation.yield(.status(statuses[id] ?? EnvironmentStatus(environmentID: id, vm: .notFound, readiness: .checking)))
+                } else if case .listEnvironments = request {
+                    continuation.yield(.environments(environmentInventory))
                 } else if case .inspectXcode = request {
                     continuation.yield(.xcodeSelection(.rejected(.unavailable)))
                 } else if case .hostPreflight = request {
@@ -390,7 +395,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 environmentID: environment, vm: .uncertain(reason: .inspectionFailed), readiness: .checking
             )
             statuses[environment] = settingOperation(id, on: status)
-        case .runtimeVersion, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation:
+        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation:
             break
         }
     }

@@ -34,6 +34,24 @@ import Testing
         #expect(await client.reconciliation().0.isEmpty)
     }
 
+    @Test(arguments: [RuntimeEnvironmentInventory.available([]), .unavailable(.repairRequired), .unavailable(.loaded)])
+    func publicInventoryPreservesUnavailableStateAndRejectsContradictions(inventory: RuntimeEnvironmentInventory) async throws {
+        let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        var query = client.send(.listEnvironments).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        peer.answer(0, .success(.environments(inventory)))
+        if inventory.isValid {
+            #expect(try await query.next() == .environments(inventory))
+            #expect(try await query.next() == nil)
+        } else {
+            await #expect(throws: RuntimeSessionFailure(cause: .malformedResponse)) { try await query.next() }
+        }
+        #expect(peer.requests == [.listEnvironments])
+        #expect(await client.reconciliation().0.isEmpty)
+        await client.close()
+    }
+
     @Test func publicQueryPolicyAllowsPreflightButDoesNotOpenTheOperationAPI() async throws {
         let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
         var query = client.send(.hostPreflight).makeAsyncIterator()

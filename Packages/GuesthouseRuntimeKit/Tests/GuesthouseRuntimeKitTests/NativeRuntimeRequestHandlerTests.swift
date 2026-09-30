@@ -68,6 +68,21 @@ import XPC
         #expect(fixture.trace.diagnostics.withLock { $0.isEmpty })
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func savedInventoryNeedsAuthenticationAndNeverTreatsFailedLoadAsEmpty(authorized: Bool, failedLoad: Bool) async throws {
+        let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in throw .corruptSnapshot })
+        if failedLoad { await loader.load() }
+        let fixture = try Fixture(authorized: authorized, productionPlan: true, runtimeState: loader)
+        defer { fixture.cancel() }
+        let bytes = try JSONEncoder().encode(RuntimeRequestEnvelope(request: .listEnvironments))
+        let frame = try RawRuntimeFrame.encode(bytes, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue))
+        let event = try await next(fixture.request(frame))
+        _ = try await next(fixture.processed)
+        if authorized { #expect(event == .environments(.unavailable(failedLoad ? .repairRequired : .loading))) }
+        else { #expect(failure(event) == .unauthorizedCaller) }
+        #expect(fixture.executor.pending.withLock { $0.isEmpty })
+    }
+
     @Test func publicInitializerUsesRealAuthentication() async throws {
         let fixture = try Fixture(usePublicPolicy: true)
         defer { fixture.cancel() }

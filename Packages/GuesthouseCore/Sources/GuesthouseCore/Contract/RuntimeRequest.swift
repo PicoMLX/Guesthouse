@@ -9,6 +9,8 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     /// Explicit metadata setup at the fixed runtime-owned location; no path or options.
     /// Replies with runtimeVersion/savedState after setup settles. Lost replies require inspection.
     case prepareStorage
+    /// Saved records only; every environment still requires live inspection.
+    case listEnvironments
     case environmentStatus(EnvironmentID)
     /// Read-only selection inspection; no guest copy or environment mutation is authorized.
     case inspectXcode(FileHandoff)
@@ -22,6 +24,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
         case .runtimeVersion: "runtimeVersion"
         case .hostPreflight: "hostPreflight"
         case .prepareStorage: "prepareStorage"
+        case .listEnvironments: "listEnvironments"
         case .environmentStatus: "environmentStatus"
         case .inspectXcode: "inspectXcode"
         case .startEnvironment: "startEnvironment"

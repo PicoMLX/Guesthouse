@@ -41,7 +41,7 @@ public final class RuntimeClient: RuntimeBackend {
         do {
             if !permitsOperations {
                 switch request {
-                case .runtimeVersion, .hostPreflight, .prepareStorage, .environmentStatus: break
+                case .runtimeVersion, .listEnvironments, .hostPreflight, .prepareStorage, .environmentStatus: break
                 case .inspectXcode(let handoff) where selection?.handoff == handoff: break
                 default: throw GuesthouseError.invalidRequest(.unsupportedOperation)
                 }

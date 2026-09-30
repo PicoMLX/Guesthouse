@@ -29,6 +29,8 @@ import XPC
         // A complete report: the wire refuses partial ones, so this is the shape that must
         // survive the frame path, not a stand-in.
         .hostPreflight(PreflightCheck.run(snapshot: HostProbeSnapshot())),
+        .xcodeSelection(.rejected(.notXcode)),
+        .environments(.unavailable(.repairRequired)),
         .accepted(OperationID()),
         .progress(OperationID(), ProgressPhase(kind: .copying, fraction: 0.5)),
         .diagnostic(DiagnosticEvent(operation: .runtimeRequest, outcome: .started, operationID: UUID())),
