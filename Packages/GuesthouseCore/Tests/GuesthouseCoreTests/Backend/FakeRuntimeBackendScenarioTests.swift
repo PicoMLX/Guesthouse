@@ -6,6 +6,19 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct FakeRuntimeBackendScenarioTests {
     let environment = EnvironmentID(), operation = OperationID()
 
+    @Test func idleInterruptionsCoalesceAndObserverDoesNotKeepFakeAlive() async {
+        var backend: FakeRuntimeBackend? = FakeRuntimeBackend()
+        weak let owner = backend
+        var interruptions = backend!.connectionInterruptions.makeAsyncIterator()
+        await backend?.simulateConnectionInterruption()
+        await backend?.simulateConnectionInterruption(.oversizedResponse)
+        #expect(await interruptions.next() == .oversizedResponse)
+        #expect(await backend?.receivedRequests.isEmpty == true)
+        backend = nil
+        #expect(await interruptions.next() == nil)
+        #expect(owner == nil)
+    }
+
     @Test func successPreservesEveryStageAndFractionBeforeTheFinalStatus() async throws {
         let backend = FakeRuntimeBackend()
         let phases = [ProgressPhase(kind: .startingVM), ProgressPhase(kind: .waitingForNetwork, fraction: 0.5)]
@@ -22,6 +35,7 @@ import Testing
 
     @Test func stagedDisconnectionPreservesAcceptanceProgressAndUncertainIdentity() async throws {
         let backend = FakeRuntimeBackend(), phase = ProgressPhase(kind: .copying)
+        var interruptions = backend.connectionInterruptions.makeAsyncIterator()
         await backend.useOperationID(operation, forNext: "importXcode")
         await backend.script("importXcode", .disconnect(after: [phase]))
         let handoff = FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")
@@ -31,6 +45,7 @@ import Testing
         await #expect(throws: RuntimeSessionFailure(cause: .connectionLost, operationID: operation, mayHaveMutated: true)) {
             try await events.next()
         }
+        #expect(await interruptions.next() == .connectionLost)
         #expect(await backend.status(of: environment)?.inFlightOperation == operation)
     }
 

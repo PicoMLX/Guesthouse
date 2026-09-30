@@ -11,6 +11,9 @@ import Synchronization
 /// and emits `accepted` under a turn ticket; the rest of the scenario runs concurrently so a
 /// hanging operation never blocks the `cancelOperation` that ends it.
 public actor FakeRuntimeBackend: RuntimeBackend {
+    public nonisolated let connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause>
+    private nonisolated let interruptionSink: AsyncStream<RuntimeSessionFailure.Cause>.Continuation
+
     public enum Scenario: Sendable {
         /// `accepted`, the given phases, an optional status, then `completed`. For queries, the
         /// normal reply.
@@ -110,8 +113,17 @@ public actor FakeRuntimeBackend: RuntimeBackend {
     }
 
     public init(delay: Duration = .zero, versionInfo: RuntimeVersionInfo = RuntimeVersionInfo(serviceVersion: "0.0.0", serviceBuild: "fake")) {
+        (connectionInterruptions, interruptionSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         self.delay = delay
         self.versionInfo = versionInfo
+    }
+
+    deinit { interruptionSink.finish() }
+
+    /// Invalidate a preview's cached connection/status even when no query is in flight.
+    /// This does not settle or cancel scripted operations; their outcomes stay independent.
+    public func simulateConnectionInterruption(_ cause: RuntimeSessionFailure.Cause = .connectionLost) {
+        interruptionSink.yield(cause)
     }
 
     // MARK: - Scripting
@@ -174,6 +186,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             await pause()
             switch scenario {
             case .disconnect:
+                interruptionSink.yield(.connectionLost)
                 continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost))
             case .fail(_, let error):
                 continuation.yield(.failed(OperationID(), error))
@@ -212,6 +225,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // refused cancellation as the target's terminal or interrupted outcome. The
             // request may still have taken effect on the way out, so it is a mutation.
             case .disconnect:
+                interruptionSink.yield(.connectionLost)
                 // The request never took effect: the reservation is released, so a later
                 // consumer-driven cancellation is recorded as the request it is.
                 releaseReservation(of: id)
@@ -314,6 +328,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             // in the other branches: it is recorded and ends as canceled rather than leaving
             // a seeded operation in flight behind a connection loss nobody is listening for.
             guard !(await cancelled(id, continuation)) else { return }
+            interruptionSink.yield(.connectionLost)
             continuation.finish(throwing: RuntimeSessionFailure(cause: .connectionLost, operationID: id, mayHaveMutated: true))
         }
     }
