@@ -39,9 +39,12 @@ public final class RuntimeClient: RuntimeBackend {
             inbox.ended(key, reason) // End callback only enqueues; never performs native cleanup.
         }
         do {
-            if !permitsOperations, request != .runtimeVersion, request != .hostPreflight, request != .prepareStorage,
-               selection.map({ request == .inspectXcode($0.handoff) }) != true {
-                throw GuesthouseError.invalidRequest(.unsupportedOperation)
+            if !permitsOperations {
+                switch request {
+                case .runtimeVersion, .hostPreflight, .prepareStorage, .environmentStatus: break
+                case .inspectXcode(let handoff) where selection?.handoff == handoff: break
+                default: throw GuesthouseError.invalidRequest(.unsupportedOperation)
+                }
             }
             let envelope = RuntimeRequestEnvelope(request: request)
             try RequestValidator.validate(envelope)
