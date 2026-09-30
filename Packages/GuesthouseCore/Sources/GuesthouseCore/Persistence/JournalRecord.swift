@@ -144,9 +144,9 @@ public struct JournalReplay: Hashable, Sendable {
     /// Operations whose latest record leaves them in flight, keyed by id. Every one of these
     /// has an unknown outcome until the coordinator inspects actual state.
     public var inFlight: [OperationID: JournalRecord]
-    /// True when the final line was incomplete, which happens when the process died mid-write.
-    /// The partial line is ignored; the operation it belonged to is still listed as in flight
-    /// by its previous record, if any. The next append truncates it.
+    /// True when the final line was incomplete. Its bytes remain on disk for explicit repair;
+    /// ordinary append must refuse rather than truncate them (ADR 0004). Only complete records
+    /// appear above, so an empty inFlight map with this flag is NOT proof of a settled history.
     public var truncatedTail: Bool
 
     public init(records: [JournalRecord], inFlight: [OperationID: JournalRecord], truncatedTail: Bool) {
