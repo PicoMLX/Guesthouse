@@ -69,8 +69,8 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.root.appending(path: "state").path).isEmpty)
     }
 
-    @Test(arguments: [false, true])
-    func startupRefusesProtectionDriftWithoutChangingOrLosingSavedWork(journal: Bool) async throws {
+    @Test(arguments: [false, true], [0o644, 0o000])
+    func startupRefusesProtectionDriftWithoutChangingOrLosingSavedWork(journal: Bool, mode: Int) async throws {
         let fixture = try Fixture()
         let owner = try await fixture.open()
         _ = try await owner.loadSnapshot()
@@ -80,16 +80,16 @@ import Testing
         await owner.close()
         let file = fixture.root.appending(path: journal ? "state/journal.ndjson" : "state/environments.json")
         let original = try Data(contentsOf: file)
-        try #require(chmod(file.path, 0o644) == 0)
+        try #require(chmod(file.path, mode_t(mode)) == 0)
         let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in try await fixture.open() })
         await loader.load()
         #expect(loader.status == .repairRequired && loader.loadedState == nil)
         var info = stat()
         try #require(lstat(file.path, &info) == 0)
-        #expect(info.st_mode & 0o777 == 0o644)
-        #expect(try Data(contentsOf: file) == original)
+        #expect(info.st_mode & 0o777 == mode_t(mode))
         // Explicit fixture-only repair permits a later read; it does not settle the operation.
         try #require(chmod(file.path, 0o600) == 0)
+        #expect(try Data(contentsOf: file) == original)
         let reopened = try await fixture.open()
         #expect(try await reopened.loadSnapshot() == .empty)
         #expect(try await reopened.replay().inFlight[operation] != nil)

@@ -67,7 +67,14 @@ enum StateFileEntry {
             let openError = errno
             if openError != ENOENT {
                 didObserve()
-                guard didIdentify(entryIdentity(in: directory, access: access)) else { throw access.failure }
+                let entry = entryMetadata(in: directory, access: access)
+                guard didIdentify(entry.map(StateFileIdentity.init)) else { throw access.failure }
+                if access.inspects, openError == EACCES || openError == EPERM,
+                   let entry, entry.st_mode & S_IFMT == S_IFREG {
+                    // Opening a known metadata file was denied before descriptor verification.
+                    // Preserve it and require repair; this is not missing first-launch storage.
+                    throw StateStoreError.insecureDirectory(reason: .permissions)
+                }
             }
             if openError == ENOENT, !access.creates {
                 do {
@@ -137,8 +144,12 @@ enum StateFileEntry {
     /// Nofollow metadata for failed opens only. An identity is evidence, not valid contents
     /// or access authority; inability to bind it is reported explicitly to the owner.
     private static func entryIdentity(in directory: Int32, access: StateFileAccess) -> StateFileIdentity? {
+        entryMetadata(in: directory, access: access).map(StateFileIdentity.init)
+    }
+
+    private static func entryMetadata(in directory: Int32, access: StateFileAccess) -> stat? {
         var entry = stat()
-        return fstatat(directory, access.name, &entry, AT_SYMLINK_NOFOLLOW) == 0 ? StateFileIdentity(entry) : nil
+        return fstatat(directory, access.name, &entry, AT_SYMLINK_NOFOLLOW) == 0 ? entry : nil
     }
 
     /// In addition to inode identity, a supplied version detects same-inode reattachment or

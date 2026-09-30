@@ -315,7 +315,8 @@ import Testing
         var identity: StateFileIdentity?
         try #require(chmod(fixture.file(access).path, 0) == 0)
         var observed = 0, opened = 0
-        #expect(throws: access.failure) {
+        let failure: StateStoreError = access.inspects ? .insecureDirectory(reason: .permissions) : access.failure
+        #expect(throws: failure) {
             try fixture.anchor.withFile(access, didOpen: { opened += 1 },
                 didObserve: { observed += 1 }, didIdentify: { identity = $0; return true },
                 body: { _ in Issue.record("Denied file reached body") })
