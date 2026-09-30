@@ -108,6 +108,10 @@ import XPC
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: base) }
         let root = base.appending(path: "Guesthouse")
+        // Filesystem preparation has its own integration suite. Prepare its successful
+        // result before the native reply watchdog so that this test measures XPC admission,
+        // disconnect and lifetime behavior rather than competing filesystem barriers.
+        let prepared = authorized && !failSetup ? try await StateStore.createFresh(root: { root }) : nil
         let (entered, signal) = AsyncStream<Void>.makeStream()
         let (release, resume) = AsyncStream<Void>.makeStream()
         defer { signal.finish(); resume.finish() }
@@ -120,12 +124,12 @@ import XPC
             completion.yield(true); completion.finish()
         })
         let loader = RuntimeStateLoader(open: { () async throws(StateStoreError) -> StateStore in
-            try await StateStore.open(storage: { try RuntimeStorage(existingRoot: root) })
+            throw .insecureDirectory(reason: .unreadable)
         }, create: { () async throws(StateStoreError) -> StateStore in
             calls.withLock { $0 += 1 }; signal.yield(())
             for await _ in release { break }
-            if failSetup { throw .setupRequiresInspection }
-            return try await StateStore.createFresh(root: { root })
+            guard let prepared else { throw .setupRequiresInspection }
+            return prepared
         })
         await loader.load()
         let fixture = try Fixture(authorized: authorized, productionPlan: true, runtimeState: loader, supervisor: supervisor)

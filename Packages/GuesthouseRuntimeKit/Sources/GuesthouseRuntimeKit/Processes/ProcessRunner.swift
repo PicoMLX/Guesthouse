@@ -89,6 +89,10 @@ struct ProcessRunner: Sendable {
             readers.detach(); delivery?.cancel()
             throw (error as? ProcessLaunchFailure) ?? .executableUnavailable
         }
+        // Drop the parent's copies before the first suspension after spawn. Keeping these
+        // across the actor hop can withhold EOF/EPIPE while the child has already exited.
+        try? stdout.fileHandleForWriting.close(); try? stderr.fileHandleForWriting.close()
+        try? stdin?.fileHandleForReading.close(); try? nullInput?.close()
         let run = ProcessRun(child: child, readers: readers, input: delivery, grace: invocation.terminationGracePeriod)
         await run.start(deadline: deadline, input: data)
         if Task.isCancelled { await run.terminate(gracePeriod: invocation.terminationGracePeriod) }
