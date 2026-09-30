@@ -57,13 +57,13 @@ import Testing
         #expect(try Data(contentsOf: blocker) == Data("keep me".utf8))
     }
 
-    @Test(arguments: [false, true]) func unsafeAncestorPreventsCreationAndRepair(_ exists: Bool) async throws {
+    @Test(arguments: [false, true]) func unsafeAncestorPreventsCreationAndRepair(_ exists: Bool) throws {
         let fixture = try Fixture()
         let root = fixture.base.appending(path: "parent/Guesthouse")
         try fixture.directory(root.deletingLastPathComponent())
         if exists {
             try fixture.directory(root, mode: 0o755)
-            try await fixture.addACL("everyone allow read,list", at: root)
+            try FixtureACL.install(.everyoneRead, at: root)
             try Data("keep me".utf8).write(to: root.appending(path: "unpublished"))
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: root.deletingLastPathComponent().path)
@@ -93,7 +93,7 @@ import Testing
 
     @Test(arguments: ["", "runtime", "vms", "state", "staging", "downloads", "diagnostics", "ssh", "ssh/maintenance"],
           [false, true])
-    func everyManagedComponentRejectsModeOrACLDriftWithoutRepair(_ suffix: String, _ acl: Bool) async throws {
+    func everyManagedComponentRejectsModeOrACLDriftWithoutRepair(_ suffix: String, _ acl: Bool) throws {
         let fixture = try Fixture()
         let storage = try RuntimeStorage(root: fixture.storage)
         let target = suffix.isEmpty ? fixture.storage : fixture.storage.appending(path: suffix)
@@ -101,7 +101,7 @@ import Testing
             RuntimeStorage.Area(rawValue: suffix) ?? .vms
         let sentinel = fixture.storage.appending(path: "vms/unpublished")
         try Data("keep me".utf8).write(to: sentinel)
-        if acl { try await fixture.addACL("everyone allow read,list", at: target) }
+        if acl { try FixtureACL.install(.everyoneRead, at: target) }
         else { try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path) }
         #expect(throws: StorageFailure.protectionDrift) { _ = try storage.location(for: area) }
         #expect(throws: StorageFailure.protectionDrift) { _ = try storage.location(for: area) }
@@ -112,7 +112,7 @@ import Testing
     }
 
     @Test(arguments: [RuntimeStorage.Area.vms, .sshMaintenance], [(0o300, false), (0o100, false), (0o700, true)])
-    func unreadableSearchableLeavesAreRepairedWithoutReplacingWork(_ area: RuntimeStorage.Area, _ options: (Int, Bool)) async throws {
+    func unreadableSearchableLeavesAreRepairedWithoutReplacingWork(_ area: RuntimeStorage.Area, _ options: (Int, Bool)) throws {
         let fixture = try Fixture()
         let storage = try RuntimeStorage(root: fixture.storage)
         let leaf = try storage.location(for: area)
@@ -126,7 +126,7 @@ import Testing
         let empty = try #require(acl_init(0))
         defer { fchmod(cleanup, 0o700); acl_set_fd(cleanup, empty); acl_free(UnsafeMutableRawPointer(empty)) }
         try #require(fchmod(cleanup, mode_t(options.0)) == 0)
-        if options.1 { try await fixture.addACL("everyone deny read,list", at: leaf) }
+        if options.1 { try FixtureACL.install(.everyoneDenyRead, at: leaf) }
         let readFD = open(leaf.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         let readError = errno
         if readFD >= 0 { close(readFD) }
@@ -152,7 +152,7 @@ import Testing
     }
 
     @Test(arguments: [false, true])
-    func inaccessibleLeafIsRefusedBeforeAnyPreparation(_ denyAccess: Bool) async throws {
+    func inaccessibleLeafIsRefusedBeforeAnyPreparation(_ denyAccess: Bool) throws {
         let fixture = try Fixture()
         try fixture.directory(fixture.storage, mode: 0o755)
         let leaf = fixture.storage.appending(path: "vms")
@@ -164,7 +164,7 @@ import Testing
         defer { close(cleanup) }
         let empty = try #require(acl_init(0))
         defer { fchmod(cleanup, 0o700); acl_set_fd(cleanup, empty); acl_free(UnsafeMutableRawPointer(empty)) }
-        if denyAccess { try await fixture.addACL("everyone deny read,list,search", at: leaf) }
+        if denyAccess { try FixtureACL.install(.everyoneDenyReadSearch, at: leaf) }
         else { try #require(fchmod(cleanup, 0o000) == 0) }
         #expect(throws: StorageFailure.inspectionFailed) { _ = try RuntimeStorage(root: fixture.storage) }
         #expect(try StorageProtection.structure(fixture.storage).st_mode & 0o7777 == 0o755)
@@ -216,20 +216,20 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: fixture.storage.appending(path: "runtime").path))
     }
 
-    @Test func inheritedReadACLIsRemovedWithoutChangingTheContainingFolder() async throws {
+    @Test func inheritedReadACLIsRemovedWithoutChangingTheContainingFolder() throws {
         let fixture = try Fixture()
-        try await fixture.addACL("everyone allow read,list,directory_inherit", at: fixture.base)
+        try FixtureACL.install(.inheritedRead, at: fixture.base)
         let storage = try RuntimeStorage(root: fixture.storage)
         try StorageProtection.verify(fixture.storage)
         try StorageProtection.verify(storage.location(for: .sshMaintenance))
         #expect(throws: StorageFailure.protectionDrift) { try StorageProtection.verify(fixture.base) }
     }
 
-    @Test func postMutationACLDriftIsRefused() async throws {
+    @Test func postMutationACLDriftIsRefused() throws {
         let fixture = try Fixture()
         let donor = fixture.base.appending(path: "acl-donor")
         try fixture.directory(donor)
-        try await fixture.addACL("everyone allow read,list", at: donor)
+        try FixtureACL.install(.everyoneRead, at: donor)
         #expect(throws: StorageFailure.protectionDrift) {
             _ = try RuntimeStorage(root: fixture.storage) { url, excluded in
                 try RuntimeStorage.writeBackupExclusion(url, excluded)
@@ -337,11 +337,6 @@ import Testing
             if url == base { return }
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: mode])
         }
-        func addACL(_ rule: String, at url: URL) async throws {
-            let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/chmod"),
-                arguments: ["+a", rule, url.path], timeout: .seconds(5)))
-            let report = try await run.waitForExit()
-            try #require(try report.childExit?.get() == .status(0) && !report.timedOut && !report.canceled)
-        }
+
     }
 }
