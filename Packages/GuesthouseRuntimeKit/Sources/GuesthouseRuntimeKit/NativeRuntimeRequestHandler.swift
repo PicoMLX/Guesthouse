@@ -3,17 +3,20 @@ import GuesthouseCore
 import XPC
 
 /// Native service ingress for #19/#20/#112 (MVP-PLAN.md §3). No listener is activated here.
-/// Version and host-preflight queries are implemented: mutations stay unavailable until streaming and
+/// Queries and explicit metadata setup are implemented: VM mutations stay unavailable until streaming and
 /// operation correlation/unknown-outcome handling migrate across all native consumers.
 public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     // In-process service policy only. Neither closures nor worker tickets cross XPC.
     enum ReplyPlan: Sendable {
         case immediate(RuntimeEvent)
         case readOnly(@Sendable () -> RuntimeEvent)
+        /// A single service-owned setup claim, reserved under registration and always completed.
+        case storageSetup(@Sendable () async -> RuntimeEvent)
     }
     private enum Delivery: Sendable {
         case immediate(RuntimeEvent)
         case deferred(RuntimeReadOnlyWorker.Ticket)
+        case storageSetup(@Sendable () async -> RuntimeEvent)
     }
     private let gate: RuntimeSessionGate
     private let worker: RuntimeReadOnlyWorker
@@ -45,6 +48,15 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     /// the existing bounded admission/reply path; filesystem probes never run under the gate.
     static func queryPlan(_ request: RuntimeRequest, version: RuntimeVersionInfo,
                           state: RuntimeStateLoader?) -> ReplyPlan {
+        if case .prepareStorage = request, let state {
+            guard let claim = state.reserveSetup() else {
+                return .immediate(queryReply(.runtimeVersion, version: version, savedState: state.status))
+            }
+            return .storageSetup {
+                let status = await state.completeSetup(claim)
+                return queryReply(.runtimeVersion, version: version, savedState: status)
+            }
+        }
         if case .hostPreflight = request {
             return .readOnly {
                 .hostPreflight(state?.hostPreflight()
@@ -79,8 +91,8 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
                   plan: { .immediate(register($0)) }, send: send, cancel: cancel, diagnostic: diagnostic)
     }
 
-    // Only named read-only service policy may select deferred work. Construct the worker
-    // and probe owners outside the gate. This seam does not activate a new public operation.
+    // Only named service policy may select work. Construct owners outside the gate;
+    // storage setup additionally reserves its one service-lifetime claim during registration.
     init(
         gate: RuntimeSessionGate, worker: RuntimeReadOnlyWorker,
         authenticate: @escaping @Sendable (XPCDictionary) -> Bool,
@@ -159,6 +171,7 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
             retainedPlan = selected
             switch selected {
             case .immediate(let event): return .immediate(event)
+            case .storageSetup(let work): return .storageSetup(work)
             case .readOnly(let work):
                 guard let ticket = worker.reserve(gate: gate, reply: reply, work: work) else {
                     return .immediate(.failed(OperationID(), .invalidRequest(.tooManyInFlight)))
@@ -168,6 +181,13 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         }
         switch registration {
         case .refused(let event), .registered(.immediate(let event)): reply.finish(event)
+        case .registered(.storageSetup(let work)):
+            // At most one claimed setup per service lifetime, not one Task per request.
+            // Once admitted it finishes even after disconnect; a lost reply remains unknown.
+            Task { [gate] in
+                let result = await work()
+                reply.finish(gate.refusal ?? result)
+            }
         case .registered(.deferred(let ticket)):
             // Start even after an intervening refusal so the canceled reservation drains.
             // The production executor enqueues, never runs a probe in this native callback.
@@ -187,9 +207,8 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
         let payload: Data
         do { payload = try RuntimeEventEnvelope(event: event).encoded() }
         catch {
-            // No mutation can run through the public handler. This is a transport failure,
-            // not success/operation completion. A future mutating adapter must preserve its
-            // registered ID and unknown outcome instead of reusing this query-only fallback.
+            // This is not setup completion. The client retains prepareStorage's mutation
+            // uncertainty, and startup inspects saved metadata after a lost/invalid reply.
             let failure = refusing(error)
             record(failure)
             guard let bytes = try? RuntimeEventEnvelope(event: failure).encoded() else { return }

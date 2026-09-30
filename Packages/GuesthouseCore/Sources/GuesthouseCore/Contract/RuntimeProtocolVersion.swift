@@ -4,9 +4,9 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
 
     public init(_ rawValue: Int) { self.rawValue = rawValue }
 
-    /// Epoch 13 adds the named host-preflight request/report to epoch 12's bounded frames.
+    /// Epoch 14 adds explicit runtime-owned metadata setup; epoch 13 cannot authorize it.
     /// Earlier epochs are not compatible fallbacks; GUI/service upgrade together (ADR 0003).
-    public static let current = RuntimeProtocolVersion(13)
+    public static let current = RuntimeProtocolVersion(14)
 
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
     public var description: String { "protocol \(rawValue)" }

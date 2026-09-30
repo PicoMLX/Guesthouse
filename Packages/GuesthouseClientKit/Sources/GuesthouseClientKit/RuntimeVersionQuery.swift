@@ -31,13 +31,13 @@ public enum RuntimeVersionQuery {
     }
 
     // Inject native-session creation/deadline only in package tests, never from GUI requests.
-    static func perform(connect: XPCRuntimeTransport.Connect?,
+    static func perform(request: RuntimeRequest = .runtimeVersion, connect: XPCRuntimeTransport.Connect?,
                         deadline: @escaping @Sendable () async throws -> Void) async -> Outcome {
         guard !Task.isCancelled else { return .failure(.canceled) }
         // This structured group owns the query's ONLY deadline and always awaits close.
         // A second client timer could win with connectionLost instead of timedOut.
         let client = RuntimeClient(connect: connect, permitsOperations: false, deadline: nil)
-        let stream = client.send(.runtimeVersion)
+        let stream = client.send(request)
         await client.flush()
         let outcome = await withTaskGroup(of: Outcome.self) { group in
             group.addTask {

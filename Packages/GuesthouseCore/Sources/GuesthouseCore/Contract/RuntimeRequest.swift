@@ -6,6 +6,9 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     case runtimeVersion
     /// Read-only report; policy and storage identity are selected and retained by the service.
     case hostPreflight
+    /// Explicit metadata setup at the fixed runtime-owned location; no path or options.
+    /// Replies with runtimeVersion/savedState after setup settles. Lost replies require inspection.
+    case prepareStorage
     case environmentStatus(EnvironmentID)
     case startEnvironment(EnvironmentID, StartOptions)
     case stopEnvironment(EnvironmentID, StopMode)
@@ -16,6 +19,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
         switch self {
         case .runtimeVersion: "runtimeVersion"
         case .hostPreflight: "hostPreflight"
+        case .prepareStorage: "prepareStorage"
         case .environmentStatus: "environmentStatus"
         case .startEnvironment: "startEnvironment"
         case .stopEnvironment: "stopEnvironment"

@@ -49,12 +49,19 @@ struct ContentView: View {
                     .accessibilityIdentifier("runtimeConnectionResult")
                 }
                 Divider()
+                StorageSetupView(canPrepare: canPrepareStorage)
+                Divider()
                 HostPreflightView()
             }
             .padding(24)
         }
         .frame(minWidth: 420, idealWidth: 520, minHeight: 260, alignment: .topLeading)
         .onDisappear(perform: cancelCheck)
+    }
+
+    private var canPrepareStorage: Bool {
+        guard case .success(let info) = outcome else { return false }
+        return info.savedState == .loaded || info.savedState == .unavailable
     }
 
     private func startCheck() {
