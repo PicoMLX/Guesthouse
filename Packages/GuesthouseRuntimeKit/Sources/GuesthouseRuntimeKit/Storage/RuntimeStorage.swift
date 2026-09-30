@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import GuesthouseCore
 
 /// Service-only storage layout migrated from #70/#88 (MVP-PLAN.md §§3 and 9). No GUI-supplied
 /// root or provider environment adapter. Preparation is explicit; reuse only checks and never
@@ -45,6 +46,33 @@ struct RuntimeStorage: Sendable {
         let preparation = try Self.missingParents(of: root).map { ($0, false) } + layout
         for (url, excluded) in preparation { try Self.prepare(url, excluded: excluded, backup: backup) }
         for (url, excluded) in preparation { try Self.verify(url, excluded: excluded) }
+    }
+
+    /// Explicit first setup: mkdir claims a previously absent root. Existing or interrupted
+    /// layouts are never repaired here. Lock state before the remaining layout becomes usable
+    /// by ordinary openers; the body must retain a duplicate of this locked descriptor.
+    static func withFreshLayout<T>(at requestedRoot: URL, backup: BackupWriter = writeBackupExclusion,
+                                   body: (RuntimeStorage, Int32) throws -> T) throws -> T {
+        let root = URL(fileURLWithPath: try StorageProtection.path(requestedRoot), isDirectory: false)
+        try StorageProtection.existingAncestors(of: root)
+        var existing = stat()
+        guard lstat(root.path, &existing) != 0, errno == ENOENT else {
+            throw StateStoreError.setupRequiresInspection
+        }
+        for parent in try missingParents(of: root) { try prepare(parent, excluded: false, backup: backup) }
+        // An atomic claim also excludes a second setup process. Never delete this marker on
+        // failure: a later launch must inspect partial setup rather than blindly repeat it.
+        guard mkdir(root.path, 0o700) == 0 else { throw StateStoreError.setupRequiresInspection }
+        try prepare(root, excluded: false, backup: backup)
+        let state = root.appending(path: Area.state.rawValue)
+        try prepare(state, excluded: false, backup: backup)
+        let descriptor = try openForPreparation(state)
+        defer { close(descriptor) }
+        guard StateFileIO.lock(descriptor, LOCK_EX | LOCK_NB) else {
+            throw StateStoreError.fileUnwritable(name: .stateDirectory)
+        }
+        let storage = try RuntimeStorage(root: root, backup: backup)
+        return try body(storage, descriptor)
     }
 
     /// Resolution only. No Application Support directory is created before ancestry checks.
