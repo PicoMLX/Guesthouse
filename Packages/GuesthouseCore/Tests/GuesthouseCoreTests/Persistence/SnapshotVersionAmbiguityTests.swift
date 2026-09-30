@@ -32,7 +32,7 @@ import Testing
     ])
     func nestedKeysAndQuotedTextDoNotCreateEnvelopeMembers(json: String) throws {
         let source = Data(json.utf8)
-        let migrated = try SnapshotMigrator.standard.migrate(source)
+        let migrated = try SnapshotMigrator(current: SchemaVersion(2)!, migrations: []).migrate(source)
         #expect(migrated.from == SchemaVersion(2))
         #expect(migrated.data == source)
     }

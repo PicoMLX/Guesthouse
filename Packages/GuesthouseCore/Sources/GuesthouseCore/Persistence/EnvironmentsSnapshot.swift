@@ -11,47 +11,71 @@ import Foundation
 /// records controlling one VM). `validate()` runs before encoding and after decoding.
 /// The concrete runtime store owns durability, permissions and preservation of rejected files.
 public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
-    /// Format 2 contains typed provisioning records. Prototype/unversioned snapshots are
-    /// refused, not re-stamped or rewritten; a future migration needs an explicit transform.
-    public static let currentSchema = SchemaVersion(2)!
+    /// Format 3 retains host storage identity. Older writers must refuse it rather than
+    /// silently discard that identity. Format 2 has an explicit migration that retains records with unknown selection.
+    public static let currentSchema = SchemaVersion(3)!
     public var schemaVersion: SchemaVersion
     public var environments: [DevelopmentEnvironment]
     public var slots: VMSlotInventory
     public var provisioning: [EnvironmentID: ProvisioningState]
+    /// Nil means unselected/unknown, never permission to infer a replacement for saved work.
+    public var storageSelection: HostStorageSelection?
 
     public init(
         schemaVersion: SchemaVersion = EnvironmentsSnapshot.currentSchema,
         environments: [DevelopmentEnvironment] = [],
         slots: VMSlotInventory = VMSlotInventory(),
-        provisioning: [EnvironmentID: ProvisioningState] = [:]
+        provisioning: [EnvironmentID: ProvisioningState] = [:],
+        storageSelection: HostStorageSelection? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.environments = environments
         self.slots = slots
         self.provisioning = provisioning
+        self.storageSelection = storageSelection
     }
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, environments, slots, provisioning
+        case schemaVersion, environments, slots, provisioning, storageSelection
     }
 
     public init(from decoder: any Decoder) throws {
+        try self.init(from: decoder, expectedVersion: Self.currentSchema)
+    }
+
+    private init(from decoder: any Decoder, expectedVersion: SchemaVersion) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let version = try c.decode(SchemaVersion.self, forKey: .schemaVersion)
-        guard version == Self.currentSchema else {
+        guard version == expectedVersion else {
             throw StateStoreError.unsupportedSnapshotVersion(found: version, current: Self.currentSchema)
         }
         self.init(
-            schemaVersion: version,
+            schemaVersion: Self.currentSchema,
             environments: try c.decode([DevelopmentEnvironment].self, forKey: .environments),
             slots: try c.decode(VMSlotInventory.self, forKey: .slots),
-            provisioning: try Self.decodeProvisioning(from: c)
+            provisioning: try Self.decodeProvisioning(from: c),
+            storageSelection: version == Self.currentSchema
+                ? try c.decodeIfPresent(HostStorageSelection.self, forKey: .storageSelection) : nil
         )
         do {
             try validate()
         } catch {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: error.userMessage))
         }
+    }
+
+    /// Decode the known format-2 record shape before upgrading; never invent a volume identity.
+    /// Reusing typed decoding preserves UInt64 tokens and duplicate provisioning-key checks.
+    static func migrateVersion2(_ data: Data) throws -> Data {
+        struct Version2: Decodable {
+            let snapshot: EnvironmentsSnapshot
+            init(from decoder: any Decoder) throws {
+                snapshot = try EnvironmentsSnapshot(from: decoder, expectedVersion: SchemaVersion(2)!)
+            }
+        }
+        do { return try JSONEncoder().encode(JSONDecoder().decode(Version2.self, from: data).snapshot) }
+        catch let failure as StateStoreError { throw failure }
+        catch { throw StateStoreError.corruptSnapshot }
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -61,6 +85,7 @@ public struct EnvironmentsSnapshot: Codable, Hashable, Sendable {
         try c.encode(environments, forKey: .environments)
         try c.encode(slots, forKey: .slots)
         try c.encode(provisioning, forKey: .provisioning)
+        try c.encodeIfPresent(storageSelection, forKey: .storageSelection)
     }
 
     /// Reads the provisioning object one key at a time instead of straight into a dictionary.

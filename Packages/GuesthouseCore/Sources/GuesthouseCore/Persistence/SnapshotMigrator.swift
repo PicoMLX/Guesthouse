@@ -39,10 +39,12 @@ public struct SnapshotMigrator: Sendable {
         ambiguousVersion = ambiguous
     }
 
-    /// No prototype-to-format-2 transform is shipped. Older records may carry incompatible
-    /// raw error/resume data; refuse them and preserve the original, rather than re-stamping
-    /// their envelope. Future upgrades require an explicit, tested record transformation.
-    public static let standard = SnapshotMigrator(migrations: [])
+    /// Format 2 upgrades known records with an explicitly unknown storage selection. Loading
+    /// transforms only in memory; publication remains an explicit StateStore save. Prototypes
+    /// are still refused because their raw error/resume data has no supported transformation.
+    public static let standard = SnapshotMigrator(migrations: [
+        .init(from: SchemaVersion(2)!, apply: EnvironmentsSnapshot.migrateVersion2),
+    ])
 
     /// Returns the document at `current`, and the version it was found at.
     public func migrate(_ data: Data) throws(StateStoreError) -> (data: Data, from: SchemaVersion) {

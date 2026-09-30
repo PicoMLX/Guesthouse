@@ -28,7 +28,7 @@ import Testing
         let restored = try JSONDecoder().decode(EnvironmentsSnapshot.self, from: JSONEncoder().encode(original))
         #expect(restored == original)
         #expect(restored.environments[0].createdAt == environment.createdAt)
-        #expect(restored.schemaVersion.rawValue == 2)
+        #expect(restored.schemaVersion == EnvironmentsSnapshot.currentSchema)
         #expect(restored.environments[0].schemaVersion.rawValue == 1)
         #expect(restored.provisioning[environment.id]?.schemaVersion.rawValue == 2)
         let json = try object(original)
@@ -95,7 +95,7 @@ import Testing
         #expect(state.nextEffectToken?.value == next)
     }
 
-    @Test(arguments: [1, 3, 99])
+    @Test(arguments: [1, 2, 4, 99])
     func outerVersionDoesNotAuthorizeANestedProvisioningFormat(version: Int) throws {
         var json = try object(sample())
         json["provisioning"] = [environment.id.uuid.uuidString: ["schemaVersion": version]]
@@ -144,7 +144,7 @@ import Testing
         }
     }
 
-    @Test(arguments: [1, 3, 99])
+    @Test(arguments: [1, 2, 4, 99])
     func unsupportedOuterFormatsAreRefusedBeforeReadingTheirShape(version: Int) throws {
         let schema = try #require(SchemaVersion(version))
         let error = StateStoreError.unsupportedSnapshotVersion(found: schema, current: EnvironmentsSnapshot.currentSchema)
