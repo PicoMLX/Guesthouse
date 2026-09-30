@@ -33,6 +33,10 @@ struct ContentView: View {
                     case .success(let info):
                         Text("Runtime service responded.").font(.headline)
                         Text("Version \(info.serviceVersion ?? "unknown"), build \(info.serviceBuild ?? "unknown"), protocol \(info.protocolVersion.rawValue).")
+                        if let savedState = info.savedState {
+                            Text(savedState.userMessage)
+                            Text(savedState.recoveryMessage).foregroundStyle(.secondary)
+                        }
                         Text("VM, provider and Xcode readiness have not been checked.")
                             .foregroundStyle(.secondary)
                     case .failure(let error):

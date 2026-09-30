@@ -28,20 +28,25 @@ public final class NativeRuntimeRequestHandler: XPCPeerHandler, Sendable {
     /// The listener must also apply RuntimeCallerAuthentication.listenerRequirement.
     /// Bundle inspection is done by the owner, outside registration's synchronous gate.
     public convenience init(
-        session: XPCSession, version: RuntimeVersionInfo,
+        session: XPCSession, version: RuntimeVersionInfo, state: RuntimeStateLoader? = nil,
         diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
     ) {
         self.init(
             authenticate: RuntimeCallerAuthentication.allows,
-            register: { Self.queryReply($0, version: version) },
+            register: { Self.queryReply($0, version: version, savedState: state?.status) },
             send: { try session.send(message: $0) },
             cancel: { session.cancel(reason: "runtime session refused") },
             diagnostic: diagnostic
         )
     }
 
-    static func queryReply(_ request: RuntimeRequest, version: RuntimeVersionInfo) -> RuntimeEvent {
-        if case .runtimeVersion = request { return .runtimeVersion(version) }
+    static func queryReply(_ request: RuntimeRequest, version: RuntimeVersionInfo,
+                           savedState: RuntimeSavedStateStatus? = nil) -> RuntimeEvent {
+        if case .runtimeVersion = request {
+            return .runtimeVersion(RuntimeVersionInfo(serviceVersion: version.serviceVersion,
+                serviceBuild: version.serviceBuild, protocolVersion: version.protocolVersion,
+                runtime: version.runtime, savedState: savedState ?? version.savedState))
+        }
         return .failed(OperationID(), .invalidRequest(.unsupportedOperation))
     }
 

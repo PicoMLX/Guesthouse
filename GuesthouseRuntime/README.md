@@ -81,3 +81,11 @@ This procedure covers one caller-identity case. It does not complete gate #34's 
 - [Service entry point](Sources/main.swift) installs the fixed listener requirement. [RuntimeCallerAuthentication](../Packages/GuesthouseRuntimeKit/Sources/GuesthouseRuntimeKit/RuntimeCallerAuthentication.swift) also checks the original incoming dictionary; there is no caller-selected identity or PID-based trust.
 - [NativeRuntimeRequestHandler](../Packages/GuesthouseRuntimeKit/Sources/GuesthouseRuntimeKit/NativeRuntimeRequestHandler.swift) authenticates before payload decoding and exposes only the read-only version query in its production constructor. [RuntimeVersionQuery](../Packages/GuesthouseClientKit/Sources/GuesthouseClientKit/RuntimeVersionQuery.swift) is the GUI's actual client path.
 - Core and native package tests cover malformed/bounded frames, mandatory version envelopes, admission, reply ownership, and injected authentication decisions. Xcode Cloud runs the package hook and shared scheme. These tests do not substitute for the signed Finder-launched app experiment.
+
+## Saved metadata on service startup
+
+The service owns one `RuntimeStateLoader` across all client sessions (MVP-PLAN.md §3; ADR 0004). It opens the already-prepared runtime storage, loads the snapshot and replays complete journal records once. The loaded store retains its exclusive directory lock. Loading does not start a VM, retry an interrupted operation, or treat saved readiness as current evidence.
+
+The existing authenticated runtime-version query includes a closed saved-state status. **Check runtime connection** displays that status and recovery guidance; queries perform no filesystem work inside the session gate. A failed load leaves the version query available, preserves files, and exposes no partial inventory. An incomplete journal tail is retained and reported as requiring repair. A second runtime cannot acquire the same store.
+
+Fresh storage creation, explicit repair, storage-volume selection, host-preflight activation and provider-backed reconciliation remain separate prerequisites. Startup does not create or repair a missing layout. Software fixtures cover load/reopen/failure behavior and native reply delivery; they do not establish signed-app or hardware readiness.
