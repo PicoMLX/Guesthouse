@@ -23,13 +23,17 @@ import Testing
     }
 
     /// Bounded, nonblocking EOF observation: leaked writer copies fail rather than hang.
-    private func drain(_ pipe: Pipe, maximumBytes: Int = 4096) async throws -> Data {
+    private enum DrainFailure: Error { case noEOFObserved }
+
+    private func drain(_ pipe: Pipe, maximumBytes: Int = 4096,
+                       deadline: ContinuousClock.Instant = .now + .seconds(2)) async throws -> Data {
         let fd = pipe.fileHandleForReading.fileDescriptor
         #expect(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0)
-        let deadline = ContinuousClock.now + .seconds(2)
         var result = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
-        while ContinuousClock.now < deadline {
+        while true {
+            // Always observe the nonblocking descriptor before considering elapsed time.
+            // A descheduled test with EOF must not be mislabeled as a leaked writer.
             let count = read(fd, &buffer, buffer.count)
             if count == 0 { return result }
             if count > 0 {
@@ -37,11 +41,22 @@ import Testing
                 try #require(result.count <= maximumBytes)
             } else {
                 try #require(errno == EAGAIN || errno == EINTR)
+                guard ContinuousClock.now < deadline else { throw DrainFailure.noEOFObserved }
                 try await Task.sleep(for: .milliseconds(5))
             }
         }
-        Issue.record("The owned spawn retained a pipe writer after exit or failure")
-        return result
+    }
+
+    @Test func expiredDeadlineStillReadsEOFButRefusesARetainedWriter() async throws {
+        let finished = Pipe(), retained = Pipe()
+        try finished.fileHandleForWriting.close()
+        let expired = ContinuousClock.now - .seconds(1)
+        #expect(try await drain(finished, deadline: expired).isEmpty)
+        await #expect(throws: DrainFailure.noEOFObserved) {
+            try await drain(retained, deadline: expired)
+        }
+        try retained.fileHandleForWriting.close()
+        #expect(try await drain(retained, deadline: expired).isEmpty)
     }
 
     @Test func rapidExitIsObservedAndReapedExactlyOnce() async throws {

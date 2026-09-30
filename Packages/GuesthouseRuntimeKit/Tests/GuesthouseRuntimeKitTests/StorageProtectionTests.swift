@@ -1,4 +1,5 @@
 import Darwin
+import Darwin.membership
 import Foundation
 import GuesthouseCore
 import Testing
@@ -22,10 +23,10 @@ import Testing
         #expect(try StorageProtection.structure(directory).st_mode & 0o7777 == mode_t(mode))
     }
 
-    @Test func leafACLIsRefusedButNeverRemoved() async throws {
+    @Test func leafACLIsRefusedButNeverRemoved() throws {
         let fixture = try Fixture()
         let directory = try fixture.directory("storage")
-        try await fixture.withACL("everyone allow read,list", at: directory) {
+        try fixture.withACL(.everyoneRead, at: directory) {
             #expect(throws: StorageFailure.protectionDrift) { try StorageProtection.verify(directory) }
             _ = try StorageProtection.structure(directory)
             #expect(throws: StorageFailure.protectionDrift) { try StorageProtection.verify(directory) }
@@ -91,22 +92,22 @@ import Testing
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: alias.path) == target.path)
     }
 
-    @Test(arguments: ["everyone deny delete", "everyone allow read,list"])
-    func harmlessAncestorACLsRemainUsable(_ rule: String) async throws {
+    @Test(arguments: [ACLRule.everyoneDenyDelete, .everyoneRead])
+    func harmlessAncestorACLsRemainUsable(_ rule: ACLRule) throws {
         let fixture = try Fixture()
         let parent = try fixture.directory("parent")
-        try await fixture.withACL(rule, at: parent) {
+        try fixture.withACL(rule, at: parent) {
             try StorageProtection.existingAncestors(of: parent.appending(path: "storage"))
         }
     }
 
-    @Test func replacementRightsForAnotherPrincipalAreRefused() async throws {
+    @Test func replacementRightsForAnotherPrincipalAreRefused() throws {
         let fixture = try Fixture()
         let parent = try fixture.directory("parent")
-        try await fixture.withACL("everyone allow add_file,delete_child", at: parent) {
+        try fixture.withACL(.everyoneReplace, at: parent) {
             #expect(throws: StorageFailure.unsafeStructure) { try StorageProtection.existingAncestors(of: parent.appending(path: "storage")) }
         }
-        try await fixture.withACL("\(NSUserName()) allow add_file,delete_child", at: parent) {
+        try fixture.withACL(.currentUserReplace, at: parent) {
             try StorageProtection.existingAncestors(of: parent.appending(path: "storage"))
         }
     }
@@ -134,6 +135,10 @@ import Testing
         #expect(!failure.message.contains("Settings") && !failure.message.contains("/private/"))
     }
 
+    enum ACLRule: Sendable {
+        case everyoneRead, everyoneDenyDelete, everyoneReplace, currentUserReplace
+    }
+
     private final class Fixture: Sendable {
         let root: URL
         init() throws {
@@ -148,17 +153,58 @@ import Testing
             try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
             return url
         }
-        func withACL(_ rule: String, at url: URL, body: () throws -> Void) async throws {
+        func withACL(_ rule: ACLRule, at url: URL, body: () throws -> Void) throws {
             defer {
                 if let empty = acl_init(0) {
                     #expect(acl_set_link_np(url.path, ACL_TYPE_EXTENDED, empty) == 0)
                     acl_free(UnsafeMutableRawPointer(empty))
                 } else { Issue.record("Could not clear the owned fixture ACL") }
             }
-            let run = try await ProcessRunner().run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/chmod"),
-                arguments: ["+a", rule, url.path], timeout: .seconds(5)))
-            let report = try await run.waitForExit()
-            try #require(try report.childExit?.get() == .status(0) && !report.timedOut && !report.canceled)
+            // Install the actual ACL using system APIs, not an unrelated child-process
+            // deadline. Cloud check 110086635926 failed in the old chmod helper before
+            // three permission assertions could run; the report did not identify why.
+            var acl = acl_init(1)
+            defer { if let acl { acl_free(UnsafeMutableRawPointer(acl)) } }
+            var entry: acl_entry_t?
+            try #require(acl_create_entry(&acl, &entry) == 0)
+            let created = try #require(entry)
+            let tag = rule == .everyoneDenyDelete ? ACL_EXTENDED_DENY : ACL_EXTENDED_ALLOW
+            try #require(acl_set_tag_type(created, tag) == 0)
+            // Apple's kauth_wellknown_guid identifies this UUID as Everybody.
+            // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_credential.c
+            var qualifier = try #require(UUID(uuidString: "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C")).uuid
+            if rule == .currentUserReplace {
+                try #require(withUnsafeMutablePointer(to: &qualifier) {
+                    $0.withMemoryRebound(to: UInt8.self, capacity: 16) { mbr_uid_to_uuid(getuid(), $0) }
+                } == 0)
+            }
+            try #require(withUnsafePointer(to: &qualifier) { acl_set_qualifier(created, $0) } == 0)
+            var permissions: acl_permset_t?
+            try #require(acl_get_permset(created, &permissions) == 0)
+            let permissionSet = try #require(permissions)
+            let rights: [acl_perm_t] = switch rule {
+            case .everyoneRead: [ACL_READ_DATA] // ACL_LIST_DIRECTORY is the same bit.
+            case .everyoneDenyDelete: [ACL_DELETE]
+            case .everyoneReplace, .currentUserReplace: [ACL_ADD_FILE, ACL_DELETE_CHILD]
+            }
+            for right in rights { try #require(acl_add_perm(permissionSet, right) == 0) }
+            let granted = try #require(acl)
+            try #require(acl_valid(granted) == 0)
+            try #require(acl_set_link_np(url.path, ACL_TYPE_EXTENDED, granted) == 0)
+            // Read back the real fixture before exercising either positive or negative policy.
+            let installed = try #require(acl_get_link_np(url.path, ACL_TYPE_EXTENDED))
+            defer { acl_free(UnsafeMutableRawPointer(installed)) }
+            var observed: acl_entry_t?, observedTag = ACL_UNDEFINED_TAG
+            try #require(acl_get_entry(installed, ACL_FIRST_ENTRY.rawValue, &observed) == 0)
+            let observedEntry = try #require(observed)
+            try #require(acl_get_tag_type(observedEntry, &observedTag) == 0 && observedTag == tag)
+            let observedID = try #require(acl_get_qualifier(observedEntry))
+            defer { acl_free(observedID) }
+            try #require(withUnsafePointer(to: &qualifier) { memcmp(observedID, $0, 16) } == 0)
+            var observedPermissions: acl_permset_t?
+            try #require(acl_get_permset(observedEntry, &observedPermissions) == 0)
+            let observedSet = try #require(observedPermissions)
+            for right in rights { try #require(acl_get_perm_np(observedSet, right) == 1) }
             try body()
         }
     }
