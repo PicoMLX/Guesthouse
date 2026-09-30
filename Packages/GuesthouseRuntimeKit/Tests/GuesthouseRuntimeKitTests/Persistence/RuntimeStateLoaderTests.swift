@@ -32,6 +32,10 @@ import Testing
         #expect(loaded.snapshot == snapshot)
         #expect(loaded.journal.inFlight[id]?.environmentID == environment.id)
         #expect(loaded.journal.inFlight[id]?.outcome == .started)
+        let status = loader.environmentStatus(environment.id)
+        #expect(status.vm == .uncertain(reason: .operationOutcomeUnknown))
+        #expect(status.inFlightOperation == id)
+        #expect(status.readiness == .needsAttention(.operationOutcomeUnknown(id)))
         await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) { try await fixture.open() }
         // Loading retains saved facts; it never claims a reconciled/running development Mac.
         #expect(loader.status.recoveryMessage.contains("inspection"))
@@ -54,6 +58,7 @@ import Testing
         await loader.load() // Must return without launching another filesystem operation.
         #expect(loader.status == .loading)
         #expect(loader.loadedState == nil)
+        #expect(loader.environmentStatus(EnvironmentID()).vm == .uncertain(reason: .inspectionFailed))
         resume.yield(())
         await task.value
         #expect(loader.status == .loaded)
