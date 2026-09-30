@@ -129,8 +129,21 @@ The public `xpc_dictionary_set_fd`/`xpc_dictionary_dup_fd` APIs are declared ava
 macOS 10.7 in the SDK; the convenient Swift descriptor subscript requires macOS 27, so it is
 not used. A duplicated descriptor is caller-owned and explicitly closed.
 
-This establishes a transport option for the named Xcode-selection consumer. Production
-framing still rejects extra descriptor fields; authentication, request binding, admission,
-bundle validation and GUI selection must be integrated together before activation. These
-unsandboxed fixtures do not prove security-scoped access from a signed GUI. Gate #34 retains
-that human-run proof; no bookmark fallback or gate result is inferred from this test.
+Epoch 15 uses this transport for the read-only `inspectXcode` consumer. Only authenticated
+inspection requests may carry the native `selectedDirectory` grant; other requests, replies
+and pushes reject it. The runtime owns its copy until the bounded worker drains, validates
+metadata relative to the pinned directory, and estimates size without following link targets.
+The GUI's **Choose Xcode…** action accepts application bundles and keeps read-only scoped
+access through the one-shot query and cleanup. Cancellation/timeouts do not copy or retry.
+
+For a development smoke check, run the shared scheme, choose an installed Xcode application,
+and check its displayed version/build against that installation. A size estimate may be
+unavailable; it is not a copy-space requirement or guest-compatibility result. Selecting another
+application must show fixed rejection/recovery text. Canceling the picker does not start a
+query; canceling an inspection keeps the control occupied until cleanup completes.
+
+The descriptor identifies the selected object directly; a canonical path string is neither
+persisted nor used as authority (MVP-PLAN.md §§2–3). Candidate/rejection replies carry typed
+selection results with Guesthouse-owned guidance, never raw file paths or errors. No bookmark
+fallback, copy operation, signature assertion or signed sandbox proof is inferred. Gate #34
+retains its separate human-run access proof; this development UI does not record it.
