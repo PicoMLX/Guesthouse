@@ -118,3 +118,19 @@ outside that lifetime. Swift `XPCSession` exposes no documented promise that ret
 arbitrary Swift task prevents idle exit. This protection does not promise survival of a crash,
 forced termination, power loss or app termination. Provider process supervision and signed
 idle-lifetime proof remain outstanding in #24/#34; no VM is launched by this change.
+
+## File-descriptor handoff feasibility
+
+`XPCFileDescriptorHandoffTests` exercises a directory descriptor alongside a Codable byte
+payload through anonymous Swift `XPCSession` dictionary endpoints (#26, MVP-PLAN.md §3).
+The received descriptor still names the selected fixture after the sender closes its copy
+and the directory is renamed/replaced. Missing descriptors and integer lookalikes are refused.
+The public `xpc_dictionary_set_fd`/`xpc_dictionary_dup_fd` APIs are declared available since
+macOS 10.7 in the SDK; the convenient Swift descriptor subscript requires macOS 27, so it is
+not used. A duplicated descriptor is caller-owned and explicitly closed.
+
+This establishes a transport option for the named Xcode-selection consumer. Production
+framing still rejects extra descriptor fields; authentication, request binding, admission,
+bundle validation and GUI selection must be integrated together before activation. These
+unsandboxed fixtures do not prove security-scoped access from a signed GUI. Gate #34 retains
+that human-run proof; no bookmark fallback or gate result is inferred from this test.
