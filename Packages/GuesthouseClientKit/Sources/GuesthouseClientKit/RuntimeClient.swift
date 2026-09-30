@@ -5,6 +5,7 @@ import GuesthouseCore
 /// The public configuration permits queries and explicit metadata setup; VM mutations remain disabled.
 /// Keep the backend alive while inspecting reconciliation; dropping it retires its transport.
 public final class RuntimeClient: RuntimeBackend {
+    public let connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause>
     typealias Deadline = @Sendable () async throws -> Void
     private let inbox: RuntimeClientInbox
     private let driver: Driver
@@ -16,11 +17,14 @@ public final class RuntimeClient: RuntimeBackend {
 
     init(connect: XPCRuntimeTransport.Connect?, permitsOperations: Bool = true,
          deadline: Deadline? = { try await Task.sleep(for: .seconds(10)) }, selection: XcodeSelectionAccess? = nil) {
+        let (interruptions, interruptionSink) = AsyncStream<RuntimeSessionFailure.Cause>.makeStream(
+            bufferingPolicy: .bufferingNewest(1))
+        connectionInterruptions = interruptions
         let inbox = RuntimeClientInbox()
         let transport: XPCRuntimeTransport
         if let connect { transport = .init(incoming: { inbox.incoming($0) }, interrupted: { inbox.interrupted($0) }, connect: connect) }
         else { transport = .init(incoming: { inbox.incoming($0) }, interrupted: { inbox.interrupted($0) }) }
-        let driver = Driver(inbox: inbox, transport: transport, deadline: deadline, selection: selection)
+        let driver = Driver(inbox: inbox, transport: transport, deadline: deadline, selection: selection, interruptionSink: interruptionSink)
         self.inbox = inbox; self.driver = driver; self.permitsOperations = permitsOperations; self.selection = selection
         drain = Task { [weak driver] in
             for await _ in inbox.wakeups {
@@ -72,6 +76,7 @@ public final class RuntimeClient: RuntimeBackend {
 
     private actor Driver {
         let inbox: RuntimeClientInbox, transport: XPCRuntimeTransport
+        let interruptionSink: AsyncStream<RuntimeSessionFailure.Cause>.Continuation
         let deadline: Deadline?
         let selection: XcodeSelectionAccess?
         var router = RuntimeEventRouter()
@@ -80,10 +85,13 @@ public final class RuntimeClient: RuntimeBackend {
         var uncertain: [RuntimeEventRouter.UncertainRequest] = []
         var inspectTargets: Set<OperationID> = []
         var admissions = 0
-        init(inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: Deadline?, selection: XcodeSelectionAccess?) {
+        init(inbox: RuntimeClientInbox, transport: XPCRuntimeTransport, deadline: Deadline?, selection: XcodeSelectionAccess?,
+             interruptionSink: AsyncStream<RuntimeSessionFailure.Cause>.Continuation) {
+            self.interruptionSink = interruptionSink
             self.inbox = inbox; self.transport = transport; self.deadline = deadline; self.selection = selection
         }
         isolated deinit {
+            interruptionSink.finish()
             for timer in timers.values { timer.cancel() }
             transport.retireCurrent()
         }
@@ -91,6 +99,7 @@ public final class RuntimeClient: RuntimeBackend {
         func close() {
             inbox.fail(.connectionLost)
             flush()
+            interruptionSink.finish()
             transport.retireCurrent()
             for timer in timers.values { timer.cancel() }
         }
@@ -111,11 +120,15 @@ public final class RuntimeClient: RuntimeBackend {
                 effects = router.reply(result, to: key)
             case .unexpectedReply(let context): effects = [.unknownOutcome(context)]
             case .incoming(let event): effects = router.incoming(event)
-            case .interrupted(let failure): effects = router.interrupted(failure)
+            case .interrupted(let failure):
+                effects = router.interrupted(failure)
+                interruptionSink.yield(failure.cause) // Driver isolation, outside native registry locks.
             case .ended(let key, let reason):
                 cancelStreams.removeValue(forKey: key)
                 effects = router.consumerEnded(key, reason: reason)
-            case .fault(let cause): effects = router.invalidate(cause)
+            case .fault(let cause):
+                effects = router.invalidate(cause)
+                interruptionSink.yield(cause)
             }
             apply(effects)
         }
