@@ -88,6 +88,8 @@ The service owns one `RuntimeStateLoader` across all client sessions (MVP-PLAN.m
 
 The existing authenticated runtime-version query includes a closed saved-state status. **Check runtime connection** displays that status and recovery guidance; queries perform no filesystem work inside the session gate. A failed load leaves the version query available, preserves files, and exposes no partial inventory. An incomplete journal tail is retained and reported as requiring repair. A second runtime cannot acquire the same store.
 
+Startup uses verify-only snapshot/journal access. Permission drift or unexpected ACL entries are preserved and reported as requiring repair; no preparation barrier or permission change is performed by those reads. Missing files remain missing.
+
 Explicit repair and provider-backed reconciliation remain separate prerequisites. Startup does not create or repair a missing layout. Software fixtures cover load/reopen/failure behavior and native reply delivery; they do not establish signed-app or hardware readiness.
 
 ## Check this Mac
