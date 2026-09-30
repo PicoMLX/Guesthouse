@@ -143,8 +143,8 @@ import Testing
         await #expect(throws: failure) { try await collectRouting(fixture.stream) }
     }
 
-    @Test func selectionReplyCannotCompleteAMutationOrArriveAsAPush() async throws {
-        let event = RuntimeEvent.xcodeSelection(.rejected(.metadataUnreadable))
+    @Test(arguments: [RuntimeEvent.xcodeSelection(.rejected(.metadataUnreadable)), .environments(.available([]))])
+    func queryOnlyRepliesCannotCompleteAMutationOrArriveAsAPush(event: RuntimeEvent) async throws {
         #expect(!Self.selection.mayMutate && !Self.selection.acceptsOperation)
         #expect(Self.selection.environment == nil && Self.selection.cancellationTarget == nil)
         #expect(event.routingID == nil)

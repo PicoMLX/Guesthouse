@@ -22,6 +22,9 @@ public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
         if case .hostPreflight(let report) = decoded, !report.isComplete {
             throw GuesthouseError.invalidRuntimeReply(.malformed)
         }
+        if case .environments(let inventory) = decoded, !inventory.isValid {
+            throw GuesthouseError.invalidRuntimeReply(.malformed)
+        }
         protocolVersion = version
         event = decoded
     }
@@ -59,6 +62,9 @@ public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
             throw .invalidRuntimeReply(.malformed)
         }
         if case .hostPreflight(let report) = event, !report.isComplete {
+            throw .invalidRuntimeReply(.malformed)
+        }
+        if case .environments(let inventory) = event, !inventory.isValid {
             throw .invalidRuntimeReply(.malformed)
         }
         do {
