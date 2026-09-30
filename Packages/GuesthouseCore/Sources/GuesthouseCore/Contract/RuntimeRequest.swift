@@ -10,6 +10,8 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     /// Replies with runtimeVersion/savedState after setup settles. Lost replies require inspection.
     case prepareStorage
     case environmentStatus(EnvironmentID)
+    /// Read-only selection inspection; no guest copy or environment mutation is authorized.
+    case inspectXcode(FileHandoff)
     case startEnvironment(EnvironmentID, StartOptions)
     case stopEnvironment(EnvironmentID, StopMode)
     case importXcode(EnvironmentID, FileHandoff)
@@ -21,6 +23,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
         case .hostPreflight: "hostPreflight"
         case .prepareStorage: "prepareStorage"
         case .environmentStatus: "environmentStatus"
+        case .inspectXcode: "inspectXcode"
         case .startEnvironment: "startEnvironment"
         case .stopEnvironment: "stopEnvironment"
         case .importXcode: "importXcode"

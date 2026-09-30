@@ -15,8 +15,9 @@ public enum RawRuntimeFrame: Sendable {
     /// Returns an owned, bounded copy. Native type/count/length checks happen before copying
     /// or JSON decoding. This does NOT bound libxpc's initial receive allocation or authenticate
     /// the caller. Do not concurrently mutate the dictionary while validating it.
-    public static func payload(_ message: XPCDictionary, expectedVersion: Int64) throws(Failure) -> Data {
-        try withPayloadBytes(message, expectedVersion: expectedVersion) { Data($0) }
+    public static func payload(_ message: XPCDictionary, expectedVersion: Int64,
+                               allowSelectedDirectory: Bool = false) throws(Failure) -> Data {
+        try withPayloadBytes(message, expectedVersion: expectedVersion, allowSelectedDirectory: allowSelectedDirectory) { Data($0) }
     }
 
     /// Internal test seam: the pointer stays inside the retained dictionary's scope. Only
@@ -24,6 +25,7 @@ public enum RawRuntimeFrame: Sendable {
     static func withPayloadBytes<ResultValue>(
         _ message: XPCDictionary,
         expectedVersion: Int64,
+        allowSelectedDirectory: Bool = false,
         _ body: (UnsafeRawBufferPointer) -> ResultValue
     ) throws(Failure) -> ResultValue {
         let result: Result<ResultValue, Failure> = message.withUnsafeUnderlyingDictionary { dictionary in
@@ -31,9 +33,14 @@ public enum RawRuntimeFrame: Sendable {
                   xpc_get_type(header) == XPC_TYPE_INT64 else { return .failure(.malformed) }
             let received = xpc_int64_get_value(header)
             guard received == expectedVersion else { return .failure(.protocolMismatch(received: received)) }
-            // Two fixed keys plus the exact count reject unknown fields without copying
-            // attacker-controlled keys/values into Swift strings or collections.
-            guard xpc_dictionary_get_count(dictionary) == 2,
+            // Epoch 15 permits one native grant only at an explicit request ingress. The
+            // consumer must bind it to inspectXcode after decoding, before admission/dup.
+            // Replies/pushes and default callers keep the original two-key grammar.
+            let count = xpc_dictionary_get_count(dictionary)
+            let selection = xpc_dictionary_get_value(dictionary, "selectedDirectory")
+            let permittedSelection = allowSelectedDirectory && count == 3
+                && selection.map { xpc_get_type($0) == XPC_TYPE_FD } == true
+            guard (count == 2 || permittedSelection),
                   let payload = xpc_dictionary_get_value(dictionary, "payload"),
                   xpc_get_type(payload) == XPC_TYPE_DATA else { return .failure(.malformed) }
             let length = xpc_data_get_length(payload)

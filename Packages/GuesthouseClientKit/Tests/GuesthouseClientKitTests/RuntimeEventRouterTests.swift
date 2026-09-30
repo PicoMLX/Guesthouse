@@ -6,6 +6,7 @@ import Testing
     static let environment = EnvironmentID(), id = OperationID()
     static let info = RuntimeVersionInfo(serviceVersion: "1", serviceBuild: "1")
     static let preflight = PreflightCheck.run(snapshot: HostProbeSnapshot())
+    static let selection = RuntimeRequest.inspectXcode(.init(kind: .fileDescriptor(token: id.uuid), displayName: "Xcode.app"))
     static let traffic: [RuntimeEvent] = [
         .progress(id, .init(kind: .copying)),
         .diagnostic(.init(operation: .startEnvironment, outcome: .started, operationID: id.uuid)),
@@ -53,6 +54,7 @@ import Testing
         let cases: [(RuntimeRequest, RuntimeEvent)] = [
             (.runtimeVersion, .runtimeVersion(Self.info)),
             (.hostPreflight, .hostPreflight(Self.preflight)),
+            (Self.selection, .xcodeSelection(.rejected(.notXcode))),
             (.environmentStatus(Self.environment), .status(.init(environmentID: Self.environment, vm: .stopped, readiness: .checking))),
             (.cancelOperation(Self.id), .completed(OperationID())),
             (.startEnvironment(Self.environment, .init()), .failed(Self.id, .runtimeMissing)),
@@ -70,7 +72,7 @@ import Testing
         #expect(router.isIdle)
     }
 
-    @Test(arguments: [false, true], [RuntimeRequest.runtimeVersion, .hostPreflight])
+    @Test(arguments: [false, true], [RuntimeRequest.runtimeVersion, .hostPreflight, selection])
     func unexpectedReplyRetainsIdentityAndRetires(accepted: Bool, request: RuntimeRequest) async throws {
         var router = RuntimeEventRouter()
         let fixture = try start(&router, request: request)
@@ -139,6 +141,22 @@ import Testing
             unknown(fixture, failure), .retireConnection,
         ])
         await #expect(throws: failure) { try await collectRouting(fixture.stream) }
+    }
+
+    @Test func selectionReplyCannotCompleteAMutationOrArriveAsAPush() async throws {
+        let event = RuntimeEvent.xcodeSelection(.rejected(.metadataUnreadable))
+        #expect(!Self.selection.mayMutate && !Self.selection.acceptsOperation)
+        #expect(Self.selection.environment == nil && Self.selection.cancellationTarget == nil)
+        #expect(event.routingID == nil)
+        #expect(!RuntimeRequest.hostPreflight.acceptsReply(event))
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router)
+        let failure = RuntimeSessionFailure(cause: .malformedResponse, mayHaveMutated: true)
+        #expect(router.reply(.success(event), to: fixture.key) == [unknown(fixture, failure), .retireConnection])
+        await #expect(throws: failure) { try await collectRouting(fixture.stream) }
+        var idle = RuntimeEventRouter()
+        #expect(idle.incoming(event) == [.retireConnection])
+        #expect(idle.pendingIDCount == 0)
     }
 
     @Test func pendingIDOverflowFailsClosedAndKeepsTheLateOwningReply() async throws {
@@ -282,9 +300,7 @@ private struct Fixture {
 }
 private func start(_ router: inout RuntimeEventRouter,
                    request: RuntimeRequest = .startEnvironment(RuntimeEventRouterTests.environment, .init())) throws -> Fixture {
-    let mutating: Bool
-    switch request { case .runtimeVersion, .hostPreflight, .environmentStatus: mutating = false; default: mutating = true }
-    let fixture = Fixture(mutating: mutating)
+    let fixture = Fixture(mutating: request.mayMutate)
     try #require(router.register(fixture.key, request: request, producer: fixture.producer) == .admitted)
     return fixture
 }

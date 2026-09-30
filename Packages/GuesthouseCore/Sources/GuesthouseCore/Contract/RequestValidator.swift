@@ -46,7 +46,7 @@ public enum RequestValidator: Sendable {
             guard deadline > .zero, deadline <= maximumGracefulStopDeadline else {
                 throw .optionOutOfRange(.gracefulStopDeadline)
             }
-        case .importXcode(_, let handoff): try validate(handoff)
+        case .importXcode(_, let handoff), .inspectXcode(let handoff): try validate(handoff)
         }
     }
 

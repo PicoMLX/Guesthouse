@@ -169,7 +169,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
         let scenario = binding.scenario
 
         switch request {
-        case .runtimeVersion, .hostPreflight, .environmentStatus:
+        case .runtimeVersion, .hostPreflight, .inspectXcode, .environmentStatus:
             advanceTurn()
             await pause()
             switch scenario {
@@ -184,6 +184,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             case .succeed:
                 if case .environmentStatus(let id) = request {
                     continuation.yield(.status(statuses[id] ?? EnvironmentStatus(environmentID: id, vm: .notFound, readiness: .checking)))
+                } else if case .inspectXcode = request {
+                    continuation.yield(.xcodeSelection(.rejected(.unavailable)))
                 } else if case .hostPreflight = request {
                     continuation.yield(.hostPreflight(hostPreflight))
                 } else {
@@ -388,7 +390,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 environmentID: environment, vm: .uncertain(reason: .inspectionFailed), readiness: .checking
             )
             statuses[environment] = settingOperation(id, on: status)
-        case .runtimeVersion, .hostPreflight, .prepareStorage, .environmentStatus, .cancelOperation:
+        case .runtimeVersion, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation:
             break
         }
     }
