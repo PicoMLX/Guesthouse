@@ -26,14 +26,15 @@ import GuesthouseCore
         }
     }
     static func run(_ environment: EnvironmentID, backend: any RuntimeBackend,
-                    accepted onAcceptance: (OperationID) -> Void, progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> Failure? {
-        var accepted: OperationID?, terminal = false
+                    accepted onAcceptance: (OperationID) -> Void, progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> (failure: Failure?, mayHaveMutated: Bool) {
+        var accepted: OperationID?, terminal = false, receivedEvent = false
         var failure: GuesthouseError?
         func malformed() -> Failure {
             .interrupted(.init(cause: .malformedResponse, operationID: accepted, mayHaveMutated: true))
         }
         do {
             for try await event in backend.send(.startEnvironment(environment, StartOptions())) {
+                receivedEvent = true
                 guard !terminal else { throw malformed() }
                 switch event {
                 case .accepted(let id):
@@ -57,11 +58,19 @@ import GuesthouseCore
                 }
             }
             guard terminal else { throw malformed() }
-            return failure.map(Failure.runtime)
-        } catch let error as Failure { return error }
-        catch let error as RuntimeSessionFailure { return .interrupted(error.contextualized(operationID: accepted, mayHaveMutated: true)) }
-        catch let error as GuesthouseError { return .runtime(error) }
-        catch { return malformed() }
+            return (failure.map(Failure.runtime), accepted != nil || isUnknown(failure))
+        } catch let error as Failure { return (error, true) }
+        catch let error as RuntimeSessionFailure { return (.interrupted(error.contextualized(operationID: accepted, mayHaveMutated: true)), true) }
+        catch let error as GuesthouseError {
+            // Only a local admission rejection before any event proves non-admission.
+            // Stream cancellation and errors after a reply cannot erase uncertainty.
+            return (.runtime(error), receivedEvent || accepted != nil || Task.isCancelled || error == .canceled || isUnknown(error))
+        }
+        catch { return (malformed(), true) }
+    }
+    private static func isUnknown(_ error: GuesthouseError?) -> Bool {
+        if case .operationOutcomeUnknown = error { return true }
+        return false
     }
     /// Cancellation has its own reply identity. Never use it as the target's terminal result.
     static func cancel(_ operation: OperationID, backend: any RuntimeBackend) async -> (failure: Failure?, retryAllowed: Bool) {
@@ -85,7 +94,7 @@ import GuesthouseCore
             default: retryAllowed = false
             }
             return (failure.map(Failure.runtime), retryAllowed)
-        } catch let error as RuntimeSessionFailure { return (.interrupted(error), false) }
+        } catch let error as RuntimeSessionFailure { return (.interrupted(error.contextualized(mayHaveMutated: true)), false) }
         catch let error as GuesthouseError {
             // RuntimeClient can reject locally before sending by throwing, rather than
             // yielding a terminal event. A throw after any reply cannot prove non-admission.
