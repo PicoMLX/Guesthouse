@@ -54,6 +54,7 @@ import Testing
 }
 
 private nonisolated final class CancellationBackend: RuntimeBackend {
+    var allowsEnvironmentStart: Bool { fake.allowsEnvironmentStart }
     let fake = FakeRuntimeBackend(), operation: OperationID
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }
     let started: AsyncStream<Void>, canceled: AsyncStream<Void>
