@@ -10,6 +10,17 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 16) {
             EnvironmentCheckView(model: model, quit: quit)
             Button("Session diagnostics…") { diagnostics = DiagnosticScope(environment: nil) }
+            if let failure = model.startCancellationFailure {
+                Text("Cancellation request failed. " + failure.message).foregroundStyle(.secondary)
+                if model.isStarting {
+                    Text("The original operation is still being observed.").font(.caption)
+                    if model.startCanCancel && !model.startCancellationRequested {
+                        Text("Use Cancel operation to request cancellation again. Guesthouse will inspect state after the operation and cancellation replies finish.").font(.caption)
+                    }
+                } else {
+                    Button("Dismiss cancellation message") { model.dismissStartCancellationFailure() }
+                }
+            }
             ForEach(model.environments) { environment in
                 EnvironmentCardView(state: EnvironmentCardState(environment: environment,
                     status: model.statuses[environment.id], checked: model.checkState == .checked,
@@ -18,12 +29,6 @@ struct DashboardView: View {
                     diagnostics: { diagnostics = DiagnosticScope(environment: environment.id) })
                 if model.startingEnvironment == environment.id {
                     if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: model.startCancellationRequested, cancel: model.startCanCancel ? { model.cancelStart() } : nil) }
-                    if model.isStarting, let failure = model.startCancellationFailure {
-                        Text("Cancellation request failed. " + failure.message + " The original operation is still being observed.").foregroundStyle(.secondary)
-                        if model.startCanCancel && !model.startCancellationRequested {
-                            Text("Use Cancel operation to request cancellation again. Guesthouse will inspect state after the operation and cancellation replies finish.").font(.caption)
-                        }
-                    }
                     recoveryDetails(for: environment.id)
                 }
             }

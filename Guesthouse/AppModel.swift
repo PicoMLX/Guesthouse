@@ -189,6 +189,13 @@ final class AppModel {
     /// Dismissing presentation cannot clear uncertainty or permit a new mutation.
     func dismissStartFailure() { startFailureDismissed = true }
 
+    /// A settled cancellation failure stays visible until acknowledged. This only dismisses
+    /// its message; the target's result and uncertainty remain independently retained.
+    func dismissStartCancellationFailure() {
+        guard !isStarting else { return }
+        startCancellationFailure = nil
+    }
+
     func invalidateStatusForMutation() {
         generation = UUID()
         statuses = [:]
