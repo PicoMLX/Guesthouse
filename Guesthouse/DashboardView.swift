@@ -29,6 +29,7 @@ struct DashboardView: View {
             }
             if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }) {
                 Text("Last Start — environment no longer listed").font(.headline)
+                Text("Check its state directly. If it is still running or cannot be located safely, preserve it and repair its saved information.").font(.caption).foregroundStyle(.secondary)
                 recoveryDetails(for: id)
             }
             if model.checkState == .checked {
