@@ -75,7 +75,8 @@ import Testing
         await owner.close()
     }
 
-    @Test func anActualForkRemainsBlockedAfterBothProcessesExit() async throws {
+    @Test(arguments: [false, true])
+    func anActualForkRemainsBlockedAfterBothProcessesExit(throughRunner: Bool) async throws {
         let fixture = try Fixture(), owner = try await fixture.fresh(), intent = try await fixture.intent(owner)
         let source = fixture.base.appending(path: "fork.c"), executable = fixture.base.appending(path: "fork")
         try Data("""
@@ -89,7 +90,15 @@ import Testing
         invocation.timeout = .seconds(20)
         let run = try await ProcessRunner().run(invocation)
         try #require(await run.waitForExit().childExit == .success(.status(0)))
-        let child = try fixture.spawn(intent, executable: executable)
+        let child: OwnedChild
+        if throughRunner {
+            var invocation = ProcessInvocation(executable: executable)
+            invocation.observation = .forkHistory
+            let run = try await ProcessRunner().run(invocation, runID: intent.attemptID)
+            child = run.ownedChild
+            let report = try await run.waitForExit()
+            #expect(report.childExit == .success(.status(0)) && report.descendantScopeUnproven)
+        } else { child = try fixture.spawn(intent, executable: executable) }
         try await owner.attachOwnedLumeChild(child, to: intent)
         #expect(await child.waitForReapedExit() == .success(.status(0)))
         #expect(child.forkObservation == .forkObserved)
@@ -97,6 +106,59 @@ import Testing
         await #expect(throws: LumeLaunchOwnershipFailure.inspectionRequired) { try await owner.settleInspectedLumeLaunch(intent) }
         await #expect(throws: LumeLaunchOwnershipFailure.inspectionRequired) { _ = try await fixture.intent(owner) }
         #expect(try Data(contentsOf: fixture.record) == before)
+        await owner.close()
+    }
+
+    @Test(arguments: [false, true])
+    func runnerReturnRetainsIntentUntilExplicitActualInspection(observing: Bool) async throws {
+        let fixture = try Fixture(), owner = try await fixture.fresh()
+        let (intent, run) = try await owner.withLumeLaunchIntent(command: .version) { intent in
+            var invocation = ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/true"))
+            invocation.observation = observing ? .forkHistory : .ordinary
+            let run = try await ProcessRunner().run(invocation, runID: intent.attemptID)
+            try await owner.attachOwnedLumeChild(run.ownedChild, to: intent)
+            return (intent, run)
+        }
+        #expect(try await run.waitForExit().childExit?.get() == .status(0))
+        let pending = try Data(contentsOf: fixture.record)
+        #expect(try fixture.saved().child == run.ownedChild.launchIdentity)
+        await #expect(throws: LumeLaunchOwnershipFailure.inspectionRequired) { _ = try await fixture.intent(owner) }
+        #expect(try Data(contentsOf: fixture.record) == pending)
+        if observing {
+            try await owner.settleInspectedLumeLaunch(intent)
+            #expect(try fixture.saved().intent == nil)
+            #expect(try await fixture.intent(owner).attemptID != intent.attemptID)
+        } else {
+            await #expect(throws: LumeLaunchOwnershipFailure.inspectionRequired) { try await owner.settleInspectedLumeLaunch(intent) }
+            #expect(try Data(contentsOf: fixture.record) == pending)
+        }
+        await owner.close()
+    }
+
+    @Test(arguments: [false, true])
+    func runnerInterruptionNeedsActualInspectionBeforeReplacement(timeout: Bool) async throws {
+        let fixture = try Fixture(), owner = try await fixture.fresh()
+        let (intent, run) = try await owner.withLumeLaunchIntent(command: .version) { intent in
+            var invocation = ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"])
+            invocation.observation = .forkHistory
+            invocation.timeout = timeout ? .milliseconds(100) : .seconds(30)
+            invocation.terminationGracePeriod = .zero
+            let run = try await ProcessRunner().run(invocation, runID: intent.attemptID)
+            try await owner.attachOwnedLumeChild(run.ownedChild, to: intent)
+            return (intent, run)
+        }
+        let pending = try Data(contentsOf: fixture.record)
+        if !timeout { await run.terminate(gracePeriod: .zero) }
+        let report = try await run.waitForExit()
+        #expect(report.timedOut == timeout && report.canceled != timeout)
+        #expect(report.childExit != nil && report.descendantScopeUnproven)
+        #expect(run.ownedChild.forkObservation == .exitedWithoutFork)
+        await #expect(throws: LumeLaunchOwnershipFailure.inspectionRequired) { _ = try await fixture.intent(owner) }
+        #expect(try Data(contentsOf: fixture.record) == pending)
+        // The interruption/report changes no metadata. Separate actual live-owner
+        // inspection may clear only this completed no-fork attempt, not its outcome.
+        try await owner.settleInspectedLumeLaunch(intent)
+        #expect(try fixture.saved().intent == nil)
         await owner.close()
     }
 

@@ -39,7 +39,7 @@ Run the native fixtures with:
 swift test --package-path Packages/GuesthouseRuntimeKit --filter OwnedChildForkTests -Xswiftc -warnings-as-errors
 ```
 
-Seven test functions run benign fixture code compiled by the system compiler;
+Nine test functions run benign fixture code compiled by the system compiler;
 they exercise fast exit, creation paths, a live escaped descendant, ordinary
 launches, unavailable birth, refused resume, and lost reap authority. They were
 validated on arm64 macOS 26.6.2 (25G83). Removing the fork subscription makes the
@@ -54,7 +54,7 @@ nothing. A publication failure retains actual ownership and the current store's
 uncertainty fence, even if a complete idle record became visible before a failed
 directory synchronization.
 
-Run this integration's nine test functions with:
+Run this integration's eleven test functions with:
 
 ```bash
 swift test --package-path Packages/GuesthouseRuntimeKit --filter LumeLaunchSettlementTests -Xswiftc -warnings-as-errors
@@ -65,9 +65,23 @@ children, missing or foreign receipts, restart refusal, queued close/root change
 cancellation and failed publication. Omitting the live-history guard produces
 eight issues across the ordinary-exit, running-child and actual-fork regressions.
 
+ProcessRunner's runtime-only invocation can opt into `forkHistory`. It delegates
+to the same suspended launch and exclusive observer; its default remains ordinary
+unobserved execution. The actual child owner carries history and the supplied
+attempt ID through the runner. `ProcessReport.descendantScopeUnproven` remains
+true: a parsed response, exit, timeout or cancellation is not settlement authority.
+
+Native runner fixtures cover fast no-fork exit and actual `fork`, `vfork` and
+`posix_spawn`. StateStore integration retains intent/receipt after runner return
+and interruption, refuses ordinary or forked replacement, and allows only separate
+explicit inspection of the retained completed no-fork owner. Removing the runner's
+observation option produces four failed history assertions and one refused
+settlement. These are shared runner/lifecycle prerequisites under MVP-PLAN.md
+§§3–4/9 and ADR 0004, not provider execution or a provider-selection decision.
+
 This history remains attached to a live child owner, never persisted as reusable
 proof. Forked launches and restart recovery still require genuine reconciliation;
-provider inventory and repair remain unfinished. ProcessRunner observation/launch
-integration and the bounded probe remain separate work. No provider, installer,
+provider inventory and repair remain unfinished. The service-owned fixed launch,
+immediate serialized revalidation and bounded probe remain separate work. No provider, installer,
 wrapper, or VM is activated, and no metadata is cleared automatically on return,
 timeout, cancellation or a delivered signal.
