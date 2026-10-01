@@ -35,6 +35,23 @@ import Testing
         #expect(OperationProgressPresentation(phase: nil).requiresCancellationConfirmation)
         #expect(!OperationProgressPresentation(phase: .init(kind: kind)).requiresCancellationConfirmation)
     }
+    @Test func retryAfterPreStartInspectionFailureChecksAgainBeforeSending() async {
+        let fake = FakeRuntimeBackend(), environment = DevelopmentEnvironment(name: "Dev Mac")
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        let model = AppModel(backend: fake); await model.checkEnvironments().value
+        await fake.script("listEnvironments", .disconnect())
+        await model.startEnvironment(environment.id)?.value
+        #expect(!model.canStart(environment.id) && model.canRetryStart(environment.id))
+        #expect(await fake.receivedRequests.allSatisfy { if case .startEnvironment = $0 { false } else { true } })
+        await fake.script("listEnvironments", .succeed())
+        await fake.script("startEnvironment", .succeed(status: .init(environmentID: environment.id, vm: .running, readiness: .checking)))
+        let retry = model.retryStart(environment.id)
+        #expect(retry != nil && model.retryStart(environment.id) == nil)
+        await retry?.value
+        #expect(model.startFailure == nil && model.statuses[environment.id]?.vm == .running)
+        #expect(await fake.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1)
+    }
     @Test(arguments: [false, true])
     func diagnosticsAreBoundedAndRejectForeignEnvironment(foreign: Bool) async {
         let environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID(), fake = FakeRuntimeBackend()
@@ -53,6 +70,7 @@ import Testing
             #expect(model.startFailure == .interrupted(.init(cause: .malformedResponse, operationID: operation, mayHaveMutated: true)))
             model.dismissStartFailure()
             #expect(model.startFailureDismissed && model.startFailure != nil && !model.canStart(environment.id))
+            #expect(!model.canRetryStart(environment.id) && model.retryStart(environment.id) == nil)
         }
     }
 }

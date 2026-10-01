@@ -29,6 +29,7 @@ struct OperationProgressView: View {
 struct ErrorRecoveryView: View {
     let presentation: RecoveryPresentation
     let canRetry: Bool
+    var canInspect = true
     let perform: (RecoveryAction) -> Void
     @State private var unavailable: RecoveryAction?
     var body: some View {
@@ -50,7 +51,7 @@ struct ErrorRecoveryView: View {
                 default: unavailable = action
                 }
             }
-            .disabled(action == .retry && (!canRetry || presentation.outcomeUnknown))
+            .disabled((action == .retry && (!canRetry || presentation.outcomeUnknown)) || (action == .inspectState && !canInspect))
             .accessibilityHint(action == .retry ? "Checks current state before a new attempt." : action.title)
         }
     }
@@ -60,8 +61,9 @@ struct DiagnosticDisclosureView: View {
     let log: DiagnosticLog
     var body: some View {
         DisclosureGroup("Operation diagnostics (\(log.records.count))") {
+            Text("This is a partial history. The runtime connection may omit intermediate events under load; the count below covers only local history evictions.").font(.caption).foregroundStyle(.secondary)
             if log.records.isEmpty { Text("No structured events reported.").foregroundStyle(.secondary) }
-            if log.discardedCount > 0 { Text("\(log.discardedCount) older events omitted.").font(.caption) }
+            if log.discardedCount > 0 { Text("\(log.discardedCount) events omitted from local history.").font(.caption) }
             ForEach(Array(log.records.enumerated()), id: \.offset) { _, record in
                 VStack(alignment: .leading) {
                     Text(record.event.message)
