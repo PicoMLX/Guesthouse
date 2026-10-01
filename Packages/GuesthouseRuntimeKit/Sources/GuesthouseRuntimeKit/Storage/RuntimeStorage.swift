@@ -100,6 +100,33 @@ struct RuntimeStorage: Sendable {
         return result
     }
 
+    /// Optional candidate setup, called only by the live StateStore owner under the shared
+    /// Lume lease. Existing base layouts remain reopenable without a candidate configuration.
+    /// Refuse unsafe writable parents before creating/repairing this one fixed directory;
+    /// preserve all files. This does not establish provider/process readiness (MVP §§3–4, 9).
+    func prepareLumeProbeConfiguration() throws {
+        _ = try location(for: .vms)
+        let state = try location(for: .state)
+        _ = try location(for: .staging)
+        try Self.prepare(state.appending(path: "lume-xdg"), excluded: false, backup: Self.writeBackupExclusion)
+    }
+
+    /// Read-only, per-invocation observation; never prepares or repairs. A future bounded
+    /// probe must call this again immediately before launch while retaining its whole lease.
+    /// No inherited environment, HOME, PATH or GUI-supplied path/flag is included. Environment
+    /// selection alone does not prove containment or descendant quiescence; execution is held.
+    func environmentForLumeProbe() throws -> [String: String] {
+        _ = try location(for: .vms)
+        let state = try location(for: .state)
+        let staging = try location(for: .staging)
+        let configuration = state.appending(path: "lume-xdg")
+        try Self.verify(configuration, excluded: false)
+        return [
+            "LUME_TELEMETRY_ENABLED": "false", "LUME_UPDATE_CHECK": "false",
+            "TMPDIR": staging.path, "XDG_CONFIG_HOME": configuration.path,
+        ]
+    }
+
     private static func components(root: URL) -> [(URL, Bool)] {
         var result: [(URL, Bool)] = []
         for area in Area.allCases {

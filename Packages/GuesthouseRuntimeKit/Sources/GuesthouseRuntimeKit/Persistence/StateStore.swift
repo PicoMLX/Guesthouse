@@ -90,6 +90,26 @@ public actor StateStore {
     /// The runtime must quiesce its operations before closing. This store cannot be reopened in place.
     public func close() { canSave = false; canAppend = false; anchor = nil }
 
+    /// Explicit optional setup, never ordinary reopening or launch. Reuses this owner's
+    /// lifetime state lock and the shared physical-root lease instead of adding another writer.
+    /// Runtime-only, fixed paths; no provider is executed and no VM mutation is authorized.
+    func prepareLumeProbeConfiguration(
+        coordinator: LumeRuntimeCoordinator = .shared
+    ) async throws {
+        guard let storage = try anchor?.verifiedProbeStorage() else {
+            throw StateStoreError.fileUnreadable(name: .stateDirectory)
+        }
+        try await coordinator.withExclusiveAccess(for: storage) {
+            try await self.prepareOwnedLumeProbeConfiguration()
+        }
+    }
+
+    private func prepareOwnedLumeProbeConfiguration() throws {
+        // close() may have run while waiting for the lease. Never mutate after losing ownership.
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        try anchor.prepareLumeProbeConfiguration()
+    }
+
     /// Missing metadata is an empty inventory, never authority to recreate a VM.
     /// Verification never repairs file permissions. Drift requires explicit repair.
     /// A successful read permits metadata saving, not host/guest mutations or job replay.
