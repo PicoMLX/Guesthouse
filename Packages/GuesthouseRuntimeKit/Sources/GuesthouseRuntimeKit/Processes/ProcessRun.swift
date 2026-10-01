@@ -113,6 +113,10 @@ final class ProcessRun: Sendable {
             childExit = result
             escalationTask?.cancel(); escalationTask = nil
             recoveryTask?.cancel(); recoveryTask = nil
+            // Stop pending delivery before waiting for actual closure. An inherited
+            // reader must not hold our writer until the drain deadline expires. This
+            // closes our input only; it establishes no outcome for that reader's owner.
+            input?.cancel()
             // Both channels share one absolute shutdown window. Never block this actor.
             let deadline = DispatchTime.now() + .seconds(5)
             let readers = readers, input = input
