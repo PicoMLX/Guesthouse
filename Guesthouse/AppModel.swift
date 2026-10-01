@@ -99,7 +99,7 @@ final class AppModel {
     }
 
     func canRetryStart(_ id: EnvironmentID) -> Bool {
-        backend.allowsEnvironmentStart && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+        backend.allowsEnvironmentStart && !startNeedsInspection && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
             && startFailure?.recoveryActions.contains(.retry) == true
     }
 
@@ -112,7 +112,7 @@ final class AppModel {
     }
 
     private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
-        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
+        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false
         startMayHaveMutated = false
         let work = Task { [weak self] in
             guard let self else { return }
@@ -127,6 +127,7 @@ final class AppModel {
             // pre-Start query never sent a mutation and needs no target reconciliation.
             startMayHaveMutated = true
             let result = await StartOperation.run(id, backend: backend,
+                accepted: { [weak self] _ in self?.startDiagnostics.removeAll() },
                 progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
             startFailure = result.failure
@@ -135,7 +136,7 @@ final class AppModel {
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
             if startFailure == nil {
-                if checkState != .checked { startFailure = .check(checkState) }
+                if checkState != .checked { startFailure = .inspectionAfterStart(checkState) }
                 else if statuses[id]?.vm != .running { startFailure = .notRunning }
             }
         }

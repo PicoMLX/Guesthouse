@@ -48,6 +48,7 @@ struct RecoveryPresentation {
     init(failure: StartOperation.Failure) {
         message = failure.message
         switch failure {
+        case .inspectionAfterStart: outcomeUnknown = true
         case .interrupted(let value): outcomeUnknown = value.outcomeUnknown
         case .runtime(.operationOutcomeUnknown): outcomeUnknown = true
         default: outcomeUnknown = false

@@ -4,10 +4,12 @@ import GuesthouseCore
 @MainActor enum StartOperation {
     enum Failure: Error, Equatable {
         case check(AppModel.CheckState), runtime(GuesthouseError), interrupted(RuntimeSessionFailure)
+        case inspectionAfterStart(AppModel.CheckState)
         case quitPending, stateChanged, notRunning
         var message: String {
             switch self {
             case .check(let state): QuitCoordinator.Failure.check(state).userMessage + " " + QuitCoordinator.Failure.check(state).recoveryMessage
+            case .inspectionAfterStart(let state): "Start may have completed. " + QuitCoordinator.Failure.check(state).userMessage + " Inspect its current state before continuing."
             case .runtime(let error): error.userMessage + " " + error.recoveryMessage
             case .interrupted(let error): error.userMessage + " " + (error.recoverySuggestion ?? "Inspect the environment before continuing.")
             case .quitPending: "Start was not sent because Guesthouse is quitting. Cancel Quit to continue working."
@@ -18,6 +20,7 @@ import GuesthouseCore
         var recoveryActions: [RecoveryAction] {
             switch self {
             case .check(let state): QuitCoordinator.Failure.check(state).recoveryActions
+            case .inspectionAfterStart: [.inspectState, .cancel]
             case .runtime(let error): error.recoveryActions
             case .interrupted(let error): error.recoveryActions
             case .quitPending: [.cancel]
@@ -26,7 +29,7 @@ import GuesthouseCore
         }
     }
     static func run(_ environment: EnvironmentID, backend: any RuntimeBackend,
-                    progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> (failure: Failure?, mayHaveMutated: Bool) {
+                    accepted onAcceptance: (OperationID) -> Void, progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> (failure: Failure?, mayHaveMutated: Bool) {
         var accepted: OperationID?, terminal = false, receivedEvent = false
         var failure: GuesthouseError?
         func malformed() -> Failure {
@@ -38,7 +41,7 @@ import GuesthouseCore
                 guard !terminal else { throw malformed() }
                 switch event {
                 case .accepted(let id):
-                    guard accepted == nil else { throw malformed() }; accepted = id
+                    guard accepted == nil else { throw malformed() }; accepted = id; onAcceptance(id)
                 case .progress(let id, let phase):
                     guard id == accepted else { throw malformed() }; progress(phase)
                 case .status(let status):
