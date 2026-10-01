@@ -31,7 +31,6 @@ struct ErrorRecoveryView: View {
     let canRetry: Bool
     var canInspect = true
     let perform: (RecoveryAction) -> Void
-    @State private var unavailable: RecoveryAction?
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if presentation.outcomeUnknown { Text("Operation outcome unknown — inspect environment").font(.headline) }
@@ -40,18 +39,15 @@ struct ErrorRecoveryView: View {
                 HStack { actions }
                 VStack(alignment: .leading) { actions }
             }
-            if let unavailable { Text("\(unavailable.title) is not available in this view yet.").font(.caption) }
+            ForEach(presentation.actions.filter { !RecoveryPresentation.isImplemented($0) }, id: \.self) { action in
+                Text("\(action.title) is not available in this view yet.").font(.caption).foregroundStyle(.secondary)
+            }
         }.textSelection(.enabled)
     }
     private var actions: some View {
         ForEach(presentation.actions, id: \.self) { action in
-            Button(action.title) {
-                switch action {
-                case .retry, .inspectState, .cancel: perform(action)
-                default: unavailable = action
-                }
-            }
-            .disabled((action == .retry && (!canRetry || presentation.outcomeUnknown)) || (action == .inspectState && !canInspect))
+            Button(action.title) { perform(action) }
+            .disabled(!presentation.canPerform(action, canRetry: canRetry, canInspect: canInspect))
             .accessibilityHint(action == .retry ? "Checks current state before a new attempt." : action.title)
         }
     }
