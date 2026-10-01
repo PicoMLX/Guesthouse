@@ -179,6 +179,38 @@ public actor StateStore {
         try publishLumeOwnership(LumeRuntimeOwnership(root: saved.root, intent: intent, child: identity), anchor: anchor)
     }
 
+    /// Explicit same-service inspection of the retained actual child (MVP-PLAN.md §§3–4).
+    /// Kernel launch history must prove that this owned set contained no descendants and
+    /// its exclusive reaper completed. Forked launches, lost authority and restart stay blocked.
+    /// This neither repairs provider inventory nor grants VM/restart/signal authority.
+    func settleInspectedLumeLaunch(
+        _ intent: LumeLaunchIntent, coordinator: LumeRuntimeCoordinator = .shared
+    ) async throws {
+        guard let storage = try anchor?.verifiedProbeStorage() else {
+            throw StateStoreError.fileUnreadable(name: .stateDirectory)
+        }
+        try await coordinator.withExclusiveAccess(for: storage) {
+            try await self.settleOwnedLumeLaunch(intent)
+        }
+    }
+
+    private func settleOwnedLumeLaunch(_ intent: LumeLaunchIntent) throws {
+        // Never retain an anchor/lease as authority after close() or a queued root change.
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        let saved = try readLumeOwnership(anchor)
+        guard saved.intent == intent, intent.serviceEpoch == serviceEpoch,
+              let child = lumeOwnedChild, let identity = child.launchIdentity,
+              identity.runID == intent.attemptID, saved.child == identity,
+              child.forkObservation == .exitedWithoutFork else {
+            throw LumeLaunchOwnershipFailure.inspectionRequired
+        }
+        try Task.checkCancellation()
+        // Keep actual authority on every publication failure, including post-rename failure.
+        // The existing uncertainty fence then refuses both settlement retry and new launches.
+        try publishLumeOwnership(LumeRuntimeOwnership(root: saved.root), anchor: anchor)
+        lumeOwnedChild = nil
+    }
+
     private func readLumeOwnership(_ anchor: StateDirectoryAnchor) throws -> LumeRuntimeOwnership {
         guard !lumePublicationUncertain else { throw LumeLaunchOwnershipFailure.inspectionRequired }
         let raw = try anchor.withFile(.inspectRuntimeOwnership) {
