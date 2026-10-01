@@ -45,4 +45,11 @@ import Testing
         #expect(RemoteURL("https://github.com/Org/" + String(repeating: "r", count: 101)) == nil)
         for owner in ["_", "-org", "org-"] { #expect(RemoteURL("https://github.com/\(owner)/Repo") == nil) }
     }
+    @Test(arguments: [".", "..", ".github.com", "github..com", "github.com.", "-host.com", "host-.com", "host_name.com", String(repeating: "a", count: 64) + ".com", Array(repeating: String(repeating: "a", count: 63), count: 4).joined(separator: ".")])
+    func refusesMalformedHostsAcrossTransports(_ host: String) throws {
+        for value in ["https://\(host)/Org/Repo", "ssh://git@\(host)/Org/Repo", "git@\(host):Org/Repo"] {
+            #expect(RemoteURL(value) == nil)
+            #expect(throws: DecodingError.self) { try JSONDecoder().decode(RemoteURL.self, from: JSONEncoder().encode(value)) }
+        }
+    }
 }

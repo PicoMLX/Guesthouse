@@ -59,6 +59,7 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
         }
 
         host = host.lowercased()
+        guard Self.isValidHost(host) else { return nil }
         // An empty component is not the same as no component: `/Org/Repo` and `Org//Repo` ask
         // the server for paths it resolves differently from `Org/Repo`, so canonicalizing them
         // to the same remote would let origin inspection accept an unexpected repository.
@@ -91,6 +92,15 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
 
     public static func == (lhs: RemoteURL, rhs: RemoteURL) -> Bool { lhs.identity == rhs.identity }
     public func hash(into hasher: inout Hasher) { hasher.combine(identity) }
+
+    /// DNS-style host names only. Unsupported hosts remain data, not network authority.
+    private static func isValidHost(_ host: String) -> Bool {
+        guard !host.isEmpty, host.utf8.count <= 253 else { return false }
+        return host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            (1...63).contains(label.utf8.count) && !label.hasPrefix("-") && !label.hasSuffix("-")
+                && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
+    }
 
     /// An account name cannot hold `.` or `_`, cannot exceed 39 characters, and takes only
     /// single hyphens, so an owner that no GitHub account could carry is refused here rather
