@@ -17,7 +17,7 @@ struct OperationProgressView: View {
                 else { cancel?() }
             }
             .disabled(cancel == nil || cancellationRequested)
-            .help(cancel == nil ? "Cancellation controls are not connected yet." : "Request cancellation and wait for its outcome.")
+            .help(cancel == nil ? "Wait for the current state inspection." : "Request cancellation and wait for its outcome.")
         }
         .confirmationDialog("This step may need to finish before cancellation is safe.", isPresented: $confirmingCancel) {
             Button("Request cancellation") { cancel?() }

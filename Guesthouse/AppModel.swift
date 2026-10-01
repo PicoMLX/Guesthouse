@@ -20,6 +20,12 @@ final class AppModel {
     private(set) var isChecking = false
     private(set) var isStarting = false
     private(set) var startingEnvironment: EnvironmentID?
+    private(set) var startCanCancel = false
+    private(set) var startOperationID: OperationID?
+    private(set) var startCancellationRequested = false
+    private(set) var startCancellationReplyReceived = false
+    private(set) var startCancellationFailure: StartOperation.Failure?
+    @ObservationIgnored private var cancelStartTask: Task<Void, Never>?
     private(set) var startPhase: ProgressPhase?
     private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
     private(set) var startFailureDismissed = false
@@ -90,24 +96,52 @@ final class AppModel {
     func startEnvironment(_ id: EnvironmentID) -> Task<Void, Never>? {
         guard canStart(id) else { return nil }
         isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
+        startOperationID = nil; startCanCancel = true; startCancellationRequested = false; startCancellationReplyReceived = false; startCancellationFailure = nil
         let work = Task { [weak self] in
             guard let self else { return }
-            defer { isStarting = false; startTask = nil; startPhase = nil }
+            defer { isStarting = false; startTask = nil; startPhase = nil; startOperationID = nil; startCanCancel = false }
             await startCheck().value
+            guard !startCancellationRequested else { startFailure = .runtime(.canceled); return }
             guard !checksReservedForQuit else { startFailure = .quitPending; return }
             guard startEligible(id) else {
                 startFailure = checkState == .checked ? .stateChanged : .check(checkState); return
             }
             invalidateStatusForMutation()
             startFailure = await StartOperation.run(id, backend: backend,
-                progress: { [weak self] phase in self?.startPhase = phase },
+                accepted: { [weak self] operation in
+                    self?.startOperationID = operation
+                    if self?.startCancellationRequested == true { self?.sendStartCancellation(operation) }
+                }, progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
+            startCanCancel = false
+            // Once the target ends, an outstanding cancellation reply cannot change that
+            // outcome. Drain its consumer before admitting any new operation.
+            cancelStartTask?.cancel()
+            await cancelStartTask?.value
+            cancelStartTask = nil
             // A terminal event is not a live state query. Unknown outcomes are inspected,
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
         }
         startTask = work
         return work
+    }
+
+    /// Keep consuming the target. A cancellation acknowledgement is not its terminal event.
+    func cancelStart() {
+        guard isStarting, startCanCancel, !startCancellationRequested else { return }
+        startCancellationRequested = true; startCancellationFailure = nil
+        if let startOperationID { sendStartCancellation(startOperationID) }
+    }
+
+    private func sendStartCancellation(_ operation: OperationID) {
+        guard cancelStartTask == nil else { return }
+        cancelStartTask = Task { [weak self, backend] in
+            let failure = await StartOperation.cancel(operation, backend: backend)
+            guard !Task.isCancelled, let self, isStarting, startOperationID == operation else { return }
+            startCancellationFailure = failure
+            startCancellationReplyReceived = true
+        }
     }
 
     /// Dismissing presentation cannot clear uncertainty or permit a new mutation.

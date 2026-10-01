@@ -14,7 +14,10 @@ struct DashboardView: View {
                     busy: model.isChecking || model.isStarting || quit.flow != .idle),
                     canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
                 if model.startingEnvironment == environment.id {
-                    if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: false) }
+                    if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: model.startCancellationRequested, cancel: model.startCanCancel ? { model.cancelStart() } : nil) }
+                    if model.isStarting, let failure = model.startCancellationFailure {
+                        Text("Cancellation request failed. " + failure.message + " The original operation is still being observed.").foregroundStyle(.secondary)
+                    }
                     if let failure = model.startFailure {
                         if model.startFailureDismissed {
                             Text("The last Start needs attention. Check the environment before continuing.").foregroundStyle(.secondary)

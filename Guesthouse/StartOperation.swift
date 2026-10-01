@@ -25,7 +25,7 @@ import GuesthouseCore
         }
     }
     static func run(_ environment: EnvironmentID, backend: any RuntimeBackend,
-                    progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> Failure? {
+                    accepted onAcceptance: (OperationID) -> Void, progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> Failure? {
         var accepted: OperationID?, terminal = false
         var failure: GuesthouseError?
         func malformed() -> Failure {
@@ -36,7 +36,7 @@ import GuesthouseCore
                 guard !terminal else { throw malformed() }
                 switch event {
                 case .accepted(let id):
-                    guard accepted == nil else { throw malformed() }; accepted = id
+                    guard accepted == nil else { throw malformed() }; accepted = id; onAcceptance(id)
                 case .progress(let id, let phase):
                     guard id == accepted else { throw malformed() }; progress(phase)
                 case .status(let status):
@@ -62,4 +62,24 @@ import GuesthouseCore
         catch let error as GuesthouseError { return .runtime(error) }
         catch { return malformed() }
     }
+    /// Cancellation has its own reply identity. Never use it as the target's terminal result.
+    static func cancel(_ operation: OperationID, backend: any RuntimeBackend) async -> Failure? {
+        var answered = false
+        var failure: GuesthouseError?
+        do {
+            for try await event in backend.send(.cancelOperation(operation)) {
+                guard !answered else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+                switch event {
+                case .completed: answered = true
+                case .failed(_, let error): answered = true; failure = error
+                default: throw GuesthouseError.invalidRuntimeReply(.malformed)
+                }
+            }
+            guard answered else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+            return failure.map(Failure.runtime)
+        } catch let error as RuntimeSessionFailure { return .interrupted(error) }
+        catch let error as GuesthouseError { return .runtime(error) }
+        catch { return .runtime(.invalidRuntimeReply(.malformed)) }
+    }
+
 }
