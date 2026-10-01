@@ -34,8 +34,7 @@ extension LumeBundle {
             throw .infoPlistUnreadable
         }
         guard values["CFBundleIdentifier"] as? String == LumePin.bundleIdentifier else { throw .bundleIdentifierMismatch }
-        guard let text = values["CFBundleShortVersionString"] as? String,
-              let version = SemanticVersion(text), version == LumePin.version else { throw .versionMismatch }
+        guard values["CFBundleShortVersionString"] as? String == LumePin.version.description else { throw .versionMismatch }
         guard values["CFBundleExecutable"] as? String == LumePin.executableName else { throw .executableNameMismatch }
         guard FileManager.default.isExecutableFile(atPath: executable.path) else { throw .executableMissing }
 

@@ -10,6 +10,8 @@ import Testing
     @Test(arguments: [
         ("CFBundleIdentifier", "private-untrusted-identifier", LumeVerificationError.bundleIdentifierMismatch),
         ("CFBundleShortVersionString", "private-untrusted-version", .versionMismatch),
+        ("CFBundleShortVersionString", "0.5.3.0", .versionMismatch),
+        ("CFBundleShortVersionString", "00.5.3", .versionMismatch),
         ("CFBundleExecutable", "private-untrusted-executable", .executableNameMismatch),
     ])
     func metadataRefusalsDoNotRetainDiscoveredText(_ sample: (String, String, LumeVerificationError)) throws {
