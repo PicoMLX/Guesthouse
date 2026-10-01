@@ -3,6 +3,24 @@ import GuesthouseCore
 import Testing
 
 @Suite struct JournalFormatCompatibilityTests {
+    @Test(arguments: JournalOperation.allCases.filter { $0 != .stopEnvironment })
+    func shutdownRefusalCannotSettleAnotherOperationOrAuthorizeItsTailRepair(operation: JournalOperation) throws {
+        let id = OperationID(), environment = EnvironmentID()
+        let start = JournalRecord(id: id, environmentID: environment, operation: operation, timestamp: Date(), outcome: .started)
+        let failed = JournalRecord(id: id, environmentID: environment, operation: operation, timestamp: Date(),
+                                   outcome: .failed(.guestShutdownRefused(environment)))
+        var history = JournalHistory(); try history.append(start)
+        #expect(!failed.isSelfConsistent)
+        #expect(throws: StateStoreError.inconsistentRecord(id)) { try history.append(failed) }
+        for sorted in [false, true] {
+            let encoder = JSONEncoder(); if sorted { encoder.outputFormatting = [.sortedKeys] }
+            let bytes = try encoder.encode(failed)
+            #expect(throws: StateStoreError.corruptJournal(line: 2)) { try JournalReplayChunk(bytes, following: history) }
+            #expect(throws: StateStoreError.corruptJournal(line: 2)) { try JournalReplayChunk(bytes.dropLast(), following: history) }
+        }
+        #expect(history.inFlight[id] == start)
+    }
+
     @Test(arguments: [false, true])
     func legacyStartsAndTailsRemainReadableBeforeNewRefusal(sorted: Bool) throws {
         let id = OperationID(), environment = EnvironmentID()
