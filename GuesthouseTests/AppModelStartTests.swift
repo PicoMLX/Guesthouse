@@ -167,11 +167,14 @@ import Testing
             operationID: operation.uuid, environmentID: environment.id)
         #expect(model.startDiagnostics.records.map(\.event) == [expected])
         #expect(model.sessionDiagnostics.records.first?.event == expected)
-        #expect(model.sessionDiagnostics.records.count == (queryRefusal ? 2 : 1))
+        #expect(model.sessionDiagnostics.records.count == 2)
         if queryRefusal {
             #expect(model.sessionDiagnostics.records.last?.event.operation == .inspectEnvironment)
             #expect(model.sessionDiagnostics.records.last?.event.outcome == .operationFailed(.unauthorizedCaller))
             #expect(model.sessionDiagnostics.records.last?.event.environmentID == nil)
+        } else {
+            #expect(model.sessionDiagnostics.records.last?.event.origin == .appObservation)
+            #expect(model.sessionDiagnostics.records.last?.event.outcome == .observationFailed(.connectionLost))
         }
         let copied = DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "", selection: [0]) ?? ""
         #expect(copied.contains(GuesthouseError.runtimeMissing.userMessage) && copied.contains(GuesthouseError.runtimeMissing.recoveryMessage))
