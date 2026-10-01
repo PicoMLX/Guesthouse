@@ -8,7 +8,7 @@ struct QuitSheet: View {
             switch coordinator.flow {
             case .idle, .confirming:
                 Text("Quit Guesthouse?").font(.headline)
-                Text("Guesthouse checks what is running and stops development Macs before quitting. Saved work stays on their disks.")
+                Text("Guesthouse checks what is running and stops development Macs before quitting. Saved work stays on their disks, but unsaved work in guest apps may be lost.")
                 Text(coordinator.warning).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
