@@ -14,12 +14,16 @@ struct DashboardView: View {
                     busy: model.isChecking || model.isStarting || quit.flow != .idle, backendAllowsStart: model.backend.allowsEnvironmentStart),
                     canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
                 if model.startingEnvironment == environment.id {
-                    if model.isStarting { ProgressView(model.startPhase == nil ? "Checking start outcome…" : "Starting development Mac…") }
-                    if let failure = model.startFailure { Text(failure.message).foregroundStyle(.secondary) }
+                    if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: false) }
+                    recoveryDetails(for: environment.id)
                 }
             }
-            if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }), let failure = model.startFailure {
-                Text(failure.message).foregroundStyle(.secondary)
+            if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }) {
+                Text("Last Start — environment no longer listed").font(.headline)
+                if let guidance = RecoveryPresentation.missingEnvironmentGuidance(hasFailure: model.startFailure != nil, needsInspection: model.startNeedsInspection) {
+                    Text(guidance).font(.caption).foregroundStyle(.secondary)
+                }
+                recoveryDetails(for: id)
             }
             if model.checkState == .checked {
                 VStack(alignment: .leading, spacing: 6) {
@@ -38,6 +42,24 @@ struct DashboardView: View {
             SetupWizardView()
         }
     }
+    @ViewBuilder private func recoveryDetails(for environmentID: EnvironmentID) -> some View {
+        if let failure = model.startFailure {
+            if model.startFailureDismissed {
+                Text("The last Start needs attention. Check the environment before continuing.").foregroundStyle(.secondary)
+            } else {
+                ErrorRecoveryView(presentation: .init(failure: failure), canRetry: model.canRetryStart(environmentID), canInspect: !model.isStarting && !model.isChecking && quit.flow == .idle) { action in
+                    switch action {
+                    case .retry: model.retryStart(environmentID)
+                    case .inspectState: model.checkEnvironments()
+                    case .cancel: model.dismissStartFailure()
+                    default: break
+                    }
+                }
+            }
+        }
+        DiagnosticDisclosureView(log: model.startDiagnostics)
+    }
+
 }
 
 private struct EnvironmentCardView: View {

@@ -39,6 +39,9 @@ final class QuitCoordinator {
         if flow == .idle {
             gracefulFailures = [:]
             unconfirmedEnvironments = Set(model.environments.map(\.id))
+            if model.startNeedsInspection, let target = model.startingEnvironment {
+                unconfirmedEnvironments.insert(target)
+            }
             model.reserveChecksForQuit(true)
             flow = .confirming
         }
@@ -167,6 +170,10 @@ final class QuitCoordinator {
 
     private func validateInspection() throws {
         guard model.checkState == .checked else { throw Failure.check(model.checkState) }
+        // Quit may have retained a pending Start before its explicit refusal arrived.
+        if !model.isStarting, !model.startMayHaveMutated, let target = model.startingEnvironment {
+            unconfirmedEnvironments.remove(target)
+        }
         // Saved cards are not live inventory. Omission cannot confirm a previously seen VM
         // stopped, including after a completed stop or while waiting for force consent.
         guard unconfirmedEnvironments.isSubset(of: Set(model.environments.map(\.id))) else {

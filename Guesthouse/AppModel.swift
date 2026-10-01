@@ -20,7 +20,11 @@ final class AppModel {
     private(set) var isChecking = false
     private(set) var isStarting = false
     private(set) var startingEnvironment: EnvironmentID?
+    private(set) var startMayHaveMutated = false
+    var startNeedsInspection: Bool { startMayHaveMutated && (isStarting || startFailure != nil) }
     private(set) var startPhase: ProgressPhase?
+    private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
+    private(set) var startFailureDismissed = false
     private(set) var startFailure: StartOperation.Failure?
     @ObservationIgnored private var startTask: Task<Void, Never>?
     let backend: any RuntimeBackend
@@ -91,7 +95,25 @@ final class AppModel {
     @discardableResult
     func startEnvironment(_ id: EnvironmentID) -> Task<Void, Never>? {
         guard canStart(id) else { return nil }
-        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil
+        return beginStart(id)
+    }
+
+    func canRetryStart(_ id: EnvironmentID) -> Bool {
+        backend.allowsEnvironmentStart && !startNeedsInspection && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+            && startFailure?.recoveryActions.contains(.retry) == true
+    }
+
+    /// Retry is an explicit new attempt, including a new inspection. It is never offered for
+    /// an unknown outcome and does not require pre-existing status after a failed query.
+    @discardableResult
+    func retryStart(_ id: EnvironmentID) -> Task<Void, Never>? {
+        guard canRetryStart(id) else { return nil }
+        return beginStart(id)
+    }
+
+    private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
+        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false
+        startMayHaveMutated = false
         let work = Task { [weak self] in
             guard let self else { return }
             defer { isStarting = false; startTask = nil; startPhase = nil }
@@ -101,18 +123,29 @@ final class AppModel {
                 startFailure = checkState == .checked ? .stateChanged : .check(checkState); return
             }
             invalidateStatusForMutation()
-            startFailure = await StartOperation.run(id, backend: backend) { [weak self] phase in self?.startPhase = phase }
+            // Mark before dispatch, including a lost reply before acceptance. A failed
+            // pre-Start query never sent a mutation and needs no target reconciliation.
+            startMayHaveMutated = true
+            let result = await StartOperation.run(id, backend: backend,
+                accepted: { [weak self] _ in self?.startDiagnostics.removeAll() },
+                progress: { [weak self] phase in self?.startPhase = phase },
+                diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
+            startFailure = result.failure
+            startMayHaveMutated = result.mayHaveMutated
             // A terminal event is not a live state query. Unknown outcomes are inspected,
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
             if startFailure == nil {
-                if checkState != .checked { startFailure = .check(checkState) }
+                if checkState != .checked { startFailure = .inspectionAfterStart(checkState) }
                 else if statuses[id]?.vm != .running { startFailure = .notRunning }
             }
         }
         startTask = work
         return work
     }
+
+    /// Dismissing presentation cannot clear uncertainty or permit a new mutation.
+    func dismissStartFailure() { startFailureDismissed = true }
 
     func invalidateStatusForMutation() {
         generation = UUID()
@@ -127,8 +160,9 @@ final class AppModel {
         isChecking = true
         checkState = .checkingEnvironment
         statuses = [:]
+        let retainedTarget = clearStartFailure && startNeedsInspection ? startingEnvironment : nil
         checkTask = Task { [weak self, backend] in
-            let result = await Self.read(backend)
+            let result = await Self.read(backend, retainedTarget: retainedTarget)
             guard let self else { return }
             defer { self.isChecking = false; self.checkTask = nil }
             guard self.generation == current else { return }
@@ -138,9 +172,15 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
-                if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
+                if clearStartFailure, !self.startMayHaveMutated {
+                    self.startFailure = nil
+                    self.startingEnvironment = nil
+                } else if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
                     switch status.vm {
-                    case .running, .stopped, .notFound: self.startFailure = nil
+                    case .stopped, .notFound: self.startFailure = nil
+                    case .running:
+                        // A live target missing from saved inventory still needs repair.
+                        if snapshot.environments.contains(where: { $0.id == id }) { self.startFailure = nil }
                     case .uncertain: break
                     }
                 }
@@ -172,7 +212,7 @@ final class AppModel {
         case metadata(RuntimeSavedStateStatus), runtime(GuesthouseError), interrupted(RuntimeSessionFailure.Cause)
     }
 
-    private static func read(_ backend: any RuntimeBackend) async -> Result<Snapshot, ReadFailure> {
+    private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil) async -> Result<Snapshot, ReadFailure> {
         do {
             guard case .environments(let inventory) = try await reply(to: .listEnvironments, from: backend),
                   inventory.isValid else { throw ReadFailure.runtime(.invalidRuntimeReply(.malformed)) }
@@ -182,13 +222,15 @@ final class AppModel {
             case .available(let records): environments = records
             }
             var statuses: [EnvironmentID: EnvironmentStatus] = [:]
-            for environment in environments {
+            var requestedIDs = environments.map(\.id)
+            if let retainedTarget, !requestedIDs.contains(retainedTarget) { requestedIDs.append(retainedTarget) }
+            for id in requestedIDs {
                 try Task.checkCancellation()
-                guard case .status(let status) = try await reply(to: .environmentStatus(environment.id), from: backend),
-                      status.environmentID == environment.id else {
+                guard case .status(let status) = try await reply(to: .environmentStatus(id), from: backend),
+                      status.environmentID == id else {
                     throw ReadFailure.runtime(.invalidRuntimeReply(.malformed))
                 }
-                statuses[environment.id] = status
+                statuses[id] = status
             }
             return .success(Snapshot(environments: environments, statuses: statuses))
         } catch let error as ReadFailure { return .failure(error) }
