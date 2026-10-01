@@ -144,7 +144,11 @@ final class AppModel {
                     if self?.startCancellationRequested == true { self?.sendStartCancellation(operation) }
                 }, progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in
-                    if let event = self?.recordDiagnostic(event, for: id) { self?.startDiagnostics.append(event) }
+                    if let event = self?.recordDiagnostic(event, for: id), self?.startOperationID?.uuid == event.operationID {
+                        // Refusals before acceptance belong to session history. Keep the last
+                        // accepted attempt's log/counts intact until a new Start is accepted.
+                        self?.startDiagnostics.append(event)
+                    }
                 })
             startFailure = result.failure
             startMayHaveMutated = result.mayHaveMutated
