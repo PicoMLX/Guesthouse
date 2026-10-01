@@ -192,6 +192,22 @@ struct QuitCoordinatorTests {
         #expect(quit.flow == .failed(.ownership(environment.id, .ownershipUnproven)) && !quit.canForceStop)
     }
 
+    @Test(arguments: [false, true])
+    func omittedRunningCardCannotConfirmStopOrOfferForce(refusal: Bool) async throws {
+        let fake = await configuredFake(), decision = Decision()
+        let backend = HeldStopBackend(fake: fake, operation: operation, holdInventory: 2)
+        let quit = QuitCoordinator(model: AppModel(backend: backend), terminationDecision: decision.record)
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var stops = backend.stopped.makeAsyncIterator(), inspections = backend.inspected.makeAsyncIterator()
+        _ = await stops.next()
+        backend.answer([.accepted(operation), refusal ? .failed(operation, .guestShutdownRefused(environment.id)) : .completed(operation)])
+        _ = await inspections.next()
+        backend.answerInventory([])
+        await work.value
+        #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))))
+        #expect(decision.values.isEmpty && !quit.canForceStop)
+    }
+
     @Test func canceledQuitBeforeItsCheckStartsCannotResurrect() async {
         let backend = await configuredFake(), decision = Decision()
         let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
