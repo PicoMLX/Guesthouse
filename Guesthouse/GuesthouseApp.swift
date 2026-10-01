@@ -20,7 +20,7 @@ struct GuesthouseApp: App {
         Window("Guesthouse", id: "main") {
             MainWindow(model: model, quit: quit, delegate: delegate)
         }
-        .defaultSize(width: 580, height: 700)
+        .defaultSize(width: 720, height: 800)
         .commands {
             CommandGroup(replacing: .appTermination) {
                 Button("Quit Guesthouse") { NSApp.terminate(nil) }.keyboardShortcut("q")
@@ -50,9 +50,9 @@ private struct MainWindow: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            EnvironmentCheckView(model: model, quit: quit).padding(20)
+            ScrollView { DashboardView(model: model, quit: quit).padding(20) }
             Divider()
-            ContentView()
+            DisclosureGroup("Setup checks") { ContentView().frame(minHeight: 300) }.padding(.horizontal, 20)
         }
         .onAppear {
             delegate.openMainWindow = { openWindow(id: "main") }

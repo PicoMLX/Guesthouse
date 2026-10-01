@@ -19,28 +19,12 @@ struct EnvironmentCheckView: View {
             case .unavailable(let error): Text(error.recoveryMessage).foregroundStyle(.secondary)
             case .interrupted(let cause): Text(RuntimeSessionFailure(cause: cause).recoverySuggestion ?? "Check the environment again.").foregroundStyle(.secondary)
             case .checkingEnvironment: Text("Saved records and live status are checked before new work.").foregroundStyle(.secondary)
-            case .checked:
-                ForEach(model.environments) { environment in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(environment.name).font(.subheadline.bold())
-                        Text(statusDescription(model.statuses[environment.id])).foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
+            case .checked: EmptyView()
             }
         }
         .textSelection(.enabled)
     }
 
-    private func statusDescription(_ status: EnvironmentStatus?) -> String {
-        switch status?.vm {
-        case .running: "Running. Tool and interactive readiness have not been verified here."
-        case .stopped: "Stopped. Starting again retains saved work on the same VM disk."
-        case .notFound: "Development Mac not found. Inspect its saved metadata and storage."
-        case .uncertain(let reason): reason.userMessage
-        case nil: "Current state has not been checked."
-        }
-    }
 }
 
 extension AppModel {
