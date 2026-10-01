@@ -58,7 +58,9 @@ import Testing
         #expect(!model.isStarting && model.startFailure == .runtime(.canceled))
         #expect(backend.cancelTargets.count == (refused ? 2 : 1))
     }
-    @Test func malformedCancellationReplyDoesNotAuthorizeRetry() async throws {
+    nonisolated enum UncertainReply: CaseIterable, Sendable { case unexpectedEvent, unknownOutcome, invalidReply, canceled }
+    @Test(arguments: UncertainReply.allCases)
+    func uncertainCancellationReplyDoesNotAuthorizeRetry(kind: UncertainReply) async throws {
         let backend = CancellationBackend(operation: operation); await configured(backend.fake)
         let model = AppModel(backend: backend); await model.checkEnvironments().value
         let task = try #require(model.startEnvironment(environment.id))
@@ -67,7 +69,12 @@ import Testing
         let (changed, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         defer { signal.finish() }
         withObservationTracking { _ = model.startCancellationReplyReceived } onChange: { signal.yield(()) }
-        backend.answerCancel(.progress(OperationID(), .init(kind: .startingVM)))
+        switch kind {
+        case .unexpectedEvent: backend.answerCancel(.progress(OperationID(), .init(kind: .startingVM)))
+        case .unknownOutcome: backend.answerCancel(.failed(OperationID(), .operationOutcomeUnknown(OperationID())))
+        case .invalidReply: backend.answerCancel(.failed(OperationID(), .invalidRuntimeReply(.malformed)))
+        case .canceled: backend.answerCancel(.failed(OperationID(), .canceled))
+        }
         var observations = changed.makeAsyncIterator(); _ = await observations.next()
         #expect(model.startCancellationRequested && model.startCancellationFailure != nil)
         model.cancelStart()
