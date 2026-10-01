@@ -6,7 +6,7 @@ import Observation
 /// Saved records and observed status remain separate; neither implies capability readiness.
 @MainActor @Observable
 final class AppModel {
-    enum CheckState: Equatable {
+    nonisolated enum CheckState: Equatable, Sendable {
         case checkingEnvironment
         case checked
         case metadataUnavailable(RuntimeSavedStateStatus)
@@ -22,6 +22,7 @@ final class AppModel {
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var checksReservedForQuit = false
 
     init(backend: any RuntimeBackend) {
         self.backend = backend
@@ -42,6 +43,26 @@ final class AppModel {
     /// service. The returned task belongs to the app model, never to a window's `.task`.
     @discardableResult
     func checkEnvironments() -> Task<Void, Never> {
+        if checksReservedForQuit { return checkTask ?? Task {} }
+        return startCheck()
+    }
+
+    func reserveChecksForQuit(_ reserved: Bool) { checksReservedForQuit = reserved }
+
+    /// A pre-existing menu check must drain, then Quit obtains a new snapshot of its own.
+    func checkForQuit() async {
+        if let checkTask { await checkTask.value }
+        guard !Task.isCancelled else { return }
+        await startCheck().value
+    }
+
+    func invalidateStatusForMutation() {
+        generation = UUID()
+        statuses = [:]
+        checkState = .checkingEnvironment
+    }
+
+    private func startCheck() -> Task<Void, Never> {
         if let checkTask { return checkTask }
         let current = UUID()
         generation = current
