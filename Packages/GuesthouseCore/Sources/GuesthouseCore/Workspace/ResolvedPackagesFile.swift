@@ -27,59 +27,63 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
 
     /// A lockfile pins one entry of a few hundred bytes per dependency, so this is room for
     /// thousands of them. The file is committed in a repository the workspace only selected,
-    /// so its size is bounded before `JSONSerialization` materializes the whole document and
+    /// so its size is bounded before the Codable reader materializes the document and
     /// the pin arrays are built from it.
     public static let maximumEncodedSize = 1024 * 1024
 
-    private struct VersionEnvelope: Decodable { let version: Int }
-
     public static func decode(_ data: Data) throws(ResolvedPackagesError) -> ResolvedPackagesFile {
         guard data.count <= Self.maximumEncodedSize else { throw .tooLarge }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw .notJSON }
-        guard let version = try? JSONDecoder().decode(VersionEnvelope.self, from: data).version else { throw .missingVersion }
-        guard version == 2 || version == 3 else { throw .unsupportedVersion }
-        if version == 3 { _ = try string(object["originHash"], field: .originHash) }
-        guard let rawPins = object["pins"] as? [[String: Any]] else { throw .malformed(.pins) }
-        var pins: [Pin] = []
-        var identities: Set<PackageIdentity> = []
-        for raw in rawPins {
-            guard let identityRaw = raw["identity"] as? String, let identity = PackageIdentity(resolvedIdentity: identityRaw) else { throw .malformed(.identity) }
-            guard identities.insert(identity).inserted else { throw .malformed(.duplicateIdentity) }
-            guard let kindRaw = raw["kind"] as? String else { throw .malformed(.kind) }
-            guard let kind = Pin.Kind(rawValue: kindRaw) else { throw .unknownKind }
-            guard let location = raw["location"] as? String else { throw .malformed(.location) }
-            // SwiftPM's Unix AbsolutePath validation is syntactic: the path must
-            // start with `/`. Do not inspect the host or change the stored spelling.
-            if kind == .localSourceControl, !location.hasPrefix("/") { throw .malformed(.location) }
-            let state = try decodeState(raw["state"], kind: kind)
-            pins.append(Pin(identity: identity, kind: kind, location: location, revision: state.revision, version: state.version, branch: state.branch))
-        }
-        return ResolvedPackagesFile(version: version, pins: pins)
+        do { return try JSONDecoder().decode(Document.self, from: data).value }
+        catch let error as ResolvedPackagesError { throw error }
+        catch { throw .notJSON }
     }
 
-    /// SwiftPM records the commit it checked out for every source-control pin, so a pin whose
-    /// `state` is absent, is not an object, or names no revision is a corrupted lockfile.
-    /// Reading it as a pin with no metadata would let an override be approved against a pin
-    /// that identifies no code, and the failure would surface later, at the build.
-    private static func decodeState(_ raw: Any?, kind: Pin.Kind) throws(ResolvedPackagesError) -> (revision: String?, version: String?, branch: String?) {
-        let isSourceControl = kind == .remoteSourceControl || kind == .localSourceControl
-        guard let raw, !(raw is NSNull) else { throw .malformed(.state) }
-        guard let fields = raw as? [String: Any] else { throw .malformed(.state) }
-        let revision = try string(fields["revision"], field: .revision)
-        let version = try string(fields["version"], field: .semanticVersion)
-        let branch = try string(fields["branch"], field: .branch)
-        // SwiftPM writes the full Git object ID it resolved, so a revision that is not one
-        // names no commit and is as corrupt as an absent one, whether it is blank or a branch
-        // name: an override approved against it would fail at resolution or at the build
-        // instead of here, where the lockfile can still be re-resolved.
-        if isSourceControl, CommitSHA(revision ?? "") == nil { throw .malformed(.revision) }
-        // SwiftPM parses a pinned version with the semantic-version grammar and refuses the
-        // whole file when it does not parse, so text such as `not-semver` names a lockfile the
-        // wrapper cannot be seeded from. It is caught here, while the repair is still to
-        // resolve packages in Xcode and commit the result.
-        if let version, !isSemanticVersion(version) { throw .malformed(.semanticVersion) }
-        if kind == .registry, version == nil { throw .malformed(.semanticVersion) }
-        return (revision, version, branch)
+    // One Codable reader, matching SwiftPM's semantics for duplicate keys at every depth.
+    // Never combine its version selection with JSONSerialization's different key selection.
+    private struct Document: Decodable {
+        let value: ResolvedPackagesFile
+        enum Keys: String, CodingKey { case version, pins, originHash }
+        init(from decoder: any Decoder) throws {
+            guard let fields = try? decoder.container(keyedBy: Keys.self) else { throw ResolvedPackagesError.notJSON }
+            guard let version = try? fields.decode(Int.self, forKey: .version) else { throw ResolvedPackagesError.missingVersion }
+            guard version == 2 || version == 3 else { throw ResolvedPackagesError.unsupportedVersion }
+            if version == 3 { _ = try fields.resolvedString(forKey: .originHash, field: .originHash) }
+            let pins = try fields.resolvedValue([DecodedPin].self, forKey: .pins, field: .pins).map(\.value)
+            guard Set(pins.map(\.identity)).count == pins.count else { throw ResolvedPackagesError.malformed(.duplicateIdentity) }
+            value = ResolvedPackagesFile(version: version, pins: pins)
+        }
+    }
+
+    private struct DecodedPin: Decodable {
+        let value: Pin
+        enum Keys: String, CodingKey { case identity, kind, location, state }
+        init(from decoder: any Decoder) throws {
+            guard let fields = try? decoder.container(keyedBy: Keys.self) else { throw ResolvedPackagesError.malformed(.pins) }
+            let identityText = try fields.resolvedValue(String.self, forKey: .identity, field: .identity)
+            guard let identity = PackageIdentity(resolvedIdentity: identityText) else { throw ResolvedPackagesError.malformed(.identity) }
+            let kindText = try fields.resolvedValue(String.self, forKey: .kind, field: .kind)
+            guard let kind = Pin.Kind(rawValue: kindText) else { throw ResolvedPackagesError.unknownKind }
+            let location = try fields.resolvedValue(String.self, forKey: .location, field: .location)
+            // Syntactic Unix path check only; no host inspection or rewriting.
+            if kind == .localSourceControl, !location.hasPrefix("/") { throw ResolvedPackagesError.malformed(.location) }
+            let state = try fields.resolvedValue(PinState.self, forKey: .state, field: .state)
+            // Guesthouse's supported source-control layout requires a full nonzero commit ID.
+            if kind != .registry, CommitSHA(state.revision ?? "") == nil { throw ResolvedPackagesError.malformed(.revision) }
+            if let version = state.version, !ResolvedPackagesFile.isSemanticVersion(version) { throw ResolvedPackagesError.malformed(.semanticVersion) }
+            if kind == .registry, state.version == nil { throw ResolvedPackagesError.malformed(.semanticVersion) }
+            value = Pin(identity: identity, kind: kind, location: location, revision: state.revision, version: state.version, branch: state.branch)
+        }
+    }
+
+    private struct PinState: Decodable {
+        let revision: String?, version: String?, branch: String?
+        enum Keys: String, CodingKey { case revision, version, branch }
+        init(from decoder: any Decoder) throws {
+            guard let fields = try? decoder.container(keyedBy: Keys.self) else { throw ResolvedPackagesError.malformed(.state) }
+            revision = try fields.resolvedString(forKey: .revision, field: .revision)
+            version = try fields.resolvedString(forKey: .version, field: .semanticVersion)
+            branch = try fields.resolvedString(forKey: .branch, field: .branch)
+        }
     }
 
     /// SwiftPM's TSCUtility.Version parser accepts leading zeros and empty
@@ -112,12 +116,17 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
         }
     }
 
-    /// A present-but-unreadable field is refused rather than dropped, so a lockfile that spells
-    /// a version or branch as something other than text is not silently read as having none.
-    private static func string(_ raw: Any?, field: ResolvedPackagesError.Field) throws(ResolvedPackagesError) -> String? {
-        guard let raw, !(raw is NSNull) else { return nil }
-        guard let text = raw as? String else { throw .malformed(field) }
-        return text
+}
+
+private extension KeyedDecodingContainer {
+    func resolvedValue<T: Decodable>(_ type: T.Type, forKey key: Key, field: ResolvedPackagesError.Field) throws -> T {
+        do { return try decode(type, forKey: key) }
+        catch let error as ResolvedPackagesError { throw error }
+        catch { throw ResolvedPackagesError.malformed(field) }
+    }
+    func resolvedString(forKey key: Key, field: ResolvedPackagesError.Field) throws -> String? {
+        do { return try decodeIfPresent(String.self, forKey: key) }
+        catch { throw ResolvedPackagesError.malformed(field) }
     }
 }
 
