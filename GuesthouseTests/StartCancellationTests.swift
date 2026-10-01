@@ -46,10 +46,51 @@ import Testing
         #expect(model.startCancellationFailure == (refused ? .runtime(failure) : nil))
         // Even a successful acknowledgment never ends the original target stream.
         #expect(model.isStarting && model.startFailure == nil)
+        if refused {
+            #expect(!model.startCancellationRequested)
+            model.cancelStart()
+            _ = await cancels.next()
+            #expect(backend.cancelTargets == [operation, operation])
+            backend.answerCancel(.completed(OperationID()))
+        }
         backend.finishTarget(.failed(operation, .canceled))
         await task.value
         #expect(!model.isStarting && model.startFailure == .runtime(.canceled))
-        #expect(backend.cancelTargets == [operation])
+        #expect(backend.cancelTargets.count == (refused ? 2 : 1))
+    }
+    @Test func malformedCancellationReplyDoesNotAuthorizeRetry() async throws {
+        let backend = CancellationBackend(operation: operation); await configured(backend.fake)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let task = try #require(model.startEnvironment(environment.id))
+        var starts = backend.started.makeAsyncIterator(), cancels = backend.canceled.makeAsyncIterator()
+        _ = await starts.next(); model.cancelStart(); backend.accept(); _ = await cancels.next()
+        let (changed, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        defer { signal.finish() }
+        withObservationTracking { _ = model.startCancellationReplyReceived } onChange: { signal.yield(()) }
+        backend.answerCancel(.progress(OperationID(), .init(kind: .startingVM)))
+        var observations = changed.makeAsyncIterator(); _ = await observations.next()
+        #expect(model.startCancellationRequested && model.startCancellationFailure != nil)
+        model.cancelStart()
+        #expect(backend.cancelTargets == [operation] && model.isStarting)
+        backend.finishTarget(.failed(operation, .canceled)); await task.value
+    }
+    @Test func targetTerminalWaitsForOutstandingCancellationReply() async throws {
+        let backend = CancellationBackend(operation: operation); await configured(backend.fake)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let task = try #require(model.startEnvironment(environment.id))
+        var starts = backend.started.makeAsyncIterator(), cancels = backend.canceled.makeAsyncIterator()
+        _ = await starts.next()
+        model.cancelStart(); backend.accept(); _ = await cancels.next()
+        let (changed, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        defer { signal.finish() }
+        withObservationTracking { _ = model.startCanCancel } onChange: { signal.yield(()) }
+        backend.finishTarget(.failed(operation, .canceled))
+        var observations = changed.makeAsyncIterator(); _ = await observations.next()
+        #expect(!model.startCanCancel && model.isStarting && !model.isChecking)
+        #expect(!model.canStart(environment.id) && !model.startCancellationReplyReceived)
+        backend.answerCancel(.completed(OperationID()))
+        await task.value
+        #expect(!model.isStarting && model.startCancellationReplyReceived)
     }
 }
 

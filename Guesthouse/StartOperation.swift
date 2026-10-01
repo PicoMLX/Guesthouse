@@ -64,7 +64,7 @@ import GuesthouseCore
         catch { return malformed() }
     }
     /// Cancellation has its own reply identity. Never use it as the target's terminal result.
-    static func cancel(_ operation: OperationID, backend: any RuntimeBackend) async -> Failure? {
+    static func cancel(_ operation: OperationID, backend: any RuntimeBackend) async -> (failure: Failure?, replySettled: Bool) {
         var answered = false
         var failure: GuesthouseError?
         do {
@@ -77,10 +77,10 @@ import GuesthouseCore
                 }
             }
             guard answered else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
-            return failure.map(Failure.runtime)
-        } catch let error as RuntimeSessionFailure { return .interrupted(error) }
-        catch let error as GuesthouseError { return .runtime(error) }
-        catch { return .runtime(.invalidRuntimeReply(.malformed)) }
+            return (failure.map(Failure.runtime), true)
+        } catch let error as RuntimeSessionFailure { return (.interrupted(error), false) }
+        catch let error as GuesthouseError { return (.runtime(error), false) }
+        catch { return (.runtime(.invalidRuntimeReply(.malformed)), false) }
     }
 
 }

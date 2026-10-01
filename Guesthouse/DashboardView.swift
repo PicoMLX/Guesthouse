@@ -17,6 +17,9 @@ struct DashboardView: View {
                     if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: model.startCancellationRequested, cancel: model.startCanCancel ? { model.cancelStart() } : nil) }
                     if model.isStarting, let failure = model.startCancellationFailure {
                         Text("Cancellation request failed. " + failure.message + " The original operation is still being observed.").foregroundStyle(.secondary)
+                        if model.startCanCancel && !model.startCancellationRequested {
+                            Text("Use Cancel operation to request cancellation again. Guesthouse will inspect state after the operation and cancellation replies finish.").font(.caption)
+                        }
                     }
                     if let failure = model.startFailure {
                         if model.startFailureDismissed {

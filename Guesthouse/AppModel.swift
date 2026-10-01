@@ -135,9 +135,8 @@ final class AppModel {
                 }, progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
             startCanCancel = false
-            // Once the target ends, an outstanding cancellation reply cannot change that
-            // outcome. Drain its consumer before admitting any new operation.
-            cancelStartTask?.cancel()
+            // A target terminal does not settle the cancellation request. Keep its consumer
+            // alive through the actual reply/connection failure before admitting new work.
             await cancelStartTask?.value
             cancelStartTask = nil
             // A terminal event is not a live state query. Unknown outcomes are inspected,
@@ -155,16 +154,20 @@ final class AppModel {
     /// Keep consuming the target. A cancellation acknowledgement is not its terminal event.
     func cancelStart() {
         guard isStarting, startCanCancel, !startCancellationRequested else { return }
-        startCancellationRequested = true; startCancellationFailure = nil
+        startCancellationRequested = true; startCancellationReplyReceived = false; startCancellationFailure = nil
         if let startOperationID { sendStartCancellation(startOperationID) }
     }
 
     private func sendStartCancellation(_ operation: OperationID) {
         guard cancelStartTask == nil else { return }
         cancelStartTask = Task { [weak self, backend] in
-            let failure = await StartOperation.cancel(operation, backend: backend)
+            let result = await StartOperation.cancel(operation, backend: backend)
             guard !Task.isCancelled, let self, isStarting, startOperationID == operation else { return }
-            startCancellationFailure = failure
+            startCancellationFailure = result.failure
+            cancelStartTask = nil
+            // A settled refusal permits another explicit cancellation request for this same
+            // observed target. A successful acknowledgement still waits for the target.
+            if result.replySettled, result.failure != nil { startCancellationRequested = false }
             startCancellationReplyReceived = true
         }
     }
