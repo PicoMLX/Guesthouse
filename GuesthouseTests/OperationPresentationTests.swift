@@ -75,6 +75,31 @@ import Testing
         _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
         #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))))
     }
+    @Test(arguments: [false, true])
+    func missingTargetBeforeStartWasSentDoesNotRequireRuntimeReconciliation(quitWithoutInspecting: Bool) async {
+        let environment = DevelopmentEnvironment(name: "Missing Mac"), other = DevelopmentEnvironment(name: "Other Mac")
+        let fake = FakeRuntimeBackend()
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        let model = AppModel(backend: fake); await model.checkEnvironments().value
+        // The cached card permits a click, but the mandatory pre-Start check loses the target.
+        await fake.setEnvironmentInventory(.available([other]))
+        await fake.setStatus(.init(environmentID: other.id, vm: .stopped, readiness: .checking))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .uncertain(reason: .inspectionFailed), readiness: .checking))
+        await model.startEnvironment(environment.id)?.value
+        #expect(model.startFailure == .stateChanged && !model.canStart(other.id))
+        if !quitWithoutInspecting {
+            await model.checkEnvironments().value
+            #expect(model.startFailure == nil && model.startingEnvironment == nil && model.canStart(other.id))
+        }
+        var decisions: [Bool] = []
+        let quit = QuitCoordinator(model: model) { decisions.append($0) }
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect(quit.flow == .terminating && decisions == [true])
+        let requests = await fake.receivedRequests
+        #expect(requests.allSatisfy { if case .startEnvironment = $0 { false } else { true } })
+        #expect(requests.filter { $0 == .environmentStatus(environment.id) }.count == 1)
+    }
     @Test(arguments: [EnvironmentStatus.VMState.stopped, .notFound, .running, .uncertain(reason: .inspectionFailed)], [false, true])
     func explicitInspectionQueriesMissingTargetBeforeResolvingItsFailure(state: EnvironmentStatus.VMState, busy: Bool) async {
         let environment = DevelopmentEnvironment(name: "Missing Mac"), other = DevelopmentEnvironment(name: "Other Mac")
@@ -91,6 +116,24 @@ import Testing
         let resolved = !busy && (state == .stopped || state == .notFound)
         #expect((model.startFailure == nil) == resolved && model.canStart(other.id) == resolved)
         #expect(Array(await fake.receivedRequests.suffix(3)) == [.listEnvironments, .environmentStatus(other.id), .environmentStatus(environment.id)])
+    }
+    @Test func lostStartReplyBeforeAcceptanceStillRequiresMissingTargetInspection() async {
+        let environment = DevelopmentEnvironment(name: "Missing Mac"), fake = FakeRuntimeBackend()
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        let backend = DiagnosticStartBackend(fake: fake, events: [], emptyInventoryOnStart: true)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        await model.startEnvironment(environment.id)?.value
+        #expect(model.startNeedsInspection)
+        #expect(model.startFailure == .interrupted(.init(cause: .malformedResponse, mayHaveMutated: true)))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .uncertain(reason: .inspectionFailed), readiness: .checking))
+        await model.checkEnvironments().value
+        #expect(model.startNeedsInspection && model.startFailure != nil)
+        #expect(Array(await fake.receivedRequests.suffix(2)) == [.listEnvironments, .environmentStatus(environment.id)])
+        var decisions: [Bool] = []
+        let quit = QuitCoordinator(model: model) { decisions.append($0) }
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))) && decisions.isEmpty)
     }
     @Test(arguments: [false, true])
     func diagnosticsAreBoundedAndRejectForeignEnvironment(foreign: Bool) async {
