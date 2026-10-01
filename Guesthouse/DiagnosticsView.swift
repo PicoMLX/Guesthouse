@@ -23,7 +23,7 @@ struct DiagnosticsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Diagnostics").font(.title2)
-            Text(environment.map { "Environment \($0)" } ?? "Current Guesthouse session").font(.caption)
+            Text(environment.map { "Environment \($0.description)" } ?? "Current Guesthouse session").font(.caption)
             Text(DiagnosticsExportBuilder.historyNotice).font(.caption).foregroundStyle(.secondary)
             Text("\(history.records.count) retained records; \(history.discardedCount) local session evictions.").font(.caption)
             HStack {
@@ -41,7 +41,7 @@ struct DiagnosticsView: View {
                         Text(record.event.message)
                         if let recovery = record.event.recoveryMessage { Text(recovery).foregroundStyle(.secondary) }
                         if environment == nil {
-                            Text(record.event.environmentID.map { "Environment \($0)" } ?? "Session-wide event").font(.caption).foregroundStyle(.secondary)
+                            Text(record.event.environmentID.map { "Environment \($0.description)" } ?? "Session-wide event").font(.caption).foregroundStyle(.secondary)
                         }
                         Text(record.event.operationID.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary)
                     }.tag(index).padding(.vertical, 3)
