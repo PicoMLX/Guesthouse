@@ -1,6 +1,6 @@
 # Lume 0.6.0 static artifact review
 
-Recorded October 1, 2026 (UTC), after the official release at 17:19:11 UTC. This is static artifact evidence for [issue #82](https://github.com/PicoMLX/Guesthouse/issues/82), [ADR 0002](../decisions/0002-prioritize-lume-and-shared-infrastructure.md) and MVP-PLAN.md §3. It is not provider selection, a runtime installation, signed-XPC execution, VM/guest evidence or a phase-zero hardware result.
+Recorded October 1, 2026 (UTC), after the official release at 17:19:11 UTC. Operator: Codex, the automated assistant in this Guesthouse chat, performed the downloads, bounded extraction and static checks on the host described below. This is static artifact evidence for [issue #82](https://github.com/PicoMLX/Guesthouse/issues/82), [ADR 0002](../decisions/0002-prioritize-lume-and-shared-infrastructure.md) and MVP-PLAN.md §§3, 10, indexed by the [canonical feasibility record](provider-feasibility.md). It is not provider selection, a runtime installation, signed-XPC execution, VM/guest evidence or a phase-zero hardware result.
 
 The new artifact passes the checks below on an arm64 Mac running macOS 26.6.2 (25G83). The earlier Lume 0.5.3 artifact remains rejected. No Lume executable, archive launcher or installer was run, and no existing runtime or VM disk was changed.
 
@@ -38,7 +38,8 @@ The retained #83/#86 verifier requires strict, all-architecture and nested-code 
 | Signing information, expected identifier/team and required entitlements | Match |
 | `codesign --verify --strict --all-architectures --deep --verbose=4` | Valid on disk; designated requirement satisfied |
 | `spctl --assess --type execute --verbose=4` | Accepted; Notarized Developer ID |
-| `pkgutil --check-signature` against extracted installer | Developer ID Installer, expected team; trusted notarization |
+| `pkgutil --check-signature` against extracted installer | Trusted Developer ID Installer signature and certificate chain; expected team |
+| `spctl --assess --type install --verbose=4` against extracted installer | Accepted; Notarized Developer ID |
 
 The app has a stapled notarization ticket and an October 1, 2026 17:17:55 UTC signing timestamp. The installer has a trusted 17:17:56 UTC timestamp. The requirement evaluated was:
 
