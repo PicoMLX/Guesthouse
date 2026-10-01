@@ -23,8 +23,19 @@ struct RecoveryPresentation {
     let message: String
     let actions: [RecoveryAction]
     let outcomeUnknown: Bool
+    static func isImplemented(_ action: RecoveryAction) -> Bool {
+        switch action { case .retry, .inspectState, .cancel: true; default: false }
+    }
+    func canPerform(_ action: RecoveryAction, canRetry: Bool, canInspect: Bool) -> Bool {
+        guard actions.contains(action), Self.isImplemented(action) else { return false }
+        switch action {
+        case .retry: return canRetry && !outcomeUnknown
+        case .inspectState: return canInspect
+        default: return true
+        }
+    }
     init(error: GuesthouseError) {
-        message = error.userMessage
+        message = error.userMessage + " " + error.recoveryMessage
         if case .operationOutcomeUnknown = error { outcomeUnknown = true } else { outcomeUnknown = false }
         actions = outcomeUnknown ? error.recoveryActions.filter { $0 != .retry } : error.recoveryActions
     }
