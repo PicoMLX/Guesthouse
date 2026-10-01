@@ -24,25 +24,12 @@ struct DashboardView: View {
                             Text("Use Cancel operation to request cancellation again. Guesthouse will inspect state after the operation and cancellation replies finish.").font(.caption)
                         }
                     }
-                    if let failure = model.startFailure {
-                        if model.startFailureDismissed {
-                            Text("The last Start needs attention. Check the environment before continuing.").foregroundStyle(.secondary)
-                        } else {
-                            ErrorRecoveryView(presentation: .init(failure: failure), canRetry: model.canRetryStart(environment.id), canInspect: !model.isStarting && !model.isChecking && quit.flow == .idle) { action in
-                                switch action {
-                                case .retry: model.retryStart(environment.id)
-                                case .inspectState: model.checkEnvironments()
-                                case .cancel: model.dismissStartFailure()
-                                default: break
-                                }
-                            }
-                        }
-                    }
-                    DiagnosticDisclosureView(log: model.startDiagnostics)
+                    recoveryDetails(for: environment.id)
                 }
             }
-            if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }), let failure = model.startFailure {
-                Text(failure.message).foregroundStyle(.secondary)
+            if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }) {
+                Text("Last Start — environment no longer listed").font(.headline)
+                recoveryDetails(for: id)
             }
             if model.checkState == .checked {
                 VStack(alignment: .leading, spacing: 6) {
@@ -68,6 +55,24 @@ struct DashboardView: View {
             }.padding(24).frame(width: 420)
         }
     }
+    @ViewBuilder private func recoveryDetails(for environmentID: EnvironmentID) -> some View {
+        if let failure = model.startFailure {
+            if model.startFailureDismissed {
+                Text("The last Start needs attention. Check the environment before continuing.").foregroundStyle(.secondary)
+            } else {
+                ErrorRecoveryView(presentation: .init(failure: failure), canRetry: model.canRetryStart(environmentID), canInspect: !model.isStarting && !model.isChecking && quit.flow == .idle) { action in
+                    switch action {
+                    case .retry: model.retryStart(environmentID)
+                    case .inspectState: model.checkEnvironments()
+                    case .cancel: model.dismissStartFailure()
+                    default: break
+                    }
+                }
+            }
+        }
+        DiagnosticDisclosureView(log: model.startDiagnostics)
+    }
+
 }
 
 private struct DiagnosticScope: Identifiable {
