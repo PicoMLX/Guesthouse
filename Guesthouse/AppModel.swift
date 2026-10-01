@@ -20,6 +20,12 @@ final class AppModel {
     private(set) var isChecking = false
     private(set) var isStarting = false
     private(set) var startingEnvironment: EnvironmentID?
+    private(set) var startCanCancel = false
+    private(set) var startOperationID: OperationID?
+    private(set) var startCancellationRequested = false
+    private(set) var startCancellationReplyReceived = false
+    private(set) var startCancellationFailure: StartOperation.Failure?
+    @ObservationIgnored private var cancelStartTask: Task<Void, Never>?
     private(set) var startMayHaveMutated = false
     var startNeedsInspection: Bool { startMayHaveMutated && (isStarting || startFailure != nil) }
     private(set) var startPhase: ProgressPhase?
@@ -69,7 +75,8 @@ final class AppModel {
     }
 
     func canStart(_ id: EnvironmentID) -> Bool {
-        guard backend.allowsEnvironmentStart, !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
+        guard backend.allowsEnvironmentStart, startCancellationFailure == nil,
+              !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
         if let startFailure {
             // One runtime writer and one presented Start result. Do not overwrite another
             // environment's failure; an explicit successful Check clears it first.
@@ -99,7 +106,8 @@ final class AppModel {
     }
 
     func canRetryStart(_ id: EnvironmentID) -> Bool {
-        backend.allowsEnvironmentStart && !startNeedsInspection && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+        backend.allowsEnvironmentStart && startCancellationFailure == nil
+            && !startNeedsInspection && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
             && startFailure?.recoveryActions.contains(.retry) == true
     }
 
@@ -113,11 +121,13 @@ final class AppModel {
 
     private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
         isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false
+        startOperationID = nil; startCanCancel = true; startCancellationRequested = false; startCancellationReplyReceived = false; startCancellationFailure = nil
         startMayHaveMutated = false
         let work = Task { [weak self] in
             guard let self else { return }
-            defer { isStarting = false; startTask = nil; startPhase = nil }
+            defer { isStarting = false; startTask = nil; startPhase = nil; startOperationID = nil; startCanCancel = false }
             await startCheck().value
+            guard !startCancellationRequested else { startFailure = .runtime(.canceled); return }
             guard !checksReservedForQuit else { startFailure = .quitPending; return }
             guard startEligible(id) else {
                 startFailure = checkState == .checked ? .stateChanged : .check(checkState); return
@@ -127,11 +137,19 @@ final class AppModel {
             // pre-Start query never sent a mutation and needs no target reconciliation.
             startMayHaveMutated = true
             let result = await StartOperation.run(id, backend: backend,
-                accepted: { [weak self] _ in self?.startDiagnostics.removeAll() },
-                progress: { [weak self] phase in self?.startPhase = phase },
+                accepted: { [weak self] operation in
+                    self?.startDiagnostics.removeAll()
+                    self?.startOperationID = operation
+                    if self?.startCancellationRequested == true { self?.sendStartCancellation(operation) }
+                }, progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
             startFailure = result.failure
             startMayHaveMutated = result.mayHaveMutated
+            startCanCancel = false
+            // A target terminal does not settle the cancellation request. Keep its consumer
+            // alive through the actual reply/connection failure before admitting new work.
+            await cancelStartTask?.value
+            cancelStartTask = nil
             // A terminal event is not a live state query. Unknown outcomes are inspected,
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
@@ -144,8 +162,36 @@ final class AppModel {
         return work
     }
 
+    /// Keep consuming the target. A cancellation acknowledgement is not its terminal event.
+    func cancelStart() {
+        guard isStarting, startCanCancel, !startCancellationRequested else { return }
+        startCancellationRequested = true; startCancellationReplyReceived = false; startCancellationFailure = nil
+        if let startOperationID { sendStartCancellation(startOperationID) }
+    }
+
+    private func sendStartCancellation(_ operation: OperationID) {
+        guard cancelStartTask == nil else { return }
+        cancelStartTask = Task { [weak self, backend] in
+            let result = await StartOperation.cancel(operation, backend: backend)
+            guard !Task.isCancelled, let self, isStarting, startOperationID == operation else { return }
+            startCancellationFailure = result.failure
+            cancelStartTask = nil
+            // A settled refusal permits another explicit cancellation request for this same
+            // observed target. A successful acknowledgement still waits for the target.
+            if result.retryAllowed { startCancellationRequested = false }
+            startCancellationReplyReceived = true
+        }
+    }
+
     /// Dismissing presentation cannot clear uncertainty or permit a new mutation.
     func dismissStartFailure() { startFailureDismissed = true }
+
+    /// A settled cancellation failure stays visible until acknowledged. This only dismisses
+    /// its message; the target's result and uncertainty remain independently retained.
+    func dismissStartCancellationFailure() {
+        guard !isStarting else { return }
+        startCancellationFailure = nil
+    }
 
     func invalidateStatusForMutation() {
         generation = UUID()

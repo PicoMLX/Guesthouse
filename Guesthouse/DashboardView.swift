@@ -8,13 +8,25 @@ struct DashboardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             EnvironmentCheckView(model: model, quit: quit)
+            if let failure = model.startCancellationFailure {
+                Text("Cancellation request failed. " + failure.message).foregroundStyle(.secondary)
+                if model.isStarting {
+                    Text("The original operation is still being observed.").font(.caption)
+                    if model.startCanCancel && !model.startCancellationRequested {
+                        Text("Use Cancel operation to request cancellation again. Guesthouse will inspect state after the operation and cancellation replies finish.").font(.caption)
+                    }
+                } else {
+                    Text("Acknowledge this cancellation result before starting another operation.").font(.caption)
+                    Button("Dismiss cancellation message") { model.dismissStartCancellationFailure() }
+                }
+            }
             ForEach(model.environments) { environment in
                 EnvironmentCardView(state: EnvironmentCardState(environment: environment,
                     status: model.statuses[environment.id], checked: model.checkState == .checked,
                     busy: model.isChecking || model.isStarting || quit.flow != .idle, backendAllowsStart: model.backend.allowsEnvironmentStart),
                     canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
                 if model.startingEnvironment == environment.id {
-                    if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: false) }
+                    if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: model.startCancellationRequested, cancel: model.startCanCancel ? { model.cancelStart() } : nil) }
                     recoveryDetails(for: environment.id)
                 }
             }

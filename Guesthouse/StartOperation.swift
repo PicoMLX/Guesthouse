@@ -75,4 +75,36 @@ import GuesthouseCore
         if case .operationOutcomeUnknown = error { return true }
         return false
     }
+    /// Cancellation has its own reply identity. Never use it as the target's terminal result.
+    static func cancel(_ operation: OperationID, backend: any RuntimeBackend) async -> (failure: Failure?, retryAllowed: Bool) {
+        var answered = false
+        var failure: GuesthouseError?
+        do {
+            for try await event in backend.send(.cancelOperation(operation)) {
+                guard !answered else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+                switch event {
+                case .completed: answered = true
+                case .failed(_, let error): answered = true; failure = error
+                default: throw GuesthouseError.invalidRuntimeReply(.malformed)
+                }
+            }
+            guard answered else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+            let retryAllowed: Bool
+            switch failure {
+            // Only an explicit admission refusal proves this cancellation did not run.
+            // Canceled/unknown/transport-like failures require inspection, not another request.
+            case .invalidRequest?: retryAllowed = true
+            default: retryAllowed = false
+            }
+            return (failure.map(Failure.runtime), retryAllowed)
+        } catch let error as RuntimeSessionFailure { return (.interrupted(error.contextualized(mayHaveMutated: true)), false) }
+        catch let error as GuesthouseError {
+            // RuntimeClient can reject locally before sending by throwing, rather than
+            // yielding a terminal event. A throw after any reply cannot prove non-admission.
+            if !answered, case .invalidRequest = error { return (.runtime(error), true) }
+            return (.runtime(error), false)
+        }
+        catch { return (.runtime(.invalidRuntimeReply(.malformed)), false) }
+    }
+
 }
