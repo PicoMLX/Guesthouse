@@ -17,4 +17,15 @@ struct DiagnosticsSelectionTests {
         #expect(DiagnosticsSelection.text(in: log, matching: "not installed", selection: [1]) == nil)
         #expect(DiagnosticsSelection.text(in: log, matching: "", selection: []) == nil)
     }
+    @Test func copiedRowsKeepSourceEvictionsAndEnvironmentAttribution() throws {
+        let environment = EnvironmentID()
+        var log = DiagnosticLog(capacity: 1)
+        let event = DiagnosticEvent(operation: .startEnvironment, outcome: .started, operationID: UUID(), environmentID: environment)
+        log.append(event); log.append(event)
+        let text = try #require(DiagnosticsSelection.text(in: log, matching: environment.description, selection: [0]))
+        #expect(text.contains("Older/omitted events: 1."))
+        #expect(text.contains(DiagnosticsExportBuilder.historyNotice) && text.contains(environment.description))
+        #expect(!text.contains("Older/omitted events: 0."))
+    }
+
 }

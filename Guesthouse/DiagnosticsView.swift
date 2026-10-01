@@ -40,6 +40,9 @@ struct DiagnosticsView: View {
                         Text(record.recordedAt, format: .dateTime.hour().minute().second()).font(.caption).foregroundStyle(.secondary)
                         Text(record.event.message)
                         if let recovery = record.event.recoveryMessage { Text(recovery).foregroundStyle(.secondary) }
+                        if environment == nil {
+                            Text(record.event.environmentID.map { "Environment \($0)" } ?? "Session-wide event").font(.caption).foregroundStyle(.secondary)
+                        }
                         Text(record.event.operationID.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary)
                     }.tag(index).padding(.vertical, 3)
                 }
@@ -103,16 +106,17 @@ struct DiagnosticsView: View {
 }
 
 nonisolated enum DiagnosticsSelection {
+    private static func matches(_ record: DiagnosticLog.Record, query: String) -> Bool {
+        query.isEmpty || (record.event.message + " " + (record.event.recoveryMessage ?? "") + " "
+            + record.event.operationID.uuidString + " " + (record.event.environmentID?.description ?? "")).localizedStandardContains(query)
+    }
     static func records(in log: DiagnosticLog, matching query: String) -> [DiagnosticLog.Record] {
-        guard !query.isEmpty else { return log.records }
-        return log.records.filter { ($0.event.message + " " + ($0.event.recoveryMessage ?? "") + " " + $0.event.operationID.uuidString).localizedStandardContains(query) }
+        log.records.filter { matches($0, query: query) }
     }
     static func text(in log: DiagnosticLog, matching query: String, selection: Set<Int>) -> String? {
-        let records = records(in: log, matching: query)
-        var selected = DiagnosticLog(capacity: log.capacity)
-        for index in selection.sorted() where records.indices.contains(index) {
-            selected.append(records[index].event, recordedAt: records[index].recordedAt)
-        }
-        return selected.records.isEmpty ? nil : "Selected diagnostic records only.\n" + selected.text
+        let visible = log.records.enumerated().filter { matches($0.element, query: query) }
+        let indices = Set(selection.compactMap { visible.indices.contains($0) ? visible[$0].offset : nil })
+        let selected = log.selecting(recordsAt: indices)
+        return selected.records.isEmpty ? nil : "Selected diagnostic records only.\n" + DiagnosticsExportBuilder.historyNotice + "\n" + selected.text
     }
 }

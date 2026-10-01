@@ -13,7 +13,10 @@ nonisolated enum DiagnosticsExportWriter {
             case .writeFailed: "Guesthouse could not save a complete diagnostic export."
             }
         }
-        var recoveryMessage: String { "Check the selected location and available space, then save with a new folder name. No existing export is replaced." }
+        var recoveryMessage: String {
+            let partial = self == .writeFailed ? "An incomplete export folder may remain at the selected location. Inspect it and remove partial files if they are no longer needed. " : ""
+            return partial + "Check the selected location and available space, then save with a new folder name. No existing export is replaced."
+        }
         var recoveryActions: [RecoveryAction] { [.chooseAllowedLocation, .cancel] }
     }
 

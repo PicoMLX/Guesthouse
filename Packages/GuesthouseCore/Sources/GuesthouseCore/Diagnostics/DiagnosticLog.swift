@@ -41,6 +41,14 @@ public struct DiagnosticLog: Sendable {
         return selected
     }
 
+    /// Select rows from a stable snapshot without losing its source-history omission count.
+    /// Out-of-range indices are ignored; retained rows keep their original order.
+    public func selecting(recordsAt indices: Set<Int>) -> Self {
+        var selected = self
+        selected.records = records.enumerated().compactMap { indices.contains($0.offset) ? $0.element : nil }
+        return selected
+    }
+
     /// Export only typed records. Never attach an error description on encoding failure.
     public func jsonData() throws -> Data {
         struct Export: Encodable {
