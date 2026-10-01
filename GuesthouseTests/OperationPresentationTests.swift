@@ -71,6 +71,26 @@ import Testing
         #expect(model.startDiagnostics.records.map(\.event) == [event])
         #expect(model.startFailure == .notRunning)
         #expect(model.startFailure?.recoveryActions.contains(.inspectState) == true)
+        let quit = QuitCoordinator(model: model) { if $0 { Issue.record("Missing target must not authorize Quit") } }
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))))
+    }
+    @Test(arguments: [EnvironmentStatus.VMState.stopped, .notFound, .running, .uncertain(reason: .inspectionFailed)], [false, true])
+    func explicitInspectionQueriesMissingTargetBeforeResolvingItsFailure(state: EnvironmentStatus.VMState, busy: Bool) async {
+        let environment = DevelopmentEnvironment(name: "Missing Mac"), other = DevelopmentEnvironment(name: "Other Mac")
+        let operation = OperationID(), fake = FakeRuntimeBackend()
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        let backend = DiagnosticStartBackend(fake: fake, events: [.accepted(operation), .completed(operation)], emptyInventoryOnStart: true)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        await model.startEnvironment(environment.id)?.value
+        await fake.setEnvironmentInventory(.available([other]))
+        await fake.setStatus(.init(environmentID: other.id, vm: .stopped, readiness: .checking))
+        await fake.setStatus(.init(environmentID: environment.id, vm: state, readiness: .checking, inFlightOperation: busy ? OperationID() : nil))
+        await model.checkEnvironments().value
+        let resolved = !busy && (state == .stopped || state == .notFound)
+        #expect((model.startFailure == nil) == resolved && model.canStart(other.id) == resolved)
+        #expect(Array(await fake.receivedRequests.suffix(3)) == [.listEnvironments, .environmentStatus(other.id), .environmentStatus(environment.id)])
     }
     @Test(arguments: [false, true])
     func diagnosticsAreBoundedAndRejectForeignEnvironment(foreign: Bool) async {
