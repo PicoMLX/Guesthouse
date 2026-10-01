@@ -21,6 +21,13 @@ import Testing
         let state = RecoveryPresentation(error: error)
         #expect(!state.message.isEmpty && !state.actions.isEmpty)
         #expect(state.actions == error.recoveryActions)
+        #expect(state.message.contains(error.recoveryMessage))
+        for action in state.actions {
+            let expected: Bool
+            switch action { case .retry: expected = !state.outcomeUnknown; case .inspectState, .cancel: expected = true; default: expected = false }
+            #expect(state.canPerform(action, canRetry: true, canInspect: true) == expected)
+            if action == .retry || action == .inspectState { #expect(!state.canPerform(action, canRetry: false, canInspect: false)) }
+        }
         if state.outcomeUnknown { #expect(!state.actions.contains(.retry)) }
     }
     @Test func transportUncertaintyNeverOffersRetryWithoutInventingAnOperationID() {
