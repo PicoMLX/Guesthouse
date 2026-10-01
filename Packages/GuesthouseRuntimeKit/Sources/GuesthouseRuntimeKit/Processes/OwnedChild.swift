@@ -117,7 +117,8 @@ final class OwnedChild: Sendable {
 
     /// Kernel history of this exact live-owned launch, not a saved/restart capability. Only
     /// successful observation AND reaping can publish exitedWithoutFork. Other launches and
-    /// any observed fork remain unproven for descendants. StateStore settlement is not wired.
+    /// any observed fork remain unproven for descendants. Only the retained actual owner can
+    /// use this same-service observation for explicit StateStore settlement; never save proof.
     var forkObservation: OwnedChildForkObservation.Result { state.withLock { $0.forkObservation } }
 
     /// Completion means only that this exact direct child has been observed and reaped.
