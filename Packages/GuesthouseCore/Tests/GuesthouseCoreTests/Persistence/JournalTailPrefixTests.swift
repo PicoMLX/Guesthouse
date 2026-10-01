@@ -21,7 +21,7 @@ import Testing
         #expect(throws: StateStoreError.corruptJournal(line: 1)) { try JournalReplayChunk(tail) }
     }
 
-    @Test(arguments: ["operationOutcomeUnknown", "guestNotReachable", "hostKeyChanged"], [false, true])
+    @Test(arguments: ["operationOutcomeUnknown", "guestNotReachable", "hostKeyChanged", "guestShutdownRefused"], [false, true])
     func inconsistentEmbeddedIdentityCannotAuthorizeRepair(error: String, outcomeFirst: Bool) throws {
         let original = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         let different = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
@@ -35,6 +35,9 @@ import Testing
             key = "id"; identity = try JSONEncoder().encode(operation)
         case "guestNotReachable":
             outcome = .failed(.guestNotReachable(reportedEnvironment))
+            key = "environmentID"; identity = try JSONEncoder().encode(environment)
+        case "guestShutdownRefused":
+            outcome = .failed(.guestShutdownRefused(reportedEnvironment))
             key = "environmentID"; identity = try JSONEncoder().encode(environment)
         default:
             outcome = .failed(.hostKeyChanged(reportedEnvironment))
@@ -54,7 +57,8 @@ import Testing
             .replacingOccurrences(of: different.uuidString, with: original.uuidString).utf8)
         var history = JournalHistory()
         try history.append(JournalRecord(id: operation, environmentID: environment,
-                                         operation: .startEnvironment, timestamp: Date(), outcome: .started))
+                                         operation: error == "guestShutdownRefused" ? .stopEnvironment : .startEnvironment,
+                                         timestamp: Date(), outcome: .started))
         for length in 1...consistent.count {
             #expect(try JournalReplayChunk(Data(consistent.prefix(length)), following: history).truncatedTail)
         }
@@ -64,7 +68,7 @@ import Testing
         let id = OperationID(), environment = EnvironmentID()
         let outcomes: [JournalRecord.Outcome] = [
             .completed, .unknown, .notApplied, .failed(.canceled),
-            .failed(.operationOutcomeUnknown(id)), .failed(.guestNotReachable(environment)),
+            .failed(.operationOutcomeUnknown(id)), .failed(.guestNotReachable(environment)), .failed(.guestShutdownRefused(environment)),
             .failed(.hostKeyChanged(environment)), .failed(.insufficientDisk(requiredBytes: .max, availableBytes: 0)),
             .failed(.unsupportedHost(.insufficientMemory(foundBytes: 0, minimumBytes: .max))),
             .failed(.protocolMismatch(client: .min, service: .max)), .failed(.vmSlotUnavailable(maximum: .max)),
@@ -73,7 +77,8 @@ import Testing
             .failed(.toolMismatch(tool: .vmRuntime)), .failed(.runtimeMissing)
         ]
         for outcome in outcomes {
-            try checkEveryCut(JournalRecord(id: id, environmentID: environment, operation: .startEnvironment,
+            let operation: JournalOperation = outcome == .failed(.guestShutdownRefused(environment)) ? .stopEnvironment : .startEnvironment
+            try checkEveryCut(JournalRecord(id: id, environmentID: environment, operation: operation,
                                           timestamp: Date(timeIntervalSinceReferenceDate: 1e-20), outcome: outcome))
         }
         for stage in ProvisioningStage.allCases {
@@ -173,7 +178,7 @@ import Testing
     }
 
     @Test(arguments: [
-        "not json", "{]", " ", "{\"unknown", "{\"format\":3", "{\"format\":\"",
+        "not json", "{]", " ", "{\"unknown", "{\"format\":4", "{\"format\":\"",
         "{\"id\":\"not-a-uuid", "{\"operation\":{\"invented", "{\"timestamp\":01",
         "{\"timestamp\":1e+x", "{\"format\":2,\"format", "{\"outcome\":[",
         "{\"outcome\":{\"failed\":{\"_0\":{\"vmSlotUnavailable\":{\"maximum\":9223372036854775808",

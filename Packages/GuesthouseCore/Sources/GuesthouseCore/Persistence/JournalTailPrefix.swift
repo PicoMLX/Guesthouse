@@ -226,6 +226,12 @@ struct JournalTailPrefix {
     }
 
     private static func makeShape(operation: JournalOperation? = nil, starting: Bool? = nil) throws -> Shape {
+        .choice(try [2, JournalRecord.currentFormat].map {
+            try makeShape(format: $0, operation: operation, starting: starting)
+        })
+    }
+
+    private static func makeShape(format: Int, operation: JournalOperation?, starting: Bool?) throws -> Shape {
         let errors: [GuesthouseError] = [
             .unsupportedHost(.notAppleSilicon), .unsupportedHost(.unknownArchitecture),
             .unsupportedHost(.macOSTooOld), .unsupportedHost(.insufficientMemory(foundBytes: 0, minimumBytes: 0)),
@@ -246,7 +252,7 @@ struct JournalTailPrefix {
         if starting == false { outcomes.removeFirst() }
         func record(operation: Shape, outcome: Shape) -> Shape {
             .object([
-                "format": .literal(Array(String(JournalRecord.currentFormat).utf8)),
+                "format": .literal(Array(String(format).utf8)),
                 "id": .uuid(.operation), "environmentID": .uuid(.environment), "timestamp": .date,
                 "operation": operation, "outcome": outcome
             ])
@@ -257,7 +263,7 @@ struct JournalTailPrefix {
                 let identity: Identity?
                 switch outcome {
                 case .failed(.operationOutcomeUnknown): identity = .operation
-                case .failed(.guestNotReachable), .failed(.hostKeyChanged): identity = .environment
+                case .failed(.guestNotReachable), .failed(.hostKeyChanged), .failed(.guestShutdownRefused): identity = .environment
                 default: identity = nil
                 }
                 return try encodedShape(outcome, identity: identity)
@@ -273,6 +279,11 @@ struct JournalTailPrefix {
             record(operation: try encodedShape(JournalOperation.provision(stage: stage)),
                    outcome: try encodedShape(JournalRecord.Outcome.checkpoint(stage)))
         }
-        return .choice([ordinary] + checkpoints)
+        let refusals: [Shape]
+        if format >= 3, starting != true, operation == nil || operation == .stopEnvironment {
+            refusals = [record(operation: try encodedShape(JournalOperation.stopEnvironment),
+                outcome: try encodedShape(JournalRecord.Outcome.failed(.guestShutdownRefused(EnvironmentID())), identity: .environment))]
+        } else { refusals = [] }
+        return .choice([ordinary] + checkpoints + refusals)
     }
 }

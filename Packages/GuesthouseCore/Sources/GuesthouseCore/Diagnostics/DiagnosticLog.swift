@@ -35,7 +35,9 @@ public struct DiagnosticLog: Sendable {
     public func jsonData() throws -> Data {
         struct Export: Encodable {
             // Version 2 adds domain-specific operationFailed outcomes (ADR 0003).
-            let schemaVersion = 2
+            // Schema 3 adds the confirmed shutdown-refusal error vocabulary. Older readers
+            // must not interpret a new closed error case as version-2 diagnostic data.
+            let schemaVersion = 3
             let discardedCount: UInt64
             let records: [Record]
         }

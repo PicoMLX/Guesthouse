@@ -8,7 +8,7 @@ struct GuesthouseErrorTests {
         .unsupportedHost(.notAppleSilicon), .unsupportedHost(.unknownArchitecture),
         .unsupportedHost(.macOSTooOld), .unsupportedHost(.insufficientMemory(foundBytes: 1, minimumBytes: 2)),
         .insufficientDisk(requiredBytes: 2, availableBytes: 1), .runtimeMissing, .runtimeIncompatible,
-        .guestNotReachable(EnvironmentID(uuid: uuid)), .hostKeyChanged(EnvironmentID(uuid: uuid)),
+        .guestShutdownRefused(EnvironmentID(uuid: uuid)), .guestNotReachable(EnvironmentID(uuid: uuid)), .hostKeyChanged(EnvironmentID(uuid: uuid)),
         .xcodeComponentsIncomplete, .vmSlotUnavailable(maximum: 2), .operationOutcomeUnknown(OperationID(uuid: uuid)),
         .unauthorizedCaller, .protocolMismatch(client: 1, service: 2)
     ] + GuesthouseError.VerificationCheck.allCases.map { .downloadVerificationFailed(check: $0) }
@@ -34,9 +34,22 @@ struct GuesthouseErrorTests {
         var log = DiagnosticLog()
         log.append(event, recordedAt: Date(timeIntervalSince1970: 0.123))
         let json = try #require(JSONSerialization.jsonObject(with: log.jsonData()) as? [String: Any])
-        #expect(json["schemaVersion"] as? Int == 2)
+        #expect(json["schemaVersion"] as? Int == 3)
         #expect(log.text.contains("1970-01-01T00:00:00.123Z [\(Self.uuid)] Check tools: " + error.userMessage))
         #expect(log.text.contains(error.recoveryMessage))
+    }
+
+    @Test func confirmedShutdownRefusalIsDistinctFromUnknownOutcome() throws {
+        let environment = EnvironmentID(uuid: Self.uuid)
+        let error = GuesthouseError.guestShutdownRefused(environment)
+        #expect(error.category == .guest && error.isRetryable)
+        #expect(error.recoveryActions == [.retry, .openConsole, .cancel])
+        let event = RuntimeEvent.failed(OperationID(uuid: Self.uuid), error)
+        let envelope = RuntimeEventEnvelope(event: event)
+        #expect(try RuntimeEventEnvelope.decode(envelope.encoded()).event == event)
+        #expect(!error.userMessage.contains(Self.uuid.uuidString))
+        #expect(!GuesthouseError.guestNotReachable(environment).isRetryable)
+        #expect(!GuesthouseError.operationOutcomeUnknown(OperationID(uuid: Self.uuid)).isRetryable)
     }
 
     @Test func uncertainOutcomesDoNotOfferBlindRetry() {

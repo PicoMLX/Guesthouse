@@ -37,10 +37,10 @@ public enum JournalOperation: Codable, Hashable, Sendable, CaseIterable {
 /// metadata before acknowledging persistCheckpoint. A known journal operation must separately
 /// be settled using actual evidence; a metadata checkpoint does not settle unrelated mutations.
 public struct JournalRecord: Codable, Hashable, Sendable {
-    /// Format 2 uses the structured GuesthouseError contract (ADR 0003). Prototype format 1
-    /// may contain incompatible legacy error payloads and is refused without rewriting it.
-    /// The concrete runtime store must preserve unsupported files and surface fixed recovery.
-    public static let currentFormat = 2
+    /// Format 3 adds confirmed graceful-shutdown refusal. Format 2 remains readable, but
+    /// cannot carry that newer case. Prototype format 1 remains refused without rewriting.
+    /// Older readers recognize format 3 as unsupported instead of asking to repair valid data.
+    public static let currentFormat = 3
 
     public enum Outcome: Codable, Hashable, Sendable {
         /// The operation was accepted. It is in flight until a later record says otherwise.
@@ -65,7 +65,7 @@ public struct JournalRecord: Codable, Hashable, Sendable {
     }
 
     /// Whether this build can read a record written in `format`.
-    public static func canRead(_ format: Int) -> Bool { format == currentFormat }
+    public static func canRead(_ format: Int) -> Bool { format == 2 || format == currentFormat }
 
     public let format: Int
     public let id: OperationID
@@ -124,11 +124,14 @@ public struct JournalRecord: Codable, Hashable, Sendable {
     /// to inspect (AGENTS.md: an interrupted operation has an unknown outcome until the actual
     /// state is inspected).
     public var isSelfConsistent: Bool {
-        switch outcome {
+        if format == 2, case .failed(.guestShutdownRefused) = outcome { return false }
+        return switch outcome {
         case .failed(.operationOutcomeUnknown(let reported)):
             reported == id
         case .failed(.guestNotReachable(let reported)), .failed(.hostKeyChanged(let reported)):
             reported == environmentID
+        case .failed(.guestShutdownRefused(let reported)):
+            reported == environmentID && operation == .stopEnvironment
         case .checkpoint(let reached):
             operation == .provision(stage: reached)
         default:

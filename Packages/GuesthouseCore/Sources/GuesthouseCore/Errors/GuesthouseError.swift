@@ -9,6 +9,10 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
     case downloadVerificationFailed(check: VerificationCheck)
     case runtimeMissing, runtimeIncompatible
     case guestNotReachable(EnvironmentID), hostKeyChanged(EnvironmentID)
+    /// Only after an accepted graceful stop ended and inspection confirms the owned VM is
+    /// still running. Never use for a timeout with unknown outcome or lost process ownership.
+    /// A GUI must inspect again and obtain explicit consent before offering a force-stop.
+    case guestShutdownRefused(EnvironmentID)
     case credentialsLocked(CredentialStore), loginExpired(Provider)
     case toolMismatch(tool: Tool), xcodeComponentsIncomplete
     case vmSlotUnavailable(maximum: Int)
@@ -73,7 +77,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .unsupportedHost: .host
         case .insufficientDisk: .storage
         case .downloadVerificationFailed, .runtimeMissing, .runtimeIncompatible: .runtime
-        case .guestNotReachable, .hostKeyChanged: .guest
+        case .guestNotReachable, .hostKeyChanged, .guestShutdownRefused: .guest
         case .credentialsLocked, .loginExpired: .credentials
         case .toolMismatch(.vmRuntime): .runtime
         case .toolMismatch, .xcodeComponentsIncomplete: .tools
@@ -103,6 +107,8 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
             "The installed virtual machine runtime is not a supported version."
         case .guestNotReachable:
             "The development Mac is not answering over the network."
+        case .guestShutdownRefused:
+            "The development Mac is still running after the request to shut down."
         case .hostKeyChanged:
             "The development Mac presented a different SSH identity. Repair pairing before connecting."
         case .credentialsLocked(.hostKeychain):
@@ -144,6 +150,7 @@ public enum GuesthouseError: Error, Codable, Hashable, Sendable {
         case .downloadVerificationFailed: [.repair(.download), .cancel]
         case .runtimeMissing, .runtimeIncompatible, .toolMismatch(.vmRuntime): [.repair(.runtime), .cancel]
         case .guestNotReachable: [.inspectState, .openConsole, .cancel]
+        case .guestShutdownRefused: [.retry, .openConsole, .cancel]
         case .hostKeyChanged: [.repair(.sshPairing), .openConsole, .cancel]
         case .credentialsLocked(.guestKeychain): [.openConsole, .repair(.credentials), .cancel]
         case .credentialsLocked(.hostKeychain): [.openSettings, .cancel]
