@@ -99,6 +99,32 @@ import Testing
         await task.value
         #expect(!model.isStarting && model.startCancellationReplyReceived)
     }
+    @Test(arguments: [false, true])
+    func thrownRefusalAllowsRetryOnlyBeforeAnyReply(answered: Bool) async {
+        let backend = CancellationBackend(operation: operation)
+        let task = Task { await StartOperation.cancel(operation, backend: backend) }
+        var cancels = backend.canceled.makeAsyncIterator(); _ = await cancels.next()
+        backend.throwCancel(.invalidRequest(.tooManyInFlight), afterReply: answered)
+        let result = await task.value
+        #expect(result.failure == .runtime(.invalidRequest(.tooManyInFlight)))
+        #expect(result.retryAllowed == !answered)
+    }
+    @Test func cancellationFailureSurvivesSuccessfulStartAndFreshCheckUntilAcknowledged() async throws {
+        let backend = CancellationBackend(operation: operation); await configured(backend.fake)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let task = try #require(model.startEnvironment(environment.id))
+        var starts = backend.started.makeAsyncIterator(), cancels = backend.canceled.makeAsyncIterator()
+        _ = await starts.next(); model.cancelStart(); backend.accept(); _ = await cancels.next()
+        backend.answerCancel(.failed(OperationID(), .invalidRequest(.unsupportedOperation)))
+        await backend.fake.setStatus(.init(environmentID: environment.id, vm: .running, readiness: .ready))
+        backend.finishTarget(.completed(operation)); await task.value
+        #expect(model.startFailure == nil && !model.isStarting)
+        #expect(model.startCancellationFailure == .runtime(.invalidRequest(.unsupportedOperation)))
+        await model.checkEnvironments().value
+        #expect(model.startCancellationFailure != nil)
+        model.dismissStartCancellationFailure()
+        #expect(model.startCancellationFailure == nil && model.statuses[environment.id]?.vm == .running)
+    }
 }
 
 private nonisolated final class CancellationBackend: RuntimeBackend {
@@ -133,6 +159,11 @@ private nonisolated final class CancellationBackend: RuntimeBackend {
     func answerCancel(_ event: RuntimeEvent) {
         let reply = cancelReply.withLock { state in defer { state = nil }; return state }
         reply?.yield(event); reply?.finish()
+    }
+    func throwCancel(_ error: GuesthouseError, afterReply: Bool) {
+        let reply = cancelReply.withLock { state in defer { state = nil }; return state }
+        if afterReply { reply?.yield(.completed(OperationID())) }
+        reply?.finish(throwing: error)
     }
     func finishTarget(_ event: RuntimeEvent) {
         let reply = target.withLock { state in defer { state = nil }; return state }
