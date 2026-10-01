@@ -14,7 +14,7 @@ import Testing
         return fake
     }
     @Test func allStartFailuresHaveFixedGuidanceAndTypedRecovery() {
-        let failures: [StartOperation.Failure] = [.quitPending, .stateChanged, .notRunning, .check(.checkingEnvironment),
+        let failures: [StartOperation.Failure] = [.quitPending, .stateChanged, .notRunning, .check(.checkingEnvironment), .inspectionAfterStart(.interrupted(.connectionLost)),
             .runtime(.runtimeIncompatible), .interrupted(.init(cause: .connectionLost, operationID: operation, mayHaveMutated: true))]
         for failure in failures { #expect(!failure.message.isEmpty && !failure.recoveryActions.isEmpty) }
     }
@@ -89,6 +89,48 @@ import Testing
         await start?.value
         #expect(await fake.receivedRequests.allSatisfy { if case .startEnvironment = $0 { false } else { true } })
         #expect(!model.isStarting && model.startFailure == .quitPending)
+    }
+    @Test func failedPrecheckAndRetryPreserveDiagnosticsUntilANewAcceptance() async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
+        await model.checkEnvironments().value
+        let first = try #require(model.startEnvironment(environment.id))
+        var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        let event = DiagnosticEvent(operation: .startEnvironment, outcome: .started, operationID: operation.uuid, environmentID: environment.id)
+        backend.answer([.accepted(operation), .diagnostic(event), .completed(operation)]); await first.value
+        await model.checkEnvironments().value
+        await fake.script("listEnvironments", .disconnect())
+        await model.startEnvironment(environment.id)?.value
+        #expect(model.startDiagnostics.records.map(\.event) == [event])
+        await model.retryStart(environment.id)?.value
+        #expect(model.startDiagnostics.records.map(\.event) == [event])
+        await fake.script("listEnvironments", .succeed())
+        let next = try #require(model.retryStart(environment.id)); _ = await sent.next()
+        let nextID = OperationID(); backend.answer([.accepted(nextID), .completed(nextID)])
+        await next.value
+        #expect(model.startDiagnostics.records.isEmpty)
+    }
+    @Test func postStartInspectionFailureCannotRetryAndForgetAMissingTarget() async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), decisions = StartDecisions()
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let start = try #require(model.startEnvironment(environment.id))
+        var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        await fake.script("listEnvironments", .disconnect())
+        backend.answer([.accepted(operation), .completed(operation)]); await start.value
+        #expect(model.startFailure == .inspectionAfterStart(.interrupted(.connectionLost)))
+        let presentation = RecoveryPresentation(failure: try #require(model.startFailure))
+        #expect(presentation.outcomeUnknown && presentation.actions == [.inspectState, .cancel])
+        #expect(model.startNeedsInspection && !model.canRetryStart(environment.id))
+        let retry = model.retryStart(environment.id)
+        #expect(retry == nil); await retry?.value
+        await fake.script("listEnvironments", .succeed())
+        await fake.setEnvironmentInventory(.available([]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .uncertain(reason: .inspectionFailed), readiness: .checking))
+        await model.checkEnvironments().value
+        #expect(model.startNeedsInspection && model.startFailure != nil)
+        #expect(Array(await fake.receivedRequests.suffix(2)) == [.listEnvironments, .environmentStatus(environment.id)])
+        let quit = QuitCoordinator(model: model, terminationDecision: decisions.record)
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))) && decisions.values.isEmpty)
     }
     @Test(arguments: [false, true])
     func quitWhileStartIsPendingRetainsMissingTargetOnlyAfterAcceptance(accepted: Bool) async throws {
