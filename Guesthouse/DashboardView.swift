@@ -4,10 +4,12 @@ import GuesthouseCore
 struct DashboardView: View {
     let model: AppModel, quit: QuitCoordinator
     @State private var showingCreation = false
+    @State private var diagnostics: DiagnosticScope?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             EnvironmentCheckView(model: model, quit: quit)
+            Button("Session diagnostics…") { diagnostics = DiagnosticScope(environment: nil) }
             if let failure = model.startCancellationFailure {
                 Text("Cancellation request failed. " + failure.message).foregroundStyle(.secondary)
                 if model.isStarting {
@@ -24,7 +26,8 @@ struct DashboardView: View {
                 EnvironmentCardView(state: EnvironmentCardState(environment: environment,
                     status: model.statuses[environment.id], checked: model.checkState == .checked,
                     busy: model.isChecking || model.isStarting || quit.flow != .idle, backendAllowsStart: model.backend.allowsEnvironmentStart),
-                    canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
+                    canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) },
+                    diagnostics: { diagnostics = DiagnosticScope(environment: environment.id) })
                 if model.startingEnvironment == environment.id {
                     if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: model.startCancellationRequested, cancel: model.startCanCancel ? { model.cancelStart() } : nil) }
                     recoveryDetails(for: environment.id)
@@ -50,6 +53,9 @@ struct DashboardView: View {
                 }
             }
         }
+        .sheet(item: $diagnostics) { scope in
+            DiagnosticsView(environment: scope.environment, history: model.sessionDiagnostics) { model.sessionDiagnostics }
+        }
         .sheet(isPresented: $showingCreation) {
             SetupWizardView()
         }
@@ -74,10 +80,16 @@ struct DashboardView: View {
 
 }
 
+private struct DiagnosticScope: Identifiable {
+    let id = UUID()
+    let environment: EnvironmentID?
+}
+
 private struct EnvironmentCardView: View {
     let state: EnvironmentCardState
     let canStart: Bool
     let start: () -> Void
+    let diagnostics: () -> Void
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
@@ -100,6 +112,7 @@ private struct EnvironmentCardView: View {
                     VStack(alignment: .leading) { primaryActions }
                 }
                 Menu("More actions") {
+                    Button("Diagnostics…", action: diagnostics)
                     action(.repair); action(.exportWork)
                     Divider()
                     action(.startFresh); action(.delete)
