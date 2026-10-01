@@ -109,6 +109,25 @@ import Testing
         await next.value
         #expect(model.startDiagnostics.records.isEmpty)
     }
+    @Test func aRefusedStartKeepsTheAcceptedAttemptLogSeparateFromSessionHistory() async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
+        await model.checkEnvironments().value
+        var sent = backend.sent.makeAsyncIterator()
+        let first = try #require(model.startEnvironment(environment.id)); _ = await sent.next()
+        let original = DiagnosticEvent(operation: .startEnvironment, outcome: .started,
+            operationID: operation.uuid, environmentID: environment.id)
+        backend.answer([.accepted(operation)] + Array(repeating: .diagnostic(original), count: 300) + [.completed(operation)])
+        await first.value; await model.checkEnvironments().value
+        let previous = model.startDiagnostics.records
+        #expect(previous.count == 256 && model.startDiagnostics.discardedCount == 44)
+        let next = try #require(model.startEnvironment(environment.id)); _ = await sent.next()
+        let refusalID = OperationID(), error = GuesthouseError.invalidRequest(.tooManyInFlight)
+        backend.answer([.failed(refusalID, error)]); await next.value
+        #expect(model.startFailure == .runtime(error) && !model.startMayHaveMutated)
+        #expect(model.startDiagnostics.records == previous && model.startDiagnostics.discardedCount == 44)
+        #expect(model.sessionDiagnostics.records.last?.event == DiagnosticEvent(operation: .startEnvironment,
+            outcome: .operationFailed(error), operationID: refusalID.uuid, environmentID: environment.id))
+    }
     @Test func postStartInspectionFailureCannotRetryAndForgetAMissingTarget() async throws {
         let fake = await configured(), backend = HeldStartBackend(fake: fake), decisions = StartDecisions()
         let model = AppModel(backend: backend); await model.checkEnvironments().value
