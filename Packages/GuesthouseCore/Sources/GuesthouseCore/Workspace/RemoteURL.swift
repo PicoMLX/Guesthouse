@@ -47,9 +47,13 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
             // authority to contain exactly the expected account and host before normalizing.
             guard let delimiter = string.range(of: "://") else { return nil }
             let authority = string[delimiter.upperBound...].prefix { !"/?#".contains($0) }
-            let expectedAuthority = (scheme == "ssh" ? "git@" : "") + urlHost
-            guard authority.lowercased() == expectedAuthority.lowercased() else { return nil }
-            host = urlHost
+            // Foundation can decode ASCII IDNA labels to Unicode in components.host.
+            // Preserve the raw DNS spelling; the shared validator below also rejects every
+            // explicit port, extra account delimiter and malformed label in this authority.
+            if scheme == "ssh" {
+                guard authority.hasPrefix("git@") else { return nil }
+                host = String(authority.dropFirst(4))
+            } else { host = String(authority) }
             path = components.path
             guard path.hasPrefix("/") else { return nil }
             path.removeFirst()
@@ -67,11 +71,14 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
         if isURLForm, path.hasSuffix("/") { path.removeLast() }
         var parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 2 else { return nil }
-        if parts[1].lowercased().hasSuffix(".git") { parts[1] = String(parts[1].dropLast(4)) }
+        func hasGitSuffix(_ name: String) -> Bool {
+            (Self.supportedHosts.contains(host) ? name.lowercased() : name).hasSuffix(".git")
+        }
+        if hasGitSuffix(parts[1]) { parts[1] = String(parts[1].dropLast(4)) }
         // A repository whose own name ends in `.git` has no round-trippable canonical form:
         // the canonical URL would lose the suffix on the next parse, silently naming a
         // different repository. Such a remote is refused rather than normalized.
-        guard !parts[1].lowercased().hasSuffix(".git") else { return nil }
+        guard !hasGitSuffix(parts[1]) else { return nil }
         guard Self.isValidOwner(parts[0]), Self.isValidRepositoryName(parts[1]) else { return nil }
         self.host = host
         owner = parts[0]

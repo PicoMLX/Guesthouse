@@ -19,6 +19,19 @@ import Testing
         #expect(!other.isSupportedHost && other.canonical == "https://gitlab.com/Group/Project")
         #expect(other != RemoteURL("https://gitlab.com/group/project"))
     }
+    @Test func unsupportedIDNAHostsAndCaseSensitiveSuffixesRoundTrip() throws {
+        for host in ["xn--xample-9ua.com", "custom.example"] {
+            for repository in ["Repo", "Repo.GIT", "Repo.GIT.git"] {
+                let scp = try #require(RemoteURL("git@\(host):Org/\(repository)"))
+                let https = try #require(RemoteURL("https://\(host)/Org/\(repository)"))
+                let ssh = try #require(RemoteURL("ssh://git@\(host)/Org/\(repository)"))
+                #expect(scp == https && scp == ssh && scp.host == host)
+                #expect(try JSONDecoder().decode(RemoteURL.self, from: JSONEncoder().encode(scp)) == scp)
+            }
+            #expect(RemoteURL("git@\(host):Org/Repo.GIT") != RemoteURL("git@\(host):Org/Repo"))
+        }
+        #expect(RemoteURL("git@github.com:Org/Repo.GIT") == RemoteURL("https://github.com/Org/Repo"))
+    }
     @Test(arguments: ["", "github.com/Org/Repo", "https://github.com/Org", "https://github.com/a/b/c", "file:///tmp/repo", "https://github.com/../x", "git@github.com:Org/Repo/", "git@github.com:/Org/Repo", "git@github.com:Org//Repo", "https://github.com//Org/Repo", "https://github.com/Org/Repo//", "https://github.com/Org/foo%2Dbar", "https://github.com:8443/Org/Repo", "ssh://git@github.com:2222/Org/Repo", "http://github.com/Org/Repo", "git://github.com/Org/Repo", "ssh://someone@github.com/Org/Repo", "ssh://github.com/Org/Repo", "someone@github.com:Org/Repo", "https://github.com/Org/Repo?ref=x", "https://github.com/Org/Repo#fragment", "https://github.com/Org/Repo.git.git", "https://github.com/Org/Repo ", " https://github.com/Org/Repo", "https://github.com/my.org/Repo", "https://github.com/org--name/Repo", "https://github.com/Ｏrg/Repo"])
     func rejectsAmbiguousUnsupportedSyntaxAndNonRoundTrippableInput(_ value: String) throws {
         #expect(RemoteURL(value) == nil)
