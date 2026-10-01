@@ -6,6 +6,29 @@ import Testing
 
 @MainActor @Suite(.timeLimit(.minutes(1)))
 struct QuitCoordinatorTests {
+    @Test(arguments: [false, true], [false, true])
+    func interruptedOrLocallyRefusedStopIsRetainedWithoutForceAuthority(accepted: Bool, refusal: Bool) async throws {
+        let fake = await configuredFake(), backend = HeldStopBackend(fake: fake, operation: operation), decision = Decision()
+        let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var sent = backend.stopped.makeAsyncIterator(); _ = await sent.next()
+        let error: any Error = refusal ? GuesthouseError.invalidRequest(.tooManyInFlight) : RuntimeSessionFailure(cause: .connectionLost)
+        backend.fail(error, after: accepted ? [.accepted(operation)] : []); await work.value
+        let event = try #require(model.sessionDiagnostics.records.last?.event)
+        #expect(model.sessionDiagnostics.records.count == 1 && event.operation == .stopEnvironment && event.environmentID == environment.id)
+        #expect(!quit.canForceStop && decision.values.isEmpty)
+        if accepted {
+            #expect(event.origin == .runtimeOperation && event.operationID == operation.uuid)
+            #expect(event.outcome == .operationFailed(.operationOutcomeUnknown(operation)))
+        } else {
+            #expect(event.origin == .appObservation && event.operationID != operation.uuid)
+            #expect(event.outcome == (refusal ? .operationFailed(.invalidRequest(.tooManyInFlight)) : .failed(.outcomeUnknown)))
+        }
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        let text = String(decoding: try #require(exported.files["log.txt"]), as: UTF8.self)
+        let recovery = try #require(event.recoveryMessage)
+        #expect(text.contains(event.message) && text.contains(recovery))
+    }
     let environment = DevelopmentEnvironment(name: "Development Mac")
     let operation = OperationID()
     let instance = UUID()
@@ -334,5 +357,9 @@ private nonisolated final class HeldStopBackend: RuntimeBackend {
         let continuation = pending.withLock { state in defer { state = nil }; return state?.1 }
         for event in events { continuation?.yield(event) }
         continuation?.finish()
+    }
+    func fail(_ error: any Error, after events: [RuntimeEvent]) {
+        let continuation = pending.withLock { state in defer { state = nil }; return state?.1 }
+        for event in events { continuation?.yield(event) }; continuation?.finish(throwing: error)
     }
 }
