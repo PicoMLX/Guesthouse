@@ -18,6 +18,11 @@ final class AppModel {
     private(set) var environments: [DevelopmentEnvironment] = []
     private(set) var statuses: [EnvironmentID: EnvironmentStatus] = [:]
     private(set) var isChecking = false
+    private(set) var isStarting = false
+    private(set) var startingEnvironment: EnvironmentID?
+    private(set) var startPhase: ProgressPhase?
+    private(set) var startFailure: StartOperation.Failure?
+    @ObservationIgnored private var startTask: Task<Void, Never>?
     let backend: any RuntimeBackend
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var observation: Task<Void, Never>?
@@ -43,17 +48,70 @@ final class AppModel {
     /// service. The returned task belongs to the app model, never to a window's `.task`.
     @discardableResult
     func checkEnvironments() -> Task<Void, Never> {
+        if let startTask { return startTask }
         if checksReservedForQuit { return checkTask ?? Task {} }
-        return startCheck()
+        return startCheck(clearStartFailure: true)
     }
 
     func reserveChecksForQuit(_ reserved: Bool) { checksReservedForQuit = reserved }
 
     /// A pre-existing menu check must drain, then Quit obtains a new snapshot of its own.
     func checkForQuit() async {
+        // Quit reserves new work immediately, then retains any accepted Start's outcome.
+        if let startTask { await startTask.value }
         if let checkTask { await checkTask.value }
         guard !Task.isCancelled else { return }
         await startCheck().value
+    }
+
+    func canStart(_ id: EnvironmentID) -> Bool {
+        guard backend.allowsEnvironmentStart, !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
+        if let startFailure {
+            // One runtime writer and one presented Start result. Do not overwrite another
+            // environment's failure; an explicit successful Check clears it first.
+            guard startingEnvironment == id else { return false }
+            if case .runtime(let error) = startFailure { return error.isRetryable }
+            return false // Unknown outcome requires an explicit inspection, never a plain retry.
+        }
+        return true
+    }
+
+    private func startEligible(_ id: EnvironmentID) -> Bool {
+        guard checkState == .checked, environments.contains(where: { $0.id == id }),
+              statuses[id]?.vm == .stopped else { return false }
+        if case .needsAttention = statuses[id]?.readiness { return false }
+        return statuses.values.allSatisfy {
+            if case .uncertain = $0.vm { return false }
+            return $0.inFlightOperation == nil
+        }
+    }
+
+    /// The app owns the task across window closure. Duplicate starts are refused and checks join existing work;
+    /// Quit waits for its outcome. Every click inspects again before issuing one mutation.
+    @discardableResult
+    func startEnvironment(_ id: EnvironmentID) -> Task<Void, Never>? {
+        guard canStart(id) else { return nil }
+        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil
+        let work = Task { [weak self] in
+            guard let self else { return }
+            defer { isStarting = false; startTask = nil; startPhase = nil }
+            await startCheck().value
+            guard !checksReservedForQuit else { startFailure = .quitPending; return }
+            guard startEligible(id) else {
+                startFailure = checkState == .checked ? .stateChanged : .check(checkState); return
+            }
+            invalidateStatusForMutation()
+            startFailure = await StartOperation.run(id, backend: backend) { [weak self] phase in self?.startPhase = phase }
+            // A terminal event is not a live state query. Unknown outcomes are inspected,
+            // never retried, and remain visible even if the following check succeeds.
+            await startCheck().value
+            if startFailure == nil {
+                if checkState != .checked { startFailure = .check(checkState) }
+                else if statuses[id]?.vm != .running { startFailure = .notRunning }
+            }
+        }
+        startTask = work
+        return work
     }
 
     func invalidateStatusForMutation() {
@@ -62,7 +120,7 @@ final class AppModel {
         checkState = .checkingEnvironment
     }
 
-    private func startCheck() -> Task<Void, Never> {
+    private func startCheck(clearStartFailure: Bool = false) -> Task<Void, Never> {
         if let checkTask { return checkTask }
         let current = UUID()
         generation = current
@@ -80,6 +138,12 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
+                if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
+                    switch status.vm {
+                    case .running, .stopped, .notFound: self.startFailure = nil
+                    case .uncertain: break
+                    }
+                }
             case .failure(.metadata(let state)): self.checkState = .metadataUnavailable(state)
             case .failure(.runtime(let error)): self.checkState = .unavailable(error)
             case .failure(.interrupted(let cause)): self.checkState = .interrupted(cause)

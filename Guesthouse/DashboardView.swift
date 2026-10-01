@@ -11,13 +11,21 @@ struct DashboardView: View {
             ForEach(model.environments) { environment in
                 EnvironmentCardView(state: EnvironmentCardState(environment: environment,
                     status: model.statuses[environment.id], checked: model.checkState == .checked,
-                    busy: model.isChecking || quit.flow != .idle))
+                    busy: model.isChecking || model.isStarting || quit.flow != .idle, backendAllowsStart: model.backend.allowsEnvironmentStart),
+                    canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
+                if model.startingEnvironment == environment.id {
+                    if model.isStarting { ProgressView(model.startPhase == nil ? "Checking start outcome…" : "Starting development Mac…") }
+                    if let failure = model.startFailure { Text(failure.message).foregroundStyle(.secondary) }
+                }
+            }
+            if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }), let failure = model.startFailure {
+                Text(failure.message).foregroundStyle(.secondary)
             }
             if model.checkState == .checked {
                 VStack(alignment: .leading, spacing: 6) {
                     if model.environments.isEmpty { Text("Create a development Mac").font(.title2) }
                     Button("Create development Mac…") { showingCreation = true }
-                        .disabled(model.environments.count >= 2 || quit.flow != .idle || model.isChecking)
+                        .disabled(model.environments.count >= 2 || quit.flow != .idle || model.isChecking || model.isStarting)
                         .help(model.environments.count >= 2 ? "Guesthouse supports at most two development Macs." : "Open development Mac setup")
                     Text(model.environments.count >= 2
                          ? "Both slots are occupied. Saved work is retained; deletion is a separate action."
@@ -38,6 +46,8 @@ struct DashboardView: View {
 
 private struct EnvironmentCardView: View {
     let state: EnvironmentCardState
+    let canStart: Bool
+    let start: () -> Void
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
@@ -66,7 +76,7 @@ private struct EnvironmentCardView: View {
                 }.accessibilityLabel("More actions for \(state.name)")
                 DisclosureGroup("Why actions are unavailable") {
                     ForEach(EnvironmentCardState.Action.allCases) { item in
-                        Text("\(item.title): \(state.reason(for: item))").font(.caption)
+                        Text("\(item.title): \(item == .start && canStart ? "Available after a fresh environment inspection." : state.reason(for: item))").font(.caption)
                     }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
@@ -77,10 +87,11 @@ private struct EnvironmentCardView: View {
         ForEach(EnvironmentCardState.Action.allCases.filter(\.primary)) { action($0) }
     }
     private func action(_ item: EnvironmentCardState.Action) -> some View {
-        Button(item.title, role: (item == .delete || item == .startFresh) ? .destructive : nil) {}.disabled(true)
-            .help(state.reason(for: item))
+        Button(item.title, role: (item == .delete || item == .startFresh) ? .destructive : nil) { if item == .start { start() } }
+            .disabled(item != .start || !canStart)
+            .help(item == .start && canStart ? "Start this development Mac and retain saved work." : state.reason(for: item))
             .accessibilityLabel("\(item.title), \(state.name)")
-            .accessibilityHint(state.reason(for: item))
+            .accessibilityHint(item == .start && canStart ? "Inspects the environment before starting." : state.reason(for: item))
     }
 }
 

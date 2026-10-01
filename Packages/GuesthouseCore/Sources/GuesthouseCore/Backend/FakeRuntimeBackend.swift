@@ -11,6 +11,7 @@ import Synchronization
 /// and emits `accepted` under a turn ticket; the rest of the scenario runs concurrently so a
 /// hanging operation never blocks the `cancelOperation` that ends it.
 public actor FakeRuntimeBackend: RuntimeBackend {
+    public nonisolated let allowsEnvironmentStart = true
     public nonisolated let connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause>
     private nonisolated let interruptionSink: AsyncStream<RuntimeSessionFailure.Cause>.Continuation
 
