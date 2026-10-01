@@ -33,7 +33,7 @@ The retained #83/#86 verifier requires strict, all-architecture and nested-code 
 | Check | Result |
 | --- | --- |
 | `SecStaticCodeCreateWithPath` | `errSecSuccess` (0) |
-| `SecStaticCodeCheckValidityWithErrors`, flags `kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode` | `errSecSuccess` (0) |
+| `SecStaticCodeCheckValidityWithErrors`, flags `kSecCSCheckAllArchitectures \| kSecCSStrictValidate \| kSecCSCheckNestedCode` | `errSecSuccess` (0) |
 | Same flags with the retained Developer ID requirement below | `errSecSuccess` (0) |
 | Signing information, expected identifier/team and required entitlements | Match |
 | `codesign --verify --strict --all-architectures --deep --verbose=4` | Valid on disk; designated requirement satisfied |
