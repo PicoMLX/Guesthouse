@@ -10,7 +10,7 @@ struct EnvironmentCheckView: View {
                 Spacer()
                 if model.isChecking { ProgressView().controlSize(.small).accessibilityLabel("Checking environment") }
                 Button("Check environment") { model.checkEnvironments() }
-                    .disabled(model.isChecking || quit.flow != .idle)
+                    .disabled(model.isChecking || model.isStarting || quit.flow != .idle)
                     .accessibilityIdentifier("checkEnvironment")
             }
             if model.backend is FakeRuntimeBackend { Text("Preview runtime — no development Mac is controlled.").foregroundStyle(.secondary) }

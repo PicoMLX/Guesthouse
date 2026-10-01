@@ -67,7 +67,7 @@ final class AppModel {
     }
 
     func canStart(_ id: EnvironmentID) -> Bool {
-        guard !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
+        guard backend.allowsEnvironmentStart, !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
         if let startFailure {
             // One runtime writer and one presented Start result. Do not overwrite another
             // environment's failure; an explicit successful Check clears it first.

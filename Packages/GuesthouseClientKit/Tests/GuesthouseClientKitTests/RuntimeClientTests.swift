@@ -99,6 +99,7 @@ import Testing
     @Test(arguments: [RuntimeEnvironmentInventory.available([]), .unavailable(.repairRequired), .unavailable(.loaded)])
     func publicInventoryPreservesUnavailableStateAndRejectsContradictions(inventory: RuntimeEnvironmentInventory) async throws {
         let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        #expect(!client.allowsEnvironmentStart)
         var query = client.send(.listEnvironments).makeAsyncIterator()
         await client.flush()
         let peer = try #require(fixture.latest)
