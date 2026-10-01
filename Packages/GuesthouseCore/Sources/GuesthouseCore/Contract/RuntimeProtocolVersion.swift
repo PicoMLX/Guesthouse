@@ -4,10 +4,10 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
 
     public init(_ rawValue: Int) { self.rawValue = rawValue }
 
-    /// Epoch 19 distinguishes runtime diagnostic identities from app observations.
+    /// Epoch 20 adds a distinct cancellation-request diagnostic operation.
     /// App-only observation failures cannot be delivered as runtime events.
     /// Earlier epochs are not compatible fallbacks; GUI/service upgrade together (ADR 0003).
-    public static let current = RuntimeProtocolVersion(19)
+    public static let current = RuntimeProtocolVersion(20)
 
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
     public var description: String { "protocol \(rawValue)" }

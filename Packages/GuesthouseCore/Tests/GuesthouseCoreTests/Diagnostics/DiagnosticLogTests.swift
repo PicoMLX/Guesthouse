@@ -110,6 +110,14 @@ struct DiagnosticLogTests {
         #expect(event.recoveryMessage == "Wait for the operation to stop, then inspect its outcome.")
     }
 
+    @Test(arguments: [DiagnosticEvent.Outcome.canceled, .operationFailed(.canceled)])
+    func canceledCancellationRequestsDoNotConfirmTheirTargetsStopped(_ outcome: DiagnosticEvent.Outcome) throws {
+        let event = DiagnosticEvent(operation: .cancelOperation, outcome: outcome, operationID: Self.operationID)
+        #expect(event.message == "Request cancellation: The cancellation request was canceled; its target may still be running.")
+        #expect(event.recoveryMessage == "Inspect the target operation before requesting cancellation again.")
+        #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
+    }
+
     @Test func confirmedCancellationHasATerminalExplanation() throws {
         let event = DiagnosticEvent(operation: .deleteEnvironment, outcome: .canceled, operationID: Self.operationID)
         #expect(event.message == "Delete development Mac: Cancellation confirmed; partial changes may remain.")
