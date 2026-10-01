@@ -20,8 +20,8 @@ final class AppModel {
     private(set) var isChecking = false
     private(set) var isStarting = false
     private(set) var startingEnvironment: EnvironmentID?
-    private(set) var startRequestSent = false
-    var startNeedsInspection: Bool { startRequestSent && (isStarting || startFailure != nil) }
+    private(set) var startMayHaveMutated = false
+    var startNeedsInspection: Bool { startMayHaveMutated && (isStarting || startFailure != nil) }
     private(set) var startPhase: ProgressPhase?
     private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
     private(set) var startFailureDismissed = false
@@ -113,7 +113,7 @@ final class AppModel {
 
     private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
         isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
-        startRequestSent = false
+        startMayHaveMutated = false
         let work = Task { [weak self] in
             guard let self else { return }
             defer { isStarting = false; startTask = nil; startPhase = nil }
@@ -125,10 +125,12 @@ final class AppModel {
             invalidateStatusForMutation()
             // Mark before dispatch, including a lost reply before acceptance. A failed
             // pre-Start query never sent a mutation and needs no target reconciliation.
-            startRequestSent = true
-            startFailure = await StartOperation.run(id, backend: backend,
+            startMayHaveMutated = true
+            let result = await StartOperation.run(id, backend: backend,
                 progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
+            startFailure = result.failure
+            startMayHaveMutated = result.mayHaveMutated
             // A terminal event is not a live state query. Unknown outcomes are inspected,
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
@@ -169,7 +171,7 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
-                if clearStartFailure, !self.startRequestSent {
+                if clearStartFailure, !self.startMayHaveMutated {
                     self.startFailure = nil
                     self.startingEnvironment = nil
                 } else if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {

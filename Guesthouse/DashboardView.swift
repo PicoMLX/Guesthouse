@@ -20,10 +20,9 @@ struct DashboardView: View {
             }
             if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }) {
                 Text("Last Start — environment no longer listed").font(.headline)
-                Text(model.startRequestSent
-                     ? "Inspect this environment before continuing. If it cannot be located safely, its state remains unknown. Repair for a missing environment is not available in this version."
-                     : "Start was not sent. Inspect the current environments before continuing.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if let guidance = RecoveryPresentation.missingEnvironmentGuidance(hasFailure: model.startFailure != nil, needsInspection: model.startNeedsInspection) {
+                    Text(guidance).font(.caption).foregroundStyle(.secondary)
+                }
                 recoveryDetails(for: id)
             }
             if model.checkState == .checked {
