@@ -17,7 +17,7 @@ struct LumeBundleFileIdentity: Hashable, Sendable {
             owner = info.st_uid
         }
     }
-    let release, bundle, contents, executables, infoPlist, executable: Item
+    let root, runtime, release, bundle, contents, executables, infoPlist, executable: Item
 }
 
 /// Runtime-only, read-only discovery migrated from #83/#86. No installation or launch API.
@@ -34,14 +34,22 @@ struct LumeBundle: Hashable, Sendable {
     /// validation and serialized immediate pre-launch revalidation still belong to later work.
     var fileIdentity: LumeBundleFileIdentity? {
         let parent = url.deletingLastPathComponent()
-        guard (try? StorageProtection.verify(parent)) != nil,
+        let runtime = parent.deletingLastPathComponent(), root = runtime.deletingLastPathComponent()
+        guard url.lastPathComponent == LumePin.bundleName, parent.lastPathComponent == LumePin.releaseTag,
+              runtime.lastPathComponent == RuntimeStorage.Area.runtime.rawValue,
+              (try? StorageProtection.verify(root)) != nil,
+              (try? StorageProtection.verify(runtime)) != nil,
+              (try? StorageProtection.verify(parent)) != nil,
+              let root = Self.item(root, kind: S_IFDIR),
+              let runtime = Self.item(runtime, kind: S_IFDIR),
               let release = Self.item(parent, kind: S_IFDIR),
               let bundle = Self.item(url, kind: S_IFDIR),
               let contents = Self.item(contents, kind: S_IFDIR),
               let executables = Self.item(executables, kind: S_IFDIR),
               let infoPlist = Self.item(infoPlist, kind: S_IFREG),
               let executable = Self.item(executable, kind: S_IFREG) else { return nil }
-        return LumeBundleFileIdentity(release: release, bundle: bundle, contents: contents, executables: executables,
+        return LumeBundleFileIdentity(root: root, runtime: runtime, release: release,
+                                      bundle: bundle, contents: contents, executables: executables,
                                       infoPlist: infoPlist, executable: executable)
     }
 

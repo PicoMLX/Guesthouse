@@ -87,20 +87,23 @@ import Testing
         #expect(try Data(contentsOf: preserved) == Data("changed!".utf8))
     }
 
-    @Test func snapshotRejectsAnIntermediateReleaseLinkWithUnchangedBundleFiles() throws {
+    @Test(arguments: ["", "runtime", "runtime/lume-v0.5.3"])
+    func snapshotRejectsManagedPrefixLinksWithUnchangedBundleFiles(_ suffix: String) throws {
         let f = try Fixture()
         try f.bundle()
         let bundle = LumeBundle(url: f.app)
         let before = try #require(bundle.fileIdentity)
-        let preserved = f.base.appending(path: "preserved-release")
-        try FileManager.default.moveItem(at: f.release, to: preserved)
-        try FileManager.default.createSymbolicLink(at: f.release, withDestinationURL: preserved)
+        let target = suffix.isEmpty ? f.root : f.root.appending(path: suffix)
+        let preserved = f.base.appending(path: "preserved")
+        let preservedExecutable = URL(fileURLWithPath: bundle.executable.path.replacingOccurrences(of: target.path, with: preserved.path))
+        try FileManager.default.moveItem(at: target, to: preserved)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: preserved)
         var info = stat()
         try #require(lstat(f.app.path, &info) == 0)
         #expect(LumeBundleFileIdentity.Item(info) == before.bundle)
         #expect(bundle.fileIdentity == nil)
         #expect(throws: StorageFailure.unsafeStructure) { _ = try LumeBundle.locate(in: f.storage) }
-        #expect(try Data(contentsOf: preserved.appending(path: "lume.app/Contents/MacOS/lume")) == Data("original".utf8))
+        #expect(try Data(contentsOf: preservedExecutable) == Data("original".utf8))
     }
 
     @Test(arguments: LumeVerificationError.allCases)
@@ -113,6 +116,9 @@ import Testing
         let copy: any Sendable = failure
         #expect(copy as? LumeVerificationError == failure)
         if failure == .insecureBundleLayout { #expect(failure.recoveryActions == [.cancel]) }
+        else if failure == .archiveUnreadable || failure == .digestMismatch {
+            #expect(failure.recoveryActions == [.repair(.download), .cancel])
+        } else { #expect(failure.recoveryActions == [.repair(.runtime), .cancel]) }
     }
 
     private final class Fixture: Sendable {

@@ -31,7 +31,11 @@ enum LumeVerificationError: Error, Hashable, Sendable, CaseIterable, LocalizedEr
         }
     }
     var recoveryActions: [RecoveryAction] {
-        self == .insecureBundleLayout ? [.cancel] : [.repair(.runtime), .cancel]
+        switch self {
+        case .insecureBundleLayout: [.cancel]
+        case .archiveUnreadable, .digestMismatch: [.repair(.download), .cancel]
+        default: [.repair(.runtime), .cancel]
+        }
     }
     var errorDescription: String? { userMessage }
 }
