@@ -7,6 +7,65 @@ import Testing
 
 @MainActor @Suite(.timeLimit(.minutes(1)))
 struct AppModelCheckTests {
+    @Test(arguments: [false, true], [RuntimeSessionFailure.Cause.connectionLost, .malformedResponse,
+                                   .oversizedResponse, .protocolMismatch(service: 7)])
+    func localQueryFailuresUseAppObservationIDsAndKeepTheirQueryScope(statusQuery: Bool, cause: RuntimeSessionFailure.Cause) async throws {
+        let backend = HeldCheckBackend(), model = AppModel(backend: backend), environment = DevelopmentEnvironment(name: "Saved Mac")
+        let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        if statusQuery {
+            backend.answer([.environments(.available([environment]))]); _ = await sent.next()
+        }
+        let unobserved = OperationID()
+        backend.fail(RuntimeSessionFailure(cause: cause, operationID: unobserved)); await check.value
+        #expect(model.checkState == .interrupted(cause) && model.statuses.isEmpty)
+        let event = try #require(model.sessionDiagnostics.records.first?.event)
+        #expect(model.sessionDiagnostics.records.count == 1 && event.origin == .appObservation)
+        #expect(event.operationID != unobserved.uuid && event.environmentID == (statusQuery ? environment.id : nil))
+        #expect(!model.startMayHaveMutated && model.startDiagnostics.records.isEmpty)
+        let text = try #require(DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "App observation", selection: [0]))
+        #expect(text.contains("App observation") && text.contains(event.operationID.uuidString))
+        #expect(!text.contains(unobserved.uuid.uuidString) && !text.contains("partial changes may remain"))
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        #expect(String(decoding: try #require(exported.files["log.txt"]), as: UTF8.self).contains(event.message))
+    }
+
+    @Test(arguments: [RuntimeSavedStateStatus.loading, .repairRequired, .incompatible, .unavailable])
+    func unavailableMetadataIsRetainedWithoutInventingARuntimeOperation(state: RuntimeSavedStateStatus) async throws {
+        let backend = FakeRuntimeBackend(); await backend.setEnvironmentInventory(.unavailable(state))
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let event = try #require(model.sessionDiagnostics.records.first?.event)
+        #expect(event.origin == .appObservation && event.environmentID == nil)
+        #expect(event.outcome == .observationFailed(.metadataUnavailable(state)))
+        #expect(event.message.contains(state.userMessage) && event.recoveryMessage == state.recoveryMessage)
+        model.connectionInterrupted(.connectionLost)
+        #expect(model.sessionDiagnostics.records.count == 1) // Retirement preserves the specific failure.
+        await model.checkEnvironments().value
+        #expect(model.sessionDiagnostics.records.count == 2 && model.sessionDiagnostics.records.last?.event.operationID != event.operationID)
+    }
+
+    @Test func unknownLocalErrorsCannotReachDiagnosticOutput() async throws {
+        struct PrivateError: Error, CustomStringConvertible { var description: String { "synthetic-private-error" } }
+        let backend = HeldCheckBackend(), model = AppModel(backend: backend)
+        let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        backend.fail(PrivateError()); await check.value
+        #expect(model.checkState == .unavailable(.invalidRuntimeReply(.malformed)))
+        let event = try #require(model.sessionDiagnostics.records.first?.event)
+        #expect(event.origin == .appObservation && event.outcome == .operationFailed(.invalidRuntimeReply(.malformed)))
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics)
+        #expect(exported.files.values.allSatisfy { !String(decoding: $0, as: UTF8.self).contains("synthetic-private-error") })
+    }
+
+    @Test(arguments: [false, true])
+    func localErrorsCannotSupplyUnobservedOperationOrForeignEnvironmentIDs(operationID: Bool) async throws {
+        let backend = HeldCheckBackend(), model = AppModel(backend: backend), foreign = EnvironmentID(), unobserved = OperationID()
+        let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        backend.fail(operationID ? GuesthouseError.operationOutcomeUnknown(unobserved) : .hostKeyChanged(foreign))
+        await check.value
+        #expect(model.checkState == .unavailable(.invalidRuntimeReply(.malformed)))
+        #expect(model.sessionDiagnostics.records.first?.event.origin == .appObservation)
+        let text = model.sessionDiagnostics.text
+        #expect(!text.contains(foreign.description) && !text.contains(unobserved.uuid.uuidString))
+    }
     @Test func checksSavedRecordsWithoutUpgradingUncertainStatusToReady() async {
         let backend = FakeRuntimeBackend(), environment = DevelopmentEnvironment(name: "Development Mac")
         let status = EnvironmentStatus(environmentID: environment.id,
@@ -141,7 +200,12 @@ struct AppModelCheckTests {
         #expect(backend.requests.count == (statusQuery ? 2 : 1) && model.statuses.isEmpty)
         let expected = DiagnosticEvent(operation: .inspectEnvironment, outcome: .operationFailed(error),
             operationID: operation.uuid, environmentID: statusQuery ? environment.id : nil)
-        #expect(model.sessionDiagnostics.records.map(\.event) == (foreign ? [] : [expected]))
+        if foreign {
+            #expect(model.sessionDiagnostics.records.count == 1)
+            #expect(model.sessionDiagnostics.records.first?.event.origin == .appObservation)
+            #expect(model.sessionDiagnostics.records.first?.event.outcome == .operationFailed(.invalidRuntimeReply(.malformed)))
+            #expect(!model.sessionDiagnostics.text.contains(operation.uuid.uuidString))
+        } else { #expect(model.sessionDiagnostics.records.map(\.event) == [expected]) }
         if !foreign {
             let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics)
             let text = String(decoding: try #require(export.files["log.txt"]), as: UTF8.self)
@@ -154,7 +218,9 @@ struct AppModelCheckTests {
         let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
         model.connectionInterrupted(.connectionLost)
         backend.answer([.failed(OperationID(), .runtimeMissing)]); await check.value
-        #expect(model.checkState == .interrupted(.connectionLost) && model.sessionDiagnostics.records.isEmpty)
+        #expect(model.checkState == .interrupted(.connectionLost) && model.sessionDiagnostics.records.count == 1)
+        #expect(model.sessionDiagnostics.records.first?.event.origin == .appObservation)
+        #expect(model.sessionDiagnostics.records.first?.event.outcome == .observationFailed(.connectionLost))
     }
 
     @Test func aFailureFollowingAPayloadIsMalformedAndDoesNotRetainTheClaimedError() async {
@@ -162,7 +228,9 @@ struct AppModelCheckTests {
         let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
         backend.answer([.environments(.available([])), .failed(OperationID(), .runtimeMissing)]); await check.value
         #expect(model.checkState == .unavailable(.invalidRuntimeReply(.malformed)))
-        #expect(model.sessionDiagnostics.records.isEmpty)
+        #expect(model.sessionDiagnostics.records.count == 1)
+        #expect(model.sessionDiagnostics.records.first?.event.origin == .appObservation)
+        #expect(model.sessionDiagnostics.records.first?.event.outcome == .operationFailed(.invalidRuntimeReply(.malformed)))
     }
 }
 
@@ -193,5 +261,9 @@ private nonisolated final class HeldCheckBackend: RuntimeBackend {
         let reply = state.withLock { state in defer { state.reply = nil }; return state.reply }
         for event in events { reply?.yield(event) }
         reply?.finish()
+    }
+    func fail(_ error: any Error) {
+        let reply = state.withLock { state in defer { state.reply = nil }; return state.reply }
+        reply?.finish(throwing: error)
     }
 }

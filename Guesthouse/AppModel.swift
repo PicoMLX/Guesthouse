@@ -248,13 +248,18 @@ final class AppModel {
                     case .uncertain: break
                     }
                 }
-            case .failure(.metadata(let state)): self.checkState = .metadataUnavailable(state)
-            case .failure(.runtime(let error, let diagnostic)):
+            case .failure(.metadata(let state)):
+                self.checkState = .metadataUnavailable(state)
+                self.recordObservation(.observationFailed(.metadataUnavailable(state)), id: current)
+            case .failure(.runtime(let error, let diagnostic, let environment)):
                 self.checkState = .unavailable(error)
                 // Query errors have their own real reply identity, separate from a Start/Stop
                 // and its later inspection. Retired checks cannot publish this record either.
                 if let diagnostic { self.sessionDiagnostics.append(diagnostic) }
-            case .failure(.interrupted(let cause)): self.checkState = .interrupted(cause)
+                else { self.recordObservation(.operationFailed(error), id: current, environment: environment) }
+            case .failure(.interrupted(let cause, let environment)):
+                self.checkState = .interrupted(cause)
+                self.recordObservation(Self.observationOutcome(cause), id: current, environment: environment)
             }
         }
         return checkTask!
@@ -263,12 +268,33 @@ final class AppModel {
     /// No automatic reconnection loop or mutation replay. A user check can establish fresh
     /// status after the current check drains. Even an already-answered late result is fenced.
     func connectionInterrupted(_ cause: RuntimeSessionFailure.Cause) {
-        generation = UUID()
+        let observedCheck = generation
         statuses = [:]
         // Keep specific failure/recovery guidance when retirement follows that failure.
         switch checkState {
         case .metadataUnavailable, .unavailable, .interrupted: break
-        case .checkingEnvironment, .checked: checkState = .interrupted(cause)
+        case .checkingEnvironment, .checked:
+            recordObservation(Self.observationOutcome(cause), id: isChecking ? observedCheck : UUID(),
+                operation: isChecking ? .inspectEnvironment : .runtimeRequest)
+            checkState = .interrupted(cause)
+        }
+        generation = UUID()
+    }
+
+    /// This ID belongs to the app's check/connection observation, never an accepted mutation.
+    /// A connection retirement records its own fact once, then fences late query results.
+    private func recordObservation(_ outcome: DiagnosticEvent.Outcome, id: UUID,
+                                   environment: EnvironmentID? = nil, operation: DiagnosticEvent.Operation = .inspectEnvironment) {
+        sessionDiagnostics.append(DiagnosticEvent(operation: operation, outcome: outcome,
+            operationID: id, environmentID: environment, origin: .appObservation))
+    }
+
+    private static func observationOutcome(_ cause: RuntimeSessionFailure.Cause) -> DiagnosticEvent.Outcome {
+        switch cause {
+        case .connectionLost: .observationFailed(.connectionLost)
+        case .malformedResponse: .operationFailed(.invalidRuntimeReply(.malformed))
+        case .oversizedResponse: .operationFailed(.invalidRuntimeReply(.oversized))
+        case .protocolMismatch(let service): .operationFailed(.protocolMismatch(client: RuntimeProtocolVersion.current.rawValue, service: service))
         }
     }
 
@@ -278,11 +304,12 @@ final class AppModel {
     }
     private enum ReadFailure: Error {
         case metadata(RuntimeSavedStateStatus)
-        case runtime(GuesthouseError, DiagnosticEvent? = nil)
-        case interrupted(RuntimeSessionFailure.Cause)
+        case runtime(GuesthouseError, DiagnosticEvent? = nil, EnvironmentID? = nil)
+        case interrupted(RuntimeSessionFailure.Cause, EnvironmentID?)
     }
 
     private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil) async -> Result<Snapshot, ReadFailure> {
+        var environment: EnvironmentID?
         do {
             guard case .environments(let inventory) = try await reply(to: .listEnvironments, from: backend),
                   inventory.isValid else { throw ReadFailure.runtime(.invalidRuntimeReply(.malformed)) }
@@ -295,19 +322,30 @@ final class AppModel {
             var requestedIDs = environments.map(\.id)
             if let retainedTarget, !requestedIDs.contains(retainedTarget) { requestedIDs.append(retainedTarget) }
             for id in requestedIDs {
+                environment = id
                 try Task.checkCancellation()
                 guard case .status(let status) = try await reply(to: .environmentStatus(id), from: backend),
                       status.environmentID == id else {
-                    throw ReadFailure.runtime(.invalidRuntimeReply(.malformed))
+                    throw ReadFailure.runtime(.invalidRuntimeReply(.malformed), nil, id)
                 }
                 statuses[id] = status
             }
             return .success(Snapshot(environments: environments, statuses: statuses))
         } catch let error as ReadFailure { return .failure(error) }
-        catch let error as RuntimeSessionFailure { return .failure(.interrupted(error.cause)) }
-        catch let error as GuesthouseError { return .failure(.runtime(error)) }
-        catch is CancellationError { return .failure(.runtime(.canceled)) }
-        catch { return .failure(.runtime(.invalidRuntimeReply(.malformed))) }
+        catch let error as RuntimeSessionFailure { return .failure(.interrupted(error.cause, environment)) }
+        catch let error as GuesthouseError {
+            // A local throw has no observed runtime reply ID. Reject foreign nested facts and
+            // uncorrelated operation IDs rather than attributing them to the app observation.
+            let valid: Bool
+            switch error {
+            case .guestNotReachable(let id), .hostKeyChanged(let id), .guestShutdownRefused(let id): valid = id == environment
+            case .operationOutcomeUnknown: valid = false
+            default: valid = true
+            }
+            return .failure(.runtime(valid ? error : .invalidRuntimeReply(.malformed), nil, environment))
+        }
+        catch is CancellationError { return .failure(.runtime(.canceled, nil, environment)) }
+        catch { return .failure(.runtime(.invalidRuntimeReply(.malformed), nil, environment)) }
     }
 
     /// Empty, duplicate, progress and foreign replies cannot become a successful check.
@@ -325,7 +363,7 @@ final class AppModel {
                 guard DiagnosticIdentity.matches(diagnostic, environment: environment) else {
                     throw GuesthouseError.invalidRuntimeReply(.malformed)
                 }
-                throw ReadFailure.runtime(error, diagnostic)
+                throw ReadFailure.runtime(error, diagnostic, environment)
             }
             switch (request, event) {
             case (.listEnvironments, .environments), (.environmentStatus, .status): reply = event

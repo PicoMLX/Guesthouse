@@ -207,7 +207,7 @@ struct QuitCoordinatorTests {
         let expected = DiagnosticEvent(operation: .stopEnvironment, outcome: .operationFailed(error),
             operationID: operation.uuid, environmentID: environment.id)
         #expect(model.sessionDiagnostics.records.first?.event == expected)
-        #expect(model.sessionDiagnostics.records.count == (queryRefusal ? 2 : 1))
+        #expect(model.sessionDiagnostics.records.count == 2)
         if queryRefusal {
             #expect(model.sessionDiagnostics.records.last?.event.operation == .inspectEnvironment)
             #expect(model.sessionDiagnostics.records.last?.event.outcome == .operationFailed(.unauthorizedCaller))

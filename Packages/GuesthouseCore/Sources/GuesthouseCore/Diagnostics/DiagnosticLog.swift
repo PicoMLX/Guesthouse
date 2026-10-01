@@ -55,7 +55,9 @@ public struct DiagnosticLog: Sendable {
             // Version 2 adds domain-specific operationFailed outcomes (ADR 0003).
             // Schema 3 adds the confirmed shutdown-refusal error vocabulary. Older readers
             // must not interpret a new closed error case as version-2 diagnostic data.
-            let schemaVersion = 3
+            // Schema 4 distinguishes app observation IDs from runtime operation IDs and adds
+            // closed connection/metadata observation failures. No transport error is attached.
+            let schemaVersion = 4
             let discardedCount: UInt64
             let records: [Record]
         }
@@ -72,7 +74,8 @@ public struct DiagnosticLog: Sendable {
         let lines = records.map { record in
             let event = record.event
             let timestamp = formatter.string(from: record.recordedAt)
-            return "\(timestamp) [\(event.operationID)] "
+            let identity = event.origin == .appObservation ? "App observation \(event.operationID)" : event.operationID.uuidString
+            return "\(timestamp) [\(identity)] "
                 + (event.environmentID.map { "environment=\($0) " } ?? "")
                 + event.message
                 + (event.recoveryMessage.map { " Recovery: " + $0 } ?? "")
