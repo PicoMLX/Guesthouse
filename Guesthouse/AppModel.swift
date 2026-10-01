@@ -245,7 +245,11 @@ final class AppModel {
                     }
                 }
             case .failure(.metadata(let state)): self.checkState = .metadataUnavailable(state)
-            case .failure(.runtime(let error)): self.checkState = .unavailable(error)
+            case .failure(.runtime(let error, let diagnostic)):
+                self.checkState = .unavailable(error)
+                // Query errors have their own real reply identity, separate from a Start/Stop
+                // and its later inspection. Retired checks cannot publish this record either.
+                if let diagnostic { self.sessionDiagnostics.append(diagnostic) }
             case .failure(.interrupted(let cause)): self.checkState = .interrupted(cause)
             }
         }
@@ -269,7 +273,9 @@ final class AppModel {
         let statuses: [EnvironmentID: EnvironmentStatus]
     }
     private enum ReadFailure: Error {
-        case metadata(RuntimeSavedStateStatus), runtime(GuesthouseError), interrupted(RuntimeSessionFailure.Cause)
+        case metadata(RuntimeSavedStateStatus)
+        case runtime(GuesthouseError, DiagnosticEvent? = nil)
+        case interrupted(RuntimeSessionFailure.Cause)
     }
 
     private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil) async -> Result<Snapshot, ReadFailure> {
@@ -306,8 +312,17 @@ final class AppModel {
         var reply: RuntimeEvent?
         for try await event in backend.send(request) {
             try Task.checkCancellation()
-            if case .failed(_, let error) = event { throw error }
             guard reply == nil else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+            if case .failed(let id, let error) = event {
+                let environment: EnvironmentID?
+                if case .environmentStatus(let target) = request { environment = target } else { environment = nil }
+                let diagnostic = DiagnosticEvent(operation: .inspectEnvironment, outcome: .init(error: error),
+                    operationID: id.uuid, environmentID: environment)
+                guard DiagnosticIdentity.matches(diagnostic, environment: environment) else {
+                    throw GuesthouseError.invalidRuntimeReply(.malformed)
+                }
+                throw ReadFailure.runtime(error, diagnostic)
+            }
             switch (request, event) {
             case (.listEnvironments, .environments), (.environmentStatus, .status): reply = event
             default: throw GuesthouseError.invalidRuntimeReply(.malformed)
