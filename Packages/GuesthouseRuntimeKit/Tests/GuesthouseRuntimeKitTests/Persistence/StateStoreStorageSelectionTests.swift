@@ -40,6 +40,39 @@ import Testing
         await store.close()
     }
 
+    @Test func unknownBindingCannotBeErasedBeforeSelectingANewVolume() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        var store = try await fixture.open()
+        _ = try await store.loadSnapshot()
+        let environment = DevelopmentEnvironment(name: "Existing work")
+        var slots = VMSlotInventory()
+        try slots.reserve(environment.id)
+        var snapshot = EnvironmentsSnapshot(environments: [environment], slots: slots)
+        try await store.saveSnapshot(snapshot)
+
+        for reopened in [false, true] {
+            if reopened { await store.close(); store = try await fixture.open() }
+            #expect(try await store.loadSnapshot() == snapshot)
+            // Ordinary nonempty edits remain possible without inventing a binding.
+            snapshot.environments[0].name = reopened ? "Reopened work" : "Renamed work"
+            try await store.saveSnapshot(snapshot)
+            let before = try fixture.contents()
+            for _ in 0..<2 {
+                _ = try await store.loadSnapshot()
+                await #expect(throws: StateStoreError.storageSelectionChanged) {
+                    try await store.saveSnapshot(EnvironmentsSnapshot())
+                }
+                #expect(try fixture.contents() == before)
+                await #expect(throws: StateStoreError.storageSelectionChanged) {
+                    try await store.selectStorageVolume()
+                }
+                #expect(try fixture.contents() == before)
+            }
+        }
+        await store.close()
+    }
+
     @Test(arguments: ["inventory", "journal", "torn", "disk", "corrupt", "unsupported"])
     func evidenceOfExistingWorkBlocksFirstSelectionWithoutChangingFiles(evidence: String) async throws {
         let fixture = try Fixture()
