@@ -34,7 +34,7 @@ import Testing
         await model.checkEnvironments().value
         #expect(model.environmentSummary == "Development Mac state needs inspection")
         let failure = QuitCoordinator.Failure.stop(.runtimeIncompatible)
-        #expect(!failure.message.isEmpty && !failure.recovery.isEmpty && !failure.canInspect)
+        #expect(!failure.userMessage.isEmpty && !failure.recoveryMessage.isEmpty && !failure.canInspect)
         #expect(!QuitCoordinator.Failure.check(.metadataUnavailable(.repairRequired)).canInspect)
     }
 }
