@@ -167,7 +167,7 @@ final class AppModel {
             cancelStartTask = nil
             // A settled refusal permits another explicit cancellation request for this same
             // observed target. A successful acknowledgement still waits for the target.
-            if result.replySettled, result.failure != nil { startCancellationRequested = false }
+            if result.retryAllowed { startCancellationRequested = false }
             startCancellationReplyReceived = true
         }
     }
