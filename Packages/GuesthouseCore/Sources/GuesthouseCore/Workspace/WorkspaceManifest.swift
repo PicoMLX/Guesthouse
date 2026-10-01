@@ -3,6 +3,8 @@ import Foundation
 /// Private workspace metadata (MVP-PLAN.md §6), never diagnostic payload. Recorded commits
 /// describe last-known facts; they do not authorize replay after an interrupted operation.
 public struct WorkspaceManifest: Codable, Hashable, Sendable {
+    /// Independent of environment and journal record epochs.
+    public static let currentSchema = SchemaVersion(1)!
     public var schemaVersion: SchemaVersion
     public var environmentID: EnvironmentID
     public var name: DirectoryName
@@ -14,7 +16,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
 
-    public init(schemaVersion: SchemaVersion = .current, environmentID: EnvironmentID, name: DirectoryName,
+    public init(schemaVersion: SchemaVersion = WorkspaceManifest.currentSchema, environmentID: EnvironmentID, name: DirectoryName,
                 repositories: [WorkspaceRepository], appProjectPath: String, sharedScheme: String,
                 testDestination: TestDestination, createdAt: Date, updatedAt: Date) {
         self.schemaVersion = schemaVersion
@@ -42,7 +44,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     /// proof. Consumers reading guest data must supply the actual environment and directory.
     public func validate(stage: ValidationStage = .recorded, in environment: EnvironmentID? = nil,
                          directory: DirectoryName? = nil) throws(WorkspaceValidationError) {
-        guard schemaVersion == .current else { throw .unsupportedSchemaVersion }
+        guard schemaVersion == Self.currentSchema else { throw .unsupportedSchemaVersion }
         if let environment, environment != environmentID { throw .environmentMismatch }
         if let directory, directory != name { throw .directoryMismatch }
         guard repositories.filter({ $0.role == .app }).count == 1 else { throw .appRepositoryCount }
@@ -55,6 +57,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
             if let reference = repository.draftPullRequest, !reference.isValid(for: repository.remote) {
                 throw .invalidPullRequestReference
             }
+            if repository.draftPullRequest != nil, repository.publishedSHA == nil { throw .missingPublishedSHA }
         }
         guard Self.isRelativeProjectPath(appProjectPath) else { throw .invalidProjectPath }
         guard !sharedScheme.isEmpty, !sharedScheme.contains("/"), sharedScheme.utf8.count <= Self.maximumSchemeBytes,
@@ -81,13 +84,33 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
     public static let maximumEncodedSize = 64 * 1024
     private struct VersionEnvelope: Decodable { let schemaVersion: SchemaVersion }
 
-    /// Bounded guest-file entry point. Plain Codable reconstructs the editable model; this
-    /// entry point also validates it and converts decoding failures to fixed recovery text.
-    public static func decode(_ data: Data, stage: ValidationStage = .recorded, in environment: EnvironmentID? = nil,
-                              directory: DirectoryName? = nil) throws(WorkspaceValidationError) -> WorkspaceManifest {
+    /// Persistence entry point: never produce a file larger than this reader accepts.
+    /// Plain Codable is for editable model interchange, not unchecked guest-file writes.
+    public func encoded(stage: ValidationStage = .recorded) throws(WorkspaceValidationError) -> Data {
+        try validate(stage: stage)
+        let data: Data
+        do { data = try JSONEncoder().encode(self) } catch { throw .malformed }
+        guard data.count <= Self.maximumEncodedSize else { throw .oversized }
+        return data
+    }
+
+    /// Recorded guest files require independently known context, not identities read from
+    /// the file itself. Decoding cannot substitute for live repository inspection.
+    public static func decode(_ data: Data, in environment: EnvironmentID,
+                              directory: DirectoryName) throws(WorkspaceValidationError) -> WorkspaceManifest {
+        try read(data, stage: .recorded, environment: environment, directory: directory)
+    }
+
+    /// Explicit unbound proposal import; never establishes a recorded guest workspace.
+    public static func decodeProposal(_ data: Data) throws(WorkspaceValidationError) -> WorkspaceManifest {
+        try read(data, stage: .setup, environment: nil, directory: nil)
+    }
+
+    private static func read(_ data: Data, stage: ValidationStage, environment: EnvironmentID?,
+                             directory: DirectoryName?) throws(WorkspaceValidationError) -> WorkspaceManifest {
         guard data.count <= maximumEncodedSize else { throw .oversized }
         // Future formats can omit current required fields; recognize their version first.
-        if let envelope = try? JSONDecoder().decode(VersionEnvelope.self, from: data), envelope.schemaVersion != .current {
+        if let envelope = try? JSONDecoder().decode(VersionEnvelope.self, from: data), envelope.schemaVersion != currentSchema {
             throw .unsupportedSchemaVersion
         }
         let manifest: WorkspaceManifest
@@ -102,7 +125,7 @@ public struct WorkspaceManifest: Codable, Hashable, Sendable {
 public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError, CaseIterable {
     case unsupportedSchemaVersion, environmentMismatch, directoryMismatch, appRepositoryCount
     case duplicateRemote, duplicateCheckout, unsupportedHost, branchCollision, invalidPullRequestReference
-    case invalidProjectPath, invalidScheme, invalidDestination, invalidTimestamps, missingBaseSHA, oversized, malformed
+    case invalidProjectPath, invalidScheme, invalidDestination, invalidTimestamps, missingBaseSHA, missingPublishedSHA, oversized, malformed
 
     public var userMessage: String {
         switch self {
@@ -120,6 +143,7 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError,
         case .invalidDestination: "The test destination contains an invalid or oversized field."
         case .invalidTimestamps: "The workspace timestamps are invalid or out of order."
         case .missingBaseSHA: "A repository has no recorded base commit. Its clone outcome must be inspected."
+        case .missingPublishedSHA: "A recorded pull request has no recorded published commit. Its push outcome must be inspected."
         case .oversized: "The workspace file exceeds the supported size limit."
         case .malformed: "The workspace file could not be read as valid workspace metadata."
         }
@@ -129,6 +153,7 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError,
         switch self {
         case .unsupportedSchemaVersion: "Check for a compatible Guesthouse version before opening this workspace."
         case .missingBaseSHA: "Inspect the existing repositories before retrying any clone. Preserve their saved work."
+        case .missingPublishedSHA: "Inspect the existing branch and pull request before another push or publish attempt."
         case .environmentMismatch, .directoryMismatch, .invalidTimestamps, .oversized, .malformed:
             "Inspect the workspace and its saved settings. Preserve existing repositories while correcting the metadata."
         case .duplicateCheckout: "Choose a distinct checkout folder for each repository."
@@ -139,7 +164,8 @@ public enum WorkspaceValidationError: Error, Hashable, Sendable, LocalizedError,
 
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .missingBaseSHA: [.inspectState, .cancel]
+        case .unsupportedSchemaVersion: [.updateApp, .cancel]
+        case .missingBaseSHA, .missingPublishedSHA: [.inspectState, .cancel]
         case .environmentMismatch, .directoryMismatch, .invalidTimestamps, .oversized, .malformed: [.inspectState, .openSettings, .cancel]
         default: [.openSettings, .cancel]
         }

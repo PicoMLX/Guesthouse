@@ -22,7 +22,7 @@ import Testing
         package.publishedSHA = CommitSHA(String(repeating: "b", count: 40))
         package.draftPullRequest = .init(number: 3, url: URL(string: "https://github.com/Org/Library/pull/3"))
         manifest.repositories.append(package)
-        let data = try JSONEncoder().encode(manifest)
+        let data = try manifest.encoded()
         #expect(try WorkspaceManifest.decode(data, in: manifest.environmentID, directory: manifest.name) == manifest)
         #expect(manifest.appRepository == manifest.repositories[0] && manifest.packageRepositories == [package])
         #expect(throws: WorkspaceValidationError.environmentMismatch) { try manifest.validate(in: EnvironmentID()) }
@@ -34,7 +34,7 @@ import Testing
         var manifest = try fixture()
         manifest.repositories[0].baseSHA = nil
         try manifest.validate(stage: .setup)
-        #expect(try WorkspaceManifest.decode(JSONEncoder().encode(manifest), stage: .setup) == manifest)
+        #expect(try WorkspaceManifest.decodeProposal(manifest.encoded(stage: .setup)) == manifest)
         #expect(throws: WorkspaceValidationError.missingBaseSHA) { try manifest.validate() }
         #expect(WorkspaceValidationError.missingBaseSHA.recoveryActions == [.inspectState, .cancel])
     }
@@ -83,18 +83,46 @@ import Testing
     }
 
     @Test func boundedDecodeRecognizesFutureFormatsAndDoesNotExposeDecoderText() throws {
-        #expect(throws: WorkspaceValidationError.oversized) { try WorkspaceManifest.decode(Data(repeating: 0, count: 65_537)) }
-        #expect(throws: WorkspaceValidationError.unsupportedSchemaVersion) { try WorkspaceManifest.decode(Data(#"{"schemaVersion":2}"#.utf8)) }
+        #expect(throws: WorkspaceValidationError.oversized) { try WorkspaceManifest.decodeProposal(Data(repeating: 0, count: 65_537)) }
+        #expect(throws: WorkspaceValidationError.unsupportedSchemaVersion) { try WorkspaceManifest.decodeProposal(Data(#"{"schemaVersion":2}"#.utf8)) }
         for text in [#"{"schemaVersion":0}"#, #"{"schemaVersion":1,"private-field":"private-value"}"#, "not json"] {
-            #expect(throws: WorkspaceValidationError.malformed) { try WorkspaceManifest.decode(Data(text.utf8)) }
+            #expect(throws: WorkspaceValidationError.malformed) { try WorkspaceManifest.decodeProposal(Data(text.utf8)) }
         }
         var value = try fixture(); value.schemaVersion = try #require(SchemaVersion(2))
         #expect(throws: WorkspaceValidationError.unsupportedSchemaVersion) { try value.validate() }
         value = try fixture(); value.repositories[0].taskBranch = value.repositories[0].baseBranch
-        #expect(throws: WorkspaceValidationError.branchCollision) { try WorkspaceManifest.decode(JSONEncoder().encode(value)) }
+        #expect(throws: WorkspaceValidationError.branchCollision) { try WorkspaceManifest.decodeProposal(JSONEncoder().encode(value)) }
         for failure in WorkspaceValidationError.allCases {
             #expect(!failure.userMessage.isEmpty && !failure.recoveryMessage.isEmpty && !failure.recoveryActions.isEmpty)
             #expect(!failure.userMessage.contains("private-value") && !failure.recoveryMessage.contains("private-field"))
         }
     }
+    @Test func persistenceEncodingSharesTheReadersAggregateLimit() throws {
+        var value = try fixture()
+        for index in 0..<200 {
+            var package = value.repositories[0]
+            package.role = .package
+            package.remote = try #require(RemoteURL("https://github.com/Org/Library\(index)"))
+            package.checkoutName = try #require(DirectoryName("Library\(index)"))
+            package.taskBranch = try #require(BranchName(String(repeating: "x", count: 240)))
+            value.repositories.append(package)
+        }
+        try value.validate()
+        #expect(try JSONEncoder().encode(value).count > WorkspaceManifest.maximumEncodedSize)
+        #expect(throws: WorkspaceValidationError.oversized) { try value.encoded() }
+    }
+
+    @Test func recordedFilesRequireContextAndPublishedCommitFacts() throws {
+        var value = try fixture()
+        #expect(value.schemaVersion == WorkspaceManifest.currentSchema && value.schemaVersion.rawValue == 1)
+        let bytes = try value.encoded()
+        #expect(throws: WorkspaceValidationError.environmentMismatch) { try WorkspaceManifest.decode(bytes, in: EnvironmentID(), directory: value.name) }
+        let other = try #require(DirectoryName("other"))
+        #expect(throws: WorkspaceValidationError.directoryMismatch) { try WorkspaceManifest.decode(bytes, in: value.environmentID, directory: other) }
+        value.repositories[0].draftPullRequest = .init(number: 3)
+        #expect(throws: WorkspaceValidationError.missingPublishedSHA) { try value.encoded() }
+        #expect(WorkspaceValidationError.missingPublishedSHA.recoveryActions == [.inspectState, .cancel])
+        #expect(WorkspaceValidationError.unsupportedSchemaVersion.recoveryActions == [.updateApp, .cancel])
+    }
+
 }
