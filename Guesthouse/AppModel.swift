@@ -66,7 +66,10 @@ final class AppModel {
 
     func canStart(_ id: EnvironmentID) -> Bool {
         guard !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
-        if startingEnvironment == id, let startFailure {
+        if let startFailure {
+            // One runtime writer and one presented Start result. Do not overwrite another
+            // environment's failure; an explicit successful Check clears it first.
+            guard startingEnvironment == id else { return false }
             if case .runtime(let error) = startFailure { return error.isRetryable }
             return false // Unknown outcome requires an explicit inspection, never a plain retry.
         }
@@ -75,7 +78,8 @@ final class AppModel {
 
     private func startEligible(_ id: EnvironmentID) -> Bool {
         guard checkState == .checked, environments.contains(where: { $0.id == id }),
-              statuses[id]?.vm == .stopped, statuses[id]?.readiness == .ready else { return false }
+              statuses[id]?.vm == .stopped else { return false }
+        if case .needsAttention = statuses[id]?.readiness { return false }
         return statuses.values.allSatisfy {
             if case .uncertain = $0.vm { return false }
             return $0.inFlightOperation == nil
@@ -101,6 +105,10 @@ final class AppModel {
             // A terminal event is not a live state query. Unknown outcomes are inspected,
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
+            if startFailure == nil {
+                if checkState != .checked { startFailure = .check(checkState) }
+                else if statuses[id]?.vm != .running { startFailure = .notRunning }
+            }
         }
         startTask = work
         return work
@@ -130,7 +138,12 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
-                if clearStartFailure { self.startFailure = nil }
+                if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
+                    switch status.vm {
+                    case .running, .stopped, .notFound: self.startFailure = nil
+                    case .uncertain: break
+                    }
+                }
             case .failure(.metadata(let state)): self.checkState = .metadataUnavailable(state)
             case .failure(.runtime(let error)): self.checkState = .unavailable(error)
             case .failure(.interrupted(let cause)): self.checkState = .interrupted(cause)
