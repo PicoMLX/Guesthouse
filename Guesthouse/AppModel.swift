@@ -151,8 +151,9 @@ final class AppModel {
         isChecking = true
         checkState = .checkingEnvironment
         statuses = [:]
+        let retainedTarget = clearStartFailure && startFailure != nil ? startingEnvironment : nil
         checkTask = Task { [weak self, backend] in
-            let result = await Self.read(backend)
+            let result = await Self.read(backend, retainedTarget: retainedTarget)
             guard let self else { return }
             defer { self.isChecking = false; self.checkTask = nil }
             guard self.generation == current else { return }
@@ -164,7 +165,10 @@ final class AppModel {
                 self.checkState = .checked
                 if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
                     switch status.vm {
-                    case .running, .stopped, .notFound: self.startFailure = nil
+                    case .stopped, .notFound: self.startFailure = nil
+                    case .running:
+                        // A live target missing from saved inventory still needs repair.
+                        if snapshot.environments.contains(where: { $0.id == id }) { self.startFailure = nil }
                     case .uncertain: break
                     }
                 }
@@ -196,7 +200,7 @@ final class AppModel {
         case metadata(RuntimeSavedStateStatus), runtime(GuesthouseError), interrupted(RuntimeSessionFailure.Cause)
     }
 
-    private static func read(_ backend: any RuntimeBackend) async -> Result<Snapshot, ReadFailure> {
+    private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil) async -> Result<Snapshot, ReadFailure> {
         do {
             guard case .environments(let inventory) = try await reply(to: .listEnvironments, from: backend),
                   inventory.isValid else { throw ReadFailure.runtime(.invalidRuntimeReply(.malformed)) }
@@ -206,13 +210,15 @@ final class AppModel {
             case .available(let records): environments = records
             }
             var statuses: [EnvironmentID: EnvironmentStatus] = [:]
-            for environment in environments {
+            var requestedIDs = environments.map(\.id)
+            if let retainedTarget, !requestedIDs.contains(retainedTarget) { requestedIDs.append(retainedTarget) }
+            for id in requestedIDs {
                 try Task.checkCancellation()
-                guard case .status(let status) = try await reply(to: .environmentStatus(environment.id), from: backend),
-                      status.environmentID == environment.id else {
+                guard case .status(let status) = try await reply(to: .environmentStatus(id), from: backend),
+                      status.environmentID == id else {
                     throw ReadFailure.runtime(.invalidRuntimeReply(.malformed))
                 }
-                statuses[environment.id] = status
+                statuses[id] = status
             }
             return .success(Snapshot(environments: environments, statuses: statuses))
         } catch let error as ReadFailure { return .failure(error) }
