@@ -207,7 +207,7 @@ final class QuitCoordinator {
                           status.inFlightOperation == nil || status.inFlightOperation == accepted else { throw malformed(accepted) }
                 case .diagnostic(let event):
                     guard accepted != nil, event.operationID == accepted?.uuid,
-                          event.environmentID == nil || event.environmentID == environment else { throw malformed(accepted) }
+                          DiagnosticIdentity.matches(event, environment: environment) else { throw malformed(accepted) }
                     model.recordDiagnostic(event, for: environment)
                 case .completed(let id):
                     guard id == accepted else { throw malformed(accepted) }; completed = true

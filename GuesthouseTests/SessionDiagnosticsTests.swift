@@ -33,6 +33,32 @@ import Testing
         #expect(AppModel(backend: fake).sessionDiagnostics.records.isEmpty) // No cross-session history.
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func nestedOutcomeIdentitiesMustMatchTargetAndOperation(stop: Bool, foreign: Bool) async {
+        let environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID(), fake = FakeRuntimeBackend()
+        let target = foreign ? EnvironmentID() : environment.id
+        let errors: [GuesthouseError] = [.guestNotReachable(target), .hostKeyChanged(target), .guestShutdownRefused(target),
+            .operationOutcomeUnknown(foreign ? OperationID() : operation)]
+        for error in errors {
+            await fake.setEnvironmentInventory(.available([environment]))
+            await fake.setStatus(.init(environmentID: environment.id, vm: stop ? .running : .stopped, readiness: .checking, runtimeInstanceID: stop ? UUID() : nil))
+            let diagnostic = DiagnosticEvent(operation: stop ? .stopEnvironment : .startEnvironment,
+                outcome: .operationFailed(error), operationID: operation.uuid)
+            let events: [RuntimeEvent] = [.accepted(operation), .diagnostic(diagnostic), .failed(operation, .canceled)]
+            let model = AppModel(backend: SessionBackend(fake: fake, start: events, stop: events))
+            if stop {
+                let quit = QuitCoordinator(model: model) { _ in }
+                _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+                if foreign { #expect(quit.flow == .failed(.interrupted(.init(cause: .malformedResponse, operationID: operation, mayHaveMutated: true)))) }
+            } else {
+                await model.checkEnvironments().value; await model.startEnvironment(environment.id)?.value
+                if foreign { #expect(model.startFailure == .interrupted(.init(cause: .malformedResponse, operationID: operation, mayHaveMutated: true))) }
+            }
+            #expect(model.sessionDiagnostics.records.count == (foreign ? 0 : 1))
+            #expect(model.startDiagnostics.records.count == (foreign || stop ? 0 : 1))
+        }
+    }
+
     @Test(arguments: [false, true]) func quitRejectsForeignEnvironmentOrOperation(foreignEnvironment: Bool) async {
         let environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID(), fake = FakeRuntimeBackend()
         await fake.setEnvironmentInventory(.available([environment]))
