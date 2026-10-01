@@ -5,6 +5,7 @@ import GuesthouseCore
 /// The public configuration permits queries and explicit metadata setup; VM mutations remain disabled.
 /// Keep the backend alive while inspecting reconciliation; dropping it retires its transport.
 public final class RuntimeClient: RuntimeBackend {
+    public var allowsEnvironmentStart: Bool { permitsOperations }
     public let connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause>
     typealias Deadline = @Sendable () async throws -> Void
     private let inbox: RuntimeClientInbox
