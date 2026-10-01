@@ -8,11 +8,12 @@ import Testing
 struct QuitCoordinatorTests {
     let environment = DevelopmentEnvironment(name: "Development Mac")
     let operation = OperationID()
+    let instance = UUID()
 
     private func configuredFake(vm: EnvironmentStatus.VMState = .running, busy: OperationID? = nil) async -> FakeRuntimeBackend {
         let backend = FakeRuntimeBackend()
         await backend.setEnvironmentInventory(.available([environment]))
-        await backend.setStatus(.init(environmentID: environment.id, vm: vm, readiness: .checking, inFlightOperation: busy))
+        await backend.setStatus(.init(environmentID: environment.id, vm: vm, readiness: .checking, inFlightOperation: busy, runtimeInstanceID: instance))
         return backend
     }
 
@@ -48,7 +49,7 @@ struct QuitCoordinatorTests {
         #expect(decision.values == [true])
         let requests = await backend.receivedRequests
         #expect(Array(requests.suffix(5)) == [.listEnvironments, .environmentStatus(environment.id),
-            .stopEnvironment(environment.id, .force), .listEnvironments, .environmentStatus(environment.id)])
+            .stopEnvironment(environment.id, .force(expectedInstanceID: instance)), .listEnvironments, .environmentStatus(environment.id)])
     }
 
     @Test(arguments: [false, true])
@@ -144,7 +145,7 @@ struct QuitCoordinatorTests {
         await quit.forceStopAndQuit()?.value
         let stops = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { true } else { false } }
         #expect(stops == [.stopEnvironment(environment.id, .graceful(deadline: .seconds(60))),
-                          .stopEnvironment(environment.id, .force), .stopEnvironment(second.id, .graceful(deadline: .seconds(60)))])
+                          .stopEnvironment(environment.id, .force(expectedInstanceID: instance)), .stopEnvironment(second.id, .graceful(deadline: .seconds(60)))])
         #expect(decision.values.isEmpty && !quit.canForceStop)
     }
 
@@ -206,6 +207,42 @@ struct QuitCoordinatorTests {
         await work.value
         #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))))
         #expect(decision.values.isEmpty && !quit.canForceStop)
+    }
+
+    @Test(arguments: [false, true])
+    func changedOrMissingInstanceCannotReuseForceConsent(missing: Bool) async {
+        let backend = await configuredFake(), decision = Decision()
+        await backend.script("stopEnvironment", .fail(error: .guestShutdownRefused(environment.id)))
+        let quit = QuitCoordinator(model: AppModel(backend: backend), terminationDecision: decision.record)
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect(quit.canForceStop)
+        await backend.setStatus(.init(environmentID: environment.id, vm: .running, readiness: .checking,
+                                      runtimeInstanceID: missing ? nil : UUID()))
+        await backend.script("stopEnvironment", .succeed(status: .init(environmentID: environment.id, vm: .stopped, readiness: .checking)))
+        await quit.forceStopAndQuit()?.value
+        let stops = await backend.receivedRequests.filter { if case .stopEnvironment = $0 { true } else { false } }
+        #expect(stops == Array(repeating: .stopEnvironment(environment.id, .graceful(deadline: .seconds(60))), count: 2))
+        #expect(decision.values == [true])
+    }
+
+    @Test func absentInstanceNeverOffersForceDespiteConfirmedRefusal() async {
+        let backend = await configuredFake()
+        await backend.setStatus(.init(environmentID: environment.id, vm: .running, readiness: .checking))
+        await backend.script("stopEnvironment", .fail(error: .guestShutdownRefused(environment.id)))
+        let quit = QuitCoordinator(model: AppModel(backend: backend), terminationDecision: { _ in })
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect(!quit.canForceStop && quit.forceStopAndQuit() == nil)
+    }
+
+    @Test func everyFailureProvidesTypedRecovery() {
+        let failures: [QuitCoordinator.Failure] = [.check(.checkingEnvironment), .check(.checked),
+            .check(.metadataUnavailable(.repairRequired)), .check(.metadataUnavailable(.incompatible)),
+            .check(.unavailable(.runtimeMissing)), .check(.interrupted(.connectionLost)),
+            .ownership(environment.id, .ownershipUnproven), .unsettled(operation), .stillRunning,
+            .stop(.guestShutdownRefused(environment.id)), .interrupted(.init(cause: .connectionLost))]
+        for failure in failures {
+            #expect(!failure.userMessage.isEmpty && !failure.recoveryMessage.isEmpty && !failure.recoveryActions.isEmpty)
+        }
     }
 
     @Test func canceledQuitBeforeItsCheckStartsCannotResurrect() async {

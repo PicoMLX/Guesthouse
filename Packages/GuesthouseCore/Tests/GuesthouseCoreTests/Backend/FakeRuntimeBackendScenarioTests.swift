@@ -83,7 +83,7 @@ import Testing
     @Test func mixedRequestsRemainInSendOrderWhenStreamsAreConsumedInReverse() async throws {
         let backend = FakeRuntimeBackend()
         let requests: [RuntimeRequest] = (0..<20).map {
-            $0.isMultiple(of: 2) ? .startEnvironment(environment, StartOptions()) : .stopEnvironment(environment, .force)
+            $0.isMultiple(of: 2) ? .startEnvironment(environment, StartOptions()) : .stopEnvironment(environment, .force(expectedInstanceID: UUID()))
         }
         let streams = requests.map { backend.send($0) }
         for stream in streams.reversed() { _ = try await collect(stream) }

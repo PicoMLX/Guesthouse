@@ -9,7 +9,7 @@ import Testing
         func request(for environment: EnvironmentID) -> RuntimeRequest {
             switch self {
             case .start: .startEnvironment(environment, StartOptions())
-            case .stop: .stopEnvironment(environment, .force)
+            case .stop: .stopEnvironment(environment, .force(expectedInstanceID: UUID()))
             case .importXcode:
                 .importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app"))
             }

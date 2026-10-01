@@ -1,3 +1,4 @@
+import Foundation
 import GuesthouseCore
 import Testing
 @testable import GuesthouseClientKit
@@ -14,7 +15,7 @@ import Testing
     ]
 
     @Test(arguments: [RuntimeRequest.runtimeVersion, .startEnvironment(environment, .init()),
-                      .stopEnvironment(environment, .force), .stopEnvironment(environment, .graceful(deadline: .seconds(60)))])
+                      .stopEnvironment(environment, .force(expectedInstanceID: UUID())), .stopEnvironment(environment, .graceful(deadline: .seconds(60)))])
     func confirmedRefusalCannotArriveAsAPreacceptanceReply(request: RuntimeRequest) async throws {
         var router = RuntimeEventRouter()
         let fixture = try start(&router, request: request)
@@ -26,7 +27,7 @@ import Testing
     @Test(arguments: [false, true], [false, true])
     func confirmedRefusalRequiresTheOwningGracefulStop(force: Bool, beforeAcceptance: Bool) async throws {
         var router = RuntimeEventRouter()
-        let request = RuntimeRequest.stopEnvironment(Self.environment, force ? .force : .graceful(deadline: .seconds(60)))
+        let request = RuntimeRequest.stopEnvironment(Self.environment, force ? .force(expectedInstanceID: UUID()) : .graceful(deadline: .seconds(60)))
         let fixture = try start(&router, request: request)
         let refusal = RuntimeEvent.failed(Self.id, .guestShutdownRefused(Self.environment))
         if beforeAcceptance { _ = router.incoming(refusal) }
@@ -126,7 +127,7 @@ import Testing
 
     @Test func namedOperationsAcceptButWrongQueryShapesDoNot() async throws {
         let operations: [RuntimeRequest] = [
-            .startEnvironment(Self.environment, .init()), .stopEnvironment(Self.environment, .force),
+            .startEnvironment(Self.environment, .init()), .stopEnvironment(Self.environment, .force(expectedInstanceID: UUID())),
             .importXcode(Self.environment, .init(kind: .fileDescriptor(token: Self.id.uuid), displayName: "Xcode")),
         ]
         for request in operations {
@@ -292,7 +293,7 @@ import Testing
     @Test func preAcceptanceFaultRetainsDistinctEnvironmentsAndCancellationTarget() async throws {
         var router = RuntimeEventRouter()
         let other = EnvironmentID()
-        let a = try start(&router), b = try start(&router, request: .stopEnvironment(other, .force))
+        let a = try start(&router), b = try start(&router, request: .stopEnvironment(other, .force(expectedInstanceID: UUID())))
         let cancel = try start(&router, request: .cancelOperation(Self.id))
         let failure = RuntimeSessionFailure(cause: .malformedResponse, mayHaveMutated: true)
         let effects = router.incoming(.runtimeVersion(Self.info))

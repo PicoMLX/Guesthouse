@@ -106,7 +106,7 @@ import Testing
         let secondID = try #require(second.snapshot.environments.first?.id)
         #expect(firstID != secondID)
         #expect(first.backend !== second.backend)
-        _ = try await collect(first.backend.send(.stopEnvironment(firstID, .force)))
+        _ = try await collect(first.backend.send(.stopEnvironment(firstID, .force(expectedInstanceID: UUID()))))
         #expect(await first.backend.status(of: firstID)?.vm == .stopped)
         #expect(await second.backend.status(of: secondID)?.vm == .running)
         #expect(await second.backend.receivedRequests.isEmpty)
