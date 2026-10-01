@@ -29,7 +29,7 @@
       }
     },
     {
-      "identity" : "registrykit",
+      "identity" : "picomlx.registrykit",
       "kind" : "registry",
       "location" : "picomlx.registrykit",
       "state" : {

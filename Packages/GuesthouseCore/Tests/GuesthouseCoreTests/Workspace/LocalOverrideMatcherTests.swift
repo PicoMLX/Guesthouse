@@ -33,12 +33,12 @@ import Testing
         let results = LocalOverrideMatcher.match(selected: [
             package("https://github.com/Fork/SharedUI"),
             package("https://github.com/PicoMLX/Unrelated"),
-            package("https://github.com/PicoMLX/RegistryKit"),
+            package("https://github.com/PicoMLX/picomlx.registrykit"),
         ], resolved: resolved, observedOrigins: [:])
         #expect(results == [
             .remoteMismatch(identity: PackageIdentity(location: "sharedui")!, expected: "https://github.com/PicoMLX/SharedUI.git", selected: "https://github.com/Fork/SharedUI"),
             .notADependency(identity: PackageIdentity(location: "unrelated")!),
-            .unsupportedKind(identity: PackageIdentity(location: "registrykit")!, kind: .registry),
+            .unsupportedKind(identity: PackageIdentity(location: "picomlx.registrykit")!, kind: .registry),
         ])
         let local = try ResolvedPackagesFile.decode(fixture("Package.resolved.v2"))
         #expect(LocalOverrideMatcher.match(selected: [package("https://github.com/PicoMLX/LocalKit")], resolved: local, observedOrigins: [:])
