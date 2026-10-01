@@ -42,11 +42,7 @@ struct DashboardView: View {
             }
         }
         .sheet(isPresented: $showingCreation) {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Create a development Mac").font(.title2)
-                Text("Environment creation is not available yet. You can check host requirements, prepare storage and select Xcode in Setup checks.")
-                Button("Done") { showingCreation = false }.keyboardShortcut(.defaultAction)
-            }.padding(24).frame(width: 420)
+            SetupWizardView()
         }
     }
     @ViewBuilder private func recoveryDetails(for environmentID: EnvironmentID) -> some View {
