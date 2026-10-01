@@ -76,6 +76,7 @@ import Testing
 }
 
 private nonisolated struct DiagnosticStartBackend: RuntimeBackend {
+    var allowsEnvironmentStart: Bool { fake.allowsEnvironmentStart }
     let fake: FakeRuntimeBackend
     let events: [RuntimeEvent]
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }

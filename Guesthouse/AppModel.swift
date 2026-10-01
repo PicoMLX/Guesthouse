@@ -97,7 +97,7 @@ final class AppModel {
     }
 
     func canRetryStart(_ id: EnvironmentID) -> Bool {
-        !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+        backend.allowsEnvironmentStart && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
             && startFailure?.recoveryActions.contains(.retry) == true
     }
 
