@@ -119,7 +119,10 @@ import Testing
             var template = Array("/private/tmp/guesthouse-lume-verification-XXXXXX".utf8CString)
             let name = try #require(mkdtemp(&template))
             base = URL(fileURLWithPath: String(cString: name))
-            bundle = LumeBundle(url: base.appending(path: "lume.app"))
+            let storage = try RuntimeStorage(root: base.appending(path: "Guesthouse"))
+            bundle = LumeBundle(url: try LumeBundle.expectedLocation(in: storage))
+            try FileManager.default.createDirectory(at: bundle.url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                   attributes: [.posixPermissions: 0o700])
             try FileManager.default.createDirectory(at: bundle.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: bundle.executable)
             try metadata()
