@@ -104,10 +104,24 @@ import Testing
         let backend = CancellationBackend(operation: operation)
         let task = Task { await StartOperation.cancel(operation, backend: backend) }
         var cancels = backend.canceled.makeAsyncIterator(); _ = await cancels.next()
-        backend.throwCancel(.invalidRequest(.tooManyInFlight), afterReply: answered)
+        backend.throwCancel(GuesthouseError.invalidRequest(.tooManyInFlight), afterReply: answered)
         let result = await task.value
         #expect(result.failure == .runtime(.invalidRequest(.tooManyInFlight)))
         #expect(result.retryAllowed == !answered)
+    }
+    @Test(arguments: [false, true])
+    func transportFailurePreservesCancellationUncertaintyWithoutInventingIdentity(answered: Bool) async throws {
+        for failure in [RuntimeSessionFailure(cause: .connectionLost),
+                        .init(cause: .protocolMismatch(service: 1), operationID: OperationID())] {
+            let backend = CancellationBackend(operation: operation)
+            let task = Task { await StartOperation.cancel(operation, backend: backend) }
+            var cancels = backend.canceled.makeAsyncIterator(); _ = await cancels.next()
+            backend.throwCancel(failure, afterReply: answered)
+            let result = await task.value
+            #expect(result.failure == .interrupted(failure.contextualized(mayHaveMutated: true)) && !result.retryAllowed)
+            let presentation = RecoveryPresentation(failure: try #require(result.failure))
+            #expect(presentation.outcomeUnknown && !presentation.actions.contains(.retry))
+        }
     }
     @Test func cancellationFailureSurvivesSuccessfulStartAndFreshCheckUntilAcknowledged() async throws {
         let backend = CancellationBackend(operation: operation); await configured(backend.fake)
@@ -167,7 +181,7 @@ private nonisolated final class CancellationBackend: RuntimeBackend {
         let reply = cancelReply.withLock { state in defer { state = nil }; return state }
         reply?.yield(event); reply?.finish()
     }
-    func throwCancel(_ error: GuesthouseError, afterReply: Bool) {
+    func throwCancel(_ error: any Error, afterReply: Bool) {
         let reply = cancelReply.withLock { state in defer { state = nil }; return state }
         if afterReply { reply?.yield(.completed(OperationID())) }
         reply?.finish(throwing: error)

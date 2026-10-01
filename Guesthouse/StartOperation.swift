@@ -94,7 +94,7 @@ import GuesthouseCore
             default: retryAllowed = false
             }
             return (failure.map(Failure.runtime), retryAllowed)
-        } catch let error as RuntimeSessionFailure { return (.interrupted(error), false) }
+        } catch let error as RuntimeSessionFailure { return (.interrupted(error.contextualized(mayHaveMutated: true)), false) }
         catch let error as GuesthouseError {
             // RuntimeClient can reject locally before sending by throwing, rather than
             // yielding a terminal event. A throw after any reply cannot prove non-admission.
