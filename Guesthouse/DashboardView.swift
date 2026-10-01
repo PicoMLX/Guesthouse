@@ -18,6 +18,7 @@ struct DashboardView: View {
                         Text("Use Cancel operation to request cancellation again. Guesthouse will inspect state after the operation and cancellation replies finish.").font(.caption)
                     }
                 } else {
+                    Text("Acknowledge this cancellation result before starting another operation.").font(.caption)
                     Button("Dismiss cancellation message") { model.dismissStartCancellationFailure() }
                 }
             }

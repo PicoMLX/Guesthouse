@@ -122,8 +122,15 @@ import Testing
         #expect(model.startCancellationFailure == .runtime(.invalidRequest(.unsupportedOperation)))
         await model.checkEnvironments().value
         #expect(model.startCancellationFailure != nil)
+        let other = DevelopmentEnvironment(name: "Second Mac")
+        await backend.fake.setEnvironmentInventory(.available([environment, other]))
+        await backend.fake.setStatus(.init(environmentID: other.id, vm: .stopped, readiness: .ready))
+        await model.checkEnvironments().value
+        #expect(!model.canStart(other.id) && model.startEnvironment(other.id) == nil)
+        #expect(model.startCancellationFailure == .runtime(.invalidRequest(.unsupportedOperation)))
         model.dismissStartCancellationFailure()
         #expect(model.startCancellationFailure == nil && model.statuses[environment.id]?.vm == .running)
+        #expect(model.canStart(other.id))
     }
 }
 
