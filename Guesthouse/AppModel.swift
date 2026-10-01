@@ -93,6 +93,23 @@ final class AppModel {
     @discardableResult
     func startEnvironment(_ id: EnvironmentID) -> Task<Void, Never>? {
         guard canStart(id) else { return nil }
+        return beginStart(id)
+    }
+
+    func canRetryStart(_ id: EnvironmentID) -> Bool {
+        !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+            && startFailure?.recoveryActions.contains(.retry) == true
+    }
+
+    /// Retry is an explicit new attempt, including a new inspection. It is never offered for
+    /// an unknown outcome and does not require pre-existing status after a failed query.
+    @discardableResult
+    func retryStart(_ id: EnvironmentID) -> Task<Void, Never>? {
+        guard canRetryStart(id) else { return nil }
+        return beginStart(id)
+    }
+
+    private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
         isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
         let work = Task { [weak self] in
             guard let self else { return }
