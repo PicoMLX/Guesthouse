@@ -8,13 +8,16 @@ import Testing
     private final class Fixture: Sendable {
         let base, root, configuration: URL
         let storage: RuntimeStorage
-        init() throws {
+        init() async throws {
             var template = Array("/private/tmp/guesthouse-lume-paths-XXXXXX".utf8CString)
             let name = try #require(mkdtemp(&template))
             base = URL(fileURLWithPath: String(cString: name))
             root = base.appending(path: "Guesthouse")
             configuration = root.appending(path: "state/lume-xdg")
-            storage = try RuntimeStorage(root: root)
+            let freshRoot = root
+            let owner = try await StateStore.createFresh(root: { freshRoot })
+            storage = try RuntimeStorage(existingRoot: root)
+            await owner.close()
         }
         deinit { try? FileManager.default.removeItem(at: base) }
 
@@ -25,7 +28,7 @@ import Testing
     }
 
     @Test func ordinaryReopeningDoesNotRequireOrCreateCandidateConfiguration() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         _ = try RuntimeStorage(existingRoot: fixture.root)
         let owner = try await fixture.owner()
         #expect(try await owner.loadSnapshot().environments.isEmpty)
@@ -36,7 +39,7 @@ import Testing
     }
 
     @Test func explicitOwnedSetupUsesOnlyFixedPrivateEnvironmentAndPreservesWork() async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         let disk = fixture.root.appending(path: "vms/unpublished")
         try Data("saved work".utf8).write(to: disk)
         try await owner.prepareLumeProbeConfiguration()
@@ -61,7 +64,7 @@ import Testing
 
     @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"], [false, true])
     func eachWritableComponentIsRecheckedWithoutRepair(_ suffix: String, _ acl: Bool) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
         _ = try fixture.storage.environmentForLumeProbe()
         let target = suffix.isEmpty ? fixture.root : fixture.root.appending(path: suffix)
@@ -75,7 +78,7 @@ import Testing
 
     @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
     func backupPolicyIsRecheckedWithoutRepair(_ suffix: String) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
         let target = suffix.isEmpty ? fixture.root : fixture.root.appending(path: suffix)
         let expected = suffix == "staging"
@@ -87,7 +90,7 @@ import Testing
 
     @Test(arguments: ["mode", "acl", "backup"])
     func explicitConfigurationRepairKeepsContentsAndIdentity(_ drift: String) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
         let before = StateFileIdentity(try StorageProtection.structure(fixture.configuration))
         let saved = fixture.configuration.appending(path: "saved-config")
@@ -107,7 +110,7 @@ import Testing
 
     @Test(arguments: [false, true])
     func unsafeConfigurationIsRefusedWithoutChangingItsDestination(_ link: Bool) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         let destination = fixture.base.appending(path: "outside")
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o755])
@@ -126,7 +129,7 @@ import Testing
 
     @Test(arguments: ["vms", "staging"])
     func unsafeWritableParentRefusesBeforeRepairingConfiguration(_ suffix: String) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixture.configuration.path)
         let target = fixture.root.appending(path: suffix)
@@ -138,7 +141,7 @@ import Testing
     }
 
     @Test func losingAndClosedOwnersCannotPrepareConfiguration() async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) { _ = try await fixture.owner() }
         #expect(!FileManager.default.fileExists(atPath: fixture.configuration.path))
         await owner.close()
@@ -150,7 +153,7 @@ import Testing
 
     @Test(arguments: [false, true])
     func preparationWaitsForLeaseAndRechecksOwnershipAfterWaiting(_ cancel: Bool) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner(), storage = fixture.storage
+        let fixture = try await Fixture(), owner = try await fixture.owner(), storage = fixture.storage
         let entered = AsyncStream.makeStream(of: Void.self), queued = AsyncStream.makeStream(of: Void.self)
         let release = AsyncStream.makeStream(of: Void.self)
         var entryEvents = entered.stream.makeAsyncIterator(), queueEvents = queued.stream.makeAsyncIterator()

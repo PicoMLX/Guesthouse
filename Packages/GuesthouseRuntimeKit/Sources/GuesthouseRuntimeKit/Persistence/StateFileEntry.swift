@@ -3,11 +3,16 @@ import GuesthouseCore
 
 /// Fixed runtime operations, never arbitrary GUI/repository names or snapshot-in-place writes.
 enum StateFileAccess: Sendable, CaseIterable {
-    case readSnapshot, readJournal, writeJournal, inspectSnapshot, inspectJournal
+    case readSnapshot, readJournal, writeJournal, inspectSnapshot, inspectJournal, inspectRuntimeOwnership
 
-    var name: String { label == .snapshot ? "environments.json" : "journal.ndjson" }
-    var label: StateStoreError.File { self == .readSnapshot || self == .inspectSnapshot ? .snapshot : .journal }
-    var inspects: Bool { self == .inspectSnapshot || self == .inspectJournal }
+    var name: String {
+        self == .inspectRuntimeOwnership ? "lume-ownership.json" : label == .snapshot ? "environments.json" : "journal.ndjson"
+    }
+    var label: StateStoreError.File {
+        self == .inspectRuntimeOwnership ? .runtimeOwnership
+            : self == .readSnapshot || self == .inspectSnapshot ? .snapshot : .journal
+    }
+    var inspects: Bool { self == .inspectSnapshot || self == .inspectJournal || self == .inspectRuntimeOwnership }
     var creates: Bool { self == .writeJournal }
     var failure: StateStoreError { creates ? .fileUnwritable(name: label) : .fileUnreadable(name: label) }
 }

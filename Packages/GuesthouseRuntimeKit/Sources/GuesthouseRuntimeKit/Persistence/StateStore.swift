@@ -9,6 +9,8 @@ import GuesthouseCore
 public actor StateStore {
     private var anchor: StateDirectoryAnchor?
     private let hooks: StateStoreHooks
+    private let serviceEpoch = UUID()
+    private var lumePublicationUncertain = false
     private var selectingStorage = false
     private var canSave = false
     private var snapshotWasPresent = false
@@ -53,6 +55,7 @@ public actor StateStore {
         }, hooks: hooks)
         do {
             _ = try await store.selectStorageVolume()
+            try await store.initializeFreshLumeOwnership()
             return store
         } catch {
             await store.close()
@@ -107,7 +110,77 @@ public actor StateStore {
     private func prepareOwnedLumeProbeConfiguration() throws {
         // close() may have run while waiting for the lease. Never mutate after losing ownership.
         guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        _ = try requireLumeAvailability(anchor)
         try anchor.prepareLumeProbeConfiguration()
+    }
+
+    /// Admission seam for the future fixed-command probe. The physical-root lease spans
+    /// publication and the caller; the durable intent continues blocking admission afterward.
+    /// All other provider mutations/replacement remain disabled until wired to this authority
+    /// and an actual whole-owned-set inspector. This is not a generic process/XPC API.
+    func withLumeLaunchIntent<T: Sendable>(
+        command: LumeLaunchIntent.Command, coordinator: LumeRuntimeCoordinator = .shared,
+        operation: @Sendable (LumeLaunchIntent) async throws -> T
+    ) async throws -> T {
+        guard let storage = try anchor?.verifiedProbeStorage() else {
+            throw StateStoreError.fileUnreadable(name: .stateDirectory)
+        }
+        return try await coordinator.withExclusiveAccess(for: storage) {
+            try Task.checkCancellation()
+            let intent = try await self.recordOwnedLumeLaunch(command: command)
+            return try await operation(intent)
+        }
+    }
+
+    private func initializeFreshLumeOwnership() throws(StateStoreError) {
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        // Called solely from createFresh after exclusive root creation, never from open/repair.
+        guard try anchor.withFile(.inspectRuntimeOwnership, body: { _ in true }) == nil else {
+            throw .setupRequiresInspection
+        }
+        let root: StateFileIdentity
+        do { root = try anchor.verifiedProbeStorage().coordinationIdentity() }
+        catch let error as StateStoreError { throw error }
+        catch { throw .insecureDirectory(reason: .changed) }
+        try publishLumeOwnership(LumeRuntimeOwnership(root: root), anchor: anchor)
+    }
+
+    private func recordOwnedLumeLaunch(command: LumeLaunchIntent.Command) throws -> LumeLaunchIntent {
+        // close() may run while queued. Never retain the old anchor/lock across that wait.
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        let saved = try requireLumeAvailability(anchor)
+        let intent = LumeLaunchIntent(operationID: UUID(), serviceEpoch: serviceEpoch,
+                                      attemptID: UUID(), command: command)
+        try publishLumeOwnership(LumeRuntimeOwnership(root: saved.root, intent: intent), anchor: anchor)
+        return intent
+    }
+
+    private func requireLumeAvailability(_ anchor: StateDirectoryAnchor) throws -> LumeRuntimeOwnership {
+        guard !lumePublicationUncertain else { throw LumeLaunchOwnershipFailure.inspectionRequired }
+        let raw = try anchor.withFile(.inspectRuntimeOwnership) {
+            try StateFileIO.readAll($0, from: 0, name: .runtimeOwnership)
+        }
+        guard let raw else { throw LumeLaunchOwnershipFailure.inspectionRequired }
+        let saved: LumeRuntimeOwnership
+        do { saved = try JSONDecoder().decode(LumeRuntimeOwnership.self, from: raw) }
+        catch let error as LumeLaunchOwnershipFailure { throw error }
+        catch { throw LumeLaunchOwnershipFailure.corruptRecord }
+        let root = try anchor.verifiedProbeStorage().coordinationIdentity()
+        guard saved.root == root else { throw LumeLaunchOwnershipFailure.changedRoot }
+        guard saved.intent == nil else { throw LumeLaunchOwnershipFailure.inspectionRequired }
+        return saved
+    }
+
+    private func publishLumeOwnership(_ value: LumeRuntimeOwnership, anchor: StateDirectoryAnchor) throws(StateStoreError) {
+        let data: Data
+        do { data = try JSONEncoder().encode(value) }
+        catch { throw .unencodable(name: .runtimeOwnership) }
+        guard data.count <= StateFileIO.maximumRuntimeOwnershipBytes else {
+            throw StateStoreError.unencodable(name: .runtimeOwnership)
+        }
+        lumePublicationUncertain = true
+        try anchor.replace(data, at: .inspectRuntimeOwnership, hooks: hooks, write: hooks.ownershipWrite)
+        lumePublicationUncertain = false
     }
 
     /// Missing metadata is an empty inventory, never authority to recreate a VM.
@@ -142,25 +215,9 @@ public actor StateStore {
         guard existing.storageSelection != nil || existing.environments.isEmpty || !snapshot.environments.isEmpty else {
             throw StateStoreError.storageSelectionChanged
         }
-        try anchor.withDescriptor { directory in
-            // One fixed exclusive temporary bounds interrupted-save debris. An existing entry
-            // requires explicit repair; never collect or overwrite evidence from another attempt.
-            let temporary = ".environments.json.pending"
-            let descriptor = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard descriptor >= 0 else { throw StateStoreError.fileUnwritable(name: .snapshot) }
-            defer { Darwin.close(descriptor) }
-            var published = false
-            defer { if !published { _ = unlinkat(directory, temporary, 0) } }
-            try StateFileProtection.prepare(descriptor, kind: .regularFile, name: .snapshot)
-            try hooks.write(descriptor, data)
-            try hooks.synchronize(descriptor, .snapshot)
-            guard renameat(directory, temporary, directory, StateFileAccess.readSnapshot.name) == 0 else {
-                throw StateStoreError.fileUnwritable(name: .snapshot)
-            }
-            published = true
-            snapshotWasPresent = true
-            try hooks.synchronize(directory, .stateDirectory)
-        }
+        // Preserve the observed-file guard even if a post-rename directory barrier fails.
+        try anchor.replace(data, at: .inspectSnapshot, hooks: hooks, write: hooks.write,
+                           didPublish: { self.snapshotWasPresent = true })
         canSave = true
     }
 
@@ -285,6 +342,7 @@ public actor StateStore {
 struct StateStoreHooks: Sendable {
     var journalWrite: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .journal) }
     var write: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .snapshot) }
+    var ownershipWrite: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .runtimeOwnership) }
     var synchronize: @Sendable (Int32, StateStoreError.File) throws -> Void = {
         try StateFileIO.fullySynchronize($0, name: $1)
     }
