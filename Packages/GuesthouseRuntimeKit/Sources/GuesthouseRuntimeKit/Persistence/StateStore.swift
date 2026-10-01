@@ -128,6 +128,7 @@ public actor StateStore {
         return try await coordinator.withExclusiveAccess(for: storage) {
             try Task.checkCancellation()
             let intent = try await self.recordOwnedLumeLaunch(command: command)
+            try Task.checkCancellation()
             return try await operation(intent)
         }
     }

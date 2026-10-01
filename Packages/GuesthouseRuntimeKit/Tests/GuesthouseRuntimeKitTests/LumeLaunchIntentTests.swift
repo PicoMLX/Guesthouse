@@ -235,4 +235,22 @@ import Testing
         #expect(try StorageProtection.structure(configuration).st_mode & 0o7777 == 0o755)
         await owner.close()
     }
+
+    @Test func cancellationDuringPublicationRetainsIntentWithoutEnteringEffects() async throws {
+        let fixture = try Fixture(), fresh = try await fixture.fresh()
+        await fresh.close()
+        let owner = try await fixture.reopen(hooks: StateStoreHooks(ownershipWrite: { fd, bytes in
+            try StateFileIO.writeAll(fd, bytes, name: .runtimeOwnership)
+            withUnsafeCurrentTask { $0?.cancel() }
+        }))
+        let attempt = Task {
+            try await owner.withLumeLaunchIntent(command: .version) { _ in Issue.record("Entered canceled effects") }
+        }
+        await #expect(throws: CancellationError.self) { try await attempt.value }
+        #expect(try fixture.saved().intent != nil)
+        await #expect(throws: LumeLaunchOwnershipFailure.inspectionRequired) {
+            try await owner.withLumeLaunchIntent(command: .version) { _ in Issue.record("Repeated canceled intent") }
+        }
+        await owner.close()
+    }
 }
