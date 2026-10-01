@@ -8,7 +8,7 @@ import Testing
         try JSONSerialization.data(withJSONObject: ["version": version, "pins": pins])
     }
     private func pin(kind: String = "remoteSourceControl", state: Any? = nil) -> [String: Any] {
-        ["identity": "library", "kind": kind, "location": "https://github.com/Org/Library.git",
+        ["identity": kind == "registry" ? "scope.library" : "library", "kind": kind, "location": "https://github.com/Org/Library.git",
          "state": state ?? ["revision": revision, "branch": "main"]]
     }
 
