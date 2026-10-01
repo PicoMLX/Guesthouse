@@ -122,7 +122,7 @@ import Testing
         let expected = DiagnosticEvent(operation: stop ? .stopEnvironment : .startEnvironment,
             outcome: accepted ? .canceled : .operationFailed(error), operationID: operation.uuid, environmentID: environment.id)
         #expect(model.sessionDiagnostics.records.map(\.event) == [expected])
-        #expect(model.startDiagnostics.records.map(\.event) == (stop ? [] : [expected]))
+        #expect(model.startDiagnostics.records.map(\.event) == (stop || !accepted ? [] : [expected]))
     }
 }
 
