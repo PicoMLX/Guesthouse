@@ -33,7 +33,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
     }
 
     public enum Operation: String, CaseIterable, Codable, Sendable {
-        case runtimeRequest
+        case runtimeRequest, cancelOperation
         case preflight, verifyRuntime, createEnvironment, startEnvironment, stopEnvironment
         case inspectEnvironment, connectSSH, importXcode, checkTools, codexSignIn, githubSignIn
         case synchronizeRepositories, testWorkspace, publishChanges, exportDiagnostics
@@ -45,6 +45,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         public var title: String {
             switch self {
             case .runtimeRequest: "Contact runtime service"
+            case .cancelOperation: "Request cancellation"
             case .preflight: "Check this Mac"
             case .verifyRuntime: "Verify runtime"
             case .createEnvironment: "Create development Mac"
@@ -135,7 +136,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .started: detail = "Started."
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
-        case .canceled: detail = "Cancellation confirmed; partial changes may remain."
+        case .canceled: detail = operation == .cancelOperation
+            ? "The cancellation request was canceled; its target may still be running."
+            : "Cancellation confirmed; partial changes may remain."
         case .failed(let failure, _):
             if failure == .verificationFailed, operation == .importXcode {
                 detail = "The Xcode bundle failed verification."
@@ -143,7 +146,8 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
                 detail = failure == .verificationFailed && isDownload
                     ? "The downloaded artifact failed verification." : failure.message
             }
-        case .operationFailed(let error): detail = error.userMessage
+        case .operationFailed(let error): detail = operation == .cancelOperation && error == .canceled
+            ? "The cancellation request was canceled; its target may still be running." : error.userMessage
         case .observationFailed(let failure): detail = failure.message
         }
         return operation.title + ": " + detail
@@ -154,10 +158,13 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         switch outcome {
         case .waitingForUserAction: "Complete the step shown by Guesthouse, then continue."
         case .failed(let failure, _): recovery(for: failure)
-        case .operationFailed(let error): error.recoveryMessage
+        case .operationFailed(let error): operation == .cancelOperation && error == .canceled
+            ? "Inspect the target operation before requesting cancellation again." : error.recoveryMessage
         case .observationFailed(let failure): failure.recoveryMessage
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
-        case .canceled: "Inspect any partial changes before starting another operation."
+        case .canceled: operation == .cancelOperation
+            ? "Inspect the target operation before requesting cancellation again."
+            : "Inspect any partial changes before starting another operation."
         case .pending, .started, .succeeded: nil
         }
     }

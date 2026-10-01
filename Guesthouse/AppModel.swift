@@ -181,9 +181,15 @@ final class AppModel {
     }
 
     private func sendStartCancellation(_ operation: OperationID) {
-        guard cancelStartTask == nil else { return }
+        guard cancelStartTask == nil, let environment = startingEnvironment else { return }
+        let dispatchObservation = UUID()
         cancelStartTask = Task { [weak self, backend] in
-            let result = await StartOperation.cancel(operation, backend: backend)
+            let result = await StartOperation.cancel(operation, backend: backend, environment: environment,
+                diagnostic: { [weak self] event in
+                    self?.recordDiagnostic(event, for: environment)
+                }, observation: { [weak self] outcome in
+                    self?.recordObservation(outcome, id: dispatchObservation, environment: environment, operation: .cancelOperation)
+                })
             guard !Task.isCancelled, let self, isStarting, startOperationID == operation else { return }
             startCancellationFailure = result.failure
             cancelStartTask = nil
