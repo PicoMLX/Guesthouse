@@ -10,11 +10,11 @@ import Testing
     func configured() async -> FakeRuntimeBackend {
         let fake = FakeRuntimeBackend()
         await fake.setEnvironmentInventory(.available([environment]))
-        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .ready))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
         return fake
     }
     @Test func allStartFailuresHaveFixedGuidanceAndTypedRecovery() {
-        let failures: [StartOperation.Failure] = [.quitPending, .stateChanged, .check(.checkingEnvironment),
+        let failures: [StartOperation.Failure] = [.quitPending, .stateChanged, .notRunning, .check(.checkingEnvironment),
             .runtime(.runtimeIncompatible), .interrupted(.init(cause: .connectionLost, operationID: operation, mayHaveMutated: true))]
         for failure in failures { #expect(!failure.message.isEmpty && !failure.recoveryActions.isEmpty) }
     }
@@ -40,7 +40,35 @@ import Testing
         #expect(!model.canStart(environment.id))
         #expect(await fake.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1)
         await model.checkEnvironments().value
+        #expect(model.startFailure != nil) // The fake still reports the interrupted operation in flight.
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        await model.checkEnvironments().value
         #expect(model.startFailure == nil)
+    }
+    @Test func completedStartWithoutRunningStatusKeepsActionableFailure() async {
+        let fake = await configured(), model = AppModel(backend: fake)
+        await model.checkEnvironments().value
+        #expect(model.canStart(environment.id)) // Stopped/checking is valid before guest boot.
+        await model.startEnvironment(environment.id)?.value
+        #expect(model.startFailure == .notRunning && !model.canStart(environment.id))
+    }
+    @Test func anotherEnvironmentCannotEraseAnUnresolvedFailure() async {
+        let fake = await configured(), second = DevelopmentEnvironment(name: "Second Mac")
+        await fake.setEnvironmentInventory(.available([environment, second]))
+        await fake.setStatus(.init(environmentID: second.id, vm: .stopped, readiness: .checking))
+        let model = AppModel(backend: fake); await model.checkEnvironments().value
+        await fake.script("startEnvironment", .disconnect())
+        await model.startEnvironment(environment.id)?.value
+        let failure = model.startFailure
+        #expect(failure != nil && !model.canStart(second.id) && model.startEnvironment(second.id) == nil)
+        #expect(model.startFailure == failure && model.startingEnvironment == environment.id)
+        await fake.setEnvironmentInventory(.available([second]))
+        await model.checkEnvironments().value
+        #expect(model.startFailure == failure && !model.canStart(second.id))
+        await fake.setEnvironmentInventory(.available([environment, second]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        await model.checkEnvironments().value
+        #expect(model.startFailure == nil && model.canStart(second.id))
     }
     @Test func quitBeforeAdmissionPreventsStart() async {
         let fake = await configured(), model = AppModel(backend: fake)

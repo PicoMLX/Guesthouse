@@ -32,6 +32,9 @@ struct DashboardView: View {
                     DiagnosticDisclosureView(log: model.startDiagnostics)
                 }
             }
+            if let id = model.startingEnvironment, !model.environments.contains(where: { $0.id == id }), let failure = model.startFailure {
+                Text(failure.message).foregroundStyle(.secondary)
+            }
             if model.checkState == .checked {
                 VStack(alignment: .leading, spacing: 6) {
                     if model.environments.isEmpty { Text("Create a development Mac").font(.title2) }

@@ -4,13 +4,14 @@ import GuesthouseCore
 @MainActor enum StartOperation {
     enum Failure: Error, Equatable {
         case check(AppModel.CheckState), runtime(GuesthouseError), interrupted(RuntimeSessionFailure)
-        case quitPending, stateChanged
+        case quitPending, stateChanged, notRunning
         var message: String {
             switch self {
             case .check(let state): QuitCoordinator.Failure.check(state).userMessage + " " + QuitCoordinator.Failure.check(state).recoveryMessage
             case .runtime(let error): error.userMessage + " " + error.recoveryMessage
             case .interrupted(let error): error.userMessage + " " + (error.recoverySuggestion ?? "Inspect the environment before continuing.")
             case .quitPending: "Start was not sent because Guesthouse is quitting. Cancel Quit to continue working."
+            case .notRunning: "Start completed, but Guesthouse could not confirm that the development Mac is running. Inspect its current state before trying again."
             case .stateChanged: "The environment is no longer eligible to start. Inspect its current state before continuing."
             }
         }
@@ -20,7 +21,7 @@ import GuesthouseCore
             case .runtime(let error): error.recoveryActions
             case .interrupted(let error): error.recoveryActions
             case .quitPending: [.cancel]
-            case .stateChanged: [.inspectState, .cancel]
+            case .stateChanged, .notRunning: [.inspectState, .cancel]
             }
         }
     }
