@@ -14,8 +14,22 @@ struct DashboardView: View {
                     busy: model.isChecking || model.isStarting || quit.flow != .idle),
                     canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
                 if model.startingEnvironment == environment.id {
-                    if model.isStarting { ProgressView(model.startPhase == nil ? "Checking start outcome…" : "Starting development Mac…") }
-                    if let failure = model.startFailure { Text(failure.message).foregroundStyle(.secondary) }
+                    if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: false) }
+                    if let failure = model.startFailure {
+                        if model.startFailureDismissed {
+                            Text("The last Start needs attention. Check the environment before continuing.").foregroundStyle(.secondary)
+                        } else {
+                            ErrorRecoveryView(presentation: .init(failure: failure), canRetry: model.canStart(environment.id)) { action in
+                                switch action {
+                                case .retry: model.startEnvironment(environment.id)
+                                case .inspectState: model.checkEnvironments()
+                                case .cancel: model.dismissStartFailure()
+                                default: break
+                                }
+                            }
+                        }
+                    }
+                    DiagnosticDisclosureView(log: model.startDiagnostics)
                 }
             }
             if model.checkState == .checked {

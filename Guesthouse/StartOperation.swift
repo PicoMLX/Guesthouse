@@ -25,7 +25,7 @@ import GuesthouseCore
         }
     }
     static func run(_ environment: EnvironmentID, backend: any RuntimeBackend,
-                    progress: (ProgressPhase) -> Void) async -> Failure? {
+                    progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> Failure? {
         var accepted: OperationID?, terminal = false
         var failure: GuesthouseError?
         func malformed() -> Failure {
@@ -43,7 +43,9 @@ import GuesthouseCore
                     guard accepted != nil, status.environmentID == environment,
                           status.inFlightOperation == nil || status.inFlightOperation == accepted else { throw malformed() }
                 case .diagnostic(let event):
-                    guard accepted != nil, event.operationID == accepted?.uuid else { throw malformed() }
+                    guard accepted != nil, event.operationID == accepted?.uuid,
+                          event.environmentID == nil || event.environmentID == environment else { throw malformed() }
+                    diagnostic(event)
                 case .completed(let id):
                     guard id == accepted else { throw malformed() }; terminal = true
                 case .failed(let id, let error):

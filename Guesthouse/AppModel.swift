@@ -21,6 +21,8 @@ final class AppModel {
     private(set) var isStarting = false
     private(set) var startingEnvironment: EnvironmentID?
     private(set) var startPhase: ProgressPhase?
+    private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
+    private(set) var startFailureDismissed = false
     private(set) var startFailure: StartOperation.Failure?
     @ObservationIgnored private var startTask: Task<Void, Never>?
     let backend: any RuntimeBackend
@@ -87,7 +89,7 @@ final class AppModel {
     @discardableResult
     func startEnvironment(_ id: EnvironmentID) -> Task<Void, Never>? {
         guard canStart(id) else { return nil }
-        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil
+        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
         let work = Task { [weak self] in
             guard let self else { return }
             defer { isStarting = false; startTask = nil; startPhase = nil }
@@ -97,7 +99,9 @@ final class AppModel {
                 startFailure = checkState == .checked ? .stateChanged : .check(checkState); return
             }
             invalidateStatusForMutation()
-            startFailure = await StartOperation.run(id, backend: backend) { [weak self] phase in self?.startPhase = phase }
+            startFailure = await StartOperation.run(id, backend: backend,
+                progress: { [weak self] phase in self?.startPhase = phase },
+                diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
             // A terminal event is not a live state query. Unknown outcomes are inspected,
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
@@ -105,6 +109,9 @@ final class AppModel {
         startTask = work
         return work
     }
+
+    /// Dismissing presentation cannot clear uncertainty or permit a new mutation.
+    func dismissStartFailure() { startFailureDismissed = true }
 
     func invalidateStatusForMutation() {
         generation = UUID()
