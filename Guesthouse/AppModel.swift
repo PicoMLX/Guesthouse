@@ -74,7 +74,8 @@ final class AppModel {
     }
 
     func canStart(_ id: EnvironmentID) -> Bool {
-        guard backend.allowsEnvironmentStart, !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
+        guard backend.allowsEnvironmentStart, startCancellationFailure == nil,
+              !isStarting && !isChecking && !checksReservedForQuit && startEligible(id) else { return false }
         if let startFailure {
             // One runtime writer and one presented Start result. Do not overwrite another
             // environment's failure; an explicit successful Check clears it first.
@@ -104,7 +105,8 @@ final class AppModel {
     }
 
     func canRetryStart(_ id: EnvironmentID) -> Bool {
-        backend.allowsEnvironmentStart && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+        backend.allowsEnvironmentStart && startCancellationFailure == nil
+            && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
             && startFailure?.recoveryActions.contains(.retry) == true
     }
 
