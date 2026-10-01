@@ -25,7 +25,7 @@ final class QuitCoordinator {
     let warning = "Stopping a development Mac interrupts any Codex task running in it. Guesthouse cannot see those tasks; finish them first."
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var attempt = UUID()
-    @ObservationIgnored private var gracefulFailures: Set<EnvironmentID> = []
+    @ObservationIgnored private var gracefulFailures: [EnvironmentID: UUID] = [:]
     @ObservationIgnored private var unconfirmedEnvironments: Set<EnvironmentID> = []
     @ObservationIgnored private let terminationDecision: @MainActor (Bool) -> Void
 
@@ -37,7 +37,7 @@ final class QuitCoordinator {
     func requestQuit() -> Bool {
         if flow == .terminating { return true }
         if flow == .idle {
-            gracefulFailures = []
+            gracefulFailures = [:]
             unconfirmedEnvironments = Set(model.environments.map(\.id))
             model.reserveChecksForQuit(true)
             flow = .confirming
@@ -48,14 +48,15 @@ final class QuitCoordinator {
     @discardableResult
     func confirmStopAndQuit() -> Task<Void, Never>? {
         guard flow == .confirming else { return nil }
-        gracefulFailures = []
+        gracefulFailures = [:]
         return begin(force: false)
     }
 
     var canForceStop: Bool {
         guard case .failed(.stop(.guestShutdownRefused(let id))) = flow,
-              gracefulFailures.contains(id), model.checkState == .checked,
-              model.statuses[id]?.vm == .running, model.statuses[id]?.inFlightOperation == nil else { return false }
+              gracefulFailures[id] != nil, model.checkState == .checked,
+              model.statuses[id]?.vm == .running, model.statuses[id]?.inFlightOperation == nil,
+              model.statuses[id]?.runtimeInstanceID == gracefulFailures[id] else { return false }
         return true
     }
 
@@ -84,7 +85,7 @@ final class QuitCoordinator {
     func inspectBeforeContinuing() -> Task<Void, Never>? {
         guard case .failed = flow else { return nil }
         let refusal: Failure?
-        if case .failed(.stop(.guestShutdownRefused(let id))) = flow, gracefulFailures.contains(id) {
+        if case .failed(.stop(.guestShutdownRefused(let id))) = flow, gracefulFailures[id] != nil {
             refusal = .stop(.guestShutdownRefused(id))
         } else { refusal = nil }
         attempt = UUID(); let current = attempt
@@ -94,7 +95,8 @@ final class QuitCoordinator {
             defer { if attempt == current { task = nil } }
             do {
                 guard try await inspect(attempt: current) else { return }
-                if case .stop(.guestShutdownRefused(let id))? = refusal, model.statuses[id]?.vm == .running {
+                if case .stop(.guestShutdownRefused(let id))? = refusal, model.statuses[id]?.vm == .running,
+                   model.statuses[id]?.runtimeInstanceID == gracefulFailures[id] {
                     flow = .failed(.stop(.guestShutdownRefused(id)))
                 } else { flow = .confirming }
             } catch { if attempt == current { flow = .failed(error as? Failure ?? .stop(.invalidRuntimeReply(.malformed))) } }
@@ -124,23 +126,24 @@ final class QuitCoordinator {
                 // At most two distinct targets per confirmed attempt. Never blindly repeat a
                 // completed stop if its VM is running again, or chase an unbounded changing list.
                 guard attempted.count < 2, attempted.insert(environment.id).inserted else { throw Failure.stillRunning }
-                let useForce = force && gracefulFailures.contains(environment.id)
-                if useForce { gracefulFailures.remove(environment.id) }
+                let instance = model.statuses[environment.id]?.runtimeInstanceID
+                let useForce = force && instance != nil && gracefulFailures[environment.id] == instance
+                if useForce { gracefulFailures.removeValue(forKey: environment.id) }
                 model.invalidateStatusForMutation()
-                try await stop(environment.id, force: useForce)
-                gracefulFailures.remove(environment.id)
+                try await stop(environment.id, force: useForce, instance: instance)
+                gracefulFailures.removeValue(forKey: environment.id)
             }
         } catch {
             guard attempt == current else { return }
             if cancelRequested || Task.isCancelled { finishCancel(); return }
             let failure = error as? Failure ?? .stop(.invalidRuntimeReply(.malformed))
-            if case .stop(.guestShutdownRefused(let id)) = failure, gracefulFailures.contains(id) {
+            if case .stop(.guestShutdownRefused(let id)) = failure, gracefulFailures[id] != nil {
                 do {
                     // Consent is offered only after post-refusal inspection. Force itself also
                     // rechecks because the user may leave the warning open for some time.
                     guard try await inspect(attempt: current) else { return }
-                    if model.statuses[id]?.vm != .running {
-                        gracefulFailures.remove(id); flow = .confirming; return
+                    if model.statuses[id]?.vm != .running || model.statuses[id]?.runtimeInstanceID != gracefulFailures[id] {
+                        gracefulFailures.removeValue(forKey: id); flow = .confirming; return
                     }
                 } catch {
                     if attempt == current { flow = .failed(error as? Failure ?? .stop(.invalidRuntimeReply(.malformed))) }
@@ -179,12 +182,16 @@ final class QuitCoordinator {
         })
     }
 
-    private func stop(_ environment: EnvironmentID, force: Bool) async throws {
+    private func stop(_ environment: EnvironmentID, force: Bool, instance: UUID?) async throws {
         flow = .stopping(environment, nil, force: force)
         var accepted: OperationID?
         var completed = false
         var failure: GuesthouseError?
-        let mode: StopMode = force ? .force : .graceful(deadline: .seconds(60))
+        let mode: StopMode
+        if force {
+            guard let instance else { throw Failure.ownership(environment, .ownershipUnproven) }
+            mode = .force(expectedInstanceID: instance)
+        } else { mode = .graceful(deadline: .seconds(60)) }
         do {
             for try await event in model.backend.send(.stopEnvironment(environment, mode)) {
                 try Task.checkCancellation()
@@ -210,7 +217,7 @@ final class QuitCoordinator {
             }
             guard completed else { throw malformed(accepted) }
             if let failure {
-                if !force, accepted != nil, failure == .guestShutdownRefused(environment) { gracefulFailures.insert(environment) }
+                if !force, accepted != nil, let instance, failure == .guestShutdownRefused(environment) { gracefulFailures[environment] = instance }
                 throw Failure.stop(failure)
             }
         } catch let error as Failure { throw error }
@@ -224,7 +231,7 @@ final class QuitCoordinator {
     }
 
     private func finishCancel() {
-        attempt = UUID(); cancelRequested = false; gracefulFailures = []; unconfirmedEnvironments = []
+        attempt = UUID(); cancelRequested = false; gracefulFailures = [:]; unconfirmedEnvironments = []
         flow = .idle; task = nil
         model.reserveChecksForQuit(false)
         terminationDecision(false)
