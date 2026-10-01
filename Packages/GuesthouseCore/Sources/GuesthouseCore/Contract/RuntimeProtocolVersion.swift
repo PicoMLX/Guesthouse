@@ -4,10 +4,10 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
 
     public init(_ rawValue: Int) { self.rawValue = rawValue }
 
-    /// Epoch 17 adds a typed confirmed graceful-shutdown refusal.
-    /// Epoch 16 cannot distinguish that known failure from uncertain shutdown outcomes.
+    /// Epoch 18 binds force-stop to a runtime-issued running-instance identity.
+    /// Epoch 17 cannot bind force consent to an instance across stop/start.
     /// Earlier epochs are not compatible fallbacks; GUI/service upgrade together (ADR 0003).
-    public static let current = RuntimeProtocolVersion(17)
+    public static let current = RuntimeProtocolVersion(18)
 
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
     public var description: String { "protocol \(rawValue)" }

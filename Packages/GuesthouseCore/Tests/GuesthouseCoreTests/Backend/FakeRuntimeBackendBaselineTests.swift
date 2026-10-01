@@ -29,7 +29,7 @@ import Testing
         let phase = ProgressPhase(kind: .stoppingVM)
         await backend.useOperationID(operation, forNext: "stopEnvironment")
         await backend.script("stopEnvironment", .fail(after: [phase], error: .guestNotReachable(environment)))
-        #expect(try await collect(backend.send(.stopEnvironment(environment, .force))) ==
+        #expect(try await collect(backend.send(.stopEnvironment(environment, .force(expectedInstanceID: UUID())))) ==
                 [.accepted(operation), .progress(operation, phase), .failed(operation, .guestNotReachable(environment))])
         #expect(await backend.status(of: environment)?.inFlightOperation == nil)
     }

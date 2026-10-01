@@ -31,8 +31,8 @@ struct QuitSheet: View {
                 HStack { Spacer(); cancelButton.disabled(coordinator.cancelRequested) }
             case .failed(let failure):
                 Text("Guesthouse could not finish quitting").font(.headline)
-                Text(failure.message)
-                Text(failure.recovery).foregroundStyle(.secondary)
+                Text(failure.userMessage)
+                Text(failure.recoveryMessage).foregroundStyle(.secondary)
                 if coordinator.canForceStop {
                     Text("Force-stopping is like pulling the power: unsaved work inside the guest can be lost.").foregroundStyle(.red)
                 }
@@ -57,37 +57,5 @@ struct QuitSheet: View {
     private var cancelButton: some View {
         Button("Cancel") { coordinator.cancelQuit() }
             .keyboardShortcut(.cancelAction).accessibilityLabel("Cancel quitting")
-    }
-}
-
-extension QuitCoordinator.Failure {
-    var message: String {
-        switch self {
-        case .check(.metadataUnavailable(let state)): state.userMessage
-        case .check(.unavailable(let error)), .stop(let error): error.userMessage
-        case .check(.interrupted(let cause)): RuntimeSessionFailure(cause: cause).userMessage
-        case .check: "Guesthouse has not completed a current environment check."
-        case .ownership(_, let reason): reason.userMessage
-        case .unsettled: "An environment operation still has an unknown outcome."
-        case .interrupted(let failure): failure.userMessage
-        case .stillRunning: "A development Mac is still running after the stop operation ended."
-        }
-    }
-    var recovery: String {
-        switch self {
-        case .check(.metadataUnavailable(let state)): state.recoveryMessage
-        case .check(.unavailable(let error)), .stop(let error): error.recoveryMessage
-        case .check(.interrupted(let cause)): RuntimeSessionFailure(cause: cause).recoverySuggestion ?? "Cancel and check the runtime connection."
-        case .interrupted(let failure): failure.recoverySuggestion ?? "Inspect the environment before continuing."
-        default: "Inspect the environment before stopping anything else, or cancel to stay in Guesthouse."
-        }
-    }
-    var canInspect: Bool {
-        switch self {
-        case .check(.metadataUnavailable(let state)): state == .loading || state == .unavailable
-        case .check(.unavailable(let error)), .stop(let error): error.recoveryActions.contains(.inspectState) || error.recoveryActions.contains(.retry)
-        case .check(.interrupted(let cause)): cause == .connectionLost
-        default: true
-        }
     }
 }
