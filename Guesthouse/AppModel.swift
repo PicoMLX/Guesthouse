@@ -38,6 +38,7 @@ final class AppModel {
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var checkEnvironment: EnvironmentID?
     @ObservationIgnored private var checksReservedForQuit = false
 
     init(backend: any RuntimeBackend) {
@@ -221,14 +222,19 @@ final class AppModel {
         if let checkTask { return checkTask }
         let current = UUID()
         generation = current
+        checkEnvironment = nil
         isChecking = true
         checkState = .checkingEnvironment
         statuses = [:]
         let retainedTarget = clearStartFailure && startNeedsInspection ? startingEnvironment : nil
         checkTask = Task { [weak self, backend] in
-            let result = await Self.read(backend, retainedTarget: retainedTarget)
+            let result = await Self.read(backend, retainedTarget: retainedTarget) { [weak self] environment in
+                guard let self, self.generation == current, !Task.isCancelled else { return false }
+                self.checkEnvironment = environment
+                return true
+            }
             guard let self else { return }
-            defer { self.isChecking = false; self.checkTask = nil }
+            defer { self.isChecking = false; self.checkTask = nil; self.checkEnvironment = nil }
             guard self.generation == current else { return }
             guard !Task.isCancelled else { self.checkState = .unavailable(.canceled); return }
             switch result {
@@ -256,7 +262,7 @@ final class AppModel {
                 // Query errors have their own real reply identity, separate from a Start/Stop
                 // and its later inspection. Retired checks cannot publish this record either.
                 if let diagnostic { self.sessionDiagnostics.append(diagnostic) }
-                else { self.recordObservation(.operationFailed(error), id: current, environment: environment) }
+                else { self.recordObservation(Self.readFailureOutcome(error), id: current, environment: environment) }
             case .failure(.interrupted(let cause, let environment)):
                 self.checkState = .interrupted(cause)
                 self.recordObservation(Self.observationOutcome(cause), id: current, environment: environment)
@@ -275,6 +281,7 @@ final class AppModel {
         case .metadataUnavailable, .unavailable, .interrupted: break
         case .checkingEnvironment, .checked:
             recordObservation(Self.observationOutcome(cause), id: isChecking ? observedCheck : UUID(),
+                environment: isChecking ? checkEnvironment : nil,
                 operation: isChecking ? .inspectEnvironment : .runtimeRequest)
             checkState = .interrupted(cause)
         }
@@ -292,10 +299,17 @@ final class AppModel {
     private static func observationOutcome(_ cause: RuntimeSessionFailure.Cause) -> DiagnosticEvent.Outcome {
         switch cause {
         case .connectionLost: .observationFailed(.connectionLost)
-        case .malformedResponse: .operationFailed(.invalidRuntimeReply(.malformed))
-        case .oversizedResponse: .operationFailed(.invalidRuntimeReply(.oversized))
+        case .malformedResponse: .observationFailed(.malformedResponse)
+        case .oversizedResponse: .observationFailed(.oversizedResponse)
         case .protocolMismatch(let service): .operationFailed(.protocolMismatch(client: RuntimeProtocolVersion.current.rawValue, service: service))
         }
+    }
+
+    private static func readFailureOutcome(_ error: GuesthouseError) -> DiagnosticEvent.Outcome {
+        if case .invalidRuntimeReply(let reason) = error {
+            return .observationFailed(reason == .malformed ? .malformedResponse : .oversizedResponse)
+        }
+        return .operationFailed(error)
     }
 
     private struct Snapshot {
@@ -308,9 +322,11 @@ final class AppModel {
         case interrupted(RuntimeSessionFailure.Cause, EnvironmentID?)
     }
 
-    private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil) async -> Result<Snapshot, ReadFailure> {
+    private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil,
+                             queryScope: (EnvironmentID?) -> Bool) async -> Result<Snapshot, ReadFailure> {
         var environment: EnvironmentID?
         do {
+            guard queryScope(nil) else { throw CancellationError() }
             guard case .environments(let inventory) = try await reply(to: .listEnvironments, from: backend),
                   inventory.isValid else { throw ReadFailure.runtime(.invalidRuntimeReply(.malformed)) }
             let environments: [DevelopmentEnvironment]
@@ -322,6 +338,7 @@ final class AppModel {
             var requestedIDs = environments.map(\.id)
             if let retainedTarget, !requestedIDs.contains(retainedTarget) { requestedIDs.append(retainedTarget) }
             for id in requestedIDs {
+                guard queryScope(id) else { throw CancellationError() }
                 environment = id
                 try Task.checkCancellation()
                 guard case .status(let status) = try await reply(to: .environmentStatus(id), from: backend),

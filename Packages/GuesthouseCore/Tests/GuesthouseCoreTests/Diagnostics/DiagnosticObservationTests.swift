@@ -4,6 +4,7 @@ import Testing
 
 struct DiagnosticObservationTests {
     @Test(arguments: [DiagnosticEvent.ObservationFailure.connectionLost,
+                      .malformedResponse, .oversizedResponse,
                       .metadataUnavailable(.loading), .metadataUnavailable(.repairRequired),
                       .metadataUnavailable(.incompatible), .metadataUnavailable(.unavailable)])
     func observationsHaveClosedExplanationsAndExplicitExportIdentity(_ failure: DiagnosticEvent.ObservationFailure) throws {
@@ -11,6 +12,10 @@ struct DiagnosticObservationTests {
             operationID: UUID(), origin: .appObservation)
         #expect(event.message == "Inspect development Mac: " + failure.message && event.recoveryMessage == failure.recoveryMessage)
         #expect(!failure.recoveryMessage.isEmpty && !event.isRuntimeEvent && event.exitStatus == nil)
+        #expect(!event.message.contains("in-flight operation may still be running"))
+        if failure == .malformedResponse || failure == .oversizedResponse {
+            #expect(!failure.recoveryMessage.contains("operation"))
+        }
         #expect(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)) == event)
         var log = DiagnosticLog(); log.append(event)
         #expect(log.text.contains("[App observation \(event.operationID)]"))

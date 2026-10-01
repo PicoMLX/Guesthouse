@@ -13,17 +13,20 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
 
     /// Only closed facts from a read/check; never a RuntimeSessionFailure attachment.
     public enum ObservationFailure: Codable, Hashable, Sendable {
-        case connectionLost
+        case connectionLost, malformedResponse, oversizedResponse
         case metadataUnavailable(RuntimeSavedStateStatus)
         public var message: String {
             switch self {
             case .connectionLost: "Guesthouse lost contact with its runtime service."
+            case .malformedResponse: "The runtime check did not receive a valid response."
+            case .oversizedResponse: "The runtime check's response exceeds the supported size limit."
             case .metadataUnavailable(let state): state.userMessage
             }
         }
         public var recoveryMessage: String {
             switch self {
             case .connectionLost: "Check the runtime connection again. Inspect any unfinished operation before starting new work."
+            case .malformedResponse, .oversizedResponse: "Check the runtime connection again. If the problem repeats, reinstall Guesthouse."
             case .metadataUnavailable(let state): state.recoveryMessage
             }
         }
