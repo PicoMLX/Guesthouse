@@ -90,6 +90,20 @@ import Testing
         #expect(await fake.receivedRequests.allSatisfy { if case .startEnvironment = $0 { false } else { true } })
         #expect(!model.isStarting && model.startFailure == .quitPending)
     }
+    @Test(arguments: [false, true])
+    func quitWhileStartIsPendingRetainsMissingTargetOnlyAfterAcceptance(accepted: Bool) async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), decisions = StartDecisions()
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let start = try #require(model.startEnvironment(environment.id))
+        var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        let quit = QuitCoordinator(model: model, terminationDecision: decisions.record)
+        _ = quit.requestQuit(); let quitting = try #require(quit.confirmStopAndQuit())
+        await fake.setEnvironmentInventory(.available([]))
+        backend.answer((accepted ? [.accepted(operation)] : []) + [.failed(operation, .invalidRequest(.tooManyInFlight))])
+        await start.value; await quitting.value
+        #expect(model.startMayHaveMutated == accepted)
+        #expect((quit.flow == .terminating) == !accepted && decisions.values == (accepted ? [] : [true]))
+    }
     @Test func quitWaitsForAcceptedStartBeforeStoppingAndChecksDoNotInterfere() async throws {
         let fake = await configured(), backend = HeldStartBackend(fake: fake), decisions = StartDecisions()
         let model = AppModel(backend: backend)

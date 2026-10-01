@@ -26,8 +26,8 @@ final class AppModel {
     private(set) var startCancellationReplyReceived = false
     private(set) var startCancellationFailure: StartOperation.Failure?
     @ObservationIgnored private var cancelStartTask: Task<Void, Never>?
-    private(set) var startRequestSent = false
-    var startNeedsInspection: Bool { startRequestSent && (isStarting || startFailure != nil) }
+    private(set) var startMayHaveMutated = false
+    var startNeedsInspection: Bool { startMayHaveMutated && (isStarting || startFailure != nil) }
     private(set) var startPhase: ProgressPhase?
     private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
     private(set) var startFailureDismissed = false
@@ -122,7 +122,7 @@ final class AppModel {
     private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
         isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
         startOperationID = nil; startCanCancel = true; startCancellationRequested = false; startCancellationReplyReceived = false; startCancellationFailure = nil
-        startRequestSent = false
+        startMayHaveMutated = false
         let work = Task { [weak self] in
             guard let self else { return }
             defer { isStarting = false; startTask = nil; startPhase = nil; startOperationID = nil; startCanCancel = false }
@@ -135,13 +135,15 @@ final class AppModel {
             invalidateStatusForMutation()
             // Mark before dispatch, including a lost reply before acceptance. A failed
             // pre-Start query never sent a mutation and needs no target reconciliation.
-            startRequestSent = true
-            startFailure = await StartOperation.run(id, backend: backend,
+            startMayHaveMutated = true
+            let result = await StartOperation.run(id, backend: backend,
                 accepted: { [weak self] operation in
                     self?.startOperationID = operation
                     if self?.startCancellationRequested == true { self?.sendStartCancellation(operation) }
                 }, progress: { [weak self] phase in self?.startPhase = phase },
                 diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
+            startFailure = result.failure
+            startMayHaveMutated = result.mayHaveMutated
             startCanCancel = false
             // A target terminal does not settle the cancellation request. Keep its consumer
             // alive through the actual reply/connection failure before admitting new work.
@@ -215,7 +217,7 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
-                if clearStartFailure, !self.startRequestSent {
+                if clearStartFailure, !self.startMayHaveMutated {
                     self.startFailure = nil
                     self.startingEnvironment = nil
                 } else if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {

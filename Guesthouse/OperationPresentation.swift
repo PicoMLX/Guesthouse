@@ -20,6 +20,12 @@ struct OperationProgressPresentation {
 }
 
 struct RecoveryPresentation {
+    static func missingEnvironmentGuidance(hasFailure: Bool, needsInspection: Bool) -> String? {
+        guard hasFailure else { return nil }
+        return needsInspection
+            ? "Inspect this environment before continuing. If it cannot be located safely, its state remains unknown. Repair for a missing environment is not available in this version."
+            : "Start did not begin. Inspect the current environments before continuing."
+    }
     let message: String
     let actions: [RecoveryAction]
     let outcomeUnknown: Bool

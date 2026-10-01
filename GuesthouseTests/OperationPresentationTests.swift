@@ -115,6 +115,7 @@ import Testing
         await model.checkEnvironments().value
         let resolved = !busy && (state == .stopped || state == .notFound)
         #expect((model.startFailure == nil) == resolved && model.canStart(other.id) == resolved)
+        #expect((RecoveryPresentation.missingEnvironmentGuidance(hasFailure: model.startFailure != nil, needsInspection: model.startNeedsInspection) == nil) == resolved)
         #expect(Array(await fake.receivedRequests.suffix(3)) == [.listEnvironments, .environmentStatus(other.id), .environmentStatus(environment.id)])
     }
     @Test func lostStartReplyBeforeAcceptanceStillRequiresMissingTargetInspection() async {
@@ -134,6 +135,29 @@ import Testing
         let quit = QuitCoordinator(model: model) { decisions.append($0) }
         _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
         #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))) && decisions.isEmpty)
+    }
+    @Test(arguments: [false, true], [false, true])
+    func knownStartRefusalRequiresTargetReconciliationOnlyAfterAcceptance(local: Bool, accepted: Bool) async {
+        let environment = DevelopmentEnvironment(name: "Missing Mac"), other = DevelopmentEnvironment(name: "Other Mac")
+        let operation = OperationID(), fake = FakeRuntimeBackend(), error = GuesthouseError.invalidRequest(.tooManyInFlight)
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        let backend = DiagnosticStartBackend(fake: fake,
+            events: (accepted ? [.accepted(operation)] : []) + (local ? [] : [.failed(operation, error)]),
+            emptyInventoryOnStart: true, localRejection: local ? error : nil)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        await model.startEnvironment(environment.id)?.value
+        #expect(model.startFailure == .runtime(error) && model.startNeedsInspection == accepted)
+        await fake.setEnvironmentInventory(.available([other]))
+        await fake.setStatus(.init(environmentID: other.id, vm: .stopped, readiness: .checking))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .uncertain(reason: .inspectionFailed), readiness: .checking))
+        await model.checkEnvironments().value
+        #expect((model.startFailure == nil) == !accepted && model.canStart(other.id) == !accepted)
+        #expect(await fake.receivedRequests.filter { $0 == .environmentStatus(environment.id) }.count == (accepted ? 3 : 2))
+        var decisions: [Bool] = []
+        let quit = QuitCoordinator(model: model) { decisions.append($0) }
+        _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+        #expect((quit.flow == .terminating) == !accepted && decisions == (accepted ? [] : [true]))
     }
     @Test(arguments: [false, true])
     func diagnosticsAreBoundedAndRejectForeignEnvironment(foreign: Bool) async {
@@ -163,6 +187,7 @@ private nonisolated struct DiagnosticStartBackend: RuntimeBackend {
     let fake: FakeRuntimeBackend
     let events: [RuntimeEvent]
     var emptyInventoryOnStart = false
+    var localRejection: GuesthouseError?
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }
     func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
         guard case .startEnvironment = request else { return fake.send(request) }
@@ -170,7 +195,7 @@ private nonisolated struct DiagnosticStartBackend: RuntimeBackend {
             Task {
                 if emptyInventoryOnStart { await fake.setEnvironmentInventory(.available([])) }
                 for event in events { continuation.yield(event) }
-                continuation.finish()
+                continuation.finish(throwing: localRejection)
             }
         }
     }
