@@ -14,8 +14,11 @@ struct ProcessReport: Sendable {
 /// A facade's release discards temporary responses, but never abandons owned-child reaping.
 final class ProcessRun: Sendable {
     enum WaitFailure: Error { case alreadyWaiting }
+    /// Runtime-only attachment capability; the receipt alone never grants cleanup authority.
+    let ownedChild: OwnedChild
     private let driver: Driver
     init(child: OwnedChild, readers: OutputReaders, input: InputDelivery?, grace: Duration) {
+        ownedChild = child
         driver = Driver(child: child, readers: readers, input: input, grace: grace)
     }
     deinit { let driver = driver; Task { await driver.abandonResponse() } }

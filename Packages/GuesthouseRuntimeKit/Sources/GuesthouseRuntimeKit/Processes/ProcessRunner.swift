@@ -38,7 +38,7 @@ enum ProcessLaunchFailure: Error, Equatable, Sendable {
 }
 
 struct ProcessRunner: Sendable {
-    func run(_ invocation: ProcessInvocation) async throws -> ProcessRun {
+    func run(_ invocation: ProcessInvocation, runID: UUID = UUID()) async throws -> ProcessRun {
         guard !Task.isCancelled else { throw ProcessLaunchFailure.canceled }
         guard invocation.timeout >= .zero, invocation.timeout <= .seconds(86_400),
               invocation.terminationGracePeriod >= .zero, invocation.terminationGracePeriod <= .seconds(60)
@@ -81,7 +81,7 @@ struct ProcessRunner: Sendable {
         let deadline = ContinuousClock.now + invocation.timeout
         do {
             guard !Task.isCancelled else { throw ProcessLaunchFailure.canceled }
-            child = try OwnedChild.spawn(executable: invocation.executable, arguments: invocation.arguments,
+            child = try OwnedChild.spawn(runID: runID, executable: invocation.executable, arguments: invocation.arguments,
                 environment: invocation.environment, workingDirectory: directory,
                 standardInput: stdin?.fileHandleForReading.fileDescriptor ?? nullInput?.fileDescriptor ?? -1,
                 standardOutput: stdout.fileHandleForWriting.fileDescriptor, standardError: stderr.fileHandleForWriting.fileDescriptor)

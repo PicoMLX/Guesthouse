@@ -44,6 +44,7 @@ final class OwnedChild: Sendable {
         var waitForExit: @Sendable (pid_t) -> Result<Void, Failure>
         var reap: @Sendable (pid_t) -> Result<ExitReason, Failure>
         var signal: @Sendable (pid_t, Int32) -> SignalResult
+        var birth: @Sendable (pid_t) -> LiveProcessProbe.Identity = LiveProcessProbe.Reads.readOwnedChildIdentity
 
         static let live = Self(observe: { pid in
             var information = siginfo_t()
@@ -81,13 +82,34 @@ final class OwnedChild: Sendable {
     /// Caller-supplied correlation for a durable intent, not transferable signal authority.
     let runID: UUID
     let processIdentifier: pid_t
+    /// Kernel birth plus the actual spawn inputs, not a later live observation or authority
+    /// to adopt/signal a PID after restart. No arguments or environment values are persisted.
+    struct LaunchIdentity: Codable, Equatable, Sendable {
+        let runID: UUID
+        let pid: Int32
+        let startTime: Date
+        let executablePath: String
+        let argumentsDigest: String
+        var isConsistent: Bool {
+            pid > 0 && startTime.timeIntervalSince1970.isFinite && startTime.timeIntervalSince1970 > 0
+                && executablePath.hasPrefix("/") && !executablePath.utf8.contains(0)
+                && argumentsDigest.hasPrefix("sha256:") && argumentsDigest.utf8.count == 71
+                && argumentsDigest.dropFirst(7).utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+        fileprivate init(runID: UUID, pid: Int32, startTime: Date, executable: URL, arguments: [String]) {
+            self.runID = runID; self.pid = pid; self.startTime = startTime
+            executablePath = executable.path; argumentsDigest = LiveProcessProbe.digest(arguments)
+        }
+    }
+    let launchIdentity: LaunchIdentity?
     private let calls: SystemCalls
     private let state = Mutex(State())
 
-    private init(runID: UUID, processIdentifier: pid_t, calls: SystemCalls) {
+    private init(runID: UUID, processIdentifier: pid_t, calls: SystemCalls, identity: LaunchIdentity?) {
         self.runID = runID
         self.processIdentifier = processIdentifier
         self.calls = calls
+        launchIdentity = identity
     }
 
     /// Completion means only that this exact direct child has been observed and reaped.
@@ -170,7 +192,15 @@ final class OwnedChild: Sendable {
             workingDirectory: workingDirectory,
             descriptors: [standardInput, standardOutput, standardError]
         )
-        let child = OwnedChild(runID: runID, processIdentifier: pid, calls: calls)
+        // Capture before starting the reaper, including a child that exited during spawn.
+        // If the kernel cannot establish birth, retain the child/reaper but publish no identity.
+        let identity: LaunchIdentity?
+        if case .present(let birth) = calls.birth(pid) {
+            let candidate = LaunchIdentity(runID: runID, pid: pid, startTime: birth,
+                                           executable: executable, arguments: arguments)
+            identity = candidate.isConsistent ? candidate : nil
+        } else { identity = nil }
+        let child = OwnedChild(runID: runID, processIdentifier: pid, calls: calls, identity: identity)
         child.startObservation()
         return child
     }
