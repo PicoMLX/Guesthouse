@@ -2,7 +2,7 @@ import GuesthouseCore
 
 /// Typed errors can carry IDs too. Check those before a consumer attributes or retains an event.
 nonisolated enum DiagnosticIdentity {
-    static func matches(_ event: DiagnosticEvent, environment: EnvironmentID) -> Bool {
+    static func matches(_ event: DiagnosticEvent, environment: EnvironmentID?) -> Bool {
         guard event.environmentID == nil || event.environmentID == environment else { return false }
         guard case .operationFailed(let error) = event.outcome else { return true }
         switch error {

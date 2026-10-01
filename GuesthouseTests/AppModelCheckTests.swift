@@ -125,6 +125,45 @@ struct AppModelCheckTests {
         #expect(model.checkState == .unavailable(.unauthorizedCaller))
         #expect(await backend.receivedRequests == [.listEnvironments])
     }
+
+    @Test(arguments: [false, true], [false, true])
+    func terminalQueryFailuresRetainActualIDsAndRejectForeignTargets(statusQuery: Bool, foreign: Bool) async throws {
+        let backend = HeldCheckBackend(), model = AppModel(backend: backend), operation = OperationID()
+        let environment = DevelopmentEnvironment(name: "Saved Mac")
+        let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        if statusQuery {
+            backend.answer([.environments(.available([environment]))]); _ = await sent.next()
+        }
+        let error: GuesthouseError = foreign ? .hostKeyChanged(EnvironmentID())
+            : statusQuery ? .guestNotReachable(environment.id) : .runtimeMissing
+        backend.answer([.failed(operation, error)]); await check.value
+        #expect(model.checkState == .unavailable(foreign ? .invalidRuntimeReply(.malformed) : error))
+        #expect(backend.requests.count == (statusQuery ? 2 : 1) && model.statuses.isEmpty)
+        let expected = DiagnosticEvent(operation: .inspectEnvironment, outcome: .operationFailed(error),
+            operationID: operation.uuid, environmentID: statusQuery ? environment.id : nil)
+        #expect(model.sessionDiagnostics.records.map(\.event) == (foreign ? [] : [expected]))
+        if !foreign {
+            let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics)
+            let text = String(decoding: try #require(export.files["log.txt"]), as: UTF8.self)
+            #expect(text.contains(operation.uuid.uuidString) && text.contains(error.userMessage) && text.contains(error.recoveryMessage))
+        }
+    }
+
+    @Test func aRetiredQueryCannotPublishFailureDiagnosticsAsTheCurrentCheck() async {
+        let backend = HeldCheckBackend(), model = AppModel(backend: backend)
+        let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        model.connectionInterrupted(.connectionLost)
+        backend.answer([.failed(OperationID(), .runtimeMissing)]); await check.value
+        #expect(model.checkState == .interrupted(.connectionLost) && model.sessionDiagnostics.records.isEmpty)
+    }
+
+    @Test func aFailureFollowingAPayloadIsMalformedAndDoesNotRetainTheClaimedError() async {
+        let backend = HeldCheckBackend(), model = AppModel(backend: backend)
+        let check = model.checkEnvironments(); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        backend.answer([.environments(.available([])), .failed(OperationID(), .runtimeMissing)]); await check.value
+        #expect(model.checkState == .unavailable(.invalidRuntimeReply(.malformed)))
+        #expect(model.sessionDiagnostics.records.isEmpty)
+    }
 }
 
 /// Controlled asynchronous replies without timing-based waits or native service access.

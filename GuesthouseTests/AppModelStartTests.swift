@@ -151,20 +151,28 @@ import Testing
         _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
         #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))) && decisions.values.isEmpty)
     }
-    @Test func terminalStartFailureRemainsCopyableAndExportableAfterInspectionFails() async throws {
+    @Test(arguments: [false, true])
+    func terminalStartFailureRemainsCopyableAndExportableAfterInspectionFails(queryRefusal: Bool) async throws {
         let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
         await model.checkEnvironments().value
         let start = try #require(model.startEnvironment(environment.id))
         var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
-        await fake.script("listEnvironments", .disconnect())
+        await fake.script("listEnvironments", queryRefusal ? .fail(error: .unauthorizedCaller) : .disconnect())
         backend.answer([.accepted(operation), .failed(operation, .runtimeMissing)])
         await start.value
-        #expect(model.startFailure == .runtime(.runtimeMissing) && model.checkState == .interrupted(.connectionLost))
+        #expect(model.startFailure == .runtime(.runtimeMissing))
+        #expect(model.checkState == (queryRefusal ? .unavailable(.unauthorizedCaller) : .interrupted(.connectionLost)))
         #expect(model.startMayHaveMutated && !model.canRetryStart(environment.id))
         let expected = DiagnosticEvent(operation: .startEnvironment, outcome: .operationFailed(.runtimeMissing),
             operationID: operation.uuid, environmentID: environment.id)
         #expect(model.startDiagnostics.records.map(\.event) == [expected])
-        #expect(model.sessionDiagnostics.records.map(\.event) == [expected])
+        #expect(model.sessionDiagnostics.records.first?.event == expected)
+        #expect(model.sessionDiagnostics.records.count == (queryRefusal ? 2 : 1))
+        if queryRefusal {
+            #expect(model.sessionDiagnostics.records.last?.event.operation == .inspectEnvironment)
+            #expect(model.sessionDiagnostics.records.last?.event.outcome == .operationFailed(.unauthorizedCaller))
+            #expect(model.sessionDiagnostics.records.last?.event.environmentID == nil)
+        }
         let copied = DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "", selection: [0]) ?? ""
         #expect(copied.contains(GuesthouseError.runtimeMissing.userMessage) && copied.contains(GuesthouseError.runtimeMissing.recoveryMessage))
         let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
