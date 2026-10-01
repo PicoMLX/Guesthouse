@@ -107,7 +107,7 @@ final class AppModel {
 
     func canRetryStart(_ id: EnvironmentID) -> Bool {
         backend.allowsEnvironmentStart && startCancellationFailure == nil
-            && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
+            && !startNeedsInspection && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
             && startFailure?.recoveryActions.contains(.retry) == true
     }
 
@@ -120,7 +120,7 @@ final class AppModel {
     }
 
     private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
-        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
+        isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false
         startOperationID = nil; startCanCancel = true; startCancellationRequested = false; startCancellationReplyReceived = false; startCancellationFailure = nil
         startMayHaveMutated = false
         let work = Task { [weak self] in
@@ -138,6 +138,7 @@ final class AppModel {
             startMayHaveMutated = true
             let result = await StartOperation.run(id, backend: backend,
                 accepted: { [weak self] operation in
+                    self?.startDiagnostics.removeAll()
                     self?.startOperationID = operation
                     if self?.startCancellationRequested == true { self?.sendStartCancellation(operation) }
                 }, progress: { [weak self] phase in self?.startPhase = phase },
@@ -153,7 +154,7 @@ final class AppModel {
             // never retried, and remain visible even if the following check succeeds.
             await startCheck().value
             if startFailure == nil {
-                if checkState != .checked { startFailure = .check(checkState) }
+                if checkState != .checked { startFailure = .inspectionAfterStart(checkState) }
                 else if statuses[id]?.vm != .running { startFailure = .notRunning }
             }
         }
