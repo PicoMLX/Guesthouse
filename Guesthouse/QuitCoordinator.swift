@@ -39,7 +39,7 @@ final class QuitCoordinator {
         if flow == .idle {
             gracefulFailures = [:]
             unconfirmedEnvironments = Set(model.environments.map(\.id))
-            if model.isStarting || model.startFailure != nil, let target = model.startingEnvironment {
+            if model.startNeedsInspection, let target = model.startingEnvironment {
                 unconfirmedEnvironments.insert(target)
             }
             model.reserveChecksForQuit(true)
