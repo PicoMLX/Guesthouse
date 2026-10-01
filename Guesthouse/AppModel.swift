@@ -179,7 +179,7 @@ final class AppModel {
     /// environment to its known target so selection cannot leak another environment's activity.
     @discardableResult
     func recordDiagnostic(_ event: DiagnosticEvent, for environment: EnvironmentID) -> DiagnosticEvent? {
-        guard event.environmentID == nil || event.environmentID == environment else { return nil }
+        guard DiagnosticIdentity.matches(event, environment: environment) else { return nil }
         let scoped = DiagnosticEvent(operation: event.operation, outcome: event.outcome,
             operationID: event.operationID, environmentID: environment)
         sessionDiagnostics.append(scoped)

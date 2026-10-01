@@ -45,7 +45,7 @@ import GuesthouseCore
                           status.inFlightOperation == nil || status.inFlightOperation == accepted else { throw malformed() }
                 case .diagnostic(let event):
                     guard accepted != nil, event.operationID == accepted?.uuid,
-                          event.environmentID == nil || event.environmentID == environment else { throw malformed() }
+                          DiagnosticIdentity.matches(event, environment: environment) else { throw malformed() }
                     diagnostic(event)
                 case .completed(let id):
                     guard id == accepted else { throw malformed() }; terminal = true
