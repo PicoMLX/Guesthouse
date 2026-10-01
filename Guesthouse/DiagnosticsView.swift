@@ -53,7 +53,7 @@ struct DiagnosticsView: View {
                 Button("Copy selected records") {
                     guard let text = DiagnosticsSelection.text(in: history, matching: query, selection: selection) else { return }
                     NSPasteboard.general.clearContents()
-                    if !NSPasteboard.general.setString(text, forType: .string) { outcome = .copyFailed }
+                    outcome = NSPasteboard.general.setString(text, forType: .string) ? nil : .copyFailed
                 }.disabled(selection.isEmpty)
                 Button("Export diagnostics…", action: export).disabled(busy)
                 if saving { ProgressView().controlSize(.small).accessibilityLabel("Saving diagnostics") }
