@@ -57,7 +57,8 @@ import Testing
             .replacingOccurrences(of: different.uuidString, with: original.uuidString).utf8)
         var history = JournalHistory()
         try history.append(JournalRecord(id: operation, environmentID: environment,
-                                         operation: .startEnvironment, timestamp: Date(), outcome: .started))
+                                         operation: error == "guestShutdownRefused" ? .stopEnvironment : .startEnvironment,
+                                         timestamp: Date(), outcome: .started))
         for length in 1...consistent.count {
             #expect(try JournalReplayChunk(Data(consistent.prefix(length)), following: history).truncatedTail)
         }
@@ -76,7 +77,8 @@ import Testing
             .failed(.toolMismatch(tool: .vmRuntime)), .failed(.runtimeMissing)
         ]
         for outcome in outcomes {
-            try checkEveryCut(JournalRecord(id: id, environmentID: environment, operation: .startEnvironment,
+            let operation: JournalOperation = outcome == .failed(.guestShutdownRefused(environment)) ? .stopEnvironment : .startEnvironment
+            try checkEveryCut(JournalRecord(id: id, environmentID: environment, operation: operation,
                                           timestamp: Date(timeIntervalSinceReferenceDate: 1e-20), outcome: outcome))
         }
         for stage in ProvisioningStage.allCases {
