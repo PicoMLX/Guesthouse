@@ -52,6 +52,19 @@ import Testing
         #expect(model.startFailure == nil && model.statuses[environment.id]?.vm == .running)
         #expect(await fake.receivedRequests.filter { if case .startEnvironment = $0 { true } else { false } }.count == 1)
     }
+    @Test func missingEnvironmentRetainsDiagnosticsAndInspectionRecovery() async {
+        let environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID(), fake = FakeRuntimeBackend()
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: .stopped, readiness: .checking))
+        let event = DiagnosticEvent(operation: .startEnvironment, outcome: .started, operationID: operation.uuid, environmentID: environment.id)
+        let backend = DiagnosticStartBackend(fake: fake, events: [.accepted(operation), .diagnostic(event), .completed(operation)], emptyInventoryOnStart: true)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        await model.startEnvironment(environment.id)?.value
+        #expect(model.environments.isEmpty && model.startingEnvironment == environment.id)
+        #expect(model.startDiagnostics.records.map(\.event) == [event])
+        #expect(model.startFailure == .notRunning)
+        #expect(model.startFailure?.recoveryActions.contains(.inspectState) == true)
+    }
     @Test(arguments: [false, true])
     func diagnosticsAreBoundedAndRejectForeignEnvironment(foreign: Bool) async {
         let environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID(), fake = FakeRuntimeBackend()
@@ -79,12 +92,16 @@ private nonisolated struct DiagnosticStartBackend: RuntimeBackend {
     var allowsEnvironmentStart: Bool { fake.allowsEnvironmentStart }
     let fake: FakeRuntimeBackend
     let events: [RuntimeEvent]
+    var emptyInventoryOnStart = false
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }
     func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> {
         guard case .startEnvironment = request else { return fake.send(request) }
         return AsyncThrowingStream { continuation in
-            for event in events { continuation.yield(event) }
-            continuation.finish()
+            Task {
+                if emptyInventoryOnStart { await fake.setEnvironmentInventory(.available([])) }
+                for event in events { continuation.yield(event) }
+                continuation.finish()
+            }
         }
     }
 }
