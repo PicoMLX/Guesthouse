@@ -173,6 +173,7 @@ import Testing
         await model.startEnvironment(environment.id)?.value
         #expect(model.startDiagnostics.records.count == (foreign ? 0 : 256))
         #expect(model.startDiagnostics.discardedCount == (foreign ? 0 : 44))
+        #expect(model.sessionDiagnostics.records.count == (foreign ? 0 : 300))
         if foreign {
             #expect(model.startFailure == .interrupted(.init(cause: .malformedResponse, operationID: operation, mayHaveMutated: true)))
             model.dismissStartFailure()

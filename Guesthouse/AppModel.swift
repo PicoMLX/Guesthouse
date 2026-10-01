@@ -30,6 +30,7 @@ final class AppModel {
     var startNeedsInspection: Bool { startMayHaveMutated && (isStarting || startFailure != nil) }
     private(set) var startPhase: ProgressPhase?
     private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
+    private(set) var sessionDiagnostics = DiagnosticLog(capacity: 500)
     private(set) var startFailureDismissed = false
     private(set) var startFailure: StartOperation.Failure?
     @ObservationIgnored private var startTask: Task<Void, Never>?
@@ -142,7 +143,9 @@ final class AppModel {
                     self?.startOperationID = operation
                     if self?.startCancellationRequested == true { self?.sendStartCancellation(operation) }
                 }, progress: { [weak self] phase in self?.startPhase = phase },
-                diagnostic: { [weak self] event in self?.startDiagnostics.append(event) })
+                diagnostic: { [weak self] event in
+                    if let event = self?.recordDiagnostic(event, for: id) { self?.startDiagnostics.append(event) }
+                })
             startFailure = result.failure
             startMayHaveMutated = result.mayHaveMutated
             startCanCancel = false
@@ -181,6 +184,17 @@ final class AppModel {
             if result.retryAllowed { startCancellationRequested = false }
             startCancellationReplyReceived = true
         }
+    }
+
+    /// Operation consumers validate acceptance/identity before calling. Attribute an omitted
+    /// environment to its known target so selection cannot leak another environment's activity.
+    @discardableResult
+    func recordDiagnostic(_ event: DiagnosticEvent, for environment: EnvironmentID) -> DiagnosticEvent? {
+        guard DiagnosticIdentity.matches(event, environment: environment) else { return nil }
+        let scoped = DiagnosticEvent(operation: event.operation, outcome: event.outcome,
+            operationID: event.operationID, environmentID: environment)
+        sessionDiagnostics.append(scoped)
+        return scoped
     }
 
     /// Dismissing presentation cannot clear uncertainty or permit a new mutation.
