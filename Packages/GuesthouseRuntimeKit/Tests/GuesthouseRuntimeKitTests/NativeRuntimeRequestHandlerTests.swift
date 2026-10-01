@@ -210,7 +210,7 @@ import XPC
         let environment = EnvironmentID()
         let requests: [RuntimeRequest] = [
             .hostPreflight, .environmentStatus(environment), .startEnvironment(environment, StartOptions()),
-            .stopEnvironment(environment, .force), .cancelOperation(OperationID()),
+            .stopEnvironment(environment, .force(expectedInstanceID: UUID())), .cancelOperation(OperationID()),
             .importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")),
         ]
         for request in requests {

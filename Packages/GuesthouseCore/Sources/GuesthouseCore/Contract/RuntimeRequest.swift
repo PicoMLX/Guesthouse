@@ -82,7 +82,9 @@ public struct StartOptions: Codable, Hashable, Sendable {
 public enum StopMode: Codable, Hashable, Sendable {
     case graceful(deadline: Duration)
     /// The GUI must obtain explicit confirmation; this value does not prove it did so.
-    case force
+    /// Runtime must compare this to the currently owned instance before signaling it, and
+    /// refuse missing/changed ownership. A GUI inspection alone is not atomic admission.
+    case force(expectedInstanceID: UUID)
 }
 
 /// Access travels through a bookmark or an authenticated out-of-band descriptor handoff.

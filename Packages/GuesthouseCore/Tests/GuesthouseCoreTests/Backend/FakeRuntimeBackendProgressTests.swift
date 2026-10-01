@@ -86,7 +86,7 @@ import Testing
         let backend = FakeRuntimeBackend()
         await backend.setStatus(status())
         await backend.script("stopEnvironment", .hang)
-        var events = backend.send(.stopEnvironment(environment, .force)).makeAsyncIterator()
+        var events = backend.send(.stopEnvironment(environment, .force(expectedInstanceID: UUID()))).makeAsyncIterator()
         let accepted = try #require(try await events.next())
         guard case .accepted(let id) = accepted else {
             Issue.record("Expected an accepted operation."); return

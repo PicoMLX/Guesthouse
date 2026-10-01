@@ -147,7 +147,7 @@ import Testing
             #expect(try await query.next() == .status(status))
             #expect(try await query.next() == nil)
         }
-        for request in [Self.start, .stopEnvironment(Self.environment, .force),
+        for request in [Self.start, .stopEnvironment(Self.environment, .force(expectedInstanceID: UUID())),
                         .inspectXcode(.init(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app"))] {
             var refused = client.send(request).makeAsyncIterator()
             await #expect(throws: GuesthouseError.invalidRequest(.unsupportedOperation)) { try await refused.next() }

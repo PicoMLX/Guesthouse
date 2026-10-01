@@ -400,7 +400,8 @@ public actor FakeRuntimeBackend: RuntimeBackend {
 
     private func settingOperation(_ id: OperationID?, on status: EnvironmentStatus) -> EnvironmentStatus {
         EnvironmentStatus(environmentID: status.environmentID, vm: status.vm, readiness: status.readiness,
-                          inFlightOperation: id, observed: status.observed, reconciledAt: status.reconciledAt)
+                          inFlightOperation: id, observed: status.observed, reconciledAt: status.reconciledAt,
+                          runtimeInstanceID: status.runtimeInstanceID)
     }
 
     /// Records every accepted operation, including when no status was scripted. Its baseline
