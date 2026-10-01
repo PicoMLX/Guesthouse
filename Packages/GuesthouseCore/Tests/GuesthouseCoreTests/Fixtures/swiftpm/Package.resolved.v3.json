@@ -1,0 +1,41 @@
+{
+  "originHash" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "pins" : [
+    {
+      "identity" : "sharedui",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PicoMLX/SharedUI.git",
+      "state" : {
+        "revision" : "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        "version" : "1.4.0"
+      }
+    },
+    {
+      "identity" : "modelkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PicoMLX/ModelKit",
+      "state" : {
+        "branch" : "main",
+        "revision" : "0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a"
+      }
+    },
+    {
+      "identity" : "swift-collections",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-collections.git",
+      "state" : {
+        "revision" : "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        "version" : "1.1.4"
+      }
+    },
+    {
+      "identity" : "registrykit",
+      "kind" : "registry",
+      "location" : "picomlx.registrykit",
+      "state" : {
+        "version" : "2.0.0"
+      }
+    }
+  ],
+  "version" : 3
+}

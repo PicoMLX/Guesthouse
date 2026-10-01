@@ -1,0 +1,22 @@
+{
+  "pins" : [
+    {
+      "identity" : "sharedui",
+      "kind" : "remoteSourceControl",
+      "location" : "git@github.com:PicoMLX/SharedUI.git",
+      "state" : {
+        "revision" : "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        "version" : "1.4.0"
+      }
+    },
+    {
+      "identity" : "localkit",
+      "kind" : "localSourceControl",
+      "location" : "/Users/dev/LocalKit",
+      "state" : {
+        "revision" : "1111111111111111111111111111111111111111"
+      }
+    }
+  ],
+  "version" : 2
+}
