@@ -33,20 +33,25 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
     public let inFlightOperation: OperationID?
     public let observed: ObservedTuple
     public let reconciledAt: Date?
+    /// Ephemeral runtime-issued identity of a proven owned running instance. Rotate on any
+    /// restart, ownership loss or runtime reconstruction; never derive from environment ID,
+    /// restore from metadata, or reuse merely because a PID/version matches. Nil means unknown.
+    public let runtimeInstanceID: UUID?
 
     public init(environmentID: EnvironmentID, vm: VMState, readiness: Readiness,
                 inFlightOperation: OperationID? = nil, observed: ObservedTuple = ObservedTuple(),
-                reconciledAt: Date? = nil) {
+                reconciledAt: Date? = nil, runtimeInstanceID: UUID? = nil) {
         self.environmentID = environmentID
         self.vm = vm
         self.readiness = readiness
         self.inFlightOperation = inFlightOperation
         self.observed = observed.admittedForWire()
         self.reconciledAt = reconciledAt
+        self.runtimeInstanceID = vm == .running ? runtimeInstanceID : nil
     }
 
     private enum CodingKeys: String, CodingKey {
-        case environmentID, vm, readiness, inFlightOperation, observed, reconciledAt
+        case environmentID, vm, readiness, inFlightOperation, observed, reconciledAt, runtimeInstanceID
     }
 
     /// Apply the same field admission to untrusted wire values as to local probe results.
@@ -58,6 +63,7 @@ public struct EnvironmentStatus: Codable, Hashable, Sendable {
                   readiness: try c.decode(Readiness.self, forKey: .readiness),
                   inFlightOperation: try c.decodeIfPresent(OperationID.self, forKey: .inFlightOperation),
                   observed: try c.decode(ObservedTuple.self, forKey: .observed),
-                  reconciledAt: try c.decodeIfPresent(Date.self, forKey: .reconciledAt))
+                  reconciledAt: try c.decodeIfPresent(Date.self, forKey: .reconciledAt),
+                  runtimeInstanceID: try c.decodeIfPresent(UUID.self, forKey: .runtimeInstanceID))
     }
 }

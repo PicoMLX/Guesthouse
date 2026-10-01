@@ -47,7 +47,7 @@ import Testing
         let backend = FakeRuntimeBackend(), start = OperationID(), stop = OperationID()
         await backend.useOperationID(start, forNext: "startEnvironment")
         await backend.useOperationID(stop, forNext: "stopEnvironment")
-        let stopStream = backend.send(.stopEnvironment(EnvironmentID(), .force))
+        let stopStream = backend.send(.stopEnvironment(EnvironmentID(), .force(expectedInstanceID: UUID())))
         let startStream = backend.send(.startEnvironment(EnvironmentID(), StartOptions()))
         #expect(try await acceptedID(startStream) == start)
         #expect(try await acceptedID(stopStream) == stop)
