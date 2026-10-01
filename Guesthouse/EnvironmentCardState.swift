@@ -23,7 +23,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
         var primary: Bool { switch self { case .repair, .exportWork, .startFresh, .delete: false; default: true } }
         var unavailableReason: String {
             switch self {
-            case .start: "Starting is not connected to this dashboard yet."
+            case .start: "A fresh, idle stopped state is required before starting."
             case .stop: "Stopping from the dashboard is not available yet. Normal Quit offers Stop environments and quit."
             case .openInCodex: "Codex connection has not been configured and verified."
             case .openConsole: "The development Mac console is not available yet."
