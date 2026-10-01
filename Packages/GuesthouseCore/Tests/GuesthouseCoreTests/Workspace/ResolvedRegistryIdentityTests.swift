@@ -17,4 +17,9 @@ import Testing
     func malformedRegistryPinsRejectTheWholeLockfile(_ format: Int, identity: String) throws {
         #expect(throws: ResolvedPackagesError.malformed(.identity)) { try ResolvedPackagesFile.decode(data(identity, format: format)) }
     }
+    @Test(arguments: [2, 3], ["\u{212A}cope.library", "scope.\u{212A}it"])
+    func unicodeThatLowercasesToASCIIIsStillInvalid(_ format: Int, identity: String) throws {
+        #expect(identity.lowercased().allSatisfy { $0.isASCII })
+        #expect(throws: ResolvedPackagesError.malformed(.identity)) { try ResolvedPackagesFile.decode(data(identity, format: format)) }
+    }
 }

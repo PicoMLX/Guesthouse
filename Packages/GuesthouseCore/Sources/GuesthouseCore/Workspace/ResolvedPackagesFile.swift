@@ -63,7 +63,8 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
             guard let identity = PackageIdentity(resolvedIdentity: identityText) else { throw ResolvedPackagesError.malformed(.identity) }
             let kindText = try fields.resolvedValue(String.self, forKey: .kind, field: .kind)
             guard let kind = Pin.Kind(rawValue: kindText) else { throw ResolvedPackagesError.unknownKind }
-            if kind == .registry, !ResolvedPackagesFile.isRegistryIdentity(identity.rawValue) {
+            // Check the input spelling: Unicode case conversion can produce ASCII.
+            if kind == .registry, !ResolvedPackagesFile.isRegistryIdentity(identityText) {
                 throw ResolvedPackagesError.malformed(.identity)
             }
             let location = try fields.resolvedValue(String.self, forKey: .location, field: .location)
