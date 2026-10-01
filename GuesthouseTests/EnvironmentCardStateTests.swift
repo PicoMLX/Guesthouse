@@ -13,7 +13,7 @@ import Testing
         #expect(model.checkState == .checked)
         #expect(model.environments.count <= 2)
         for environment in model.environments {
-            let state = EnvironmentCardState(environment: environment, status: model.statuses[environment.id], checked: true, busy: false)
+            let state = EnvironmentCardState(environment: environment, status: model.statuses[environment.id], checked: true, busy: false, backendAllowsStart: true)
             #expect(state.id == environment.id)
             #expect(EnvironmentCardState.Action.allCases.allSatisfy { !state.reason(for: $0).isEmpty })
             #expect(state.details.first { $0.label == "Disk usage" }?.value == "Not measured")
@@ -30,7 +30,7 @@ import Testing
         let environment = DevelopmentEnvironment(name: "Dev Mac", guestDiskBytes: .max)
         let status = EnvironmentStatus(environmentID: foreign ? EnvironmentID() : environment.id, vm: .running,
             readiness: .ready, observed: ObservedTuple(xcodeBuild: "17F113"))
-        let state = EnvironmentCardState(environment: environment, status: status, checked: foreign, busy: false)
+        let state = EnvironmentCardState(environment: environment, status: status, checked: foreign, busy: false, backendAllowsStart: true)
         #expect(state.statusText == "Current state unknown")
         #expect(state.details.first { $0.label == "Xcode build" }?.value == "Unknown")
         #expect(state.details.first?.value == UInt64.max.formatted() + " bytes")
@@ -40,12 +40,12 @@ import Testing
     @Test func uncertainAndFailedStatesExplainRecoveryWithoutPretendingToCheckForever() {
         let environment = DevelopmentEnvironment(name: "Dev Mac")
         let uncertain = EnvironmentCardState(environment: environment, status: .init(environmentID: environment.id,
-            vm: .uncertain(reason: .ownershipUnproven), readiness: .ready), checked: true, busy: false)
+            vm: .uncertain(reason: .ownershipUnproven), readiness: .ready), checked: true, busy: false, backendAllowsStart: true)
         #expect(uncertain.statusText == "State needs inspection")
         #expect(uncertain.guidance?.contains("Inspect") == true)
         let error = GuesthouseError.hostKeyChanged(environment.id)
         let stopped = EnvironmentCardState(environment: environment, status: .init(environmentID: environment.id,
-            vm: .stopped, readiness: .needsAttention(error)), checked: true, busy: false)
+            vm: .stopped, readiness: .needsAttention(error)), checked: true, busy: false, backendAllowsStart: true)
         #expect(stopped.statusText == "Stopped")
         #expect(stopped.guidance?.contains(error.recoveryMessage) == true)
         #expect(stopped.reason(for: .start) == error.recoveryMessage)

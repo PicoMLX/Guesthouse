@@ -73,7 +73,7 @@ private struct GuesthouseMenu: View {
         Divider()
         Button("Show Guesthouse") { delegate.presentMainWindow() }
         Button("Check environment") { model.checkEnvironments() }
-            .disabled(model.isChecking || quit.flow != .idle)
+            .disabled(model.isChecking || model.isStarting || quit.flow != .idle)
         Divider()
         Button("Quit Guesthouse") { NSApp.terminate(nil) }
         .onAppear {

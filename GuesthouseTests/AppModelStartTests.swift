@@ -18,6 +18,16 @@ import Testing
             .runtime(.runtimeIncompatible), .interrupted(.init(cause: .connectionLost, operationID: operation, mayHaveMutated: true))]
         for failure in failures { #expect(!failure.message.isEmpty && !failure.recoveryActions.isEmpty) }
     }
+    @Test func restrictedBackendNeverEnablesOrSendsStart() async {
+        let fake = await configured(), backend = QueryOnlyBackend(fake: fake)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        #expect(model.statuses[environment.id]?.vm == .stopped)
+        #expect(!backend.allowsEnvironmentStart && !model.canStart(environment.id))
+        #expect(model.startEnvironment(environment.id) == nil)
+        #expect(await fake.receivedRequests == [.listEnvironments, .environmentStatus(environment.id)])
+        let card = EnvironmentCardState(environment: environment, status: model.statuses[environment.id], checked: true, busy: false)
+        #expect(card.startBlockedReason.contains("verified VM provider"))
+    }
     @Test func startInspectsSendsOnceAndInspectsAgain() async throws {
         let fake = await configured(), model = AppModel(backend: fake)
         await model.checkEnvironments().value
@@ -119,6 +129,7 @@ import Testing
 }
 private nonisolated final class HeldStartBackend: RuntimeBackend {
     let fake: FakeRuntimeBackend
+    var allowsEnvironmentStart: Bool { fake.allowsEnvironmentStart }
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }
     let sent: AsyncStream<Void>
     private let signal: AsyncStream<Void>.Continuation
@@ -134,4 +145,10 @@ private nonisolated final class HeldStartBackend: RuntimeBackend {
         let continuation = pending.withLock { state in defer { state = nil }; return state }
         for event in events { continuation?.yield(event) }; continuation?.finish()
     }
+}
+
+private nonisolated struct QueryOnlyBackend: RuntimeBackend {
+    let fake: FakeRuntimeBackend
+    var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { fake.connectionInterruptions }
+    func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error> { fake.send(request) }
 }

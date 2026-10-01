@@ -8,5 +8,13 @@ public protocol RuntimeBackend: Sendable {
     /// Canceling the observer ends observation; create a new backend to establish a new observer.
     var connectionInterruptions: AsyncStream<RuntimeSessionFailure.Cause> { get }
 
+    /// Whether this client configuration can submit Start at all. This is not provider
+    /// verification, live-state admission or permission to bypass the runtime's checks.
+    var allowsEnvironmentStart: Bool { get }
+
     func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error>
+}
+
+extension RuntimeBackend {
+    public var allowsEnvironmentStart: Bool { false }
 }

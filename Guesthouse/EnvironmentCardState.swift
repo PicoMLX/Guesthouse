@@ -47,7 +47,7 @@ struct EnvironmentCardState: Equatable, Identifiable {
     let details: [Detail]
     let startBlockedReason: String
 
-    init(environment: DevelopmentEnvironment, status candidate: EnvironmentStatus?, checked: Bool, busy: Bool) {
+    init(environment: DevelopmentEnvironment, status candidate: EnvironmentStatus?, checked: Bool, busy: Bool, backendAllowsStart: Bool = false) {
         id = environment.id; name = environment.name
         let status = checked && candidate?.environmentID == environment.id ? candidate : nil
         switch status?.vm {
@@ -68,7 +68,8 @@ struct EnvironmentCardState: Equatable, Identifiable {
         } else if status?.vm == .notFound {
             guidance = "Inspect saved metadata and storage. Missing state does not authorize deletion."
         } else { guidance = nil }
-        if busy { startBlockedReason = "Wait for the current check or Quit attempt." }
+        if !backendAllowsStart { startBlockedReason = "Starting is unavailable until a verified VM provider is enabled." }
+        else if busy { startBlockedReason = "Wait for the current check or Quit attempt." }
         else if status == nil { startBlockedReason = "Check the environment before starting." }
         else if status?.inFlightOperation != nil { startBlockedReason = "An operation is in progress." }
         else if status?.vm == .running { startBlockedReason = "Already running." }

@@ -11,7 +11,7 @@ struct DashboardView: View {
             ForEach(model.environments) { environment in
                 EnvironmentCardView(state: EnvironmentCardState(environment: environment,
                     status: model.statuses[environment.id], checked: model.checkState == .checked,
-                    busy: model.isChecking || model.isStarting || quit.flow != .idle),
+                    busy: model.isChecking || model.isStarting || quit.flow != .idle, backendAllowsStart: model.backend.allowsEnvironmentStart),
                     canStart: model.canStart(environment.id), start: { model.startEnvironment(environment.id) })
                 if model.startingEnvironment == environment.id {
                     if model.isStarting { OperationProgressView(phase: model.startPhase, cancellationRequested: model.startCancellationRequested, cancel: model.startCanCancel ? { model.cancelStart() } : nil) }
