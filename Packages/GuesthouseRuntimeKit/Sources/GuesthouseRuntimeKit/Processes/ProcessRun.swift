@@ -118,7 +118,9 @@ final class ProcessRun: Sendable {
             let readers = readers, input = input
             Task { [self] in
                 let closed = await withCheckedContinuation { continuation in
-                    DispatchQueue.global(qos: .utility).async {
+                    // A blocking group wait must not occupy the shared utility callback
+                    // pool: input cleanup/readability callbacks need it to finish draining.
+                    DispatchQueue(label: "GuesthouseRuntimeKit.ProcessRun.drain", qos: .utility).async {
                         readers.waitUntilDrained(by: deadline)
                         continuation.resume(returning: input?.waitUntilClosed(by: deadline) ?? true)
                     }
