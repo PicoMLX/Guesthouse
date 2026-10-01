@@ -17,6 +17,12 @@ struct VerifiedLumeBundle: Hashable, Sendable {
     func matchesVerifiedFiles(in candidate: LumeBundle) -> Bool {
         candidate.url == bundle.url && candidate.fileIdentity == verifiedFileIdentity
     }
+
+    /// Repeat at EACH launch boundary, inside the shared runtime lease. This does not prove
+    /// process cleanup or authorize activation; the caller still owns those prerequisites.
+    func reverified(in storage: RuntimeStorage) throws -> VerifiedLumeBundle {
+        try LumeLaunchValidation.reverify(expected: bundle, identity: verifiedFileIdentity, in: storage)
+    }
 }
 
 extension LumeBundle {
