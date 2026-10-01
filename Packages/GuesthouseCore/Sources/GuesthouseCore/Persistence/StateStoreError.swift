@@ -16,13 +16,14 @@ public enum StateStoreError: Error, Hashable, Sendable, LocalizedError {
 
     /// Logical store areas, never user-selected paths or actual filenames.
     public enum File: Hashable, Sendable, CaseIterable {
-        case stateDirectory, snapshot, journal
+        case stateDirectory, snapshot, journal, runtimeOwnership
 
         var label: String {
             switch self {
             case .stateDirectory: "saved-state folder"
             case .snapshot: "environment snapshot"
             case .journal: "operation journal"
+            case .runtimeOwnership: "runtime ownership record"
             }
         }
     }
