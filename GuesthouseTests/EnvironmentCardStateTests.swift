@@ -18,7 +18,9 @@ import Testing
             #expect(EnvironmentCardState.Action.allCases.allSatisfy { !state.reason(for: $0).isEmpty })
             #expect(state.details.first { $0.label == "Disk usage" }?.value == "Not measured")
             #expect(state.details.first { $0.label == "Accounts" }?.value == "Not checked")
-            #expect(!EnvironmentCardState.Action.delete.primary)
+            #expect(!EnvironmentCardState.Action.delete.primary && !EnvironmentCardState.Action.startFresh.primary)
+            #expect(EnvironmentCardState.Action.stop.primary)
+            #expect(EnvironmentCardState.Action.startFresh.unavailableReason.contains("preserved"))
             #expect(!state.statusText.contains("Ready"))
         }
     }

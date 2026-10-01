@@ -4,30 +4,34 @@ import GuesthouseCore
 /// Presentation only, never runtime admission (MVP-PLAN.md §§1–2, 5; retained #77).
 struct EnvironmentCardState: Equatable, Identifiable {
     enum Action: String, CaseIterable, Identifiable {
-        case start, openInCodex, openConsole, testWorkspace, publishDrafts, repair, exportWork, delete
+        case start, stop, openInCodex, openConsole, testWorkspace, publishDrafts, repair, exportWork, startFresh, delete
         var id: String { rawValue }
         var title: String {
             switch self {
             case .start: "Start"
+            case .stop: "Stop"
             case .openInCodex: "Open in Codex"
             case .openConsole: "Open Mac console"
             case .testWorkspace: "Test workspace"
             case .publishDrafts: "Publish draft PRs"
             case .repair: "Repair…"
             case .exportWork: "Export work…"
+            case .startFresh: "Start fresh…"
             case .delete: "Delete environment…"
             }
         }
-        var primary: Bool { switch self { case .repair, .exportWork, .delete: false; default: true } }
+        var primary: Bool { switch self { case .repair, .exportWork, .startFresh, .delete: false; default: true } }
         var unavailableReason: String {
             switch self {
             case .start: "Starting is not connected to this dashboard yet."
+            case .stop: "Stopping from the dashboard is not available yet. Normal Quit offers Stop environments and quit."
             case .openInCodex: "Codex connection has not been configured and verified."
             case .openConsole: "The development Mac console is not available yet."
             case .testWorkspace: "Workspace testing is not available yet."
             case .publishDrafts: "Publishing draft pull requests is not available yet."
             case .repair: "Guided repair is not available yet. Inspect the environment before continuing."
             case .exportWork: "Work export is not available yet. Saved disks are retained."
+            case .startFresh: "Starting fresh is unavailable until existing work can be reviewed, exported or preserved."
             case .delete: "Deletion is unavailable until work can be reviewed and exported."
             }
         }

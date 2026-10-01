@@ -62,7 +62,7 @@ private struct EnvironmentCardView: View {
                 Menu("More actions") {
                     action(.repair); action(.exportWork)
                     Divider()
-                    action(.delete)
+                    action(.startFresh); action(.delete)
                 }.accessibilityLabel("More actions for \(state.name)")
                 DisclosureGroup("Why actions are unavailable") {
                     ForEach(EnvironmentCardState.Action.allCases) { item in
@@ -77,7 +77,7 @@ private struct EnvironmentCardView: View {
         ForEach(EnvironmentCardState.Action.allCases.filter(\.primary)) { action($0) }
     }
     private func action(_ item: EnvironmentCardState.Action) -> some View {
-        Button(item.title, role: item == .delete ? .destructive : nil) {}.disabled(true)
+        Button(item.title, role: (item == .delete || item == .startFresh) ? .destructive : nil) {}.disabled(true)
             .help(state.reason(for: item))
             .accessibilityLabel("\(item.title), \(state.name)")
             .accessibilityHint(state.reason(for: item))
