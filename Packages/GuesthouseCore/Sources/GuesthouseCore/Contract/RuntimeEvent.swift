@@ -31,8 +31,9 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
         }
     }
 
-    /// Only this explicit case can enter DiagnosticLog. Consumers must not stringify other
-    /// events or infer operation completion from diagnostic presentation alone.
+    /// Extract only an explicit diagnostic payload; never stringify other events. An owning
+    /// operation may map a validated terminal GuesthouseError to a DiagnosticEvent. Diagnostic
+    /// presentation alone never establishes operation completion or live environment state.
     public var diagnosticEvent: DiagnosticEvent? {
         if case .diagnostic(let event) = self { event } else { nil }
     }
