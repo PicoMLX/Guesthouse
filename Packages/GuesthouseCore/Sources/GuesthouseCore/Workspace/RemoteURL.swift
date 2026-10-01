@@ -40,9 +40,15 @@ public struct RemoteURL: Hashable, Sendable, CustomStringConvertible {
             // port, query, fragment, or user other than SSH's `git` names something else.
             // SSH remotes must name GitHub's `git` account; without it SSH would use the guest
             // account and every clone or push would fail.
-            guard ["https", "ssh"].contains(scheme), components.port == nil, components.query == nil, components.fragment == nil,
+            guard ["https", "ssh"].contains(scheme), !urlHost.isEmpty, components.port == nil, components.query == nil, components.fragment == nil,
                   components.password == nil, scheme == "https" ? components.user == nil : components.user == "git"
             else { return nil }
+            // URLComponents reports nil for empty and overflowing ports. Require the raw
+            // authority to contain exactly the expected account and host before normalizing.
+            guard let delimiter = string.range(of: "://") else { return nil }
+            let authority = string[delimiter.upperBound...].prefix { !"/?#".contains($0) }
+            let expectedAuthority = (scheme == "ssh" ? "git@" : "") + urlHost
+            guard authority.lowercased() == expectedAuthority.lowercased() else { return nil }
             host = urlHost
             path = components.path
             guard path.hasPrefix("/") else { return nil }

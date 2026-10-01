@@ -32,6 +32,11 @@ import Testing
             catch DecodingError.dataCorrupted(let context) { #expect(!context.debugDescription.contains(marker)) }
         }
     }
+    @Test(arguments: ["https://github.com:/Org/Repo", "ssh://git@github.com:/Org/Repo", "https://github.com:18446744073709551616/Org/Repo", "ssh://git@github.com:18446744073709551616/Org/Repo", "https:///Org/Repo", "ssh://git@/Org/Repo"])
+    func refusesEmptyHostsAndPortsEvenWhenURLComponentsReportsNoPort(_ value: String) throws {
+        #expect(RemoteURL(value) == nil)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(RemoteURL.self, from: JSONEncoder().encode(value)) }
+    }
     @Test func ownerAndRepositoryComponentsHaveSeparateBoundedAlphabets() {
         #expect(RemoteURL("https://github.com/Org-Name/repo_name.v2") != nil)
         #expect(RemoteURL("https://github.com/" + String(repeating: "o", count: 39) + "/Repo") != nil)
