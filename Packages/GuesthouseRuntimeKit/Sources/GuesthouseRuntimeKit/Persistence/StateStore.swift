@@ -116,6 +116,12 @@ public actor StateStore {
         guard existing.storageSelection == snapshot.storageSelection || selectingStorage else {
             throw StateStoreError.storageSelectionChanged
         }
+        // An ordinary save must not make unknown prior placement look like fresh setup.
+        // Removing this last evidence requires explicit inspected recovery/discard, not
+        // an empty intermediate snapshot followed by selecting the current volume.
+        guard existing.storageSelection != nil || existing.environments.isEmpty || !snapshot.environments.isEmpty else {
+            throw StateStoreError.storageSelectionChanged
+        }
         try anchor.withDescriptor { directory in
             // One fixed exclusive temporary bounds interrupted-save debris. An existing entry
             // requires explicit repair; never collect or overwrite evidence from another attempt.

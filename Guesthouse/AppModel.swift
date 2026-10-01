@@ -26,6 +26,8 @@ final class AppModel {
     private(set) var startCancellationReplyReceived = false
     private(set) var startCancellationFailure: StartOperation.Failure?
     @ObservationIgnored private var cancelStartTask: Task<Void, Never>?
+    private(set) var startRequestSent = false
+    var startNeedsInspection: Bool { startRequestSent && (isStarting || startFailure != nil) }
     private(set) var startPhase: ProgressPhase?
     private(set) var startDiagnostics = DiagnosticLog(capacity: 256)
     private(set) var sessionDiagnostics = DiagnosticLog(capacity: 500)
@@ -121,6 +123,7 @@ final class AppModel {
     private func beginStart(_ id: EnvironmentID) -> Task<Void, Never> {
         isStarting = true; startingEnvironment = id; startPhase = nil; startFailure = nil; startFailureDismissed = false; startDiagnostics.removeAll()
         startOperationID = nil; startCanCancel = true; startCancellationRequested = false; startCancellationReplyReceived = false; startCancellationFailure = nil
+        startRequestSent = false
         let work = Task { [weak self] in
             guard let self else { return }
             defer { isStarting = false; startTask = nil; startPhase = nil; startOperationID = nil; startCanCancel = false }
@@ -131,6 +134,9 @@ final class AppModel {
                 startFailure = checkState == .checked ? .stateChanged : .check(checkState); return
             }
             invalidateStatusForMutation()
+            // Mark before dispatch, including a lost reply before acceptance. A failed
+            // pre-Start query never sent a mutation and needs no target reconciliation.
+            startRequestSent = true
             startFailure = await StartOperation.run(id, backend: backend,
                 accepted: { [weak self] operation in
                     self?.startOperationID = operation
@@ -211,7 +217,7 @@ final class AppModel {
         isChecking = true
         checkState = .checkingEnvironment
         statuses = [:]
-        let retainedTarget = clearStartFailure && startFailure != nil ? startingEnvironment : nil
+        let retainedTarget = clearStartFailure && startNeedsInspection ? startingEnvironment : nil
         checkTask = Task { [weak self, backend] in
             let result = await Self.read(backend, retainedTarget: retainedTarget)
             guard let self else { return }
@@ -223,7 +229,10 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
-                if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
+                if clearStartFailure, !self.startRequestSent {
+                    self.startFailure = nil
+                    self.startingEnvironment = nil
+                } else if clearStartFailure, let id = self.startingEnvironment, let status = snapshot.statuses[id], status.inFlightOperation == nil {
                     switch status.vm {
                     case .stopped, .notFound: self.startFailure = nil
                     case .running:
