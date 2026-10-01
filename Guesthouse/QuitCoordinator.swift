@@ -26,6 +26,7 @@ final class QuitCoordinator {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var attempt = UUID()
     @ObservationIgnored private var gracefulFailures: Set<EnvironmentID> = []
+    @ObservationIgnored private var unconfirmedEnvironments: Set<EnvironmentID> = []
     @ObservationIgnored private let terminationDecision: @MainActor (Bool) -> Void
 
     init(model: AppModel, terminationDecision: @escaping @MainActor (Bool) -> Void) {
@@ -37,6 +38,7 @@ final class QuitCoordinator {
         if flow == .terminating { return true }
         if flow == .idle {
             gracefulFailures = []
+            unconfirmedEnvironments = Set(model.environments.map(\.id))
             model.reserveChecksForQuit(true)
             flow = .confirming
         }
@@ -162,11 +164,19 @@ final class QuitCoordinator {
 
     private func validateInspection() throws {
         guard model.checkState == .checked else { throw Failure.check(model.checkState) }
+        // Saved cards are not live inventory. Omission cannot confirm a previously seen VM
+        // stopped, including after a completed stop or while waiting for force consent.
+        guard unconfirmedEnvironments.isSubset(of: Set(model.environments.map(\.id))) else {
+            throw Failure.check(.unavailable(.invalidRuntimeReply(.malformed)))
+        }
         for environment in model.environments {
             guard let status = model.statuses[environment.id] else { throw Failure.check(.unavailable(.invalidRuntimeReply(.malformed))) }
             if let operation = status.inFlightOperation { throw Failure.unsettled(operation) }
             if case .uncertain(let reason) = status.vm { throw Failure.ownership(environment.id, reason) }
         }
+        unconfirmedEnvironments = Set(model.environments.compactMap {
+            model.statuses[$0.id]?.vm == .running ? $0.id : nil
+        })
     }
 
     private func stop(_ environment: EnvironmentID, force: Bool) async throws {
@@ -214,7 +224,7 @@ final class QuitCoordinator {
     }
 
     private func finishCancel() {
-        attempt = UUID(); cancelRequested = false; gracefulFailures = []
+        attempt = UUID(); cancelRequested = false; gracefulFailures = []; unconfirmedEnvironments = []
         flow = .idle; task = nil
         model.reserveChecksForQuit(false)
         terminationDecision(false)
