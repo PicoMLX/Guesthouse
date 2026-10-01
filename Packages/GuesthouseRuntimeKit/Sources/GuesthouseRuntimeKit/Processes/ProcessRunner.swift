@@ -5,6 +5,9 @@ import GuesthouseCore
 /// this is not a GUI request, root-containment check, or provider verification (MVP-PLAN.md §3).
 struct ProcessInvocation: Sendable {
     enum StandardInput: Sendable { case none, data(Data) }
+    /// Opt-in launch history, armed by OwnedChild before user code runs. This never
+    /// settles an operation or replaces its actual retained owner/inspection policy.
+    enum Observation: Sendable { case ordinary, forkHistory }
     let executable: URL
     var arguments: [String] = []
     var environment: [String: String] = [:]
@@ -14,6 +17,7 @@ struct ProcessInvocation: Sendable {
     var terminationGracePeriod: Duration = .seconds(5)
     var maximumOutputBytes = 0
     var capturing: Set<OutputReaders.Kind> = []
+    var observation: Observation = .ordinary
 }
 
 enum ProcessLaunchFailure: Error, Equatable, Sendable {
@@ -81,7 +85,8 @@ struct ProcessRunner: Sendable {
         let deadline = ContinuousClock.now + invocation.timeout
         do {
             guard !Task.isCancelled else { throw ProcessLaunchFailure.canceled }
-            child = try OwnedChild.spawn(runID: runID, executable: invocation.executable, arguments: invocation.arguments,
+            child = try OwnedChild.spawn(runID: runID, observingForks: invocation.observation == .forkHistory,
+                executable: invocation.executable, arguments: invocation.arguments,
                 environment: invocation.environment, workingDirectory: directory,
                 standardInput: stdin?.fileHandleForReading.fileDescriptor ?? nullInput?.fileDescriptor ?? -1,
                 standardOutput: stdout.fileHandleForWriting.fileDescriptor, standardError: stderr.fileHandleForWriting.fileDescriptor)
