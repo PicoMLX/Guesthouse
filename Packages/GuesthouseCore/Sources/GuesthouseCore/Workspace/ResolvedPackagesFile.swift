@@ -63,6 +63,9 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
             guard let identity = PackageIdentity(resolvedIdentity: identityText) else { throw ResolvedPackagesError.malformed(.identity) }
             let kindText = try fields.resolvedValue(String.self, forKey: .kind, field: .kind)
             guard let kind = Pin.Kind(rawValue: kindText) else { throw ResolvedPackagesError.unknownKind }
+            if kind == .registry, !ResolvedPackagesFile.isRegistryIdentity(identity.rawValue) {
+                throw ResolvedPackagesError.malformed(.identity)
+            }
             let location = try fields.resolvedValue(String.self, forKey: .location, field: .location)
             // Syntactic Unix path check only; no host inspection or rewriting.
             if kind == .localSourceControl, !location.hasPrefix("/") { throw ResolvedPackagesError.malformed(.location) }
@@ -84,6 +87,27 @@ public struct ResolvedPackagesFile: Hashable, Sendable {
             version = try fields.resolvedString(forKey: .version, field: .semanticVersion)
             branch = try fields.resolvedString(forKey: .branch, field: .branch)
         }
+    }
+
+    /// SwiftPM registry scope (1...39) and package name (1...100), separated by one dot.
+    /// Names additionally allow underscores; neither part allows adjacent/edge punctuation.
+    private static func isRegistryIdentity(_ text: String) -> Bool {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return false }
+        func valid(_ part: Substring, limit: Int, underscore: Bool) -> Bool {
+            guard (1...limit).contains(part.utf8.count) else { return false }
+            var followsPunctuation = true
+            for character in part {
+                guard character.isASCII else { return false }
+                if character.isLetter || character.isNumber { followsPunctuation = false }
+                else if character == "-" || (underscore && character == "_") {
+                    guard !followsPunctuation else { return false }
+                    followsPunctuation = true
+                } else { return false }
+            }
+            return !followsPunctuation
+        }
+        return valid(parts[0], limit: 39, underscore: false) && valid(parts[1], limit: 100, underscore: true)
     }
 
     /// SwiftPM's TSCUtility.Version parser accepts leading zeros and empty
