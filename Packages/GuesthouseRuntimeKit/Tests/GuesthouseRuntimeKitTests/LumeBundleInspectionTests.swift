@@ -87,6 +87,22 @@ import Testing
         #expect(try Data(contentsOf: preserved) == Data("changed!".utf8))
     }
 
+    @Test func snapshotRejectsAnIntermediateReleaseLinkWithUnchangedBundleFiles() throws {
+        let f = try Fixture()
+        try f.bundle()
+        let bundle = LumeBundle(url: f.app)
+        let before = try #require(bundle.fileIdentity)
+        let preserved = f.base.appending(path: "preserved-release")
+        try FileManager.default.moveItem(at: f.release, to: preserved)
+        try FileManager.default.createSymbolicLink(at: f.release, withDestinationURL: preserved)
+        var info = stat()
+        try #require(lstat(f.app.path, &info) == 0)
+        #expect(LumeBundleFileIdentity.Item(info) == before.bundle)
+        #expect(bundle.fileIdentity == nil)
+        #expect(throws: StorageFailure.unsafeStructure) { _ = try LumeBundle.locate(in: f.storage) }
+        #expect(try Data(contentsOf: preserved.appending(path: "lume.app/Contents/MacOS/lume")) == Data("original".utf8))
+    }
+
     @Test(arguments: LumeVerificationError.allCases)
     func failuresCarryOnlyOwnedActionablePresentation(_ failure: LumeVerificationError) throws {
         #expect(failure.errorDescription == failure.userMessage)

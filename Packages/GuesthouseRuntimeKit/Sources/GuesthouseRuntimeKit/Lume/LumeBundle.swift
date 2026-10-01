@@ -17,7 +17,7 @@ struct LumeBundleFileIdentity: Hashable, Sendable {
             owner = info.st_uid
         }
     }
-    let bundle, contents, executables, infoPlist, executable: Item
+    let release, bundle, contents, executables, infoPlist, executable: Item
 }
 
 /// Runtime-only, read-only discovery migrated from #83/#86. No installation or launch API.
@@ -33,12 +33,15 @@ struct LumeBundle: Hashable, Sendable {
     /// alone misses same-inode writes and replacement below Contents. Full nested-code
     /// validation and serialized immediate pre-launch revalidation still belong to later work.
     var fileIdentity: LumeBundleFileIdentity? {
-        guard let bundle = Self.item(url, kind: S_IFDIR),
+        let parent = url.deletingLastPathComponent()
+        guard (try? StorageProtection.verify(parent)) != nil,
+              let release = Self.item(parent, kind: S_IFDIR),
+              let bundle = Self.item(url, kind: S_IFDIR),
               let contents = Self.item(contents, kind: S_IFDIR),
               let executables = Self.item(executables, kind: S_IFDIR),
               let infoPlist = Self.item(infoPlist, kind: S_IFREG),
               let executable = Self.item(executable, kind: S_IFREG) else { return nil }
-        return LumeBundleFileIdentity(bundle: bundle, contents: contents, executables: executables,
+        return LumeBundleFileIdentity(release: release, bundle: bundle, contents: contents, executables: executables,
                                       infoPlist: infoPlist, executable: executable)
     }
 
