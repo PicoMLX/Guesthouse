@@ -95,7 +95,23 @@ The only options are version and create/detached-run/attach help, with no stdin,
 five-second timeout, one-second termination grace and bounded stdout. This boundary
 has no GUI/XPC consumer. Refusal tests use missing/unsigned fixtures; the historical
 pin remains rejected, so no verified candidate launch happy path is claimed. The
-complete bounded probe, typed reply/diagnostics and actual candidate execution
+complete bounded probe, typed XPC reply and actual candidate execution
 remain separate work. No provider, installer,
 wrapper, or VM is activated, and no metadata is cleared automatically on return,
 timeout, cancellation or a delivered signal.
+
+`inspectLumeProbeResponse` explicitly completes an already owned fixed launch. It
+matches the protected record, current epoch and exact live child before waiting,
+then rechecks ownership after waiting. Only complete, bounded UTF-8 responses are
+interpreted; version text must match the pin exactly, including its components.
+Help results expose advertised options only, with no VNC, Stop or GPU proof.
+Raw bytes never enter diagnostic events, errors, metadata or exports. Diagnostics
+use the persisted operation UUID and no fabricated environment identity (MVP §3).
+
+A parsed response and zero exit status still cannot produce success: explicit live
+no-fork inspection and atomic idle publication must finish first. Failed responses,
+cancellation, timeout, ordinary/forked children, foreign receipts, restart and
+publication uncertainty keep the launch blocked. `LumeProbeResponseTests` uses real
+benign native processes and actual persisted ownership, with no verifier override
+or synthetic cleanup proof. This completion boundary grants no launch authority;
+production launches still require the existing strict fixed-launch boundary.
