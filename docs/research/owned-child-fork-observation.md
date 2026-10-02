@@ -81,7 +81,21 @@ settlement. These are shared runner/lifecycle prerequisites under MVP-PLAN.md
 
 This history remains attached to a live child owner, never persisted as reusable
 proof. Forked launches and restart recovery still require genuine reconciliation;
-provider inventory and repair remain unfinished. The service-owned fixed launch,
-immediate serialized revalidation and bounded probe remain separate work. No provider, installer,
+provider inventory and repair remain unfinished.
+
+StateStore's internal fixed-launch boundary checks ownership and protected writable
+paths, then performs strict bundle verification before publishing intent. It repeats
+complete verification/coherence and writable-path checks after publication, and
+uses the same synchronous runner spawner without another actor suspension before
+attaching the actual child. Failed attachment retains that owner and requests only
+direct-child termination; signals never settle metadata. Startup ownership is
+scheduled before synchronous return, even if the facade is dropped.
+
+The only options are version and create/detached-run/attach help, with no stdin,
+five-second timeout, one-second termination grace and bounded stdout. This boundary
+has no GUI/XPC consumer. Refusal tests use missing/unsigned fixtures; the historical
+pin remains rejected, so no verified candidate launch happy path is claimed. The
+complete bounded probe, typed reply/diagnostics and actual candidate execution
+remain separate work. No provider, installer,
 wrapper, or VM is activated, and no metadata is cleared automatically on return,
 timeout, cancellation or a delivered signal.

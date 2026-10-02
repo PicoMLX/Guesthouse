@@ -42,7 +42,24 @@ enum ProcessLaunchFailure: Error, Equatable, Sendable {
 }
 
 struct ProcessRunner: Sendable {
+    struct Spawned: Sendable {
+        let run: ProcessRun
+        let deadline: ContinuousClock.Instant
+        let input: Data?
+        func start() async { await run.start(deadline: deadline, input: input) }
+    }
+
     func run(_ invocation: ProcessInvocation, runID: UUID = UUID()) async throws -> ProcessRun {
+        let spawned = try spawn(invocation, runID: runID)
+        await spawned.start()
+        if Task.isCancelled { await spawned.run.terminate(gracePeriod: invocation.terminationGracePeriod) }
+        return spawned.run
+    }
+
+    /// Same spawner/driver, with no suspension through launch and owner transfer. Runtime
+    /// actors may persist the actual child before their next hop. Startup/deadline ownership
+    /// is already scheduled even if attachment fails or the caller drops this value.
+    func spawn(_ invocation: ProcessInvocation, runID: UUID = UUID()) throws -> Spawned {
         guard !Task.isCancelled else { throw ProcessLaunchFailure.canceled }
         guard invocation.timeout >= .zero, invocation.timeout <= .seconds(86_400),
               invocation.terminationGracePeriod >= .zero, invocation.terminationGracePeriod <= .seconds(60)
@@ -99,8 +116,7 @@ struct ProcessRunner: Sendable {
         try? stdout.fileHandleForWriting.close(); try? stderr.fileHandleForWriting.close()
         try? stdin?.fileHandleForReading.close(); try? nullInput?.close()
         let run = ProcessRun(child: child, readers: readers, input: delivery, grace: invocation.terminationGracePeriod)
-        await run.start(deadline: deadline, input: data)
-        if Task.isCancelled { await run.terminate(gracePeriod: invocation.terminationGracePeriod) }
-        return run
+        run.scheduleStart(deadline: deadline, input: data)
+        return Spawned(run: run, deadline: deadline, input: data)
     }
 }
