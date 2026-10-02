@@ -31,6 +31,7 @@ import Testing
         #expect(!text.contains(other.description.lowercased()) && !text.contains(otherOperation.uuidString.lowercased()))
         #expect(text.contains(selectedOperation.uuidString.lowercased()) && text.contains(globalOperation.uuidString.lowercased()))
         let manifest = try Self.object("manifest.json", in: result)
+        #expect(manifest["schemaVersion"] as? Int == 1)
         #expect(manifest["recordCount"] as? Int == 2 && manifest["discardedCount"] as? Int == 1)
         #expect(Set(manifest.keys) == ["schemaVersion", "historyNotice", "exclusions", "selectedEnvironmentIDs", "eventEnvironmentIDs", "recordCount", "discardedCount"])
         let global = try DiagnosticsExportBuilder.build(log: log, environmentIDs: [])

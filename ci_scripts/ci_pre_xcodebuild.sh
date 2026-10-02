@@ -28,3 +28,12 @@ for manifest in "${package_manifests[@]}"; do
     swift test --package-path "${package_directory}" -Xswiftc -warnings-as-errors \
         -Xcc -Wall -Xcc -Wextra -Xcc -Werror
 done
+
+# The shared Xcode Test action is Debug. Exercise the actual GUI launch factory in
+# Release as well, so moving a simulation override outside DEBUG cannot pass CI.
+client_package_directory="Packages/GuesthouseClientKit"
+if [[ -f "${client_package_directory}/Package.swift" ]]; then
+    printf 'Testing %s in Release with warnings treated as errors\n' "${client_package_directory}"
+    swift test --package-path "${client_package_directory}" --configuration release \
+        -Xswiftc -warnings-as-errors -Xcc -Wall -Xcc -Wextra -Xcc -Werror
+fi
