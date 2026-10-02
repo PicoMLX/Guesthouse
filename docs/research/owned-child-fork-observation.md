@@ -115,3 +115,16 @@ publication uncertainty keep the launch blocked. `LumeProbeResponseTests` uses r
 benign native processes and actual persisted ownership, with no verifier override
 or synthetic cleanup proof. This completion boundary grants no launch authority;
 production launches still require the existing strict fixed-launch boundary.
+
+StateStore's internal `probeLume` retains one physical-root lease around the entire
+version/create/detached-run/attach inspection. It reuses the fixed strict launcher
+and actual inspected completion directly, with no nested acquisition or second
+writer. Every step must settle before another starts; any refusal stops the sequence.
+Cancellation is checked before and after each step. All three help surfaces must
+advertise storage for the aggregate storage advertisement to be true.
+
+`LumeProbeSequenceTests` exercises sequencing with real benign owned children and
+refusal at the production entry. These fixtures grant no provider verification
+authority. The signed candidate happy path remains unvalidated while the current
+pin is rejected. Typed XPC wiring, actual candidate execution and fork/restart
+reconciliation remain separate work; the aggregate never denotes provider readiness.
