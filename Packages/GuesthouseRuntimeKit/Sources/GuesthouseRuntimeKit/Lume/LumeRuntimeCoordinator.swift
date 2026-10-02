@@ -22,15 +22,15 @@ private enum LumeRuntimeLeaseContext {
 /// Use `shared` for production. This is not a second metadata writer or a cross-process lock:
 /// the service must first own its existing StateStore before admitting managed mutations.
 ///
-/// Returning/throwing releases the lease. Never return while a launched child or descendant
-/// may still use the runtime: a timeout, canceled waiter or delivered signal is not quiescence.
-/// Provider execution remains disabled pending the ownership/restart proof in #84/#82; this
-/// slice does not resolve that finding or authorize a process launch. A future provider owner
-/// must retain authority beyond the caller and reconcile unknown outcomes before replacement.
+/// Returning/throwing releases only this in-process lease, never process-lifetime authority.
+/// StateStore's internal launch boundary first persists intent and retains the actual child;
+/// its separate ownership fence blocks probes/repair afterward until explicit inspection.
+/// Timeout, cancellation and signals never clear it. The bounded diagnostic remains unwired;
+/// production provider mutations and fork/restart reconciliation remain blocked by #84/#82.
 ///
 /// Lume writes configuration even for help commands, and a verified app bundle must not be
 /// replaced between verification and launch. Probes and every future install, update, repair,
-/// or removal operation therefore share this coordinator and hold it for their whole operation.
+/// or removal operation therefore share this coordinator and the StateStore ownership fence.
 /// Processes running independently as the signed-in host user are outside Guesthouse's
 /// containment boundary. These rules implement MVP-PLAN.md §3 ("Sandbox and XPC boundary"
 /// and "Local storage") and §4 ("Runtime delivery and console").
