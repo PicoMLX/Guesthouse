@@ -47,6 +47,19 @@ final class StateDirectoryAnchor {
 
     func storageDestination() throws -> URL { try storage.location(for: .vms) }
 
+    func verifiedProbeStorage() throws(StateStoreError) -> RuntimeStorage {
+        try verifyCurrent()
+        return storage
+    }
+
+    /// Called synchronously on the StateStore executor while its lifetime lock remains held.
+    /// Keep closed storage failures intact; candidate setup is not a metadata-save failure.
+    func prepareLumeProbeConfiguration() throws {
+        try verifyCurrent()
+        try storage.prepareLumeProbeConfiguration()
+        try verifyCurrent()
+    }
+
     /// Retains #57's startup barriers even for already-visible directories left by an interrupted
     /// preparation. Call before accepting store operations; there is no cached "already durable"
     /// flag. This flushes the state directory and its ancestry, not other managed storage areas.
