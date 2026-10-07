@@ -11,6 +11,7 @@ public actor StateStore {
     private let hooks: StateStoreHooks
     private let serviceEpoch = UUID()
     private var lumePublicationUncertain = false
+    private var lumeOwnedChild: OwnedChild?
     private var selectingStorage = false
     private var canSave = false
     private var snapshotWasPresent = false
@@ -161,6 +162,28 @@ public actor StateStore {
     }
 
     private func requireLumeAvailability(_ anchor: StateDirectoryAnchor) throws -> LumeRuntimeOwnership {
+        let saved = try readLumeOwnership(anchor)
+        guard saved.intent == nil else { throw LumeLaunchOwnershipFailure.inspectionRequired }
+        return saved
+    }
+
+    /// Attach only a child constructed by the existing spawner to this owner's exact attempt.
+    /// Do this even after cancellation: effects already happened. Neither attachment, caller
+    /// return nor direct-child reaping settles the durable intent or proves descendants quiet.
+    func attachOwnedLumeChild(_ child: OwnedChild, to intent: LumeLaunchIntent) throws {
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        let saved = try readLumeOwnership(anchor)
+        guard saved.intent == intent, intent.serviceEpoch == serviceEpoch,
+              saved.child == nil, lumeOwnedChild == nil,
+              child.runID == intent.attemptID, let identity = child.launchIdentity,
+              identity.isConsistent else { throw LumeLaunchOwnershipFailure.inspectionRequired }
+        // Keep actual authority even if the attachment's publication fails. The previous
+        // intent already blocks restart; failure never grants permission to replace/retry.
+        lumeOwnedChild = child
+        try publishLumeOwnership(LumeRuntimeOwnership(root: saved.root, intent: intent, child: identity), anchor: anchor)
+    }
+
+    private func readLumeOwnership(_ anchor: StateDirectoryAnchor) throws -> LumeRuntimeOwnership {
         guard !lumePublicationUncertain else { throw LumeLaunchOwnershipFailure.inspectionRequired }
         let raw = try anchor.withFile(.inspectRuntimeOwnership) {
             try StateFileIO.readAll($0, from: 0, name: .runtimeOwnership)
@@ -172,7 +195,6 @@ public actor StateStore {
         catch { throw LumeLaunchOwnershipFailure.corruptRecord }
         let root = try anchor.verifiedProbeStorage().coordinationIdentity()
         guard saved.root == root else { throw LumeLaunchOwnershipFailure.changedRoot }
-        guard saved.intent == nil else { throw LumeLaunchOwnershipFailure.inspectionRequired }
         return saved
     }
 

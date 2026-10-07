@@ -30,24 +30,33 @@ enum LumeLaunchOwnershipFailure: Error, Equatable, Sendable, LocalizedError {
 struct LumeRuntimeOwnership: Codable, Equatable, Sendable {
     let root: StateFileIdentity
     let intent: LumeLaunchIntent?
+    let child: OwnedChild.LaunchIdentity?
 
-    init(root: StateFileIdentity, intent: LumeLaunchIntent? = nil) {
+    init(root: StateFileIdentity, intent: LumeLaunchIntent? = nil, child: OwnedChild.LaunchIdentity? = nil) {
         self.root = root
         self.intent = intent
+        self.child = child
     }
 
     private struct Wire: Codable {
         let format: Int
         let root: StateFileIdentity
         let intent: LumeLaunchIntent?
+        let child: OwnedChild.LaunchIdentity?
     }
     init(from decoder: any Decoder) throws {
         let wire = try Wire(from: decoder)
         guard wire.format == 1 else { throw LumeLaunchOwnershipFailure.unsupportedFormat }
+        if let child = wire.child {
+            guard child.isConsistent, child.runID == wire.intent?.attemptID else {
+                throw LumeLaunchOwnershipFailure.corruptRecord
+            }
+        }
         root = wire.root
         intent = wire.intent
+        child = wire.child
     }
     func encode(to encoder: any Encoder) throws {
-        try Wire(format: 1, root: root, intent: intent).encode(to: encoder)
+        try Wire(format: 1, root: root, intent: intent, child: child).encode(to: encoder)
     }
 }

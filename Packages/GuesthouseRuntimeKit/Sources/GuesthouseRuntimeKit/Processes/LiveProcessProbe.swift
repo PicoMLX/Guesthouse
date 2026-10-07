@@ -60,6 +60,16 @@ public struct LiveProcessProbe: Sendable {
 
 extension LiveProcessProbe.Reads {
     static func readIdentity(_ pid: Int32) -> LiveProcessProbe.Identity {
+        readIdentity(pid, ownedChild: false)
+    }
+
+    /// Only used immediately after our spawn, before its exclusive reaper starts. An
+    /// unreaped zombie still has its original birth identity and cannot have a reused PID.
+    static func readOwnedChildIdentity(_ pid: Int32) -> LiveProcessProbe.Identity {
+        readIdentity(pid, ownedChild: true)
+    }
+
+    private static func readIdentity(_ pid: Int32, ownedChild: Bool) -> LiveProcessProbe.Identity {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
@@ -68,7 +78,9 @@ extension LiveProcessProbe.Reads {
         }
         if size == 0 { return .absent }
         guard size == MemoryLayout<kinfo_proc>.stride, info.kp_proc.p_pid == pid else { return .unavailable }
-        if info.kp_proc.p_stat == Int8(SZOMB) { return .absent }
+        if ownedChild {
+            guard info.kp_eproc.e_ppid == getpid() else { return .unavailable }
+        } else if info.kp_proc.p_stat == Int8(SZOMB) { return .absent }
         let time = info.kp_proc.p_starttime
         guard time.tv_sec > 0, time.tv_usec >= 0, time.tv_usec < 1_000_000 else { return .unavailable }
         return .present(Date(timeIntervalSince1970: TimeInterval(time.tv_sec) + TimeInterval(time.tv_usec) / 1_000_000))
