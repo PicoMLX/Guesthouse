@@ -12,9 +12,9 @@ public protocol RuntimeBackend: Sendable {
     /// verification, live-state admission or permission to bypass the runtime's checks.
     var allowsEnvironmentStart: Bool { get }
 
-    /// A GuesthouseError thrown before any event is a local admission rejection, except
-    /// observation cancellation or an explicit unknown outcome. Transport uncertainty
-    /// uses RuntimeSessionFailure. A valid failed reply before acceptance refuses admission;
+    /// An invalidRequest thrown before any event is an explicit local admission refusal,
+    /// except during observation cancellation. Other throws cannot prove unsent dispatch;
+    /// transport uncertainty uses RuntimeSessionFailure. A valid failed reply before acceptance refuses admission;
     /// absence of acceptance alone does not prove a request unsent.
     func send(_ request: RuntimeRequest) -> AsyncThrowingStream<RuntimeEvent, any Error>
 }
