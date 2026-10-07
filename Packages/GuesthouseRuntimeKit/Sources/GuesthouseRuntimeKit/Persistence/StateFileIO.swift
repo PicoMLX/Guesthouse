@@ -12,6 +12,7 @@ enum StateFileIO {
     /// Finite retained history budget. Reaching it refuses further appends; it never rotates,
     /// truncates or discards unresolved history automatically.
     static let maximumJournalBytes = 16 * 1024 * 1024
+    static let maximumRuntimeOwnershipBytes = 64 * 1024
 
     /// Reads through observed EOF, with file size checked before allocation and on growth.
     /// Cache/identity validation and journal record-count policy remain owned by the store.
@@ -20,7 +21,8 @@ enum StateFileIO {
         _ descriptor: Int32, from offset: off_t, name: StateStoreError.File,
         readBytes: (Int32, UnsafeMutableRawPointer?, Int) -> Int = Darwin.read
     ) throws(StateStoreError) -> Data {
-        let limit = name == .snapshot ? maximumSnapshotBytes : maximumJournalBytes
+        let limit = name == .snapshot ? maximumSnapshotBytes
+            : name == .runtimeOwnership ? maximumRuntimeOwnershipBytes : maximumJournalBytes
         guard offset >= 0, offset <= off_t(limit) else { throw .fileUnreadable(name: name) }
         let remaining = limit - Int(offset)
         var info = stat()
@@ -101,7 +103,7 @@ enum StateFileIO {
     }
 }
 
-struct StateFileIdentity: Hashable, Sendable {
+struct StateFileIdentity: Codable, Hashable, Sendable {
     let device: dev_t
     let inode: ino_t
 

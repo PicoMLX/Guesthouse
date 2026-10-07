@@ -31,6 +31,7 @@ import Testing
         (StateStoreError.File.stateDirectory, "Guesthouse could not write its saved-state folder."),
         (.snapshot, "Guesthouse could not write its environment snapshot."),
         (.journal, "Guesthouse could not write its operation journal."),
+        (.runtimeOwnership, "Guesthouse could not write its runtime ownership record."),
     ])
     func logicalFileNamesAreGuesthouseOwned(file: StateStoreError.File, expected: String) {
         #expect(StateStoreError.fileUnwritable(name: file).userMessage == expected)
