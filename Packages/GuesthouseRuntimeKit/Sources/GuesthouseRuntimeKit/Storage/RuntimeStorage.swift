@@ -212,8 +212,9 @@ struct RuntimeStorage: Sendable {
     }
     private static func verify(_ url: URL, excluded: Bool) throws {
         try StorageProtection.verify(url)
-        // A fresh URL avoids Foundation's cached resource values masking subsequent drift.
-        let fresh = URL(fileURLWithPath: url.path(percentEncoded: false), isDirectory: true)
+        // Explicitly discard Foundation resource values before observing current backup policy.
+        var fresh = URL(fileURLWithPath: url.path(percentEncoded: false), isDirectory: true)
+        fresh.removeAllCachedResourceValues()
         let actual: Bool?
         do { actual = try fresh.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup }
         catch { throw StorageFailure.inspectionFailed }
