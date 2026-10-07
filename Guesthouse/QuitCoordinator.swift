@@ -57,7 +57,7 @@ final class QuitCoordinator {
 
     var canForceStop: Bool {
         guard case .failed(.stop(.guestShutdownRefused(let id))) = flow,
-              gracefulFailures[id] != nil, model.checkState == .checked,
+              gracefulFailures[id] != nil, model.recoveredOperations.isEmpty, model.checkState == .checked,
               model.statuses[id]?.vm == .running, model.statuses[id]?.inFlightOperation == nil,
               model.statuses[id]?.runtimeInstanceID == gracefulFailures[id] else { return false }
         return true
@@ -170,6 +170,8 @@ final class QuitCoordinator {
 
     private func validateInspection() throws {
         guard model.checkState == .checked else { throw Failure.check(model.checkState) }
+        if let id = model.recoveredOperations.keys.sorted(by: { $0.uuid.uuidString < $1.uuid.uuidString }).first,
+           let operation = model.recoveredOperations[id] { throw Failure.unsettled(operation) }
         // Quit may have retained a pending Start before its explicit refusal arrived.
         if !model.isStarting, !model.startMayHaveMutated, let target = model.startingEnvironment {
             unconfirmedEnvironments.remove(target)
@@ -220,6 +222,12 @@ final class QuitCoordinator {
                     guard id == accepted else { throw malformed(accepted) }; completed = true
                 case .failed(let id, let error):
                     guard accepted == nil || id == accepted else { throw malformed(accepted) }
+                    let event = DiagnosticEvent(operation: .stopEnvironment, outcome: .init(error: error),
+                        operationID: id.uuid, environmentID: environment)
+                    guard DiagnosticIdentity.matches(event, environment: environment) else { throw malformed(accepted) }
+                    // Post-refusal inspection has its own presentation state. Preserve this
+                    // terminal fact independently for diagnostics after a failed Quit.
+                    model.recordDiagnostic(event, for: environment)
                     failure = error; completed = true
                 default: throw malformed(accepted)
                 }
