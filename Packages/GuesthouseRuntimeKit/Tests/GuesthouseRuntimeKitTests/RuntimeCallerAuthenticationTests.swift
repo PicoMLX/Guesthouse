@@ -2,7 +2,7 @@ import Dispatch
 import Foundation
 import GuesthouseCore
 import GuesthouseRuntimeAuthentication
-import GuesthouseRuntimeKit
+@testable import GuesthouseRuntimeKit
 import Synchronization
 import Testing
 import XPC
@@ -84,30 +84,40 @@ private final class AcceptedSession: Sendable {
 private final class Fixture: Sendable {
     let listener: XPCListener
     let client: XPCSession
-    let observations: AsyncThrowingStream<Observation, any Error>
+    let observations: NativeXPCFixtureStream<Observation>
+    let progress = NativeXPCFixtureProgress()
     private let accepted: AcceptedSession
 
     init() throws {
         let (stream, events) = AsyncThrowingStream<Observation, any Error>.makeStream()
-        observations = stream
+        observations = NativeXPCFixtureStream(stream: stream, progress: progress)
         let accepted = AcceptedSession()
         self.accepted = accepted
         // Deliberately no listener requirement here: the anonymous fixture must reach the
         // REAL per-message check. Production must apply BOTH requirements, not this fixture.
-        let listener = XPCListener { request in
-            request.accept { session in
+        let progress = progress
+        let listenerQueue = DispatchQueue(label: "caller-auth.listener.\(UUID())")
+        let clientQueue = DispatchQueue(label: "caller-auth.client.\(UUID())")
+        progress.observe(listenerQueue, bit: 1); progress.observe(clientQueue, bit: 2)
+        let listener = XPCListener(targetQueue: listenerQueue) { request in
+            progress.record(.accepting)
+            let decision = acceptNativeRuntimeSession(request) { session in
                 accepted.value.withLock { $0 = session }
-                return Handler(session: session, observations: events)
+                return Handler(session: session, observations: events, progress: progress)
             }
+            progress.record(.bound)
+            return decision
         }
-        do { client = try XPCSession(endpoint: listener.endpoint) }
+        do { client = try XPCSession(endpoint: listener.endpoint, targetQueue: clientQueue) }
         catch { listener.cancel(); throw error }
         self.listener = listener
     }
 
-    func request(_ message: XPCDictionary) -> AsyncThrowingStream<Data, any Error> {
+    func request(_ message: XPCDictionary) -> NativeXPCFixtureStream<Data> {
         let (stream, answers) = AsyncThrowingStream<Data, any Error>.makeStream()
+        let progress = progress
         client.send(message: message) { result in
+            progress.record(.reply)
             switch result {
             case .success(let reply):
                 do {
@@ -117,7 +127,7 @@ private final class Fixture: Sendable {
             case .failure: answers.finish(throwing: FixtureFailure.transport)
             }
         }
-        return stream
+        return NativeXPCFixtureStream(stream: stream, progress: progress)
     }
 
     func cancel() {
@@ -130,13 +140,15 @@ private final class Fixture: Sendable {
 private struct Handler: XPCPeerHandler {
     let session: XPCSession
     let observations: AsyncThrowingStream<Observation, any Error>.Continuation
+    let progress: NativeXPCFixtureProgress
 
     func handleIncomingRequest(_ message: XPCDictionary) -> XPCDictionary? {
+        progress.record(.received)
         // Authenticate the original native message before consuming its reply context.
         let allowed = RuntimeCallerAuthentication.allows(message)
         let context = RawRuntimeReplyContext(receivedMessage: message)
         if let context {
-            do {
+            do throws(any Error) {
                 guard let reply = try context.takeReply(
                     payload: Data([allowed ? 1 : 0]), protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue)
                 ) else { observations.finish(throwing: FixtureFailure.missingReply); return nil }
@@ -145,6 +157,7 @@ private struct Handler: XPCPeerHandler {
         }
         // Report checker observations only. This fixture does NOT implement production
         // session refusal, admission or operation dispatch; those require their own adapter.
+        progress.record(.processed)
         observations.yield(Observation(allowed: allowed, expectsReply: context != nil))
         return nil
     }
@@ -152,17 +165,6 @@ private struct Handler: XPCPeerHandler {
 
 private enum FixtureFailure: Error { case timeout, transport, missingReply }
 
-private func next<T: Sendable>(_ stream: AsyncThrowingStream<T, any Error>) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask {
-            var iterator = stream.makeAsyncIterator()
-            return try #require(await iterator.next())
-        }
-        group.addTask {
-            try await Task.sleep(for: .seconds(5))
-            throw FixtureFailure.timeout
-        }
-        defer { group.cancelAll() }
-        return try #require(await group.next())
-    }
+private func next<T: Sendable>(_ stream: NativeXPCFixtureStream<T>) async throws -> T {
+    try await stream.next()
 }

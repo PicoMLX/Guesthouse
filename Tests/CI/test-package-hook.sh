@@ -22,7 +22,7 @@ touch "${checkout}/Fixtures/Skipped/Package.swift"
 export PATH="${test_root}/bin:${PATH}"
 export CI_HOOK_EXPECTED_ROOT="$(cd -- "${checkout}" && pwd -P)"
 export CI_HOOK_INVOCATIONS="${test_root}/invocations"
-unset CI_HOOK_FAIL_PACKAGE CI_XCODEBUILD_ACTION
+unset CI_HOOK_FAIL_PACKAGE CI_HOOK_FAIL_CONFIGURATION CI_XCODEBUILD_ACTION
 cd -- "${test_root}/elsewhere"
 
 assert_all_packages() {
@@ -66,4 +66,26 @@ status=0
 CI_PRIMARY_REPOSITORY_PATH="${test_root}/empty checkout" "${hook}" 2>/dev/null || status=$?
 [[ "${status}" == 1 && ! -s "${CI_HOOK_INVOCATIONS}" ]]
 
-printf 'Package hook: 7 scenarios passed.\n'
+# The real GUI-safe client package additionally runs its complete Release suite.
+mkdir -p "${checkout}/Packages/GuesthouseClientKit"
+touch "${checkout}/Packages/GuesthouseClientKit/Package.swift"
+: > "${CI_HOOK_INVOCATIONS}"
+CI_PRIMARY_REPOSITORY_PATH="${checkout}" CI_XCODEBUILD_ACTION=build-for-testing "${hook}"
+printf '%s\n' 'Packages/Alpha Kit' Packages/Beta Packages/GuesthouseClientKit Packages/Zebra \
+    'Packages/GuesthouseClientKit (release)' | cmp - "${CI_HOOK_INVOCATIONS}"
+
+# A failing Release check is not hidden by the already successful Debug checks.
+: > "${CI_HOOK_INVOCATIONS}"
+status=0
+CI_PRIMARY_REPOSITORY_PATH="${checkout}" CI_HOOK_FAIL_PACKAGE=Packages/GuesthouseClientKit \
+    CI_HOOK_FAIL_CONFIGURATION=release "${hook}" || status=$?
+[[ "${status}" == 23 ]]
+printf '%s\n' 'Packages/Alpha Kit' Packages/Beta Packages/GuesthouseClientKit Packages/Zebra \
+    'Packages/GuesthouseClientKit (release)' | cmp - "${CI_HOOK_INVOCATIONS}"
+
+# Neither configuration runs in the source-free second test phase.
+: > "${CI_HOOK_INVOCATIONS}"
+CI_PRIMARY_REPOSITORY_PATH="${test_root}/missing" CI_XCODEBUILD_ACTION=test-without-building "${hook}"
+[[ ! -s "${CI_HOOK_INVOCATIONS}" ]]
+
+printf 'Package hook: 10 scenarios passed.\n'

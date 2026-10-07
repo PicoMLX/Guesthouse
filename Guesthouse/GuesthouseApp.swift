@@ -10,7 +10,7 @@ struct GuesthouseApp: App {
     @State private var quit: QuitCoordinator
 
     init() {
-        let model = AppModel(backend: AppRuntimeConfiguration.makeBackend())
+        let model = AppModel(backend: RuntimeBackendFactory.makeBackend())
         _model = State(initialValue: model)
         _quit = State(initialValue: QuitCoordinator(model: model) { NSApp.reply(toApplicationShouldTerminate: $0) })
     }
@@ -29,18 +29,6 @@ struct GuesthouseApp: App {
         MenuBarExtra("Guesthouse", systemImage: "desktopcomputer") {
             GuesthouseMenu(model: model, quit: quit, delegate: delegate)
         }
-    }
-}
-
-/// Only development builds can substitute simulation through a launch environment.
-enum AppRuntimeConfiguration {
-    static func makeBackend(environment: [String: String] = ProcessInfo.processInfo.environment) -> any RuntimeBackend {
-        #if DEBUG
-        if environment["XCTestConfigurationFilePath"] != nil || environment["GUESTHOUSE_FAKE_RUNTIME"] == "1" {
-            return FakeRuntimeBackend()
-        }
-        #endif
-        return RuntimeClient()
     }
 }
 

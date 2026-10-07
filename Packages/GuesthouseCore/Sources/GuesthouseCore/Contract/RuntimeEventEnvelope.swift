@@ -16,6 +16,9 @@ public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
         let version = try c.decode(RuntimeProtocolVersion.self, forKey: .protocolVersion)
         guard version == .current else { throw ProtocolMismatch(service: version) }
         let decoded = try c.decode(RuntimeEvent.self, forKey: .event)
+        if let diagnostic = decoded.diagnosticEvent, !diagnostic.isRuntimeEvent {
+            throw GuesthouseError.invalidRuntimeReply(.malformed)
+        }
         if case .runtimeVersion(let info) = decoded, info.protocolVersion != version {
             throw GuesthouseError.invalidRuntimeReply(.malformed)
         }
@@ -57,6 +60,9 @@ public struct RuntimeEventEnvelope: Codable, Hashable, Sendable {
     public func encoded() throws(GuesthouseError) -> Data {
         guard protocolVersion == .current else {
             throw ProtocolMismatch(service: protocolVersion).error
+        }
+        if let diagnostic = event.diagnosticEvent, !diagnostic.isRuntimeEvent {
+            throw .invalidRuntimeReply(.malformed)
         }
         if case .runtimeVersion(let info) = event, info.protocolVersion != protocolVersion {
             throw .invalidRuntimeReply(.malformed)
