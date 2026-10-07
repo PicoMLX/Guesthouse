@@ -108,7 +108,10 @@ struct RuntimeStorage: Sendable {
         _ = try location(for: .vms)
         let state = try location(for: .state)
         _ = try location(for: .staging)
-        try Self.prepare(state.appending(path: "lume-xdg"), excluded: false, backup: Self.writeBackupExclusion)
+        let xdg = state.appending(path: "lume-xdg")
+        try Self.prepare(xdg, excluded: false, backup: Self.writeBackupExclusion)
+        // Lume SettingsManager uses XDG_CONFIG_HOME/lume, not the XDG root itself.
+        try Self.prepare(xdg.appending(path: "lume"), excluded: false, backup: Self.writeBackupExclusion)
     }
 
     /// Read-only, per-invocation observation; never prepares or repairs. A future bounded
@@ -119,11 +122,15 @@ struct RuntimeStorage: Sendable {
         _ = try location(for: .vms)
         let state = try location(for: .state)
         let staging = try location(for: .staging)
-        let configuration = state.appending(path: "lume-xdg")
+        let xdg = state.appending(path: "lume-xdg")
+        let configuration = xdg.appending(path: "lume")
+        try Self.verify(xdg, excluded: false)
         try Self.verify(configuration, excluded: false)
         return [
             "LUME_TELEMETRY_ENABLED": "false", "LUME_UPDATE_CHECK": "false",
-            "TMPDIR": staging.path, "XDG_CONFIG_HOME": configuration.path,
+            "TMPDIR": staging.path, "XDG_CONFIG_HOME": xdg.path,
+            // Recognized by LumeReleaseChannel, not a VM/cache/telemetry-home override.
+            "LUME_HOME": configuration.path,
         ]
     }
 
