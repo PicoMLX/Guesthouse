@@ -27,7 +27,7 @@ The error Core contract and structured event/export integration are implemented.
 
 ## Respect transport boundaries
 
-Current `diagnostics.json` exports use schema version 3 for the closed diagnostic/error contract; the export manifest has its own schema version 1. `DiagnosticLogTests` and `DiagnosticsExportBuilderTests` verify these boundaries. This guidance introduces no importer or XPC wire activation. When migrating RuntimeEvent and its envelopes, allocate an explicit incompatible protocol version, update both endpoints, and retain admission/size/authentication checks. Do not interpret an unknown error/event enum as arbitrary text.
+Current `diagnostics.json` exports use schema version 4. This version adds an explicit `origin` that distinguishes app-observation IDs from runtime operation IDs, plus closed connection and metadata observation failures. An app observation does not acknowledge runtime admission or establish an operation's terminal outcome; app observations are rejected on the runtime wire. The export manifest retains its own schema version 1. `DiagnosticLogTests`, `DiagnosticObservationTests` and `DiagnosticsExportBuilderTests` verify these boundaries. This guidance introduces no importer or XPC wire activation. When migrating RuntimeEvent and its envelopes, allocate an explicit incompatible protocol version, update both endpoints, and retain admission/size/authentication checks. Do not interpret an unknown error/event enum as arbitrary text.
 
 The finalized schema from #136 stores `exitStatus` inside the `failed` outcome, not at the event's top level. An extra top-level status is ignored and never re-exported; it is not a supported compatibility path for an older producer. Adopt the finalized typed constructors at each consumer.
 
