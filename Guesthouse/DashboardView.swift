@@ -44,7 +44,7 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if model.environments.isEmpty { Text("Create a development Mac").font(.title2) }
                     Button("Create development Mac…") { showingCreation = true }
-                        .disabled(model.environments.count >= 2 || quit.flow != .idle || model.isChecking || model.isStarting)
+                        .disabled(model.environments.count >= 2 || !model.recoveredOperations.isEmpty || quit.flow != .idle || model.isChecking || model.isStarting)
                         .help(model.environments.count >= 2 ? "Guesthouse supports at most two development Macs." : "Open development Mac setup")
                     Text(model.environments.count >= 2
                          ? "Both slots are occupied. Saved work is retained; deletion is a separate action."
