@@ -222,6 +222,12 @@ final class QuitCoordinator {
                     guard id == accepted else { throw malformed(accepted) }; completed = true
                 case .failed(let id, let error):
                     guard accepted == nil || id == accepted else { throw malformed(accepted) }
+                    let event = DiagnosticEvent(operation: .stopEnvironment, outcome: .init(error: error),
+                        operationID: id.uuid, environmentID: environment)
+                    guard DiagnosticIdentity.matches(event, environment: environment) else { throw malformed(accepted) }
+                    // Post-refusal inspection has its own presentation state. Preserve this
+                    // terminal fact independently for diagnostics after a failed Quit.
+                    model.recordDiagnostic(event, for: environment)
                     failure = error; completed = true
                 default: throw malformed(accepted)
                 }

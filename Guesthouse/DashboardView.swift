@@ -75,7 +75,11 @@ struct DashboardView: View {
                 }
             }
         }
-        DiagnosticDisclosureView(log: model.startDiagnostics)
+        DiagnosticDisclosureView(log: model.startDiagnostics, title: "Accepted Start diagnostics")
+        if !model.startDiagnostics.records.isEmpty {
+            Text("Diagnostics from the last accepted Start. Open Session diagnostics for refused attempts.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
 }

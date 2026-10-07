@@ -56,6 +56,12 @@ import GuesthouseCore
                 case .failed(let id, let error):
                     guard accepted == nil || accepted == id else { throw malformed() }
                     if case .guestShutdownRefused = error { throw malformed() }
+                    let event = DiagnosticEvent(operation: .startEnvironment, outcome: .init(error: error),
+                        operationID: id.uuid, environmentID: environment)
+                    guard DiagnosticIdentity.matches(event, environment: environment) else { throw malformed() }
+                    // Retain the terminal fact even when no intermediate diagnostic arrived.
+                    // A later inspection failure must not replace the operation's own error.
+                    diagnostic(event)
                     failure = error; terminal = true
                 default: throw malformed()
                 }
