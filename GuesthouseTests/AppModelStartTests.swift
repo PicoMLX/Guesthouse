@@ -5,6 +5,61 @@ import Testing
 @testable import Guesthouse
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct AppModelStartTests {
+    @Test(arguments: [false, true], [false, true])
+    func interruptedOrLocallyRefusedStartIsRetainedWithHonestIdentity(accepted: Bool, refusal: Bool) async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
+        await model.checkEnvironments().value
+        let work = try #require(model.startEnvironment(environment.id))
+        var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        let error: any Error = refusal ? GuesthouseError.invalidRequest(.tooManyInFlight) : RuntimeSessionFailure(cause: .connectionLost)
+        backend.fail(error, after: accepted ? [.accepted(operation)] : []); await work.value
+        let event = try #require(model.sessionDiagnostics.records.last?.event)
+        #expect(model.sessionDiagnostics.records.count == 1 && event.operation == .startEnvironment && event.environmentID == environment.id)
+        if accepted {
+            #expect(event.origin == .runtimeOperation && event.operationID == operation.uuid)
+            #expect(event.outcome == .operationFailed(.operationOutcomeUnknown(operation)))
+            #expect(model.startDiagnostics.records.map(\.event) == [event])
+        } else {
+            #expect(event.origin == .appObservation && event.operationID != operation.uuid)
+            #expect(event.outcome == (refusal ? .operationFailed(.invalidRequest(.tooManyInFlight)) : .failed(.outcomeUnknown)))
+            #expect(model.startDiagnostics.records.isEmpty)
+        }
+        #expect(model.startMayHaveMutated == (accepted || !refusal) && !model.canRetryStart(environment.id))
+        let copied = try #require(DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "", selection: [0]))
+        let recovery = try #require(event.recoveryMessage)
+        #expect(copied.contains(event.message) && copied.contains(recovery))
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        #expect(String(decoding: try #require(exported.files["log.txt"]), as: UTF8.self).contains(event.message))
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func unknownThrowsNeverExportRawErrorsOrUnobservedOperationIDs(accepted: Bool, privateError: Bool) async throws {
+        struct PrivateError: Error, CustomStringConvertible { var description: String { "synthetic-private-mutation-error" } }
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend), unobserved = OperationID()
+        await model.checkEnvironments().value
+        let work = try #require(model.startEnvironment(environment.id)); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        let error: any Error = privateError ? PrivateError() : GuesthouseError.operationOutcomeUnknown(unobserved)
+        backend.fail(error, after: accepted ? [.accepted(operation)] : []); await work.value
+        let event = try #require(model.sessionDiagnostics.records.last?.event)
+        #expect(model.startNeedsInspection && !model.canRetryStart(environment.id))
+        #expect(event.origin == (accepted ? .runtimeOperation : .appObservation))
+        #expect(event.outcome == (accepted ? .operationFailed(.operationOutcomeUnknown(operation)) : .failed(.outcomeUnknown)))
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics)
+        for data in exported.files.values {
+            let text = String(decoding: data, as: UTF8.self)
+            #expect(!text.contains(unobserved.uuid.uuidString) && !text.contains("synthetic-private-mutation-error"))
+        }
+    }
+
+    @Test func aLocalNonAdmissionErrorCannotClaimThatStartWasUnsent() async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
+        await model.checkEnvironments().value
+        let work = try #require(model.startEnvironment(environment.id)); var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        backend.fail(GuesthouseError.runtimeMissing, after: []); await work.value
+        #expect(model.startMayHaveMutated && model.startNeedsInspection && !model.canRetryStart(environment.id))
+        #expect(model.sessionDiagnostics.records.last?.event.origin == .appObservation)
+        #expect(model.sessionDiagnostics.records.last?.event.outcome == .failed(.outcomeUnknown))
+    }
     let environment = DevelopmentEnvironment(name: "Dev Mac")
     let operation = OperationID()
     func configured() async -> FakeRuntimeBackend {
@@ -109,6 +164,25 @@ import Testing
         await next.value
         #expect(model.startDiagnostics.records.isEmpty)
     }
+    @Test func aRefusedStartKeepsTheAcceptedAttemptLogSeparateFromSessionHistory() async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
+        await model.checkEnvironments().value
+        var sent = backend.sent.makeAsyncIterator()
+        let first = try #require(model.startEnvironment(environment.id)); _ = await sent.next()
+        let original = DiagnosticEvent(operation: .startEnvironment, outcome: .started,
+            operationID: operation.uuid, environmentID: environment.id)
+        backend.answer([.accepted(operation)] + Array(repeating: .diagnostic(original), count: 300) + [.completed(operation)])
+        await first.value; await model.checkEnvironments().value
+        let previous = model.startDiagnostics.records
+        #expect(previous.count == 256 && model.startDiagnostics.discardedCount == 44)
+        let next = try #require(model.startEnvironment(environment.id)); _ = await sent.next()
+        let refusalID = OperationID(), error = GuesthouseError.invalidRequest(.tooManyInFlight)
+        backend.answer([.failed(refusalID, error)]); await next.value
+        #expect(model.startFailure == .runtime(error) && !model.startMayHaveMutated)
+        #expect(model.startDiagnostics.records == previous && model.startDiagnostics.discardedCount == 44)
+        #expect(model.sessionDiagnostics.records.last?.event == DiagnosticEvent(operation: .startEnvironment,
+            outcome: .operationFailed(error), operationID: refusalID.uuid, environmentID: environment.id))
+    }
     @Test func postStartInspectionFailureCannotRetryAndForgetAMissingTarget() async throws {
         let fake = await configured(), backend = HeldStartBackend(fake: fake), decisions = StartDecisions()
         let model = AppModel(backend: backend); await model.checkEnvironments().value
@@ -131,6 +205,37 @@ import Testing
         let quit = QuitCoordinator(model: model, terminationDecision: decisions.record)
         _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
         #expect(quit.flow == .failed(.check(.unavailable(.invalidRuntimeReply(.malformed)))) && decisions.values.isEmpty)
+    }
+    @Test(arguments: [false, true])
+    func terminalStartFailureRemainsCopyableAndExportableAfterInspectionFails(queryRefusal: Bool) async throws {
+        let fake = await configured(), backend = HeldStartBackend(fake: fake), model = AppModel(backend: backend)
+        await model.checkEnvironments().value
+        let start = try #require(model.startEnvironment(environment.id))
+        var sent = backend.sent.makeAsyncIterator(); _ = await sent.next()
+        await fake.script("listEnvironments", queryRefusal ? .fail(error: .unauthorizedCaller) : .disconnect())
+        backend.answer([.accepted(operation), .failed(operation, .runtimeMissing)])
+        await start.value
+        #expect(model.startFailure == .runtime(.runtimeMissing))
+        #expect(model.checkState == (queryRefusal ? .unavailable(.unauthorizedCaller) : .interrupted(.connectionLost)))
+        #expect(model.startMayHaveMutated && !model.canRetryStart(environment.id))
+        let expected = DiagnosticEvent(operation: .startEnvironment, outcome: .operationFailed(.runtimeMissing),
+            operationID: operation.uuid, environmentID: environment.id)
+        #expect(model.startDiagnostics.records.map(\.event) == [expected])
+        #expect(model.sessionDiagnostics.records.first?.event == expected)
+        #expect(model.sessionDiagnostics.records.count == 2)
+        if queryRefusal {
+            #expect(model.sessionDiagnostics.records.last?.event.operation == .inspectEnvironment)
+            #expect(model.sessionDiagnostics.records.last?.event.outcome == .operationFailed(.unauthorizedCaller))
+            #expect(model.sessionDiagnostics.records.last?.event.environmentID == nil)
+        } else {
+            #expect(model.sessionDiagnostics.records.last?.event.origin == .appObservation)
+            #expect(model.sessionDiagnostics.records.last?.event.outcome == .observationFailed(.connectionLost))
+        }
+        let copied = DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "", selection: [0]) ?? ""
+        #expect(copied.contains(GuesthouseError.runtimeMissing.userMessage) && copied.contains(GuesthouseError.runtimeMissing.recoveryMessage))
+        let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        let text = String(decoding: try #require(export.files["log.txt"]), as: UTF8.self)
+        #expect(text.contains(operation.uuid.uuidString) && text.contains(GuesthouseError.runtimeMissing.recoveryMessage))
     }
     @Test(arguments: [false, true])
     func quitWhileStartIsPendingRetainsMissingTargetOnlyAfterAcceptance(accepted: Bool) async throws {
@@ -200,6 +305,10 @@ private nonisolated final class HeldStartBackend: RuntimeBackend {
     func answer(_ events: [RuntimeEvent]) {
         let continuation = pending.withLock { state in defer { state = nil }; return state }
         for event in events { continuation?.yield(event) }; continuation?.finish()
+    }
+    func fail(_ error: any Error, after events: [RuntimeEvent]) {
+        let continuation = pending.withLock { state in defer { state = nil }; return state }
+        for event in events { continuation?.yield(event) }; continuation?.finish(throwing: error)
     }
 }
 

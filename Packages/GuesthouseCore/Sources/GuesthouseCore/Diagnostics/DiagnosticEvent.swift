@@ -4,8 +4,36 @@ import Foundation
 /// environment, stdout, stderr or underlying error can be attached to an event.
 /// IDs must come from Guesthouse's operation/environment records, not guest output.
 public struct DiagnosticEvent: Codable, Hashable, Sendable {
+    /// App observations have their own Guesthouse record identity. They never acknowledge
+    /// runtime admission or borrow an unobserved runtime operation ID (MVP §§2–3, #30).
+    public enum Origin: String, Codable, Hashable, Sendable {
+        case runtimeOperation, appObservation
+        public var title: String { self == .runtimeOperation ? "Runtime operation" : "App observation" }
+    }
+
+    /// Only closed facts from a read/check; never a RuntimeSessionFailure attachment.
+    public enum ObservationFailure: Codable, Hashable, Sendable {
+        case connectionLost, malformedResponse, oversizedResponse
+        case metadataUnavailable(RuntimeSavedStateStatus)
+        public var message: String {
+            switch self {
+            case .connectionLost: "Guesthouse lost contact with its runtime service."
+            case .malformedResponse: "The runtime check did not receive a valid response."
+            case .oversizedResponse: "The runtime check's response exceeds the supported size limit."
+            case .metadataUnavailable(let state): state.userMessage
+            }
+        }
+        public var recoveryMessage: String {
+            switch self {
+            case .connectionLost: "Check the runtime connection again. Inspect any unfinished operation before starting new work."
+            case .malformedResponse, .oversizedResponse: "Check the runtime connection again. If the problem repeats, reinstall Guesthouse."
+            case .metadataUnavailable(let state): state.recoveryMessage
+            }
+        }
+    }
+
     public enum Operation: String, CaseIterable, Codable, Sendable {
-        case runtimeRequest
+        case runtimeRequest, cancelOperation
         case preflight, verifyRuntime, createEnvironment, startEnvironment, stopEnvironment
         case inspectEnvironment, connectSSH, importXcode, checkTools, codexSignIn, githubSignIn
         case synchronizeRepositories, testWorkspace, publishChanges, exportDiagnostics
@@ -17,6 +45,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         public var title: String {
             switch self {
             case .runtimeRequest: "Contact runtime service"
+            case .cancelOperation: "Request cancellation"
             case .preflight: "Check this Mac"
             case .verifyRuntime: "Verify runtime"
             case .createEnvironment: "Create development Mac"
@@ -62,6 +91,8 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case failed(DiagnosticFailure, exitStatus: Int32? = nil)
         /// Non-cancellation errors. Adapters use init(error:) to preserve terminal cancellation.
         case operationFailed(GuesthouseError)
+        /// App-owned observation only. This is not an operation's terminal result.
+        case observationFailed(ObservationFailure)
 
         /// A canceled error means cancellation was confirmed, not merely requested.
         public init(error: GuesthouseError) {
@@ -71,6 +102,7 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
 
     public let operation: Operation
     public let outcome: Outcome
+    public let origin: Origin
     public let operationID: UUID
     public let environmentID: EnvironmentID?
     public var exitStatus: Int32? {
@@ -79,12 +111,20 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
 
     public init(
         operation: Operation, outcome: Outcome, operationID: UUID,
-        environmentID: EnvironmentID? = nil
+        environmentID: EnvironmentID? = nil, origin: Origin = .runtimeOperation
     ) {
         self.operation = operation
         self.outcome = outcome
         self.operationID = operationID
         self.environmentID = environmentID
+        self.origin = origin
+    }
+
+    /// App observations cannot arrive as runtime wire events, even with a claimed runtime origin.
+    public var isRuntimeEvent: Bool {
+        guard origin == .runtimeOperation else { return false }
+        if case .observationFailed = outcome { return false }
+        return true
     }
 
     /// Render locally from closed enums. Decoded/guest-supplied message text is never used.
@@ -96,7 +136,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         case .started: detail = "Started."
         case .succeeded: detail = "Succeeded."
         case .cancellationRequested: detail = "Cancellation requested; completion is not yet confirmed."
-        case .canceled: detail = "Cancellation confirmed; partial changes may remain."
+        case .canceled: detail = operation == .cancelOperation
+            ? "The cancellation request was canceled; its target may still be running."
+            : "Cancellation confirmed; partial changes may remain."
         case .failed(let failure, _):
             if failure == .verificationFailed, operation == .importXcode {
                 detail = "The Xcode bundle failed verification."
@@ -104,7 +146,9 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
                 detail = failure == .verificationFailed && isDownload
                     ? "The downloaded artifact failed verification." : failure.message
             }
-        case .operationFailed(let error): detail = error.userMessage
+        case .operationFailed(let error): detail = operation == .cancelOperation && error == .canceled
+            ? "The cancellation request was canceled; its target may still be running." : error.userMessage
+        case .observationFailed(let failure): detail = failure.message
         }
         return operation.title + ": " + detail
             + (exitStatus.map { " Exit status: \($0)." } ?? "")
@@ -114,9 +158,13 @@ public struct DiagnosticEvent: Codable, Hashable, Sendable {
         switch outcome {
         case .waitingForUserAction: "Complete the step shown by Guesthouse, then continue."
         case .failed(let failure, _): recovery(for: failure)
-        case .operationFailed(let error): error.recoveryMessage
+        case .operationFailed(let error): operation == .cancelOperation && error == .canceled
+            ? "Inspect the target operation before requesting cancellation again." : error.recoveryMessage
+        case .observationFailed(let failure): failure.recoveryMessage
         case .cancellationRequested: "Wait for the operation to stop, then inspect its outcome."
-        case .canceled: "Inspect any partial changes before starting another operation."
+        case .canceled: operation == .cancelOperation
+            ? "Inspect the target operation before requesting cancellation again."
+            : "Inspect any partial changes before starting another operation."
         case .pending, .started, .succeeded: nil
         }
     }

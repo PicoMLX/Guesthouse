@@ -55,8 +55,9 @@ struct ErrorRecoveryView: View {
 
 struct DiagnosticDisclosureView: View {
     let log: DiagnosticLog
+    var title = "Operation diagnostics"
     var body: some View {
-        DisclosureGroup("Operation diagnostics (\(log.records.count))") {
+        DisclosureGroup("\(title) (\(log.records.count))") {
             Text("This is a partial history. The runtime connection may omit intermediate events under load; the count below covers only local history evictions.").font(.caption).foregroundStyle(.secondary)
             if log.records.isEmpty { Text("No structured events reported.").foregroundStyle(.secondary) }
             if log.discardedCount > 0 { Text("\(log.discardedCount) events omitted from local history.").font(.caption) }

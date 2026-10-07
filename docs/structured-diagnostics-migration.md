@@ -23,11 +23,11 @@ Attach a known numeric process status to the low-level failure itself: `.failed(
 | `RedactedLine`, `SanitizedText`, sanitizer fallback | Typed events/errors; no drop-in raw-string constructor |
 | `OperationID` | UUID wire shape is retained |
 
-The error Core contract and structured event/export integration are implemented. The existing compatibility, runtime, XPC and GUI branches still need call-site migration and integration testing. Do not merge their old sanitizer ancestors to make them compile. Preserve reusable domain logic and tests while replacing the obsolete text boundary.
+The error Core contract and structured event/export integration are implemented. The existing compatibility, runtime, XPC and GUI branches still need call-site migration and integration testing. [The retained GUI acceptance audit](gui-migration-acceptance.md) distinguishes merged typed consumers from pending attribution, recovered-operation and provider prerequisites. Do not merge their old sanitizer ancestors to make them compile. Preserve reusable domain logic and tests while replacing the obsolete text boundary.
 
 ## Respect transport boundaries
 
-Diagnostic JSON exports use schema version 2 for the new `operationFailed` outcome. No importer or XPC wire activation is introduced here. When migrating RuntimeEvent and its envelopes, allocate an explicit incompatible protocol version, update both endpoints, and retain admission/size/authentication checks. Do not interpret an unknown error/event enum as arbitrary text.
+Current `diagnostics.json` exports use schema version 4. This version adds an explicit `origin` that distinguishes app-observation IDs from runtime operation IDs, plus closed connection and metadata observation failures. An app observation does not acknowledge runtime admission or establish an operation's terminal outcome; app observations are rejected on the runtime wire. The export manifest retains its own schema version 1. `DiagnosticLogTests`, `DiagnosticObservationTests` and `DiagnosticsExportBuilderTests` verify these boundaries. This guidance introduces no importer or XPC wire activation. When migrating RuntimeEvent and its envelopes, allocate an explicit incompatible protocol version, update both endpoints, and retain admission/size/authentication checks. Do not interpret an unknown error/event enum as arbitrary text.
 
 The finalized schema from #136 stores `exitStatus` inside the `failed` outcome, not at the event's top level. An extra top-level status is ignored and never re-exported; it is not a supported compatibility path for an older producer. Adopt the finalized typed constructors at each consumer.
 
