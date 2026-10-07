@@ -185,6 +185,39 @@ import Testing
         await owner.close()
     }
 
+    @Test(arguments: [false, true], ["mode", "acl", "backup"])
+    func unsafeSettingsChildRefusesBeforeChangingParentMetadata(link: Bool, drift: String) async throws {
+        let fixture = try Fixture(), owner = try await fixture.owner()
+        try await owner.prepareLumeProbeConfiguration()
+        let parent = fixture.configuration, settings = parent.appending(path: "lume")
+        let saved = parent.appending(path: "saved-config")
+        try Data("preserve parent work".utf8).write(to: saved)
+        try FileManager.default.removeItem(at: settings) // Empty fixture directory only.
+        let outside = fixture.base.appending(path: "outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        if link { try FileManager.default.createSymbolicLink(at: settings, withDestinationURL: outside) }
+        else { try Data("preserve invalid child".utf8).write(to: settings) }
+        switch drift {
+        case "acl": try FixtureACL.install(.everyoneRead, at: parent)
+        case "backup": try RuntimeStorage.writeBackupExclusion(parent, true)
+        default: try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path)
+        }
+        let before = try StorageProtection.structure(parent)
+        await #expect(throws: StorageFailure.unsafeStructure) { try await owner.prepareLumeProbeConfiguration() }
+        let after = try StorageProtection.structure(parent)
+        #expect(StateFileIdentity(after) == StateFileIdentity(before) && after.st_mode == before.st_mode)
+        if drift == "backup" {
+            var observed = URL(fileURLWithPath: parent.path); observed.removeAllCachedResourceValues()
+            #expect(try observed.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        } else { #expect(throws: StorageFailure.protectionDrift) { try StorageProtection.verify(parent) } }
+        #expect(try Data(contentsOf: saved) == Data("preserve parent work".utf8))
+        #expect(try StorageProtection.structure(outside).st_mode & 0o7777 == 0o755)
+        if link { #expect(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path) == outside.path) }
+        else { #expect(try Data(contentsOf: settings) == Data("preserve invalid child".utf8)) }
+        await owner.close()
+    }
+
     @Test func losingAndClosedOwnersCannotPrepareConfiguration() async throws {
         let fixture = try Fixture(), owner = try await fixture.owner()
         await #expect(throws: StateStoreError.fileUnwritable(name: .stateDirectory)) { _ = try await fixture.owner() }

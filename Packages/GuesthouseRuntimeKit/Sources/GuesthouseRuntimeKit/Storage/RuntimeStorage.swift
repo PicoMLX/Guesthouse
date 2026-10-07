@@ -102,16 +102,21 @@ struct RuntimeStorage: Sendable {
 
     /// Optional candidate setup, called only by the live StateStore owner under the shared
     /// Lume lease. Existing base layouts remain reopenable without a candidate configuration.
-    /// Refuse unsafe writable parents before creating/repairing this one fixed directory;
+    /// Refuse unsafe writable parents before creating/repairing these fixed directories;
     /// preserve all files. This does not establish provider/process readiness (MVP §§3–4, 9).
     func prepareLumeProbeConfiguration() throws {
         _ = try location(for: .vms)
         let state = try location(for: .state)
         _ = try location(for: .staging)
         let xdg = state.appending(path: "lume-xdg")
-        try Self.prepare(xdg, excluded: false, backup: Self.writeBackupExclusion)
         // Lume SettingsManager uses XDG_CONFIG_HOME/lume, not the XDG root itself.
-        try Self.prepare(xdg.appending(path: "lume"), excluded: false, backup: Self.writeBackupExclusion)
+        let configuration = xdg.appending(path: "lume")
+        // Inspect both existing entries before repairing either one's metadata. Keep each
+        // prepare's own rechecks; this preflight is not an atomic tree transaction.
+        for directory in [xdg, configuration] { try Self.preflight(directory) }
+        for directory in [xdg, configuration] {
+            try Self.prepare(directory, excluded: false, backup: Self.writeBackupExclusion)
+        }
     }
 
     /// Read-only, per-invocation observation; never prepares or repairs. A future bounded
