@@ -24,7 +24,10 @@ import Testing
             await model.checkEnvironments().value; await model.startEnvironment(environment.id)?.value
             #expect(model.startFailure == .interrupted(failure) && model.startNeedsInspection)
         }
-        #expect(model.sessionDiagnostics.records.isEmpty && model.startDiagnostics.records.isEmpty)
+        let expected = DiagnosticEvent(operation: stop ? .stopEnvironment : .startEnvironment,
+            outcome: .operationFailed(.operationOutcomeUnknown(operation)), operationID: operation.uuid, environmentID: environment.id)
+        #expect(model.sessionDiagnostics.records.map(\.event) == [expected])
+        #expect(model.startDiagnostics.records.map(\.event) == (stop ? [] : [expected]))
     }
 
     @Test func sessionRetainsBoundedStartAndQuitEventsWithKnownEnvironmentAttribution() async throws {
@@ -78,8 +81,12 @@ import Testing
                 await model.checkEnvironments().value; await model.startEnvironment(environment.id)?.value
                 if foreign { #expect(model.startFailure == .interrupted(.init(cause: .malformedResponse, operationID: operation, mayHaveMutated: true))) }
             }
-            #expect(model.sessionDiagnostics.records.count == (foreign ? 0 : 2))
-            #expect(model.startDiagnostics.records.count == (foreign || stop ? 0 : 2))
+            #expect(model.sessionDiagnostics.records.count == (foreign ? 1 : 2))
+            #expect(model.startDiagnostics.records.count == (stop ? 0 : foreign ? 1 : 2))
+            if foreign {
+                #expect(model.sessionDiagnostics.records.first?.event == DiagnosticEvent(operation: stop ? .stopEnvironment : .startEnvironment,
+                    outcome: .operationFailed(.operationOutcomeUnknown(operation)), operationID: operation.uuid, environmentID: environment.id))
+            }
         }
     }
 
@@ -94,7 +101,9 @@ import Testing
         // Use the model whose session receives the operation, independent of any window.
         let tested = QuitCoordinator(model: model) { _ in }
         _ = tested.requestQuit(); await tested.confirmStopAndQuit()?.value
-        #expect(model.sessionDiagnostics.records.isEmpty && tested.flow != .terminating)
+        #expect(model.sessionDiagnostics.records.map(\.event) == [DiagnosticEvent(operation: .stopEnvironment,
+            outcome: .operationFailed(.operationOutcomeUnknown(operation)), operationID: operation.uuid, environmentID: environment.id)])
+        #expect(tested.flow != .terminating)
     }
 
     @Test(arguments: [false, true], [false, true])
@@ -121,7 +130,9 @@ import Testing
             }
             let expected = DiagnosticEvent(operation: stop ? .stopEnvironment : .startEnvironment,
                 outcome: .init(error: error), operationID: operation.uuid, environmentID: environment.id)
-            #expect(model.sessionDiagnostics.records.map(\.event) == (foreign ? [] : [expected]))
+            let unknown = DiagnosticEvent(operation: stop ? .stopEnvironment : .startEnvironment,
+                outcome: .operationFailed(.operationOutcomeUnknown(operation)), operationID: operation.uuid, environmentID: environment.id)
+            #expect(model.sessionDiagnostics.records.map(\.event) == [foreign ? unknown : expected])
         }
     }
 

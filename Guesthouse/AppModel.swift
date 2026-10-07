@@ -142,6 +142,7 @@ final class AppModel {
             // Mark before dispatch, including a lost reply before acceptance. A failed
             // pre-Start query never sent a mutation and needs no target reconciliation.
             startMayHaveMutated = true
+            let dispatchObservation = UUID()
             let result = await StartOperation.run(id, backend: backend,
                 accepted: { [weak self] operation in
                     self?.startDiagnostics.removeAll()
@@ -154,6 +155,8 @@ final class AppModel {
                         // accepted attempt's log/counts intact until a new Start is accepted.
                         self?.startDiagnostics.append(event)
                     }
+                }, observation: { [weak self] outcome in
+                    self?.recordObservation(outcome, id: dispatchObservation, environment: id, operation: .startEnvironment)
                 })
             startFailure = result.failure
             startMayHaveMutated = result.mayHaveMutated
@@ -310,9 +313,9 @@ final class AppModel {
         generation = UUID()
     }
 
-    /// This ID belongs to the app's check/connection observation, never an accepted mutation.
+    /// This ID belongs to an app check, connection or dispatch observation, never runtime admission.
     /// A connection retirement records its own fact once, then fences late query results.
-    private func recordObservation(_ outcome: DiagnosticEvent.Outcome, id: UUID,
+    func recordObservation(_ outcome: DiagnosticEvent.Outcome, id: UUID,
                                    environment: EnvironmentID? = nil, operation: DiagnosticEvent.Operation = .inspectEnvironment) {
         sessionDiagnostics.append(DiagnosticEvent(operation: operation, outcome: outcome,
             operationID: id, environmentID: environment, origin: .appObservation))
