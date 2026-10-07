@@ -70,6 +70,32 @@ struct RecoveredOperationTests {
             .listEnvironments, .environmentStatus(idle.id), .environmentStatus(recovered.id)])
     }
 
+    @Test(arguments: [false, true])
+    func aLaterQueryRefusalKeepsDiagnosticsSeparateFromRecoveredOwnership(retired: Bool) async throws {
+        let fake = await configured(), backend = HeldRecoveredCheck(fake: fake)
+        backend.holdNextStatus(idle.id)
+        let query = OperationID(), model = AppModel(backend: backend), check = model.checkEnvironments()
+        var sent = backend.sent.makeAsyncIterator(); try #require(await sent.next() != nil)
+        #expect(model.recoveredOperations == [recovered.id: operation])
+        if retired { model.connectionInterrupted(.connectionLost) }
+        backend.answer([.failed(query, .guestNotReachable(idle.id))]); await check.value
+        #expect(model.recoveredOperations == [recovered.id: operation])
+        #expect(model.statuses.isEmpty && model.environments.isEmpty && !model.canStart(idle.id))
+        #expect(model.startEnvironment(idle.id) == nil)
+        let event = try #require(model.sessionDiagnostics.records.first?.event)
+        #expect(model.sessionDiagnostics.records.count == 1 && event.environmentID == idle.id)
+        if retired {
+            #expect(model.checkState == .interrupted(.connectionLost))
+            #expect(event.origin == .appObservation && event.outcome == .observationFailed(.connectionLost))
+            #expect(event.operationID != operation.uuid && event.operationID != query.uuid)
+        } else {
+            #expect(model.checkState == .unavailable(.guestNotReachable(idle.id)))
+            #expect(event == DiagnosticEvent(operation: .inspectEnvironment,
+                outcome: .operationFailed(.guestNotReachable(idle.id)), operationID: query.uuid, environmentID: idle.id))
+        }
+        #expect(await fake.receivedRequests == [.listEnvironments, .environmentStatus(recovered.id)])
+    }
+
     @Test(arguments: [EnvironmentStatus.VMState.stopped, .running])
     func completeListedIdleInspectionCanClearTheObligation(vm: EnvironmentStatus.VMState) async {
         let backend = await configured(), model = AppModel(backend: backend)

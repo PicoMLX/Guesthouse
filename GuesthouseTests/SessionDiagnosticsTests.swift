@@ -4,6 +4,29 @@ import Testing
 @testable import Guesthouse
 
 @MainActor struct SessionDiagnosticsTests {
+    @Test(arguments: [false, true], [false, true])
+    func runtimeConsumersRejectAppObservationClaims(stop: Bool, claimedRuntimeOrigin: Bool) async {
+        let fake = FakeRuntimeBackend(), environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID()
+        await fake.setEnvironmentInventory(.available([environment]))
+        await fake.setStatus(.init(environmentID: environment.id, vm: stop ? .running : .stopped,
+            readiness: .checking, runtimeInstanceID: stop ? UUID() : nil))
+        let event = DiagnosticEvent(operation: .inspectEnvironment, outcome: .observationFailed(.connectionLost),
+            operationID: operation.uuid, environmentID: environment.id,
+            origin: claimedRuntimeOrigin ? .runtimeOperation : .appObservation)
+        let events: [RuntimeEvent] = [.accepted(operation), .diagnostic(event), .completed(operation)]
+        let model = AppModel(backend: SessionBackend(fake: fake, start: events, stop: events))
+        let failure = RuntimeSessionFailure(cause: .malformedResponse, operationID: operation, mayHaveMutated: true)
+        if stop {
+            let quit = QuitCoordinator(model: model) { _ in }
+            _ = quit.requestQuit(); await quit.confirmStopAndQuit()?.value
+            #expect(quit.flow == .failed(.interrupted(failure)))
+        } else {
+            await model.checkEnvironments().value; await model.startEnvironment(environment.id)?.value
+            #expect(model.startFailure == .interrupted(failure) && model.startNeedsInspection)
+        }
+        #expect(model.sessionDiagnostics.records.isEmpty && model.startDiagnostics.records.isEmpty)
+    }
+
     @Test func sessionRetainsBoundedStartAndQuitEventsWithKnownEnvironmentAttribution() async throws {
         let environment = DevelopmentEnvironment(name: "Dev Mac"), start = OperationID(), stop = OperationID()
         let marker = "synthetic-private-token"
