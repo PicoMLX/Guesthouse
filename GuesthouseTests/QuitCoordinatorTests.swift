@@ -192,20 +192,26 @@ struct QuitCoordinatorTests {
         await work.value
         #expect(quit.flow == .failed(.ownership(environment.id, .ownershipUnproven)) && !quit.canForceStop)
     }
-    @Test func terminalStopFailureRemainsExportableWhenPostRefusalInspectionFails() async throws {
+    @Test(arguments: [false, true])
+    func terminalStopFailureRemainsExportableWhenPostRefusalInspectionFails(queryRefusal: Bool) async throws {
         let fake = await configuredFake(), backend = HeldStopBackend(fake: fake, operation: operation), decision = Decision()
         let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
         _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
         var stops = backend.stopped.makeAsyncIterator(); _ = await stops.next()
-        await fake.script("listEnvironments", .disconnect())
+        await fake.script("listEnvironments", queryRefusal ? .fail(error: .unauthorizedCaller) : .disconnect())
         backend.answer([.accepted(operation), .failed(operation, .guestShutdownRefused(environment.id))])
         await work.value
-        #expect(quit.flow == .failed(.check(.interrupted(.connectionLost))))
+        #expect(quit.flow == .failed(.check(queryRefusal ? .unavailable(.unauthorizedCaller) : .interrupted(.connectionLost))))
         #expect(!quit.canForceStop && decision.values.isEmpty)
         let error = GuesthouseError.guestShutdownRefused(environment.id)
         let expected = DiagnosticEvent(operation: .stopEnvironment, outcome: .operationFailed(error),
             operationID: operation.uuid, environmentID: environment.id)
-        #expect(model.sessionDiagnostics.records.map(\.event) == [expected])
+        #expect(model.sessionDiagnostics.records.first?.event == expected)
+        #expect(model.sessionDiagnostics.records.count == (queryRefusal ? 2 : 1))
+        if queryRefusal {
+            #expect(model.sessionDiagnostics.records.last?.event.operation == .inspectEnvironment)
+            #expect(model.sessionDiagnostics.records.last?.event.outcome == .operationFailed(.unauthorizedCaller))
+        }
         let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
         let text = String(decoding: try #require(export.files["log.txt"]), as: UTF8.self)
         #expect(text.contains(operation.uuid.uuidString) && text.contains(error.userMessage) && text.contains(error.recoveryMessage))
