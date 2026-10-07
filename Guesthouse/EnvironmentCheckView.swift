@@ -14,6 +14,10 @@ struct EnvironmentCheckView: View {
                     .accessibilityIdentifier("checkEnvironment")
             }
             if model.backend is FakeRuntimeBackend { Text("Preview runtime — no development Mac is controlled.").foregroundStyle(.secondary) }
+            if !model.recoveredOperations.isEmpty {
+                Text("A previously observed operation still needs inspection. Check the environment before starting or stopping anything. Missing saved records do not confirm that it stopped.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             switch model.checkState {
             case .metadataUnavailable(let state): Text(state.recoveryMessage).foregroundStyle(.secondary)
             case .unavailable(let error): Text(error.recoveryMessage).foregroundStyle(.secondary)

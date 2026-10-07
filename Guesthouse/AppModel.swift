@@ -17,6 +17,9 @@ final class AppModel {
     private(set) var checkState: CheckState = .checkingEnvironment
     private(set) var environments: [DevelopmentEnvironment] = []
     private(set) var statuses: [EnvironmentID: EnvironmentStatus] = [:]
+    /// Previously observed runtime identities, not proof that an operation is still running.
+    /// Failed checks and inventory omissions cannot erase these inspection obligations.
+    private(set) var recoveredOperations: [EnvironmentID: OperationID] = [:]
     private(set) var isChecking = false
     private(set) var isStarting = false
     private(set) var startingEnvironment: EnvironmentID?
@@ -90,7 +93,7 @@ final class AppModel {
     }
 
     private func startEligible(_ id: EnvironmentID) -> Bool {
-        guard checkState == .checked, environments.contains(where: { $0.id == id }),
+        guard recoveredOperations.isEmpty, checkState == .checked, environments.contains(where: { $0.id == id }),
               statuses[id]?.vm == .stopped else { return false }
         if case .needsAttention = statuses[id]?.readiness { return false }
         return statuses.values.allSatisfy {
@@ -109,6 +112,7 @@ final class AppModel {
 
     func canRetryStart(_ id: EnvironmentID) -> Bool {
         backend.allowsEnvironmentStart && startCancellationFailure == nil
+            && recoveredOperations.isEmpty
             && !startNeedsInspection && !isStarting && !isChecking && !checksReservedForQuit && startingEnvironment == id
             && startFailure?.recoveryActions.contains(.retry) == true
     }
@@ -227,12 +231,20 @@ final class AppModel {
         checkState = .checkingEnvironment
         statuses = [:]
         let retainedTarget = clearStartFailure && startNeedsInspection ? startingEnvironment : nil
+        var retainedIDs = Set(recoveredOperations.keys)
+        if let retainedTarget { retainedIDs.insert(retainedTarget) }
         checkTask = Task { [weak self, backend] in
-            let result = await Self.read(backend, retainedTarget: retainedTarget) { [weak self] environment in
+            let result = await Self.read(backend, retainedIDs: retainedIDs, queryScope: { [weak self] environment in
                 guard let self, self.generation == current, !Task.isCancelled else { return false }
                 self.checkEnvironment = environment
                 return true
-            }
+            }, observed: { [weak self] status in
+                guard let self, self.generation == current, !Task.isCancelled,
+                      let operation = status.inFlightOperation else { return }
+                // Preserve a valid individual observation even if a later query fails.
+                // Never publish partial readiness or clear an obligation from partial reads.
+                self.recoveredOperations[status.environmentID] = operation
+            })
             guard let self else { return }
             defer { self.isChecking = false; self.checkTask = nil; self.checkEnvironment = nil }
             guard self.generation == current else { return }
@@ -242,6 +254,16 @@ final class AppModel {
                 self.environments = snapshot.environments
                 self.statuses = snapshot.statuses
                 self.checkState = .checked
+                for id in Array(self.recoveredOperations.keys) {
+                    guard snapshot.environments.contains(where: { $0.id == id }),
+                          let status = snapshot.statuses[id], status.inFlightOperation == nil else { continue }
+                    // Missing/unlisted/uncertain state still requires reconciliation/repair.
+                    // Only a complete current check of a listed, inspected VM can clear this.
+                    switch status.vm {
+                    case .stopped, .running: self.recoveredOperations.removeValue(forKey: id)
+                    case .notFound, .uncertain: break
+                    }
+                }
                 if clearStartFailure, !self.startMayHaveMutated {
                     self.startFailure = nil
                     self.startingEnvironment = nil
@@ -322,8 +344,9 @@ final class AppModel {
         case interrupted(RuntimeSessionFailure.Cause, EnvironmentID?)
     }
 
-    private static func read(_ backend: any RuntimeBackend, retainedTarget: EnvironmentID? = nil,
-                             queryScope: (EnvironmentID?) -> Bool) async -> Result<Snapshot, ReadFailure> {
+    private static func read(_ backend: any RuntimeBackend, retainedIDs: Set<EnvironmentID>,
+                             queryScope: (EnvironmentID?) -> Bool,
+                             observed: (EnvironmentStatus) -> Void) async -> Result<Snapshot, ReadFailure> {
         var environment: EnvironmentID?
         do {
             guard queryScope(nil) else { throw CancellationError() }
@@ -336,7 +359,7 @@ final class AppModel {
             }
             var statuses: [EnvironmentID: EnvironmentStatus] = [:]
             var requestedIDs = environments.map(\.id)
-            if let retainedTarget, !requestedIDs.contains(retainedTarget) { requestedIDs.append(retainedTarget) }
+            requestedIDs += retainedIDs.subtracting(requestedIDs).sorted { $0.uuid.uuidString < $1.uuid.uuidString }
             for id in requestedIDs {
                 guard queryScope(id) else { throw CancellationError() }
                 environment = id
@@ -345,6 +368,7 @@ final class AppModel {
                       status.environmentID == id else {
                     throw ReadFailure.runtime(.invalidRuntimeReply(.malformed), nil, id)
                 }
+                observed(status)
                 statuses[id] = status
             }
             return .success(Snapshot(environments: environments, statuses: statuses))
