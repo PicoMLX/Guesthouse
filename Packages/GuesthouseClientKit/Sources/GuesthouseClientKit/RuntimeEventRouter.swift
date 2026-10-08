@@ -131,7 +131,7 @@ struct RuntimeEventRouter: Sendable {
     mutating func incoming(_ event: RuntimeEvent) -> [Effect] {
         guard !requiresRetirement else { return [] }
         switch event {
-        case .accepted, .runtimeVersion, .hostPreflight, .xcodeSelection, .environments: return fault(.malformedResponse)
+        case .accepted, .runtimeVersion, .runtimeProbe, .hostPreflight, .xcodeSelection, .environments: return fault(.malformedResponse)
         case .status(let status) where status.inFlightOperation == nil:
             for entry in requests.values where entry.operation != nil && entry.request.environment == status.environmentID {
                 entry.producer.push(event)
@@ -215,19 +215,21 @@ struct RuntimeEventRouter: Sendable {
 }
 
 extension RuntimeRequest {
+    // probeRuntime can journal owned launches, even when its report has no diagnostic ID.
+    // Preserve uncertainty on interruption; its aggregate is not a stream acceptance.
     var mayMutate: Bool {
         switch self { case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .environmentStatus: false; default: true }
     }
     var environment: EnvironmentID? {
         switch self {
         case .environmentStatus(let id), .startEnvironment(let id, _), .stopEnvironment(let id, _), .importXcode(let id, _): id
-        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .cancelOperation: nil
+        case .runtimeVersion, .probeRuntime, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .cancelOperation: nil
         }
     }
     var acceptsOperation: Bool {
         switch self {
         case .startEnvironment, .stopEnvironment, .importXcode: true
-        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation: false
+        case .runtimeVersion, .probeRuntime, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation: false
         }
     }
     var cancellationTarget: OperationID? {
@@ -238,6 +240,7 @@ extension RuntimeRequest {
         if case .failed = event { return true } // Correlated service rejection, not a live registration.
         switch (self, event) {
         case (.runtimeVersion, .runtimeVersion(let info)), (.prepareStorage, .runtimeVersion(let info)): return info.protocolVersion == .current
+        case (.probeRuntime, .runtimeProbe(let report)): return report.isValid
         case (.hostPreflight, .hostPreflight(let report)): return report.isComplete
         case (.listEnvironments, .environments(let inventory)): return inventory.isValid
         case (.inspectXcode, .xcodeSelection): return true
@@ -254,7 +257,7 @@ extension RuntimeEvent {
         case .accepted(let id), .progress(let id, _), .completed(let id), .failed(let id, _): id
         case .diagnostic(let event): OperationID(uuid: event.operationID)
         case .status(let status): status.inFlightOperation
-        case .runtimeVersion, .hostPreflight, .xcodeSelection, .environments: nil
+        case .runtimeVersion, .runtimeProbe, .hostPreflight, .xcodeSelection, .environments: nil
         }
     }
     var isTerminal: Bool {

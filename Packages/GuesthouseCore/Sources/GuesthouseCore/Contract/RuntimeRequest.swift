@@ -4,6 +4,10 @@ import Foundation
 /// private selection metadata is not a command, a diagnostic attachment, or access authority.
 public enum RuntimeRequest: Codable, Hashable, Sendable {
     case runtimeVersion
+    /// Explicit candidate diagnostic; service selects the verified artifact and fixed probes.
+    /// May retain launch metadata. A lost reply requires inspection, never automatic retry.
+    /// This contract does not activate the production service or select a provider.
+    case probeRuntime
     /// Read-only report; policy and storage identity are selected and retained by the service.
     case hostPreflight
     /// Explicit metadata setup at the fixed runtime-owned location; no path or options.
@@ -22,6 +26,7 @@ public enum RuntimeRequest: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .runtimeVersion: "runtimeVersion"
+        case .probeRuntime: "probeRuntime"
         case .hostPreflight: "hostPreflight"
         case .prepareStorage: "prepareStorage"
         case .listEnvironments: "listEnvironments"

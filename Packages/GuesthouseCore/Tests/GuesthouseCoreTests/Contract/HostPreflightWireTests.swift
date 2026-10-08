@@ -11,7 +11,7 @@ struct HostPreflightWireTests {
     ), now: Date(timeIntervalSince1970: 0))
 
     @Test func queryCarriesNoCallerSelectedPathPolicyOrIdentity() throws {
-        let input = Data(#"{"protocolVersion":20,"request":{"hostPreflight":{"path":"private-marker","volumeUUID":"private-marker","policy":"private-marker"}}}"#.utf8)
+        let input = Data(#"{"protocolVersion":21,"request":{"hostPreflight":{"path":"private-marker","volumeUUID":"private-marker","policy":"private-marker"}}}"#.utf8)
         let envelope = try RequestValidator.decode(input)
         #expect(envelope.request == .hostPreflight)
         #expect(envelope.request.caseName == "hostPreflight")
@@ -55,7 +55,7 @@ struct HostPreflightWireTests {
         var report = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.blocked)) as? [String: Any])
         report["path"] = "private-marker"
         report["error"] = ["Authorization": "private-marker"]
-        let object: [String: Any] = ["protocolVersion": 20, "event": ["hostPreflight": ["_0": report]]]
+        let object: [String: Any] = ["protocolVersion": 21, "event": ["hostPreflight": ["_0": report]]]
         let decoded = try RuntimeEventEnvelope.decode(JSONSerialization.data(withJSONObject: object))
         #expect(decoded.event == .hostPreflight(Self.blocked))
         #expect(!String(decoding: try decoded.encoded(), as: UTF8.self).contains("private-marker"))

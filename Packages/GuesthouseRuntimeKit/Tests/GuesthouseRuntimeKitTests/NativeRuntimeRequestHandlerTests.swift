@@ -199,8 +199,8 @@ import XPC
         await loader.loadedState?.store.close()
     }
 
-    @Test func productionPlanKeepsMutationsUnsupported() {
-        let request = RuntimeRequest.startEnvironment(EnvironmentID(), StartOptions())
+    @Test(arguments: [RuntimeRequest.probeRuntime, .startEnvironment(EnvironmentID(), StartOptions())])
+    func productionPlanKeepsUnactivatedWorkUnsupported(request: RuntimeRequest) {
         guard case .immediate(let event) = NativeRuntimeRequestHandler.queryPlan(request, version: version, state: nil) else {
             Issue.record("Mutation was scheduled"); return
         }
@@ -210,7 +210,7 @@ import XPC
     @Test func immediateReplyHelperRejectsDeferredQueriesAndMutations() {
         let environment = EnvironmentID()
         let requests: [RuntimeRequest] = [
-            .hostPreflight, .environmentStatus(environment), .startEnvironment(environment, StartOptions()),
+            .probeRuntime, .hostPreflight, .environmentStatus(environment), .startEnvironment(environment, StartOptions()),
             .stopEnvironment(environment, .force(expectedInstanceID: UUID())), .cancelOperation(OperationID()),
             .importXcode(environment, FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")),
         ]
@@ -226,6 +226,17 @@ import XPC
         try fixture.client.send(message: try message(.ignoredJSON))
         _ = try await next(fixture.processed)
         #expect(fixture.trace.steps.withLock { $0 } == [.authenticated, .diagnostic])
+        #expect(try await next(fixture.request(try message(.current))) == .runtimeVersion(version))
+    }
+
+    @Test func nativeProductionProbeRefusalDoesNotScheduleWorkOrChangeVersionQuery() async throws {
+        let fixture = try Fixture(productionPlan: true)
+        defer { fixture.cancel() }
+        let bytes = try JSONEncoder().encode(RuntimeRequestEnvelope(request: .probeRuntime))
+        let frame = try RawRuntimeFrame.encode(bytes, protocolVersion: Int64(RuntimeProtocolVersion.current.rawValue))
+        #expect(failure(try await next(fixture.request(frame))) == .invalidRequest(.unsupportedOperation))
+        #expect(fixture.executor.pending.withLock { $0.isEmpty })
+        #expect(!fixture.trace.steps.withLock { $0.contains(.probed) })
         #expect(try await next(fixture.request(try message(.current))) == .runtimeVersion(version))
     }
 
