@@ -171,10 +171,12 @@ import Testing
         let model = AppModel(backend: backend)
         await model.checkEnvironments().value
         await model.startEnvironment(environment.id)?.value
-        #expect(model.startDiagnostics.records.count == (foreign ? 0 : 256))
+        #expect(model.startDiagnostics.records.count == (foreign ? 1 : 256))
         #expect(model.startDiagnostics.discardedCount == (foreign ? 0 : 44))
-        #expect(model.sessionDiagnostics.records.count == (foreign ? 0 : 300))
+        #expect(model.sessionDiagnostics.records.count == (foreign ? 1 : 300))
         if foreign {
+            #expect(model.sessionDiagnostics.records.first?.event == DiagnosticEvent(operation: .startEnvironment,
+                outcome: .operationFailed(.operationOutcomeUnknown(operation)), operationID: operation.uuid, environmentID: environment.id))
             #expect(model.startFailure == .interrupted(.init(cause: .malformedResponse, operationID: operation, mayHaveMutated: true)))
             model.dismissStartFailure()
             #expect(model.startFailureDismissed && model.startFailure != nil && !model.canStart(environment.id))

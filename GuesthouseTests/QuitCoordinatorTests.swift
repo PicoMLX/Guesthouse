@@ -6,6 +6,29 @@ import Testing
 
 @MainActor @Suite(.timeLimit(.minutes(1)))
 struct QuitCoordinatorTests {
+    @Test(arguments: [false, true], [false, true])
+    func interruptedOrLocallyRefusedStopIsRetainedWithoutForceAuthority(accepted: Bool, refusal: Bool) async throws {
+        let fake = await configuredFake(), backend = HeldStopBackend(fake: fake, operation: operation), decision = Decision()
+        let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var sent = backend.stopped.makeAsyncIterator(); _ = await sent.next()
+        let error: any Error = refusal ? GuesthouseError.invalidRequest(.tooManyInFlight) : RuntimeSessionFailure(cause: .connectionLost)
+        backend.fail(error, after: accepted ? [.accepted(operation)] : []); await work.value
+        let event = try #require(model.sessionDiagnostics.records.last?.event)
+        #expect(model.sessionDiagnostics.records.count == 1 && event.operation == .stopEnvironment && event.environmentID == environment.id)
+        #expect(!quit.canForceStop && decision.values.isEmpty)
+        if accepted {
+            #expect(event.origin == .runtimeOperation && event.operationID == operation.uuid)
+            #expect(event.outcome == .operationFailed(.operationOutcomeUnknown(operation)))
+        } else {
+            #expect(event.origin == .appObservation && event.operationID != operation.uuid)
+            #expect(event.outcome == (refusal ? .operationFailed(.invalidRequest(.tooManyInFlight)) : .failed(.outcomeUnknown)))
+        }
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        let text = String(decoding: try #require(exported.files["log.txt"]), as: UTF8.self)
+        let recovery = try #require(event.recoveryMessage)
+        #expect(text.contains(event.message) && text.contains(recovery))
+    }
     let environment = DevelopmentEnvironment(name: "Development Mac")
     let operation = OperationID()
     let instance = UUID()
@@ -192,6 +215,30 @@ struct QuitCoordinatorTests {
         await work.value
         #expect(quit.flow == .failed(.ownership(environment.id, .ownershipUnproven)) && !quit.canForceStop)
     }
+    @Test(arguments: [false, true])
+    func terminalStopFailureRemainsExportableWhenPostRefusalInspectionFails(queryRefusal: Bool) async throws {
+        let fake = await configuredFake(), backend = HeldStopBackend(fake: fake, operation: operation), decision = Decision()
+        let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var stops = backend.stopped.makeAsyncIterator(); _ = await stops.next()
+        await fake.script("listEnvironments", queryRefusal ? .fail(error: .unauthorizedCaller) : .disconnect())
+        backend.answer([.accepted(operation), .failed(operation, .guestShutdownRefused(environment.id))])
+        await work.value
+        #expect(quit.flow == .failed(.check(queryRefusal ? .unavailable(.unauthorizedCaller) : .interrupted(.connectionLost))))
+        #expect(!quit.canForceStop && decision.values.isEmpty)
+        let error = GuesthouseError.guestShutdownRefused(environment.id)
+        let expected = DiagnosticEvent(operation: .stopEnvironment, outcome: .operationFailed(error),
+            operationID: operation.uuid, environmentID: environment.id)
+        #expect(model.sessionDiagnostics.records.first?.event == expected)
+        #expect(model.sessionDiagnostics.records.count == 2)
+        if queryRefusal {
+            #expect(model.sessionDiagnostics.records.last?.event.operation == .inspectEnvironment)
+            #expect(model.sessionDiagnostics.records.last?.event.outcome == .operationFailed(.unauthorizedCaller))
+        }
+        let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        let text = String(decoding: try #require(export.files["log.txt"]), as: UTF8.self)
+        #expect(text.contains(operation.uuid.uuidString) && text.contains(error.userMessage) && text.contains(error.recoveryMessage))
+    }
 
     @Test(arguments: [false, true])
     func omittedRunningCardCannotConfirmStopOrOfferForce(refusal: Bool) async throws {
@@ -310,5 +357,9 @@ private nonisolated final class HeldStopBackend: RuntimeBackend {
         let continuation = pending.withLock { state in defer { state = nil }; return state?.1 }
         for event in events { continuation?.yield(event) }
         continuation?.finish()
+    }
+    func fail(_ error: any Error, after events: [RuntimeEvent]) {
+        let continuation = pending.withLock { state in defer { state = nil }; return state?.1 }
+        for event in events { continuation?.yield(event) }; continuation?.finish(throwing: error)
     }
 }

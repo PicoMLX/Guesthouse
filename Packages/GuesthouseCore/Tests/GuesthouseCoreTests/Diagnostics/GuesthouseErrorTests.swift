@@ -34,7 +34,7 @@ struct GuesthouseErrorTests {
         var log = DiagnosticLog()
         log.append(event, recordedAt: Date(timeIntervalSince1970: 0.123))
         let json = try #require(JSONSerialization.jsonObject(with: log.jsonData()) as? [String: Any])
-        #expect(json["schemaVersion"] as? Int == 3)
+        #expect(json["schemaVersion"] as? Int == 4)
         #expect(log.text.contains("1970-01-01T00:00:00.123Z [\(Self.uuid)] Check tools: " + error.userMessage))
         #expect(log.text.contains(error.recoveryMessage))
     }
