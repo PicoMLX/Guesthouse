@@ -76,6 +76,7 @@ final class OwnedChild: Sendable {
 
     private struct State {
         var result: Result<ExitReason, Failure>?
+        var forkObservation: OwnedChildForkObservation.Result = .unproven
         var waiters: [CheckedContinuation<Result<ExitReason, Failure>, Never>] = []
     }
 
@@ -103,14 +104,21 @@ final class OwnedChild: Sendable {
     }
     let launchIdentity: LaunchIdentity?
     private let calls: SystemCalls
+    private let forks: OwnedChildForkObservation?
     private let state = Mutex(State())
 
-    private init(runID: UUID, processIdentifier: pid_t, calls: SystemCalls, identity: LaunchIdentity?) {
+    private init(runID: UUID, processIdentifier: pid_t, calls: SystemCalls, identity: LaunchIdentity?, forks: OwnedChildForkObservation?) {
         self.runID = runID
         self.processIdentifier = processIdentifier
         self.calls = calls
         launchIdentity = identity
+        self.forks = forks
     }
+
+    /// Kernel history of this exact live-owned launch, not a saved/restart capability. Only
+    /// successful observation AND reaping can publish exitedWithoutFork. Other launches and
+    /// any observed fork remain unproven for descendants. StateStore settlement is not wired.
+    var forkObservation: OwnedChildForkObservation.Result { state.withLock { $0.forkObservation } }
 
     /// Completion means only that this exact direct child has been observed and reaped.
     /// This wait deliberately ignores task cancellation. A caller can separately request a
@@ -159,7 +167,11 @@ final class OwnedChild: Sendable {
             state.withLock { state in
                 guard state.result == nil else { return }
                 switch observed {
-                case .success: state.result = calls.reap(processIdentifier)
+                case .success:
+                    let history = forks?.afterObservedExit() ?? .unproven
+                    let reaped = calls.reap(processIdentifier)
+                    state.result = reaped
+                    if case .success = reaped { state.forkObservation = history }
                 case .failure(let failure): state.result = .failure(failure)
                 }
             }
@@ -182,6 +194,7 @@ final class OwnedChild: Sendable {
     /// its own copies. The working-directory capability remains alive through addfchdir.
     static func spawn(
         runID: UUID = UUID(),
+        observingForks: Bool = false,
         executable: URL, arguments: [String] = [], environment: [String: String] = [:],
         workingDirectory: PinnedWorkingDirectory? = nil,
         standardInput: Int32, standardOutput: Int32, standardError: Int32,
@@ -190,7 +203,7 @@ final class OwnedChild: Sendable {
         let pid = try OwnedChildSpawn.launch(
             executable: executable, arguments: arguments, environment: environment,
             workingDirectory: workingDirectory,
-            descriptors: [standardInput, standardOutput, standardError]
+            descriptors: [standardInput, standardOutput, standardError], startSuspended: observingForks
         )
         // Capture before starting the reaper, including a child that exited during spawn.
         // If the kernel cannot establish birth, retain the child/reaper but publish no identity.
@@ -200,7 +213,16 @@ final class OwnedChild: Sendable {
                                            executable: executable, arguments: arguments)
             identity = candidate.isConsistent ? candidate : nil
         } else { identity = nil }
-        let child = OwnedChild(runID: runID, processIdentifier: pid, calls: calls, identity: identity)
+        let forks = observingForks && identity != nil ? OwnedChildForkObservation(pid: pid) : nil
+        let child = OwnedChild(runID: runID, processIdentifier: pid, calls: calls, identity: identity, forks: forks)
+        if observingForks {
+            // Never enter user code without a complete observation boundary. Retain actual
+            // child/reaper on any failure; signal delivery is not cleanup proof.
+            // This owner has not escaped or started its reaper: the exclusive direct-child
+            // contract holds its PID. waitid can report the initial suspended stop on Darwin,
+            // so do not use the ordinary running/exit probe to resume this new child.
+            if forks == nil || calls.signal(pid, SIGCONT) != .delivered { _ = calls.signal(pid, SIGKILL) }
+        }
         child.startObservation()
         return child
     }

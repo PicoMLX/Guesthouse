@@ -31,7 +31,7 @@ final class PinnedWorkingDirectory: Sendable {
 enum OwnedChildSpawn {
     static func launch(
         executable: URL, arguments: [String], environment: [String: String],
-        workingDirectory: PinnedWorkingDirectory?, descriptors: [Int32]
+        workingDirectory: PinnedWorkingDirectory?, descriptors: [Int32], startSuspended: Bool = false
     ) throws -> pid_t {
         guard executable.isFileURL, !executable.path.utf8.contains(0),
               arguments.allSatisfy({ !$0.utf8.contains(0) }),
@@ -75,6 +75,7 @@ enum OwnedChildSpawn {
         sigdelset(&defaults, SIGSTOP)
         try check(posix_spawnattr_setsigdefault(&attributes, &defaults), .resetDispositions)
         let flags = POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF
+            | (startSuspended ? POSIX_SPAWN_START_SUSPENDED : 0)
         try check(posix_spawnattr_setflags(&attributes, Int16(flags)), .setFlags)
         var pid: pid_t = 0
         let status = try withCStringArray([executable.path] + arguments) { argv in

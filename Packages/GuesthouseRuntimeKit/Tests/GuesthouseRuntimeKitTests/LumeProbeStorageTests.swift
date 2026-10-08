@@ -144,7 +144,7 @@ import Testing
 
     @Test(arguments: [false, true])
     func canceledAtFinalActorEntryNeverCreatesOrRepairsConfiguration(repair: Bool) async throws {
-        let fixture = try Fixture(), cancelAtEntry = Mutex(false)
+        let fixture = try await Fixture(), cancelAtEntry = Mutex(false)
         var hooks = StateStoreHooks()
         hooks.beforeLumeProbeActorEntry = {
             if cancelAtEntry.withLock({ $0 }) { withUnsafeCurrentTask { $0?.cancel() } }
@@ -169,7 +169,7 @@ import Testing
 
     @Test(arguments: [false, true])
     func actualLumeSettingsDirectoryIsProtectedAndUnsafeEntriesArePreserved(link: Bool) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
         let settings = fixture.configuration.appending(path: "lume")
         try StorageProtection.verify(settings)
@@ -190,7 +190,7 @@ import Testing
 
     @Test(arguments: [false, true], ["mode", "acl", "backup"])
     func unsafeSettingsChildRefusesBeforeChangingParentMetadata(link: Bool, drift: String) async throws {
-        let fixture = try Fixture(), owner = try await fixture.owner()
+        let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
         let parent = fixture.configuration, settings = parent.appending(path: "lume")
         let saved = parent.appending(path: "saved-config")
