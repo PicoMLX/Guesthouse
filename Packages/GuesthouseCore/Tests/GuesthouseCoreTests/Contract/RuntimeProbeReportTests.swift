@@ -77,6 +77,37 @@ import Testing
         #expect(!RuntimeProbeReport(failure: failure, diagnostics: Self.pair(failure.diagnosticOutcome)).isValid)
     }
 
+    private static func expectMalformed(_ report: RuntimeProbeReport) throws {
+        #expect(!report.isValid)
+        #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) { _ = try JSONEncoder().encode(report) }
+        var object: [String: Any] = ["diagnostics": try JSONSerialization.jsonObject(with: JSONEncoder().encode(report.diagnostics))]
+        if let advertisements = report.advertisements { object["advertisements"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(advertisements)) }
+        if let failure = report.failure { object["failure"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(failure)) }
+        #expect(throws: GuesthouseError.invalidRuntimeReply(.malformed)) {
+            _ = try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+    }
+
+    @Test(arguments: [RuntimeProbeFailure.versionMismatch, .invalidResponse, .timedOut, .processFailed(exitStatus: 23)], [0, 1, 2, 3, 4])
+    func launchedFailuresRequireTheirMatchingTerminalPair(_ failure: RuntimeProbeFailure, _ completed: Int) throws {
+        try Self.expectMalformed(RuntimeProbeReport(failure: failure, diagnostics: Self.successes(completed)))
+        if completed < 4 {
+            let valid = RuntimeProbeReport(failure: failure, diagnostics: Self.successes(completed) + Self.pair(failure.diagnosticOutcome))
+            #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(valid)) == valid)
+        }
+    }
+
+    @Test(arguments: [0, 1, 7, 8])
+    func appObservationCannotBorrowRuntimeReportIdentity(_ position: Int) throws {
+        var events = Self.successes()
+        for index in events.indices where index == position || position == events.count {
+            let event = events[index]
+            events[index] = .init(operation: event.operation, outcome: event.outcome,
+                operationID: event.operationID, origin: .appObservation)
+        }
+        try Self.expectMalformed(RuntimeProbeReport(advertisements: Self.advertisements, diagnostics: events))
+    }
+
     @Test func unknownAttachmentsCannotReachReexportOrStructuredDiagnostics() throws {
         let report = RuntimeProbeReport(advertisements: Self.advertisements, diagnostics: Self.successes())
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])

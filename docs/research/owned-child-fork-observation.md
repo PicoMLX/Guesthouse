@@ -136,6 +136,10 @@ failure, or no events when no diagnostic identity is available. An empty trace
 does not prove that effects were unsent. `probeLumeReport` reuses `DiagnosticLog`
 to capture the actual inspection events, with no invented operation/environment
 identity or raw-error classifier. Core coding refuses foreign, incomplete,
-contradictory or oversized traces. This data is not provider or cleanup authority.
+contradictory or oversized traces. Runtime reports also reject app-observation
+provenance. Launched version/response/timeout/process failures must retain their
+matching terminal failed pair; precheck refusals and unknown outcomes can preserve
+prior actual pairs without inventing a failed-operation identity. This data is not
+provider or cleanup authority.
 Native request activation, lifetime/cancellation routing and GUI consumers remain
 separate work; the ordinary version handshake still performs no provider execution.

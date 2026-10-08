@@ -44,6 +44,13 @@ public enum RuntimeProbeFailure: Codable, Hashable, Sendable, LocalizedError {
         default: [.inspectState, .cancel]
         }
     }
+    // These failures arise from an admitted launch and must preserve its terminal identity.
+    fileprivate var requiresTerminalFailureEvent: Bool {
+        switch self {
+        case .versionMismatch, .invalidResponse, .timedOut, .processFailed: true
+        default: false
+        }
+    }
     public var diagnosticOutcome: DiagnosticEvent.Outcome {
         switch self {
         case .runtimeMissing: .failed(.executableUnavailable)
@@ -75,7 +82,7 @@ public struct RuntimeProbeReport: Codable, Hashable, Sendable {
     public var isValid: Bool {
         guard (advertisements == nil) != (failure == nil),
               diagnostics.count <= Self.maximumDiagnosticCount, diagnostics.count.isMultiple(of: 2),
-              diagnostics.allSatisfy({ $0.operation == .verifyRuntime && $0.environmentID == nil }) else { return false }
+              diagnostics.allSatisfy({ $0.isRuntimeEvent && $0.operation == .verifyRuntime && $0.environmentID == nil }) else { return false }
         if case .processFailed(let status) = failure, !(1...255).contains(status) { return false }
         if advertisements != nil, diagnostics.count != Self.maximumDiagnosticCount { return false }
         var seen: Set<UUID> = []
@@ -87,7 +94,7 @@ public struct RuntimeProbeReport: Codable, Hashable, Sendable {
                 return index == diagnostics.count - 2 && end.outcome == failure?.diagnosticOutcome
             }
         }
-        return true
+        return failure?.requiresTerminalFailureEvent != true
     }
 
     private enum CodingKeys: String, CodingKey { case advertisements, failure, diagnostics }
