@@ -107,13 +107,7 @@ import Testing
         #expect(report.input == .abandoned && report.inputClosed)
         #expect(report.descendantScopeUnproven && report.outputComplete)
         // Observe actual pipe EOF after draining bounded pending bytes, not merely a flag.
-        var bytes = [UInt8](repeating: 0, count: 16 << 10)
-        var count = 1
-        for _ in 0..<258 {
-            count = Darwin.read(descriptor, &bytes, bytes.count)
-            if count <= 0 { break }
-        }
-        #expect(count == 0)
+        #expect(await nativePipeReachesEOF(descriptor))
     }
 
     @Test func canceledWaitStillObservesReapedChild() async throws {
@@ -248,6 +242,46 @@ import Testing
             withUnsafeCurrentTask { $0?.cancel() }
             await #expect(throws: ProcessLaunchFailure.canceled) {
                 _ = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/true")))
+            }
+        }
+        await task.value
+    }
+
+    @Test func synchronousSpawnStillDeliversInputAndActualEOF() async throws {
+        let bytes = Data("bounded native fixture".utf8), runID = UUID()
+        let spawned = try runner.spawn(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/cat"),
+            standardInput: .data(bytes), maximumOutputBytes: 4096, capturing: stdout), runID: runID)
+        // The synchronous caller need not perform another actor hop to keep startup alive.
+        let report = try await spawned.run.waitForExit()
+        #expect(report.childExit == .success(.status(0)))
+        #expect(report.input == .delivered && report.inputClosed && report.descendantScopeUnproven)
+        #expect(spawned.run.ownedChild.runID == runID)
+        #expect(try #require(await spawned.run.takeOutput()).stdout == bytes)
+    }
+
+    @Test func droppedSynchronousSpawnKeepsItsAbsoluteDeadline() async throws {
+        var spawned: ProcessRunner.Spawned? = try runner.spawn(ProcessInvocation(
+            executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"],
+            timeout: .milliseconds(100), terminationGracePeriod: .zero))
+        let child = try #require(spawned).run.ownedChild
+        weak let facade = spawned?.run
+        let watchdog = Task {
+            do { try await Task.sleep(for: .seconds(3)) } catch { return OwnedChild.SignalResult.alreadyReaped }
+            return child.signal(SIGKILL)
+        }
+        defer { watchdog.cancel() }
+        spawned = nil
+        #expect(facade == nil)
+        #expect(await child.waitForReapedExit() == .success(.signal(SIGTERM)))
+        watchdog.cancel()
+        #expect(await watchdog.value != .delivered)
+    }
+
+    @Test func canceledSynchronousAdmissionRefusesBeforeSpawning() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            #expect(throws: ProcessLaunchFailure.canceled) {
+                _ = try runner.spawn(ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/true")))
             }
         }
         await task.value

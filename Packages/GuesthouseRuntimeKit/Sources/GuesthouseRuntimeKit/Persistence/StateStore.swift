@@ -119,6 +119,48 @@ public actor StateStore {
         try anchor.prepareLumeProbeConfiguration()
     }
 
+    /// Internal fixed-command launch groundwork (MVP-PLAN.md §§3–4). Not wired to XPC,
+    /// the GUI or production mutations. The historical pin still fails strict verification.
+    /// Returning retains intent and actual authority; separate explicit inspection is required.
+    func launchLumeProbe(command: LumeLaunchIntent.Command,
+                         coordinator: LumeRuntimeCoordinator = .shared) async throws -> LumeProbeLaunch {
+        guard let storage = try anchor?.verifiedProbeStorage() else {
+            throw StateStoreError.fileUnreadable(name: .stateDirectory)
+        }
+        return try await coordinator.withExclusiveAccess(for: storage) {
+            try await self.launchOwnedLumeProbe(command: command)
+        }
+    }
+
+    private func launchOwnedLumeProbe(command: LumeLaunchIntent.Command) throws -> LumeProbeLaunch {
+        // Recheck the current owner after queueing; never carry its old anchor across that wait.
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        _ = try requireLumeAvailability(anchor)
+        guard lumeOwnedChild == nil else { throw LumeLaunchOwnershipFailure.inspectionRequired }
+        let storage = try anchor.verifiedProbeStorage()
+        _ = try storage.environmentForLumeProbe()
+        guard let bundle = try LumeBundle.locate(in: storage) else { throw LumeVerificationError.bundleMissing }
+        let verified = try bundle.verify() // Precheck refusal creates no launch intent/effects.
+        try Task.checkCancellation()
+        let intent = try recordOwnedLumeLaunch(command: command)
+        try Task.checkCancellation()
+        // Publication may have taken time. Repeat the complete strict/coherence gate and
+        // writable-path checks immediately before the same synchronous spawner, under lease.
+        let current = try verified.reverified(in: storage)
+        let invocation = try LumeProbeInvocation.make(executable: current.executable, command: command, storage: storage)
+        let spawned = try ProcessRunner().spawn(invocation, runID: intent.attemptID)
+        do { try attachOwnedLumeChild(spawned.run.ownedChild, to: intent) }
+        catch {
+            // Even unavailable birth/failed receipt publication retains the actual owner.
+            // Requesting direct-child termination proves no cleanup or descendant outcome.
+            if lumeOwnedChild == nil { lumeOwnedChild = spawned.run.ownedChild }
+            let run = spawned.run
+            Task { await run.terminate(gracePeriod: .seconds(1)) }
+            throw error
+        }
+        return LumeProbeLaunch(intent: intent, run: spawned.run)
+    }
+
     /// Admission seam for the future fixed-command probe. The physical-root lease spans
     /// publication and the caller; the durable intent continues blocking admission afterward.
     /// All other provider mutations/replacement remain disabled until wired to this authority

@@ -22,6 +22,12 @@ final class ProcessRun: Sendable {
         driver = Driver(child: child, readers: readers, input: input, grace: grace)
     }
     deinit { let driver = driver; Task { await driver.abandonResponse() } }
+    /// Retain the controller before a synchronous launcher can return/throw/drop its facade.
+    /// The absolute deadline is unchanged; this task retains no facade or caller response.
+    func scheduleStart(deadline: ContinuousClock.Instant, input: Data?) {
+        let driver = driver
+        Task { await driver.start(deadline: deadline, data: input) }
+    }
     func start(deadline: ContinuousClock.Instant, input: Data?) async { await driver.start(deadline: deadline, data: input) }
     func terminate(gracePeriod: Duration) async { await driver.stop(grace: gracePeriod, timedOut: false) }
     func waitForExit() async throws -> ProcessReport {
