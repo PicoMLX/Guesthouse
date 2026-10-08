@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import GuesthouseCore
+import Synchronization
 import Testing
 @testable import GuesthouseRuntimeKit
 
@@ -21,9 +22,9 @@ import Testing
         }
         deinit { try? FileManager.default.removeItem(at: base) }
 
-        func owner() async throws -> StateStore {
+        func owner(hooks: StateStoreHooks = StateStoreHooks()) async throws -> StateStore {
             let root = root
-            return try await StateStore.open(storage: { try RuntimeStorage(existingRoot: root) })
+            return try await StateStore.open(storage: { try RuntimeStorage(existingRoot: root) }, hooks: hooks)
         }
     }
 
@@ -48,6 +49,7 @@ import Testing
             "LUME_TELEMETRY_ENABLED": "false", "LUME_UPDATE_CHECK": "false",
             "TMPDIR": fixture.root.appending(path: "staging").path,
             "XDG_CONFIG_HOME": fixture.configuration.path,
+            "LUME_HOME": fixture.configuration.appending(path: "lume").path,
         ])
         #expect(environment["HOME"] == nil && environment["PATH"] == nil)
         try StorageProtection.verify(fixture.configuration)
@@ -62,7 +64,7 @@ import Testing
         await owner.close()
     }
 
-    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"], [false, true])
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "state/lume-xdg/lume", "staging"], [false, true])
     func eachWritableComponentIsRecheckedWithoutRepair(_ suffix: String, _ acl: Bool) async throws {
         let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
@@ -76,7 +78,7 @@ import Testing
         await owner.close()
     }
 
-    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "staging"])
+    @Test(arguments: ["", "vms", "state", "state/lume-xdg", "state/lume-xdg/lume", "staging"])
     func backupPolicyIsRecheckedWithoutRepair(_ suffix: String) async throws {
         let fixture = try await Fixture(), owner = try await fixture.owner()
         try await owner.prepareLumeProbeConfiguration()
@@ -137,6 +139,85 @@ import Testing
         await #expect(throws: StorageFailure.protectionDrift) { try await owner.prepareLumeProbeConfiguration() }
         #expect(try StorageProtection.structure(fixture.configuration).st_mode & 0o7777 == 0o755)
         #expect(try StorageProtection.structure(target).st_mode & 0o7777 == 0o755)
+        await owner.close()
+    }
+
+    @Test(arguments: [false, true])
+    func canceledAtFinalActorEntryNeverCreatesOrRepairsConfiguration(repair: Bool) async throws {
+        let fixture = try await Fixture(), cancelAtEntry = Mutex(false)
+        var hooks = StateStoreHooks()
+        hooks.beforeLumeProbeActorEntry = {
+            if cancelAtEntry.withLock({ $0 }) { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let owner = try await fixture.owner(hooks: hooks)
+        let configuration = fixture.configuration.appending(path: "lume")
+        let saved = configuration.appending(path: "saved-config")
+        if repair {
+            try await owner.prepareLumeProbeConfiguration()
+            try Data("preserve me".utf8).write(to: saved)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: configuration.path)
+        }
+        cancelAtEntry.withLock { $0 = true }
+        let work = Task { try await owner.prepareLumeProbeConfiguration() }
+        await #expect(throws: CancellationError.self) { try await work.value }
+        if repair {
+            #expect(try StorageProtection.structure(configuration).st_mode & 0o7777 == 0o755)
+            #expect(try Data(contentsOf: saved) == Data("preserve me".utf8))
+        } else { #expect(!FileManager.default.fileExists(atPath: fixture.configuration.path)) }
+        await owner.close()
+    }
+
+    @Test(arguments: [false, true])
+    func actualLumeSettingsDirectoryIsProtectedAndUnsafeEntriesArePreserved(link: Bool) async throws {
+        let fixture = try await Fixture(), owner = try await fixture.owner()
+        try await owner.prepareLumeProbeConfiguration()
+        let settings = fixture.configuration.appending(path: "lume")
+        try StorageProtection.verify(settings)
+        #expect(try settings.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == false)
+        try FileManager.default.removeItem(at: settings) // Empty fixture directory only.
+        let outside = fixture.base.appending(path: "outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        if link { try FileManager.default.createSymbolicLink(at: settings, withDestinationURL: outside) }
+        else { try Data("keep invalid entry".utf8).write(to: settings) }
+        await #expect(throws: StorageFailure.unsafeStructure) { try await owner.prepareLumeProbeConfiguration() }
+        #expect(throws: StorageFailure.unsafeStructure) { _ = try fixture.storage.environmentForLumeProbe() }
+        #expect(try StorageProtection.structure(outside).st_mode & 0o7777 == 0o755)
+        if link { #expect(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path) == outside.path) }
+        else { #expect(try Data(contentsOf: settings) == Data("keep invalid entry".utf8)) }
+        await owner.close()
+    }
+
+    @Test(arguments: [false, true], ["mode", "acl", "backup"])
+    func unsafeSettingsChildRefusesBeforeChangingParentMetadata(link: Bool, drift: String) async throws {
+        let fixture = try await Fixture(), owner = try await fixture.owner()
+        try await owner.prepareLumeProbeConfiguration()
+        let parent = fixture.configuration, settings = parent.appending(path: "lume")
+        let saved = parent.appending(path: "saved-config")
+        try Data("preserve parent work".utf8).write(to: saved)
+        try FileManager.default.removeItem(at: settings) // Empty fixture directory only.
+        let outside = fixture.base.appending(path: "outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        if link { try FileManager.default.createSymbolicLink(at: settings, withDestinationURL: outside) }
+        else { try Data("preserve invalid child".utf8).write(to: settings) }
+        switch drift {
+        case "acl": try FixtureACL.install(.everyoneRead, at: parent)
+        case "backup": try RuntimeStorage.writeBackupExclusion(parent, true)
+        default: try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path)
+        }
+        let before = try StorageProtection.structure(parent)
+        await #expect(throws: StorageFailure.unsafeStructure) { try await owner.prepareLumeProbeConfiguration() }
+        let after = try StorageProtection.structure(parent)
+        #expect(StateFileIdentity(after) == StateFileIdentity(before) && after.st_mode == before.st_mode)
+        if drift == "backup" {
+            var observed = URL(fileURLWithPath: parent.path); observed.removeAllCachedResourceValues()
+            #expect(try observed.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        } else { #expect(throws: StorageFailure.protectionDrift) { try StorageProtection.verify(parent) } }
+        #expect(try Data(contentsOf: saved) == Data("preserve parent work".utf8))
+        #expect(try StorageProtection.structure(outside).st_mode & 0o7777 == 0o755)
+        if link { #expect(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path) == outside.path) }
+        else { #expect(try Data(contentsOf: settings) == Data("preserve invalid child".utf8)) }
         await owner.close()
     }
 

@@ -6,32 +6,52 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1))) struct OwnedChildForkTests {
     private final class Fixture: Sendable {
-        let base, executable: URL
-        init() async throws {
-            var template = Array("/private/tmp/guesthouse-fork-observation-XXXXXX".utf8CString)
-            let name = try #require(mkdtemp(&template))
-            base = URL(fileURLWithPath: String(cString: name))
-            executable = base.appending(path: "fixture")
-            let source = base.appending(path: "fixture.c")
-            try Data(Self.source.utf8).write(to: source)
-            var invocation = ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/clang"))
-            invocation.arguments = ["-Wall", "-Wextra", "-Werror", source.path, "-o", executable.path]
-            invocation.timeout = .seconds(20)
-            invocation.capturing = [.stderr]; invocation.maximumOutputBytes = 4096
-            let run = try await ProcessRunner().run(invocation)
-            let report = try await run.waitForExit()
-            let response = await run.takeOutput()
-            try #require(report.childExit == .success(.status(0)),
-                Comment(rawValue: String(decoding: response?.stderr ?? Data(), as: UTF8.self)))
+        private final class Compiled: Sendable {
+            let base, executable: URL
+            init() async throws {
+                var template = Array("/private/tmp/guesthouse-fork-observation-XXXXXX".utf8CString)
+                let name = try #require(mkdtemp(&template))
+                base = URL(fileURLWithPath: String(cString: name))
+                executable = base.appending(path: "fixture")
+                let source = base.appending(path: "fixture.c")
+                try Data(Fixture.source.utf8).write(to: source)
+                var invocation = ProcessInvocation(executable: URL(fileURLWithPath: "/usr/bin/clang"))
+                invocation.arguments = ["-Wall", "-Wextra", "-Werror", source.path, "-o", executable.path]
+                invocation.timeout = .seconds(20)
+                invocation.capturing = [.stderr]; invocation.maximumOutputBytes = 4096
+                let run = try await ProcessRunner().run(invocation)
+                let report = try await run.waitForExit()
+                let response = await run.takeOutput()
+                try #require(report.childExit == .success(.status(0)),
+                    Comment(rawValue: String(decoding: response?.stderr ?? Data(), as: UTF8.self)))
+            }
+            deinit { try? FileManager.default.removeItem(at: base) }
         }
-        deinit { try? FileManager.default.removeItem(at: base) }
+        // One immutable executable remains alive for the test process, including
+        // asynchronous platform signature assessment after an individual child exits.
+        private static let compiled = Task { try await Compiled() }
+        private let retained: Compiled
+        var base: URL { retained.base }
+        var executable: URL { retained.executable }
+        init() async throws { retained = try await Self.compiled.value }
         func spawn(_ mode: String, observing: Bool = true, calls: OwnedChild.SystemCalls = .live,
                    input: Int32? = nil, output: Int32? = nil) throws -> OwnedChild {
             let fd = open("/dev/null", O_RDWR | O_CLOEXEC)
             try #require(fd >= 0)
             defer { close(fd) }
-            return try OwnedChild.spawn(observingForks: observing, executable: executable, arguments: [mode],
+            let child = try OwnedChild.spawn(observingForks: observing, executable: executable, arguments: [mode],
                 standardInput: input ?? fd, standardOutput: output ?? fd, standardError: fd, calls: calls)
+            let watchdog = Task {
+                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                if child.signal(SIGKILL) == .delivered {
+                    Issue.record("Native fixture exceeded its owned-child watchdog.")
+                }
+            }
+            Task {
+                _ = await child.waitForReapedExit()
+                watchdog.cancel()
+            }
+            return child
         }
         // Benign native process-creation fixtures only; never a shell or provider artifact.
         private static let source = """

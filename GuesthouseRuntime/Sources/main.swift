@@ -28,9 +28,8 @@ do {
         service: "com.starlingprotocol.Guesthouse.Runtime",
         requirement: RuntimeCallerAuthentication.listenerRequirement
     ) { request in
-        request.accept { session in
-            NativeRuntimeRequestHandler(session: session, version: version, state: state, supervisor: supervisor, diagnostic: record)
-        }
+        NativeRuntimeRequestHandler.accept(request, version: version, state: state,
+                                           supervisor: supervisor, diagnostic: record)
     }
     // Default initialization already activates the listener. Never activate it a second time.
     withExtendedLifetime(listener) { dispatchMain() }
