@@ -16,7 +16,7 @@ import Testing
         delivery.cancel()
         try #require(await closed(delivery))
         #expect(delivery.end == .abandoned)
-        #expect(await reachesEOF(descriptor)) // Real EOF while the retained read end remains open.
+        #expect(await nativePipeReachesEOF(descriptor)) // Real EOF while the retained read end remains open.
     }
 
     @Test func cancellationBeforeStartClosesTheUnusedWriter() async throws {
@@ -51,30 +51,6 @@ import Testing
         delivery.start(Data([65]))
         try #require(await closed(delivery))
         #expect(delivery.end == .failed(EPIPE)) // Descriptor-local suppression keeps the host alive.
-    }
-
-    private func reachesEOF(_ descriptor: Int32) async -> Bool {
-        await withCheckedContinuation { continuation in
-            DispatchQueue(label: "Guesthouse.InputDeliveryTests.EOF").async {
-                let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
-                var bytes = [UInt8](repeating: 0, count: 16 << 10)
-                var drained = 0
-                while DispatchTime.now().uptimeNanoseconds < deadline {
-                    let count = Darwin.read(descriptor, &bytes, bytes.count)
-                    if count == 0 { continuation.resume(returning: true); return }
-                    if count > 0 {
-                        drained += count
-                        if drained > 4 << 20 { break }
-                    } else if errno == EAGAIN {
-                        // Cancellation/closure is not EOF. Observe readiness/HUP and retry
-                        // the actual read within a bound, including concurrent spawn windows.
-                        var item = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-                        _ = poll(&item, 1, 100)
-                    } else if errno != EINTR { break }
-                }
-                continuation.resume(returning: false)
-            }
-        }
     }
 
     private func closed(_ delivery: InputDelivery) async -> Bool {
