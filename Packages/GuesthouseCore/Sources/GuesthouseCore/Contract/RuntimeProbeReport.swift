@@ -99,6 +99,7 @@ public struct RuntimeProbeReport: Codable, Hashable, Sendable {
                   seen.insert(start.operationID).inserted else { return false }
             if end.outcome != .succeeded {
                 return failure?.isPrelaunchFailure != true
+                    && (failure != .versionMismatch || index == 0)
                     && index == diagnostics.count - 2 && end.outcome == failure?.diagnosticOutcome
             }
         }

@@ -138,7 +138,8 @@ to capture the actual inspection events, with no invented operation/environment
 identity or raw-error classifier. Core coding refuses foreign, incomplete,
 contradictory or oversized traces. Runtime reports also reject app-observation
 provenance. Launched version/response/timeout/process failures must retain their
-matching terminal failed pair. Missing-runtime and artifact-verification refusals
+matching terminal failed pair. Version mismatch is valid only in the first pair,
+matching the fixed version-first sequence. Missing-runtime and artifact-verification refusals
 precede launch: only zero to three prior successful pairs can remain, with no
 terminal failed pair. Ambiguous storage/refusal and unknown outcomes can preserve
 actual pairs without inventing a failed-operation identity. This data is not

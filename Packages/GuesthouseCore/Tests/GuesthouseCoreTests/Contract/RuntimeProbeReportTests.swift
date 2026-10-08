@@ -93,8 +93,16 @@ import Testing
         try Self.expectMalformed(RuntimeProbeReport(failure: failure, diagnostics: Self.successes(completed)))
         if completed < 4 {
             let valid = RuntimeProbeReport(failure: failure, diagnostics: Self.successes(completed) + Self.pair(failure.diagnosticOutcome))
-            #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(valid)) == valid)
+            if failure == .versionMismatch, completed > 0 { try Self.expectMalformed(valid) }
+            else { #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(valid)) == valid) }
         }
+    }
+
+    @Test(arguments: [1, 2, 3])
+    func versionMismatchCannotBorrowEarlierCompletedOperations(_ completed: Int) throws {
+        let failure = RuntimeProbeFailure.versionMismatch
+        try Self.expectMalformed(RuntimeProbeReport(failure: failure,
+            diagnostics: Self.successes(completed) + Self.pair(failure.diagnosticOutcome)))
     }
 
     @Test(arguments: [RuntimeProbeFailure.runtimeMissing, .verificationFailed], [0, 1, 2, 3, 4])
