@@ -107,13 +107,7 @@ import Testing
         #expect(report.input == .abandoned && report.inputClosed)
         #expect(report.descendantScopeUnproven && report.outputComplete)
         // Observe actual pipe EOF after draining bounded pending bytes, not merely a flag.
-        var bytes = [UInt8](repeating: 0, count: 16 << 10)
-        var count = 1
-        for _ in 0..<258 {
-            count = Darwin.read(descriptor, &bytes, bytes.count)
-            if count <= 0 { break }
-        }
-        #expect(count == 0)
+        #expect(await nativePipeReachesEOF(descriptor))
     }
 
     @Test func canceledWaitStillObservesReapedChild() async throws {
