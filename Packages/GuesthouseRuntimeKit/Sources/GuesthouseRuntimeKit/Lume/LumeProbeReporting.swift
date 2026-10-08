@@ -28,6 +28,7 @@ enum LumeProbeReporting {
     static func classify(_ error: any Error) -> RuntimeProbeFailure {
         switch error {
         case LumeVerificationError.bundleMissing: .runtimeMissing
+        case LumeVerificationError.insecureBundleLayout: .unsafeStorage
         case is LumeVerificationError: .verificationFailed
         case let error as LumeProbeResponseFailure:
             switch error {

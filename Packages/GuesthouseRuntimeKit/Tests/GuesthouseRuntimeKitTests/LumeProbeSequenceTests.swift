@@ -246,17 +246,24 @@ import Testing
         await f.owner.close()
     }
 
-    @Test(arguments: ["closed", "configuration", "bundle", "unsigned"])
+    @Test(arguments: ["closed", "configuration", "bundle", "unsigned", "unsafe"])
     func typedProductionPrecheckRefusalHasNoInventedIdentity(_ defect: String) async throws {
         let f = try await Fixture(), before = try Data(contentsOf: f.record)
         if defect == "closed" { await f.owner.close() }
-        if defect == "bundle" || defect == "unsigned" { try await f.owner.prepareLumeProbeConfiguration() }
-        if defect == "unsigned" { try f.unsignedBundle() }
+        if ["bundle", "unsigned", "unsafe"].contains(defect) { try await f.owner.prepareLumeProbeConfiguration() }
+        if defect == "unsigned" || defect == "unsafe" { try f.unsignedBundle() }
+        if defect == "unsafe" {
+            let info = try LumeBundle.expectedLocation(in: f.storage).appending(path: "Contents/Info.plist")
+            let preserved = f.base.appending(path: "preserved-info")
+            try FileManager.default.moveItem(at: info, to: preserved)
+            try FileManager.default.createSymbolicLink(at: info, withDestinationURL: preserved)
+        }
         let report = await f.owner.probeLumeReport()
-        let expected: RuntimeProbeFailure = defect == "bundle" ? .runtimeMissing : defect == "unsigned" ? .verificationFailed : .storageUnavailable
+        let expected: RuntimeProbeFailure = defect == "bundle" ? .runtimeMissing : defect == "unsigned" ? .verificationFailed : defect == "unsafe" ? .unsafeStorage : .storageUnavailable
         #expect(report.isValid && report.failure == expected && report.advertisements == nil)
         let after = try Data(contentsOf: f.record)
         #expect(report.diagnostics.isEmpty && after == before)
+        if defect == "unsafe" { #expect(report.failure?.recoveryActions == [.inspectState, .cancel]) }
         await f.owner.close()
     }
 

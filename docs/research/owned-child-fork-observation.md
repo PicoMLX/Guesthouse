@@ -142,7 +142,9 @@ matching terminal failed pair. Version mismatch is valid only in the first pair,
 matching the fixed version-first sequence. Missing-runtime and artifact-verification refusals
 precede launch: only zero to three prior successful pairs can remain, with no
 terminal failed pair. Ambiguous storage/refusal and unknown outcomes can preserve
-actual pairs without inventing a failed-operation identity. This data is not
-provider or cleanup authority.
+actual pairs without inventing a failed-operation identity. Only unknown outcome
+can follow four successful pairs. Launched version mismatch and unsafe bundle
+layout retain inspection/cancel guidance without offering runtime repair. This data
+is not provider or cleanup authority.
 Native request activation, lifetime/cancellation routing and GUI consumers remain
 separate work; the ordinary version handshake still performs no provider execution.

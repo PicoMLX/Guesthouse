@@ -98,6 +98,22 @@ import Testing
         }
     }
 
+    @Test(arguments: [RuntimeProbeFailure.storageUnavailable, .unsafeStorage, .inspectionRequired], [0, 1, 2, 3, 4])
+    func midProbeFailuresCannotFollowCompleteSuccess(_ failure: RuntimeProbeFailure, _ completed: Int) throws {
+        let prior = Self.successes(completed), report = RuntimeProbeReport(failure: failure, diagnostics: prior)
+        if completed == 4 { try Self.expectMalformed(report) }
+        else {
+            #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(report)) == report)
+            let terminal = RuntimeProbeReport(failure: failure, diagnostics: prior + Self.pair(failure.diagnosticOutcome))
+            #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(terminal)) == terminal)
+        }
+    }
+
+    @Test(arguments: [RuntimeProbeFailure.versionMismatch, .invalidResponse, .timedOut, .processFailed(exitStatus: 23)])
+    func launchedFailureRecoveryPreservesTheRetainedOperation(_ failure: RuntimeProbeFailure) {
+        #expect(failure.recoveryActions == [.inspectState, .cancel])
+    }
+
     @Test(arguments: [1, 2, 3])
     func versionMismatchCannotBorrowEarlierCompletedOperations(_ completed: Int) throws {
         let failure = RuntimeProbeFailure.versionMismatch

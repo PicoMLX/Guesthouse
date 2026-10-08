@@ -28,7 +28,8 @@ public enum RuntimeProbeFailure: Codable, Hashable, Sendable, LocalizedError {
     public var userMessage: String {
         switch self {
         case .runtimeMissing: "The tested runtime is missing from Guesthouse's private runtime folder."
-        case .verificationFailed, .versionMismatch: "The runtime does not match Guesthouse's tested identity. Preserve the installation and inspect it in Repair."
+        case .verificationFailed: "The runtime does not match Guesthouse's tested identity. Preserve the installation and inspect it in Repair."
+        case .versionMismatch: "The runtime inspection returned a different version. Preserve its storage and inspect the retained launch before continuing."
         case .storageUnavailable: "Guesthouse could not access its saved runtime state. Preserve the storage and inspect it before continuing."
         case .unsafeStorage: "Guesthouse could not verify its storage protection. Preserve the folders and any unpublished work before continuing."
         case .inspectionRequired, .outcomeUnknown: "The runtime inspection has an unknown outcome. Preserve its storage and inspect the actual owned processes before continuing."
@@ -40,7 +41,7 @@ public enum RuntimeProbeFailure: Codable, Hashable, Sendable, LocalizedError {
     public var errorDescription: String? { userMessage }
     public var recoveryActions: [RecoveryAction] {
         switch self {
-        case .runtimeMissing, .verificationFailed, .versionMismatch: [.inspectState, .repair(.runtime), .cancel]
+        case .runtimeMissing, .verificationFailed: [.inspectState, .repair(.runtime), .cancel]
         default: [.inspectState, .cancel]
         }
     }
@@ -104,7 +105,7 @@ public struct RuntimeProbeReport: Codable, Hashable, Sendable {
             }
         }
         return failure?.requiresTerminalFailureEvent != true
-            && (failure?.isPrelaunchFailure != true || diagnostics.count < Self.maximumDiagnosticCount)
+            && (failure == nil || failure == .outcomeUnknown || diagnostics.count < Self.maximumDiagnosticCount)
     }
 
     private enum CodingKeys: String, CodingKey { case advertisements, failure, diagnostics }
