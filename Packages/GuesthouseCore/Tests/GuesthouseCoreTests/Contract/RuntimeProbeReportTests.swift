@@ -97,6 +97,16 @@ import Testing
         }
     }
 
+    @Test(arguments: [RuntimeProbeFailure.runtimeMissing, .verificationFailed], [0, 1, 2, 3, 4])
+    func prelaunchFailuresOnlyRetainPriorSuccessfulPairs(_ failure: RuntimeProbeFailure, _ completed: Int) throws {
+        let prior = Self.successes(completed), report = RuntimeProbeReport(failure: failure, diagnostics: prior)
+        if completed == 4 { try Self.expectMalformed(report) }
+        else {
+            #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(report)) == report)
+            try Self.expectMalformed(RuntimeProbeReport(failure: failure, diagnostics: prior + Self.pair(failure.diagnosticOutcome)))
+        }
+    }
+
     @Test(arguments: [0, 1, 7, 8])
     func appObservationCannotBorrowRuntimeReportIdentity(_ position: Int) throws {
         var events = Self.successes()

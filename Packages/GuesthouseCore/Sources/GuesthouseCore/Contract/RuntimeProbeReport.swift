@@ -51,6 +51,13 @@ public enum RuntimeProbeFailure: Codable, Hashable, Sendable, LocalizedError {
         default: false
         }
     }
+    // Artifact admission refuses before the next intent and diagnostic emitter exist.
+    fileprivate var isPrelaunchFailure: Bool {
+        switch self {
+        case .runtimeMissing, .verificationFailed: true
+        default: false
+        }
+    }
     public var diagnosticOutcome: DiagnosticEvent.Outcome {
         switch self {
         case .runtimeMissing: .failed(.executableUnavailable)
@@ -91,10 +98,12 @@ public struct RuntimeProbeReport: Codable, Hashable, Sendable {
             guard start.outcome == .started, start.operationID == end.operationID,
                   seen.insert(start.operationID).inserted else { return false }
             if end.outcome != .succeeded {
-                return index == diagnostics.count - 2 && end.outcome == failure?.diagnosticOutcome
+                return failure?.isPrelaunchFailure != true
+                    && index == diagnostics.count - 2 && end.outcome == failure?.diagnosticOutcome
             }
         }
         return failure?.requiresTerminalFailureEvent != true
+            && (failure?.isPrelaunchFailure != true || diagnostics.count < Self.maximumDiagnosticCount)
     }
 
     private enum CodingKeys: String, CodingKey { case advertisements, failure, diagnostics }
