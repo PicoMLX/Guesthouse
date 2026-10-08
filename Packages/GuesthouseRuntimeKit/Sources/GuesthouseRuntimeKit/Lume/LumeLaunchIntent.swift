@@ -25,8 +25,9 @@ enum LumeLaunchOwnershipFailure: Error, Equatable, Sendable, LocalizedError {
 /// One bounded record owned by StateStore's existing lifetime lock. Genesis is permitted only
 /// during createFresh's exclusive creation of a new root. Missing records on reopening never
 /// mean idle. A saved intent stays unresolved across return, throw, cancellation and restart.
-/// There is deliberately no settlement API: direct-child exit and synthetic inspection do not
-/// prove whole-owned-set quiescence. No provider/probe execution is wired by this slice.
+/// Only explicit same-service inspection of actual no-fork launch history can settle an intent.
+/// Direct-child exit and saved/synthetic inspection never suffice. Provider/probe execution and
+/// restart/forked-set recovery remain unwired.
 struct LumeRuntimeOwnership: Codable, Equatable, Sendable {
     let root: StateFileIdentity
     let intent: LumeLaunchIntent?

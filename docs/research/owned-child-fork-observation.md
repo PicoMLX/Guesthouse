@@ -45,7 +45,29 @@ launches, unavailable birth, refused resume, and lost reap authority. They were
 validated on arm64 macOS 26.6.2 (25G83). Removing the fork subscription makes the
 descendant cases fail.
 
-This history remains attached to a live child owner. It is not persisted proof,
-restart reconciliation, provider success, or authorization to clear saved launch
-intent. StateStore settlement and ProcessRunner integration remain separate work.
-No provider, installer, wrapper, or VM is activated by this change.
+StateStore's runtime-only `settleInspectedLumeLaunch` explicitly checks the current
+intent, service epoch, protected root/record and actually retained child. Its live
+history must be `exitedWithoutFork`; a saved receipt cannot substitute for that
+owner. The same lifetime lock, physical-root lease and atomic writer publish idle
+metadata before releasing the child. Cancellation before publication changes
+nothing. A publication failure retains actual ownership and the current store's
+uncertainty fence, even if a complete idle record became visible before a failed
+directory synchronization.
+
+Run this integration's nine test functions with:
+
+```bash
+swift test --package-path Packages/GuesthouseRuntimeKit --filter LumeLaunchSettlementTests -Xswiftc -warnings-as-errors
+```
+
+They check explicit completion and preserved work, running/ordinary/forked
+children, missing or foreign receipts, restart refusal, queued close/root change,
+cancellation and failed publication. Omitting the live-history guard produces
+eight issues across the ordinary-exit, running-child and actual-fork regressions.
+
+This history remains attached to a live child owner, never persisted as reusable
+proof. Forked launches and restart recovery still require genuine reconciliation;
+provider inventory and repair remain unfinished. ProcessRunner observation/launch
+integration and the bounded probe remain separate work. No provider, installer,
+wrapper, or VM is activated, and no metadata is cleared automatically on return,
+timeout, cancellation or a delivered signal.

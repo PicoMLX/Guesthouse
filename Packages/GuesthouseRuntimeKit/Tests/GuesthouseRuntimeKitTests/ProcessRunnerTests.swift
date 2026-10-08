@@ -89,6 +89,33 @@ import Testing
         #expect(report.inputClosed)
     }
 
+    @Test func reapedChildClosesInputEvenWhileAnotherReaderIsOpen() async throws {
+        let fixture = try Fixture(executable: "/usr/bin/true", watchdogDelay: .seconds(15))
+        defer { fixture.closeWriters() }
+        // A real retained reader models an inherited stdin descriptor. It remains open
+        // throughout inspection; closing our writer must not imply descendant quiescence.
+        let pipe = Pipe()
+        defer { try? pipe.fileHandleForReading.close() }
+        let descriptor = pipe.fileHandleForReading.fileDescriptor
+        #expect(fcntl(descriptor, F_SETFL, O_NONBLOCK) == 0)
+        let input = try InputDelivery(pipe.fileHandleForWriting)
+        let run = ProcessRun(child: fixture.child, readers: fixture.readers, input: input, grace: .zero)
+        await run.start(deadline: .now + .seconds(10), input: Data(repeating: 65, count: 4 << 20))
+        fixture.closeWriters()
+        let report = try await run.waitForExit()
+        #expect(try report.childExit?.get() == .status(0))
+        #expect(report.input == .abandoned && report.inputClosed)
+        #expect(report.descendantScopeUnproven && report.outputComplete)
+        // Observe actual pipe EOF after draining bounded pending bytes, not merely a flag.
+        var bytes = [UInt8](repeating: 0, count: 16 << 10)
+        var count = 1
+        for _ in 0..<258 {
+            count = Darwin.read(descriptor, &bytes, bytes.count)
+            if count <= 0 { break }
+        }
+        #expect(count == 0)
+    }
+
     @Test func canceledWaitStillObservesReapedChild() async throws {
         let run = try await runner.run(ProcessInvocation(executable: URL(fileURLWithPath: "/bin/sleep"),
             arguments: ["60"], terminationGracePeriod: .milliseconds(50)))
