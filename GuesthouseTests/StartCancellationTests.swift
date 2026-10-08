@@ -6,6 +6,86 @@ import Testing
 @testable import Guesthouse
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct StartCancellationTests {
+    nonisolated enum DiagnosticReply: CaseIterable, Sendable { case acknowledged, refused, canceled, disconnected, privateError, foreignEnvironment, foreignOperation, targetAcknowledgement }
+    @Test(arguments: DiagnosticReply.allCases)
+    func cancellationDiagnosticsNeverSettleOrBorrowTheStartIdentity(kind: DiagnosticReply) async throws {
+        struct PrivateError: Error, CustomStringConvertible { var description: String { "synthetic-private-cancellation" } }
+        let backend = CancellationBackend(operation: operation); await configured(backend.fake)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let work = try #require(model.startEnvironment(environment.id)), replyID = OperationID(), foreign = EnvironmentID(), unobserved = OperationID()
+        var starts = backend.started.makeAsyncIterator(), cancels = backend.canceled.makeAsyncIterator()
+        defer { backend.finishTarget(.failed(operation, .canceled)) }
+        _ = await starts.next(); model.cancelStart(); backend.accept(); _ = await cancels.next()
+        let (changed, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        defer { signal.finish() }
+        withObservationTracking { _ = model.startCancellationReplyReceived } onChange: { signal.yield(()) }
+        switch kind {
+        case .acknowledged: backend.answerCancel(.completed(replyID))
+        case .refused: backend.answerCancel(.failed(replyID, .invalidRequest(.tooManyInFlight)))
+        case .canceled: backend.answerCancel(.failed(replyID, .canceled))
+        case .disconnected: backend.throwCancel(RuntimeSessionFailure(cause: .connectionLost, operationID: unobserved), afterReply: false)
+        case .privateError: backend.throwCancel(PrivateError(), afterReply: false)
+        case .foreignEnvironment: backend.answerCancel(.failed(replyID, .guestNotReachable(foreign)))
+        case .foreignOperation: backend.answerCancel(.failed(replyID, .operationOutcomeUnknown(unobserved)))
+        case .targetAcknowledgement: backend.answerCancel(.completed(operation))
+        }
+        var changes = changed.makeAsyncIterator(); _ = await changes.next()
+        #expect(model.isStarting && model.startFailure == nil && model.startDiagnostics.records.isEmpty)
+        let event = try #require(model.sessionDiagnostics.records.last?.event)
+        #expect(model.sessionDiagnostics.records.count == 1 && event.operationID != operation.uuid && event.environmentID == environment.id)
+        #expect(event.operation.title == "Request cancellation")
+        switch kind {
+        case .acknowledged:
+            #expect(event.operationID == replyID.uuid && event.origin == .runtimeOperation && event.outcome == .cancellationRequested)
+            #expect(model.startCancellationFailure == nil)
+        case .refused:
+            #expect(event.operationID == replyID.uuid && event.origin == .runtimeOperation && event.outcome == .operationFailed(.invalidRequest(.tooManyInFlight)))
+            #expect(!model.startCancellationRequested)
+        case .canceled:
+            #expect(event.operationID == replyID.uuid && event.origin == .runtimeOperation && event.outcome == .operationFailed(.canceled))
+            #expect(event.message.contains("target may still be running"))
+        default:
+            #expect(event.origin == .appObservation && event.outcome == .failed(.outcomeUnknown))
+        }
+        let copied = try #require(DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "", selection: [0]))
+        #expect(copied.contains(event.message))
+        let export = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics)
+        for data in export.files.values {
+            let text = String(decoding: data, as: UTF8.self)
+            #expect(!text.contains(foreign.uuid.uuidString) && !text.contains(unobserved.uuid.uuidString) && !text.contains("synthetic-private-cancellation"))
+        }
+        backend.finishTarget(.failed(operation, .canceled)); await work.value
+        #expect(model.sessionDiagnostics.records.first?.event == event)
+    }
+    @Test(arguments: [false, true], [false, true])
+    func thrownCancellationFailuresKeepReplyAndDispatchIdentitiesSeparate(answered: Bool, localRefusal: Bool) async throws {
+        let backend = CancellationBackend(operation: operation); await configured(backend.fake)
+        let model = AppModel(backend: backend); await model.checkEnvironments().value
+        let work = try #require(model.startEnvironment(environment.id)), unobserved = OperationID()
+        var starts = backend.started.makeAsyncIterator(), cancels = backend.canceled.makeAsyncIterator()
+        defer { backend.finishTarget(.failed(operation, .canceled)) }
+        _ = await starts.next(); model.cancelStart(); backend.accept(); _ = await cancels.next()
+        let (changed, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        defer { signal.finish() }
+        withObservationTracking { _ = model.startCancellationReplyReceived } onChange: { signal.yield(()) }
+        let error: any Error = localRefusal ? GuesthouseError.invalidRequest(.tooManyInFlight)
+            : RuntimeSessionFailure(cause: .connectionLost, operationID: unobserved)
+        backend.throwCancel(error, afterReply: answered)
+        var changes = changed.makeAsyncIterator(); _ = await changes.next()
+        let records = model.sessionDiagnostics.records.map(\.event), last = try #require(records.last)
+        #expect(records.count == (answered ? 2 : 1) && model.isStarting && model.startDiagnostics.records.isEmpty)
+        if answered {
+            let acknowledgement = try #require(records.first)
+            #expect(acknowledgement.outcome == .cancellationRequested && last.operationID == acknowledgement.operationID)
+            #expect(last.origin == .runtimeOperation && last.outcome == .operationFailed(.operationOutcomeUnknown(OperationID(uuid: last.operationID))))
+        } else {
+            #expect(last.origin == .appObservation)
+            #expect(last.outcome == (localRefusal ? .operationFailed(.invalidRequest(.tooManyInFlight)) : .failed(.outcomeUnknown)))
+        }
+        #expect(model.startCancellationRequested == (answered || !localRefusal))
+        for record in records { #expect(record.operationID != operation.uuid && record.operationID != unobserved.uuid && record.environmentID == environment.id) }
+        backend.finishTarget(.failed(operation, .canceled)); await work.value
+    }
     let environment = DevelopmentEnvironment(name: "Dev Mac"), operation = OperationID()
     func configured(_ fake: FakeRuntimeBackend) async {
         await fake.setEnvironmentInventory(.available([environment]))

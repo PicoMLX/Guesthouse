@@ -103,12 +103,16 @@ public actor StateStore {
         guard let storage = try anchor?.verifiedProbeStorage() else {
             throw StateStoreError.fileUnreadable(name: .stateDirectory)
         }
+        let beforeEntry = hooks.beforeLumeProbeActorEntry
         try await coordinator.withExclusiveAccess(for: storage) {
+            beforeEntry()
             try await self.prepareOwnedLumeProbeConfiguration()
         }
     }
 
     private func prepareOwnedLumeProbeConfiguration() throws {
+        // Cancellation can arrive after lease acquisition while hopping back to this actor.
+        try Task.checkCancellation()
         // close() may have run while waiting for the lease. Never mutate after losing ownership.
         guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
         _ = try requireLumeAvailability(anchor)
@@ -437,6 +441,7 @@ public actor StateStore {
 
 /// Internal synchronous fault seams. Borrowed descriptors never escape or cross a suspension.
 struct StateStoreHooks: Sendable {
+    var beforeLumeProbeActorEntry: @Sendable () -> Void = {}
     var journalWrite: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .journal) }
     var write: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .snapshot) }
     var ownershipWrite: @Sendable (Int32, Data) throws -> Void = { try StateFileIO.writeAll($0, $1, name: .runtimeOwnership) }
