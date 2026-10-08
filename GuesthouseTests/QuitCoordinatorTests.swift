@@ -241,6 +241,34 @@ struct QuitCoordinatorTests {
     }
 
     @Test(arguments: [false, true])
+    func canceledQuitRetainsTerminalStopFailureForCopyAndExport(refusal: Bool) async throws {
+        let fake = await configuredFake(), backend = HeldStopBackend(fake: fake, operation: operation), decision = Decision()
+        let model = AppModel(backend: backend), quit = QuitCoordinator(model: model, terminationDecision: decision.record)
+        let error = refusal ? GuesthouseError.guestShutdownRefused(environment.id) : .runtimeMissing
+        _ = quit.requestQuit(); let work = try #require(quit.confirmStopAndQuit())
+        var stops = backend.stopped.makeAsyncIterator(); _ = await stops.next()
+        // Terminal replies need no diagnostic traffic to preserve the actual Stop failure.
+        backend.answer([.accepted(operation), .failed(operation, error)])
+        await work.value
+        #expect(quit.flow == .failed(.stop(error)) && quit.canForceStop == refusal)
+        quit.cancelQuit()
+        await model.checkEnvironments().value
+        #expect(quit.flow == .idle && decision.values == [false] && !quit.canForceStop)
+        #expect(model.checkState == .checked && model.statuses[environment.id]?.vm == .running)
+        #expect(backend.stopRequests == [.stopEnvironment(environment.id, .graceful(deadline: .seconds(60)))])
+        let expected = DiagnosticEvent(operation: .stopEnvironment, outcome: .operationFailed(error),
+            operationID: operation.uuid, environmentID: environment.id)
+        #expect(model.sessionDiagnostics.records.map(\.event) == [expected])
+        let copied = try #require(DiagnosticsSelection.text(in: model.sessionDiagnostics, matching: "", selection: [0]))
+        let exported = try DiagnosticsExportBuilder.build(log: model.sessionDiagnostics, environmentIDs: [environment.id])
+        let text = String(decoding: try #require(exported.files["log.txt"]), as: UTF8.self)
+        for diagnostic in [copied, text] {
+            #expect(diagnostic.contains(operation.uuid.uuidString) && diagnostic.contains(environment.id.uuid.uuidString))
+            #expect(diagnostic.contains(error.userMessage) && diagnostic.contains(error.recoveryMessage))
+        }
+    }
+
+    @Test(arguments: [false, true])
     func omittedRunningCardCannotConfirmStopOrOfferForce(refusal: Bool) async throws {
         let fake = await configuredFake(), decision = Decision()
         let backend = HeldStopBackend(fake: fake, operation: operation, holdInventory: 2)
