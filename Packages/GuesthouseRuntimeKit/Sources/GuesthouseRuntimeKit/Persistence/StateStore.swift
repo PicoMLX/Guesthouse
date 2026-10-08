@@ -161,6 +161,57 @@ public actor StateStore {
         return LumeProbeLaunch(intent: intent, run: spawned.run)
     }
 
+    /// Explicit completion of an already owned fixed launch. No executable/flags are accepted,
+    /// and no new launch is authorized. Raw output stays temporary; success requires actual
+    /// no-fork history, exclusive reap and persisted idle before releasing this live owner.
+    /// Interrupted/invalid/forked/restarted attempts remain blocked for separate inspection.
+    func inspectLumeProbeResponse(
+        _ launch: LumeProbeLaunch, coordinator: LumeRuntimeCoordinator = .shared,
+        diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void = { _ in }
+    ) async throws -> LumeProbeResponse {
+        guard let storage = try anchor?.verifiedProbeStorage() else {
+            throw StateStoreError.fileUnreadable(name: .stateDirectory)
+        }
+        return try await coordinator.withExclusiveAccess(for: storage) {
+            try await self.inspectOwnedLumeProbeResponse(launch, diagnostic: diagnostic)
+        }
+    }
+
+    private func requireOwnedLumeProbe(_ launch: LumeProbeLaunch) throws {
+        guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
+        let saved = try readLumeOwnership(anchor)
+        guard saved.intent == launch.intent, launch.intent.serviceEpoch == serviceEpoch,
+              lumeOwnedChild === launch.run.ownedChild,
+              let identity = launch.run.ownedChild.launchIdentity,
+              identity.runID == launch.intent.attemptID, saved.child == identity else {
+            throw LumeLaunchOwnershipFailure.inspectionRequired
+        }
+    }
+
+    private func inspectOwnedLumeProbeResponse(
+        _ launch: LumeProbeLaunch, diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void
+    ) async throws -> LumeProbeResponse {
+        try requireOwnedLumeProbe(launch) // No borrowed/fabricated operation identity in diagnostics.
+        let emit: (DiagnosticEvent.Outcome) -> Void = {
+            diagnostic(DiagnosticEvent(operation: .verifyRuntime, outcome: $0, operationID: launch.intent.operationID))
+        }
+        emit(.started)
+        do {
+            let report: ProcessReport
+            do { report = try await launch.run.waitForExit() }
+            catch { throw LumeProbeResponseFailure.interrupted }
+            try requireOwnedLumeProbe(launch) // close/root/receipt may have changed during the wait.
+            let output = await launch.run.takeOutput()
+            let value = try LumeProbeResponse.checked(report, output: output, command: launch.intent.command)
+            try settleOwnedLumeLaunch(launch.intent)
+            emit(.succeeded)
+            return value
+        } catch {
+            emit((error as? LumeProbeResponseFailure)?.diagnosticOutcome ?? .failed(.outcomeUnknown))
+            throw error
+        }
+    }
+
     /// Admission seam for the future fixed-command probe. The physical-root lease spans
     /// publication and the caller; the durable intent continues blocking admission afterward.
     /// All other provider mutations/replacement remain disabled until wired to this authority
