@@ -201,6 +201,74 @@ import Testing
         #expect(idle.pendingIDCount == 0)
     }
 
+    static let probe = RuntimeProbeReport(failure: .timedOut, diagnostics: [
+        .init(operation: .verifyRuntime, outcome: .started, operationID: id.uuid),
+        .init(operation: .verifyRuntime, outcome: .failed(.timedOut), operationID: id.uuid),
+    ])
+
+    @Test func probeReportsStayWithTheirOwningReplyAndNeverBindChildIDs() async throws {
+        var router = RuntimeEventRouter()
+        let first = try start(&router, request: .probeRuntime)
+        let second = try start(&router, request: .probeRuntime)
+        let refused = RuntimeEvent.runtimeProbe(.init(failure: .runtimeMissing, diagnostics: []))
+        #expect(router.reply(.success(refused), to: second.key).isEmpty)
+        #expect(router.reply(.success(.runtimeProbe(Self.probe)), to: first.key).isEmpty)
+        #expect(try await collectRouting(first.stream) == [.runtimeProbe(Self.probe)])
+        #expect(try await collectRouting(second.stream) == [refused])
+        #expect(router.isIdle && router.pendingIDCount == 0 && router.retiredCount == 0)
+        #expect(RuntimeRequest.probeRuntime.mayMutate)
+        #expect(!RuntimeRequest.probeRuntime.acceptsOperation)
+        #expect(RuntimeRequest.probeRuntime.environment == nil && RuntimeRequest.probeRuntime.cancellationTarget == nil)
+        #expect(RuntimeEvent.runtimeProbe(Self.probe).routingID == nil)
+        #expect(router.consumerEnded(first.key, reason: .abandoned).isEmpty)
+    }
+
+    @Test func probeReportsCannotAcknowledgeOtherRequestsOrArriveAsPushes() async throws {
+        for request in [RuntimeRequest.runtimeVersion, .hostPreflight, .startEnvironment(Self.environment, .init())] {
+            var router = RuntimeEventRouter()
+            let fixture = try start(&router, request: request)
+            let failure = RuntimeSessionFailure(cause: .malformedResponse, mayHaveMutated: request.mayMutate)
+            let effects = router.reply(.success(.runtimeProbe(Self.probe)), to: fixture.key)
+            #expect(effects.contains(.retireConnection))
+            #expect(effects.contains(unknown(fixture, failure)) == request.mayMutate)
+            await #expect(throws: failure) { try await collectRouting(fixture.stream) }
+            #expect(router.isIdle && router.pendingIDCount == 0)
+        }
+        var idle = RuntimeEventRouter()
+        #expect(idle.incoming(.runtimeProbe(Self.probe)) == [.retireConnection])
+        #expect(idle.pendingIDCount == 0 && idle.retiredCount == 0)
+    }
+
+    @Test(arguments: [RuntimeEvent.runtimeVersion(info), .accepted(id), .runtimeProbe(.init(failure: .timedOut, diagnostics: []))])
+    func probeRejectsHandshakeAcceptanceAndMalformedReports(event: RuntimeEvent) async throws {
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router, request: .probeRuntime)
+        let failure = RuntimeSessionFailure(cause: .malformedResponse, operationID: event.routingID, mayHaveMutated: true)
+        #expect(router.reply(.success(event), to: fixture.key) == [unknown(fixture, failure, environment: nil), .retireConnection])
+        await #expect(throws: failure) { try await collectRouting(fixture.stream) }
+    }
+
+    @Test func lostProbeReplyRetainsUncertaintyAndIgnoresLateReportSuccess() async throws {
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router, request: .probeRuntime)
+        let failure = RuntimeSessionFailure(cause: .connectionLost, mayHaveMutated: true)
+        #expect(router.invalidate(.connectionLost) == [.retireConnection, unknown(fixture, failure, environment: nil)])
+        await #expect(throws: failure) { try await collectRouting(fixture.stream) }
+        #expect(router.requestCount == 1)
+        #expect(router.reply(.success(.runtimeProbe(Self.probe)), to: fixture.key) == [unknown(fixture, failure, environment: nil)])
+        #expect(router.isIdle && router.pendingIDCount == 0 && router.retiredCount == 0)
+    }
+
+    @Test func abandonedProbeNeverCancelsAChildIDFromItsTerminalReport() throws {
+        var router = RuntimeEventRouter()
+        let fixture = try start(&router, request: .probeRuntime)
+        #expect(router.consumerEnded(fixture.key, reason: .abandoned).isEmpty)
+        #expect(router.requestCount == 1)
+        #expect(router.reply(.success(.runtimeProbe(Self.probe)), to: fixture.key).isEmpty)
+        #expect(router.consumerEnded(fixture.key, reason: .abandoned).isEmpty)
+        #expect(router.isIdle && router.retiredCount == 0)
+    }
+
     @Test func pendingIDOverflowFailsClosedAndKeepsTheLateOwningReply() async throws {
         var router = RuntimeEventRouter()
         let fixture = try start(&router)

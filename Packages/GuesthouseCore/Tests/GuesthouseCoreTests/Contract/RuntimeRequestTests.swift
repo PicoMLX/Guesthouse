@@ -6,7 +6,7 @@ import Testing
     static let environment = EnvironmentID()
     static let operation = OperationID()
     static let requests: [RuntimeRequest] = [
-        .runtimeVersion, .listEnvironments, .hostPreflight, .prepareStorage, .environmentStatus(environment), .cancelOperation(operation),
+        .runtimeVersion, .probeRuntime, .listEnvironments, .hostPreflight, .prepareStorage, .environmentStatus(environment), .cancelOperation(operation),
         .inspectXcode(FileHandoff(kind: .fileDescriptor(token: UUID()), displayName: "Xcode.app")),
         .startEnvironment(environment, StartOptions()),
         .startEnvironment(environment, StartOptions(console: .native, ipWait: .seconds(120))),
@@ -22,7 +22,7 @@ import Testing
         let envelope = RuntimeRequestEnvelope(request: request)
         let data = try JSONEncoder().encode(envelope)
         #expect(try RequestValidator.decode(data) == envelope)
-        #expect(envelope.protocolVersion.rawValue == 20)
+        #expect(envelope.protocolVersion.rawValue == 21)
     }
 
     @Test(arguments: requests, ["executable", "arguments", "command", "shell", "--", "/bin/"])
@@ -31,12 +31,12 @@ import Testing
         #expect(!String(decoding: data, as: UTF8.self).lowercased().contains(forbidden))
     }
 
-    @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, Int.max])
+    @Test(arguments: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, Int.max])
     func foreignVersionPrecedesUnknownPayload(version: Int) {
         let data = Data("{\"protocolVersion\":\(version),\"request\":{\"futureRequest\":{}}}".utf8)
         let expected = RequestValidationError.protocolMismatch(client: RuntimeProtocolVersion(version), service: .current)
         #expect(throws: expected) { try RequestValidator.decode(data) }
-        #expect(expected.guesthouseError == .protocolMismatch(client: version, service: 20))
+        #expect(expected.guesthouseError == .protocolMismatch(client: version, service: 21))
     }
 
     @Test func directEnvelopeDecoderAlsoChecksHeaderFirst() throws {
@@ -44,12 +44,12 @@ import Testing
         let error = try #require(throws: RuntimeRequestEnvelope.ProtocolMismatch.self) {
             try JSONDecoder().decode(RuntimeRequestEnvelope.self, from: data)
         }
-        #expect(error.error == .protocolMismatch(client: 7, service: 20))
+        #expect(error.error == .protocolMismatch(client: 7, service: 21))
     }
 
     @Test(arguments: ["{}", "null", #"{"request":{"runtimeVersion":{}}}"#,
-                      #"{"protocolVersion":"20","request":{}}"#, #"{"protocolVersion":20}"#,
-                      #"{"protocolVersion":20,"request":{"runCommand":{"command":"private-marker"}}}"#])
+                      #"{"protocolVersion":"21","request":{}}"#, #"{"protocolVersion":21}"#,
+                      #"{"protocolVersion":21,"request":{"runCommand":{"command":"private-marker"}}}"#])
     func malformedRequestsAreTyped(json: String) {
         #expect(throws: RequestValidationError.malformed) { try RequestValidator.decode(Data(json.utf8)) }
     }
@@ -135,13 +135,13 @@ import Testing
     }
 
     @Test func unknownMetadataIsNotForwarded() throws {
-        let data = Data(#"{"protocolVersion":20,"private":"private-marker","request":{"runtimeVersion":{}}}"#.utf8)
+        let data = Data(#"{"protocolVersion":21,"private":"private-marker","request":{"runtimeVersion":{}}}"#.utf8)
         let encoded = try JSONEncoder().encode(RequestValidator.decode(data))
         #expect(!String(decoding: encoded, as: UTF8.self).contains("private-marker"))
     }
 
     @Test func malformedInputCannotReachStructuredErrorsOrExports() throws {
-        let data = Data(#"{"protocolVersion":20,"request":{"private-marker":{}}}"#.utf8)
+        let data = Data(#"{"protocolVersion":21,"request":{"private-marker":{}}}"#.utf8)
         let rejection = try #require(throws: RequestValidationError.self) { try RequestValidator.decode(data) }
         #expect(rejection.guesthouseError == .invalidRequest(.malformed))
         let event = DiagnosticEvent(operation: .importXcode, outcome: .init(error: rejection.guesthouseError), operationID: UUID())

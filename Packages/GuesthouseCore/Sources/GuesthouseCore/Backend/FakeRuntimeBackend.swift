@@ -217,7 +217,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
             }
             return
 
-        case .prepareStorage:
+        case .prepareStorage, .probeRuntime:
             advanceTurn()
             continuation.yield(.failed(OperationID(), .invalidRequest(.unsupportedOperation)))
             continuation.finish()
@@ -415,7 +415,7 @@ public actor FakeRuntimeBackend: RuntimeBackend {
                 environmentID: environment, vm: .uncertain(reason: .inspectionFailed), readiness: .checking
             )
             statuses[environment] = settingOperation(id, on: status)
-        case .runtimeVersion, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation:
+        case .runtimeVersion, .probeRuntime, .listEnvironments, .hostPreflight, .inspectXcode, .prepareStorage, .environmentStatus, .cancelOperation:
             break
         }
     }

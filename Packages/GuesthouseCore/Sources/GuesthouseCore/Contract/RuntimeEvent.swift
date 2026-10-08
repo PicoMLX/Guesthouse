@@ -1,6 +1,9 @@
 /// Named service-to-GUI events (#9, MVP-PLAN.md §3). Private status is not a diagnostic.
 public enum RuntimeEvent: Codable, Hashable, Sendable {
     case runtimeVersion(RuntimeVersionInfo)
+    /// Terminal reply to probeRuntime's owning request, never unsolicited operation traffic.
+    /// Child diagnostic IDs do not identify a request or authorize cancellation/settlement.
+    case runtimeProbe(RuntimeProbeReport)
     /// Terminal reply to its owning query, never an unsolicited operation event.
     case hostPreflight(PreflightReport)
     /// Owning list query reply only, never a readiness result or unsolicited push.
@@ -19,6 +22,7 @@ public enum RuntimeEvent: Codable, Hashable, Sendable {
     public var caseName: String {
         switch self {
         case .runtimeVersion: "runtimeVersion"
+        case .runtimeProbe: "runtimeProbe"
         case .hostPreflight: "hostPreflight"
         case .environments: "environments"
         case .xcodeSelection: "xcodeSelection"

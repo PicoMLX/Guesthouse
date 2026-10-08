@@ -148,3 +148,19 @@ layout retain inspection/cancel guidance without offering runtime repair. This d
 is not provider or cleanup authority.
 Native request activation, lifetime/cancellation routing and GUI consumers remain
 separate work; the ordinary version handshake still performs no provider execution.
+
+The epoch-21 wire contract names `probeRuntime` separately from `runtimeVersion`
+and returns a `runtimeProbe` report only to the owning request. It accepts no
+caller-selected executable, flags, provider, storage path or operation identity.
+The existing 64-KiB transport bounds and session admission cap still apply.
+Client routing validates the report, refuses it as a push or another request's
+reply, and never binds its child diagnostic IDs as streaming operation IDs.
+A lost probe reply retains mutation uncertainty because the existing probe can
+journal owned launches; an empty report trace does not permit automatic retry.
+Consumer abandonment cannot authorize canceling a child ID copied from a report.
+Production `RuntimeClient` and native service dispatch still refuse this request,
+and the fake backend reports unsupported rather than inventing execution proof.
+Service admission, bounded async capacity, activity retention and cancellation
+must be implemented on the existing owners before activation. GUI consumers,
+actual candidate execution and provider acceptance remain separate under
+MVP-PLAN.md §§3–4 and 11; the version handshake remains identity/status only.

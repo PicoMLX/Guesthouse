@@ -77,6 +77,23 @@ import Testing
         await #expect(throws: GuesthouseError.invalidRequest(.unsupportedOperation)) { try await iterator.next() }
     }
 
+    @Test func publicPolicyRefusesProbeBeforeConnectionOrHandshakeExecution() async throws {
+        let fixture = OwnerFixture(), client = fixture.client(permitsOperations: false)
+        var refused = client.send(.probeRuntime).makeAsyncIterator()
+        await #expect(throws: GuesthouseError.invalidRequest(.unsupportedOperation)) { try await refused.next() }
+        await client.flush()
+        #expect(fixture.connectionCount == 0)
+        #expect(await client.reconciliation().0.isEmpty)
+        var version = client.send(.runtimeVersion).makeAsyncIterator()
+        await client.flush()
+        let peer = try #require(fixture.latest)
+        #expect(peer.requests == [.runtimeVersion])
+        peer.answer(0, .success(.runtimeVersion(Self.info)))
+        #expect(try await version.next() == .runtimeVersion(Self.info))
+        #expect(try await version.next() == nil)
+        await client.close()
+    }
+
     @Test func orderedRequestsAndPushesUseTheActualOwner() async throws {
         let fixture = OwnerFixture(), client = fixture.client()
         let first = client.send(Self.start), second = client.send(.runtimeVersion)

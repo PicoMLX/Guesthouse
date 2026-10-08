@@ -4,10 +4,10 @@ public struct RuntimeProtocolVersion: Hashable, Sendable, Comparable, CustomStri
 
     public init(_ rawValue: Int) { self.rawValue = rawValue }
 
-    /// Epoch 20 adds a distinct cancellation-request diagnostic operation.
-    /// App-only observation failures cannot be delivered as runtime events.
+    /// Epoch 21 adds the explicit candidate probe request and bounded typed report reply.
+    /// The ordinary version handshake remains identity/status only.
     /// Earlier epochs are not compatible fallbacks; GUI/service upgrade together (ADR 0003).
-    public static let current = RuntimeProtocolVersion(20)
+    public static let current = RuntimeProtocolVersion(21)
 
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
     public var description: String { "protocol \(rawValue)" }
