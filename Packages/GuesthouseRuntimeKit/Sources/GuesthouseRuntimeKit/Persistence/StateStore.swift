@@ -138,7 +138,7 @@ public actor StateStore {
     func probeLume(
         coordinator: LumeRuntimeCoordinator = .shared,
         diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void = { _ in }
-    ) async throws -> LumeProbeResult {
+    ) async throws -> RuntimeProbeAdvertisement {
         guard let storage = try anchor?.verifiedProbeStorage() else {
             throw StateStoreError.fileUnreadable(name: .stateDirectory)
         }
@@ -147,6 +147,13 @@ public actor StateStore {
             // reacquires the coordinator, nor retains an old anchor across suspension.
             let launch = try await self.launchOwnedLumeProbe(command: command)
             return try await self.inspectOwnedLumeProbeResponse(launch, diagnostic: diagnostic)
+        }
+    }
+
+    /// Runtime-only reply construction. No native request or GUI consumer is activated here.
+    func probeLumeReport() async -> RuntimeProbeReport {
+        await LumeProbeReporting.capture { diagnostic in
+            try await self.probeLume(diagnostic: diagnostic)
         }
     }
 

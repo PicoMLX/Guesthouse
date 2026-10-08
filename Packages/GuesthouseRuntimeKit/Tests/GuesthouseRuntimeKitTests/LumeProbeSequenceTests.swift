@@ -61,7 +61,7 @@ import Testing
             return try await f.step(command) { event in log.withLock { $0.append(event) } }
         }
         #expect(calls.withLock { $0 } == [.version, .createHelp, .detachedRunHelp, .attachHelp])
-        #expect(result == LumeProbeResult(version: LumePin.version, unattendedTahoeAdvertised: true,
+        #expect(result == RuntimeProbeAdvertisement(version: LumePin.version, unattendedTahoeAdvertised: true,
             createRunAttachStorageAdvertised: true, detachedRunAdvertised: true, nativeAttachAdvertised: true))
         #expect(try f.saved().intent == nil && f.saved().child == nil)
         let events = log.withLock { $0.records.map(\.event) }
@@ -215,5 +215,103 @@ import Testing
         #expect(calls.withLock { $0 } == LumeLaunchIntent.Command.allCases)
         #expect(enteredReplacement.withLock { $0 })
         await f.owner.close()
+    }
+
+    @Test func typedReportRetainsOnlyActualCompletedStepDiagnostics() async throws {
+        let f = try await Fixture()
+        let report = await LumeProbeReporting.capture { diagnostic in
+            try await LumeProbeSequence.run { try await f.step($0, diagnostic: diagnostic) }
+        }
+        #expect(report.isValid && report.failure == nil && report.advertisements?.version == LumePin.version)
+        #expect(report.diagnostics.count == 8 && Set(report.diagnostics.map(\.operationID)).count == 4)
+        #expect(report.diagnostics.allSatisfy { $0.environmentID == nil })
+        #expect(try f.saved().intent == nil)
+        #expect(try JSONDecoder().decode(RuntimeProbeReport.self, from: JSONEncoder().encode(report)) == report)
+        await f.owner.close()
+    }
+
+    @Test(arguments: LumeLaunchIntent.Command.allCases)
+    func typedFailurePreservesItsRealIdentityAndBlocksAnotherProbe(_ failing: LumeLaunchIntent.Command) async throws {
+        let f = try await Fixture()
+        let report = await LumeProbeReporting.capture { diagnostic in
+            try await LumeProbeSequence.run { try await f.step($0, truncate: $0 == failing, diagnostic: diagnostic) }
+        }
+        let intent = try #require(f.saved().intent)
+        #expect(report.isValid && report.advertisements == nil && report.failure == .invalidResponse)
+        #expect(report.diagnostics.last?.operationID == intent.operationID)
+        #expect(report.diagnostics.last?.outcome == .failed(.invalidResponse))
+        let retry = await f.owner.probeLumeReport()
+        #expect(retry.failure == .inspectionRequired && retry.diagnostics.isEmpty)
+        #expect(try f.saved().intent == intent) // A reply is not settlement or permission to retry.
+        await f.owner.close()
+    }
+
+    @Test(arguments: ["closed", "configuration", "bundle", "unsigned", "unsafe"])
+    func typedProductionPrecheckRefusalHasNoInventedIdentity(_ defect: String) async throws {
+        let f = try await Fixture(), before = try Data(contentsOf: f.record)
+        if defect == "closed" { await f.owner.close() }
+        if ["bundle", "unsigned", "unsafe"].contains(defect) { try await f.owner.prepareLumeProbeConfiguration() }
+        if defect == "unsigned" || defect == "unsafe" { try f.unsignedBundle() }
+        if defect == "unsafe" {
+            let info = try LumeBundle.expectedLocation(in: f.storage).appending(path: "Contents/Info.plist")
+            let preserved = f.base.appending(path: "preserved-info")
+            try FileManager.default.moveItem(at: info, to: preserved)
+            try FileManager.default.createSymbolicLink(at: info, withDestinationURL: preserved)
+        }
+        let report = await f.owner.probeLumeReport()
+        let expected: RuntimeProbeFailure = defect == "bundle" ? .runtimeMissing : defect == "unsigned" ? .verificationFailed : defect == "unsafe" ? .unsafeStorage : .storageUnavailable
+        #expect(report.isValid && report.failure == expected && report.advertisements == nil)
+        let after = try Data(contentsOf: f.record)
+        #expect(report.diagnostics.isEmpty && after == before)
+        if defect == "unsafe" { #expect(report.failure?.recoveryActions == [.inspectState, .cancel]) }
+        await f.owner.close()
+    }
+
+    @Test(arguments: [false, true])
+    func requestedCancellationAfterActualStepsNeverBecomesConfirmedCancellation(_ afterSequence: Bool) async throws {
+        let f = try await Fixture()
+        let task = Task { await LumeProbeReporting.capture { diagnostic in
+            let value = try await LumeProbeSequence.run { command in
+                let response = try await f.step(command, diagnostic: diagnostic)
+                if command == .attachHelp, !afterSequence { withUnsafeCurrentTask { $0?.cancel() } }
+                return response
+            }
+            if afterSequence { withUnsafeCurrentTask { $0?.cancel() } }
+            return value
+        } }
+        let report = await task.value
+        #expect(report.isValid && report.failure == .outcomeUnknown && report.advertisements == nil)
+        #expect(report.diagnostics.count == 8 && !report.diagnostics.contains { $0.outcome == .canceled })
+        #expect(try f.saved().intent == nil) // These preceding steps were genuinely settled.
+        await f.owner.close()
+    }
+
+    @Test func canceledUnstartedReporterDoesNotEnterProbeOrInventADiagnostic() async {
+        let entered = Mutex(false)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await LumeProbeReporting.capture { _ in
+                entered.withLock { $0 = true }
+                return RuntimeProbeAdvertisement(version: LumePin.version, unattendedTahoeAdvertised: false,
+                    createRunAttachStorageAdvertised: false, detachedRunAdvertised: false, nativeAttachAdvertised: false)
+            }
+        }
+        let report = await task.value
+        #expect(!entered.withLock { $0 } && report.failure == .outcomeUnknown && report.diagnostics.isEmpty)
+    }
+
+    @Test func arbitraryErrorsAndForeignOrDroppedDiagnosticsCannotBecomeAReply() async throws {
+        struct PrivateError: LocalizedError { var errorDescription: String? { "private-marker" } }
+        let report = await LumeProbeReporting.capture { _ in throw PrivateError() }
+        #expect(report.failure == .outcomeUnknown && report.diagnostics.isEmpty && report.isValid)
+        #expect(!String(decoding: try JSONEncoder().encode(report), as: UTF8.self).contains("private-marker"))
+        for count in [1, 10] {
+            let invalid = await LumeProbeReporting.capture { emit in
+                for _ in 0..<count { emit(DiagnosticEvent(operation: .startEnvironment, outcome: .started, operationID: UUID(), environmentID: EnvironmentID())) }
+                return RuntimeProbeAdvertisement(version: LumePin.version, unattendedTahoeAdvertised: true,
+                    createRunAttachStorageAdvertised: true, detachedRunAdvertised: true, nativeAttachAdvertised: true)
+            }
+            #expect(invalid.failure == .outcomeUnknown && invalid.advertisements == nil && invalid.diagnostics.isEmpty)
+        }
     }
 }

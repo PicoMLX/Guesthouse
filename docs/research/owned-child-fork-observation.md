@@ -128,3 +128,23 @@ refusal at the production entry. These fixtures grant no provider verification
 authority. The signed candidate happy path remains unvalidated while the current
 pin is rejected. Typed XPC wiring, actual candidate execution and fork/restart
 reconciliation remain separate work; the aggregate never denotes provider readiness.
+
+The Core `RuntimeProbeReport` carries only typed advertisements, closed failures and
+at most eight typed diagnostic events. Its complete trace requires four distinct
+started/succeeded pairs; refusal can retain prior real pairs and a final matching
+failure, or no events when no diagnostic identity is available. An empty trace
+does not prove that effects were unsent. `probeLumeReport` reuses `DiagnosticLog`
+to capture the actual inspection events, with no invented operation/environment
+identity or raw-error classifier. Core coding refuses foreign, incomplete,
+contradictory or oversized traces. Runtime reports also reject app-observation
+provenance. Launched version/response/timeout/process failures must retain their
+matching terminal failed pair. Version mismatch is valid only in the first pair,
+matching the fixed version-first sequence. Missing-runtime and artifact-verification refusals
+precede launch: only zero to three prior successful pairs can remain, with no
+terminal failed pair. Ambiguous storage/refusal and unknown outcomes can preserve
+actual pairs without inventing a failed-operation identity. Only unknown outcome
+can follow four successful pairs. Launched version mismatch and unsafe bundle
+layout retain inspection/cancel guidance without offering runtime repair. This data
+is not provider or cleanup authority.
+Native request activation, lifetime/cancellation routing and GUI consumers remain
+separate work; the ordinary version handshake still performs no provider execution.
