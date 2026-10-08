@@ -121,6 +121,28 @@ import Testing
         #expect(child.forkObservation == .unproven)
     }
 
+    @Test(arguments: ["none", "fork", "spawn", "vfork"])
+    func runnerRetainsActualHistoryWithoutChangingItsReport(_ mode: String) async throws {
+        let fixture = try await Fixture(), runID = UUID()
+        var invocation = ProcessInvocation(executable: fixture.executable, arguments: [mode])
+        invocation.observation = .forkHistory
+        let run = try await ProcessRunner().run(invocation, runID: runID)
+        let report = try await run.waitForExit()
+        #expect(report.childExit == .success(.status(0)))
+        #expect(report.descendantScopeUnproven && report.outputComplete)
+        #expect(run.ownedChild.launchIdentity?.runID == runID)
+        #expect(run.ownedChild.forkObservation == (mode == "none" ? .exitedWithoutFork : .forkObserved))
+        #expect(run.ownedChild.signal(SIGTERM) == .alreadyReaped)
+    }
+
+    @Test func runnerDoesNotObserveOrdinaryLaunchesRetroactively() async throws {
+        let fixture = try await Fixture()
+        let run = try await ProcessRunner().run(ProcessInvocation(executable: fixture.executable, arguments: ["none"]))
+        let report = try await run.waitForExit()
+        #expect(report.childExit == .success(.status(0)))
+        #expect(report.descendantScopeUnproven && run.ownedChild.forkObservation == .unproven)
+    }
+
     @Test func unavailableBirthPreventsResumingUnobservedCode() async throws {
         let fixture = try await Fixture()
         var calls = OwnedChild.SystemCalls.live
