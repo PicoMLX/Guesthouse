@@ -40,10 +40,9 @@ import XPC
         try #require(writable >= 0)
         defer { close(writable) }
         #expect(throws: XcodeSelectionFailure.unavailable) { try XcodeSelectionAccess(borrowing: writable) }
-        let closed = dup(writable)
-        try #require(closed >= 0)
-        close(closed)
-        #expect(throws: XcodeSelectionFailure.unavailable) { try XcodeSelectionAccess(borrowing: closed) }
+        // A closed descriptor number can be reused by another parallel test. An
+        // out-of-range positive value reaches the same native unavailable path.
+        #expect(throws: XcodeSelectionFailure.unavailable) { try XcodeSelectionAccess(borrowing: Int32.max) }
     }
 
     @Test func nativeTransportSendsTheOwnedSelectionAfterCallerCloseAndRename() async throws {
