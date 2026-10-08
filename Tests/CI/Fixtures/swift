@@ -1,12 +1,23 @@
 #!/bin/bash
 set -euo pipefail
 
-[[ $# == 11 && "$1" == test && "$2" == --package-path &&
-    "$4" == -Xswiftc && "$5" == -warnings-as-errors &&
-    "$6" == -Xcc && "$7" == -Wall && "$8" == -Xcc && "$9" == -Wextra &&
-    "${10}" == -Xcc && "${11}" == -Werror ]] || exit 91
+[[ $# -ge 3 && "$1" == test && "$2" == --package-path ]] || exit 91
+package_directory="$3"
+shift 3
+configuration=debug
+if [[ "${1:-}" == --configuration ]]; then
+    [[ "${2:-}" == release ]] || exit 91
+    configuration=release
+    shift 2
+fi
+[[ $# == 8 && "$1" == -Xswiftc && "$2" == -warnings-as-errors &&
+    "$3" == -Xcc && "$4" == -Wall && "$5" == -Xcc && "$6" == -Wextra &&
+    "$7" == -Xcc && "$8" == -Werror ]] || exit 91
 [[ "$(pwd -P)" == "${CI_HOOK_EXPECTED_ROOT}" ]] || exit 92
-printf '%s\n' "$3" >> "${CI_HOOK_INVOCATIONS}"
-if [[ "$3" == "${CI_HOOK_FAIL_PACKAGE:-}" ]]; then
+suffix=
+if [[ "${configuration}" == release ]]; then suffix=' (release)'; fi
+printf '%s%s\n' "${package_directory}" "${suffix}" >> "${CI_HOOK_INVOCATIONS}"
+if [[ "${package_directory}" == "${CI_HOOK_FAIL_PACKAGE:-}" &&
+    "${configuration}" == "${CI_HOOK_FAIL_CONFIGURATION:-${configuration}}" ]]; then
     exit 23
 fi

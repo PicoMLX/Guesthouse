@@ -31,6 +31,7 @@ import Testing
         #expect(!text.contains(other.description.lowercased()) && !text.contains(otherOperation.uuidString.lowercased()))
         #expect(text.contains(selectedOperation.uuidString.lowercased()) && text.contains(globalOperation.uuidString.lowercased()))
         let manifest = try Self.object("manifest.json", in: result)
+        #expect(manifest["schemaVersion"] as? Int == 1)
         #expect(manifest["recordCount"] as? Int == 2 && manifest["discardedCount"] as? Int == 1)
         #expect(Set(manifest.keys) == ["schemaVersion", "historyNotice", "exclusions", "selectedEnvironmentIDs", "eventEnvironmentIDs", "recordCount", "discardedCount"])
         let global = try DiagnosticsExportBuilder.build(log: log, environmentIDs: [])
@@ -44,7 +45,7 @@ import Testing
         log.append(event); log.append(event)
         let result = try DiagnosticsExportBuilder.build(log: log)
         let events = try Self.object("diagnostics.json", in: result)
-        #expect(events["schemaVersion"] as? Int == 3 && events["discardedCount"] as? Int == 1)
+        #expect(events["schemaVersion"] as? Int == 4 && events["discardedCount"] as? Int == 1)
         #expect((events["records"] as? [Any])?.count == 1)
     }
     @Test func invalidSelectionAndEncodingFailuresAreTyped() throws {

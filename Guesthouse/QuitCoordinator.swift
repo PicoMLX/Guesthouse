@@ -57,7 +57,7 @@ final class QuitCoordinator {
 
     var canForceStop: Bool {
         guard case .failed(.stop(.guestShutdownRefused(let id))) = flow,
-              gracefulFailures[id] != nil, model.checkState == .checked,
+              gracefulFailures[id] != nil, model.recoveredOperations.isEmpty, model.checkState == .checked,
               model.statuses[id]?.vm == .running, model.statuses[id]?.inFlightOperation == nil,
               model.statuses[id]?.runtimeInstanceID == gracefulFailures[id] else { return false }
         return true
@@ -170,6 +170,8 @@ final class QuitCoordinator {
 
     private func validateInspection() throws {
         guard model.checkState == .checked else { throw Failure.check(model.checkState) }
+        if let id = model.recoveredOperations.keys.sorted(by: { $0.uuid.uuidString < $1.uuid.uuidString }).first,
+           let operation = model.recoveredOperations[id] { throw Failure.unsettled(operation) }
         // Quit may have retained a pending Start before its explicit refusal arrived.
         if !model.isStarting, !model.startMayHaveMutated, let target = model.startingEnvironment {
             unconfirmedEnvironments.remove(target)
@@ -194,6 +196,17 @@ final class QuitCoordinator {
         var accepted: OperationID?
         var completed = false
         var failure: GuesthouseError?
+        let dispatchObservation = UUID()
+        func retainUnknownOutcome() {
+            if let accepted {
+                model.recordDiagnostic(DiagnosticEvent(operation: .stopEnvironment,
+                    outcome: .operationFailed(.operationOutcomeUnknown(accepted)),
+                    operationID: accepted.uuid, environmentID: environment), for: environment)
+            } else {
+                model.recordObservation(.failed(.outcomeUnknown), id: dispatchObservation,
+                    environment: environment, operation: .stopEnvironment)
+            }
+        }
         let mode: StopMode
         if force {
             guard let instance else { throw Failure.ownership(environment, .ownershipUnproven) }
@@ -220,6 +233,12 @@ final class QuitCoordinator {
                     guard id == accepted else { throw malformed(accepted) }; completed = true
                 case .failed(let id, let error):
                     guard accepted == nil || id == accepted else { throw malformed(accepted) }
+                    let event = DiagnosticEvent(operation: .stopEnvironment, outcome: .init(error: error),
+                        operationID: id.uuid, environmentID: environment)
+                    guard DiagnosticIdentity.matches(event, environment: environment) else { throw malformed(accepted) }
+                    // Post-refusal inspection has its own presentation state. Preserve this
+                    // terminal fact independently for diagnostics after a failed Quit.
+                    model.recordDiagnostic(event, for: environment)
                     failure = error; completed = true
                 default: throw malformed(accepted)
                 }
@@ -229,10 +248,24 @@ final class QuitCoordinator {
                 if !force, accepted != nil, let instance, failure == .guestShutdownRefused(environment) { gracefulFailures[environment] = instance }
                 throw Failure.stop(failure)
             }
-        } catch let error as Failure { throw error }
-        catch let error as RuntimeSessionFailure { throw Failure.interrupted(error.contextualized(operationID: accepted, mayHaveMutated: true)) }
-        catch let error as GuesthouseError { throw Failure.stop(error) }
-        catch { throw malformed(accepted) }
+        } catch let error as Failure {
+            // A validated terminal Stop error was already retained. Protocol/identity
+            // failures instead preserve an unknown outcome under the observed acceptance.
+            if case .interrupted = error { retainUnknownOutcome() }
+            throw error
+        }
+        catch let error as RuntimeSessionFailure {
+            retainUnknownOutcome()
+            throw Failure.interrupted(error.contextualized(operationID: accepted, mayHaveMutated: true))
+        }
+        catch let error as GuesthouseError {
+            if accepted == nil, !completed, case .invalidRequest = error {
+                model.recordObservation(.operationFailed(error), id: dispatchObservation,
+                    environment: environment, operation: .stopEnvironment)
+            } else { retainUnknownOutcome() }
+            throw Failure.stop(error)
+        }
+        catch { retainUnknownOutcome(); throw malformed(accepted) }
     }
 
     private func malformed(_ id: OperationID?) -> Failure {
