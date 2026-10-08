@@ -102,13 +102,21 @@ struct RuntimeStorage: Sendable {
 
     /// Optional candidate setup, called only by the live StateStore owner under the shared
     /// Lume lease. Existing base layouts remain reopenable without a candidate configuration.
-    /// Refuse unsafe writable parents before creating/repairing this one fixed directory;
+    /// Refuse unsafe writable parents before creating/repairing these fixed directories;
     /// preserve all files. This does not establish provider/process readiness (MVP §§3–4, 9).
     func prepareLumeProbeConfiguration() throws {
         _ = try location(for: .vms)
         let state = try location(for: .state)
         _ = try location(for: .staging)
-        try Self.prepare(state.appending(path: "lume-xdg"), excluded: false, backup: Self.writeBackupExclusion)
+        let xdg = state.appending(path: "lume-xdg")
+        // Lume SettingsManager uses XDG_CONFIG_HOME/lume, not the XDG root itself.
+        let configuration = xdg.appending(path: "lume")
+        // Inspect both existing entries before repairing either one's metadata. Keep each
+        // prepare's own rechecks; this preflight is not an atomic tree transaction.
+        for directory in [xdg, configuration] { try Self.preflight(directory) }
+        for directory in [xdg, configuration] {
+            try Self.prepare(directory, excluded: false, backup: Self.writeBackupExclusion)
+        }
     }
 
     /// Read-only, per-invocation observation; never prepares or repairs. A future bounded
@@ -119,11 +127,15 @@ struct RuntimeStorage: Sendable {
         _ = try location(for: .vms)
         let state = try location(for: .state)
         let staging = try location(for: .staging)
-        let configuration = state.appending(path: "lume-xdg")
+        let xdg = state.appending(path: "lume-xdg")
+        let configuration = xdg.appending(path: "lume")
+        try Self.verify(xdg, excluded: false)
         try Self.verify(configuration, excluded: false)
         return [
             "LUME_TELEMETRY_ENABLED": "false", "LUME_UPDATE_CHECK": "false",
-            "TMPDIR": staging.path, "XDG_CONFIG_HOME": configuration.path,
+            "TMPDIR": staging.path, "XDG_CONFIG_HOME": xdg.path,
+            // Recognized by LumeReleaseChannel, not a VM/cache/telemetry-home override.
+            "LUME_HOME": configuration.path,
         ]
     }
 
@@ -212,8 +224,9 @@ struct RuntimeStorage: Sendable {
     }
     private static func verify(_ url: URL, excluded: Bool) throws {
         try StorageProtection.verify(url)
-        // A fresh URL avoids Foundation's cached resource values masking subsequent drift.
-        let fresh = URL(fileURLWithPath: url.path(percentEncoded: false), isDirectory: true)
+        // Explicitly discard Foundation resource values before observing current backup policy.
+        var fresh = URL(fileURLWithPath: url.path(percentEncoded: false), isDirectory: true)
+        fresh.removeAllCachedResourceValues()
         let actual: Bool?
         do { actual = try fresh.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup }
         catch { throw StorageFailure.inspectionFailed }

@@ -29,11 +29,21 @@ import GuesthouseCore
         }
     }
     static func run(_ environment: EnvironmentID, backend: any RuntimeBackend,
-                    accepted onAcceptance: (OperationID) -> Void, progress: (ProgressPhase) -> Void, diagnostic: (DiagnosticEvent) -> Void) async -> (failure: Failure?, mayHaveMutated: Bool) {
+                    accepted onAcceptance: (OperationID) -> Void, progress: (ProgressPhase) -> Void,
+                    diagnostic: (DiagnosticEvent) -> Void, observation: (DiagnosticEvent.Outcome) -> Void) async -> (failure: Failure?, mayHaveMutated: Bool) {
         var accepted: OperationID?, terminal = false, receivedEvent = false
         var failure: GuesthouseError?
         func malformed() -> Failure {
             .interrupted(.init(cause: .malformedResponse, operationID: accepted, mayHaveMutated: true))
+        }
+        func retainUnknownOutcome() {
+            if let accepted {
+                diagnostic(DiagnosticEvent(operation: .startEnvironment, outcome: .operationFailed(.operationOutcomeUnknown(accepted)),
+                    operationID: accepted.uuid, environmentID: environment))
+            } else {
+                // The app owns this dispatch observation; there is no accepted runtime ID.
+                observation(.failed(.outcomeUnknown))
+            }
         }
         do {
             for try await event in backend.send(.startEnvironment(environment, StartOptions())) {
@@ -56,35 +66,73 @@ import GuesthouseCore
                 case .failed(let id, let error):
                     guard accepted == nil || accepted == id else { throw malformed() }
                     if case .guestShutdownRefused = error { throw malformed() }
+                    let event = DiagnosticEvent(operation: .startEnvironment, outcome: .init(error: error),
+                        operationID: id.uuid, environmentID: environment)
+                    guard DiagnosticIdentity.matches(event, environment: environment) else { throw malformed() }
+                    // Retain the terminal fact even when no intermediate diagnostic arrived.
+                    // A later inspection failure must not replace the operation's own error.
+                    diagnostic(event)
                     failure = error; terminal = true
                 default: throw malformed()
                 }
             }
             guard terminal else { throw malformed() }
             return (failure.map(Failure.runtime), accepted != nil || isUnknown(failure))
-        } catch let error as Failure { return (error, true) }
-        catch let error as RuntimeSessionFailure { return (.interrupted(error.contextualized(operationID: accepted, mayHaveMutated: true)), true) }
+        } catch let error as Failure { retainUnknownOutcome(); return (error, true) }
+        catch let error as RuntimeSessionFailure {
+            retainUnknownOutcome()
+            return (.interrupted(error.contextualized(operationID: accepted, mayHaveMutated: true)), true)
+        }
         catch let error as GuesthouseError {
             // Only a local admission rejection before any event proves non-admission.
             // Stream cancellation and errors after a reply cannot erase uncertainty.
-            return (.runtime(error), receivedEvent || accepted != nil || Task.isCancelled || error == .canceled || isUnknown(error))
+            let knownUnsent = !receivedEvent && accepted == nil && !Task.isCancelled && isLocalAdmissionRefusal(error)
+            let mayHaveMutated = !knownUnsent
+            if mayHaveMutated { retainUnknownOutcome() }
+            else { observation(.operationFailed(error)) }
+            return (.runtime(error), mayHaveMutated)
         }
-        catch { return (malformed(), true) }
+        catch { retainUnknownOutcome(); return (malformed(), true) }
+    }
+    private static func isLocalAdmissionRefusal(_ error: GuesthouseError) -> Bool {
+        if case .invalidRequest = error { return true }
+        return false
     }
     private static func isUnknown(_ error: GuesthouseError?) -> Bool {
         if case .operationOutcomeUnknown = error { return true }
         return false
     }
     /// Cancellation has its own reply identity. Never use it as the target's terminal result.
-    static func cancel(_ operation: OperationID, backend: any RuntimeBackend) async -> (failure: Failure?, retryAllowed: Bool) {
+    static func cancel(_ operation: OperationID, backend: any RuntimeBackend, environment: EnvironmentID? = nil,
+                       diagnostic: (DiagnosticEvent) -> Void = { _ in },
+                       observation: (DiagnosticEvent.Outcome) -> Void = { _ in }) async -> (failure: Failure?, retryAllowed: Bool) {
         var answered = false
+        var replyID: OperationID?
         var failure: GuesthouseError?
+        func retainUnknownOutcome() {
+            if let replyID {
+                diagnostic(DiagnosticEvent(operation: .cancelOperation, outcome: .operationFailed(.operationOutcomeUnknown(replyID)),
+                    operationID: replyID.uuid, environmentID: environment))
+            } else { observation(.failed(.outcomeUnknown)) }
+        }
         do {
             for try await event in backend.send(.cancelOperation(operation)) {
                 guard !answered else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
                 switch event {
-                case .completed: answered = true
-                case .failed(_, let error): answered = true; failure = error
+                case .completed(let id):
+                    guard id != operation else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+                    replyID = id; answered = true
+                    // This acknowledges only the cancellation request, never its target.
+                    diagnostic(DiagnosticEvent(operation: .cancelOperation, outcome: .cancellationRequested,
+                        operationID: id.uuid, environmentID: environment))
+                case .failed(let id, let error):
+                    guard id != operation else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+                    if case .guestShutdownRefused = error { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+                    let retained = DiagnosticEvent(operation: .cancelOperation, outcome: .operationFailed(error),
+                        operationID: id.uuid, environmentID: environment)
+                    guard DiagnosticIdentity.matches(retained, environment: environment) else { throw GuesthouseError.invalidRuntimeReply(.malformed) }
+                    replyID = id; answered = true; failure = error
+                    diagnostic(retained)
                 default: throw GuesthouseError.invalidRuntimeReply(.malformed)
                 }
             }
@@ -92,19 +140,22 @@ import GuesthouseCore
             let retryAllowed: Bool
             switch failure {
             // Only an explicit admission refusal proves this cancellation did not run.
-            // Canceled/unknown/transport-like failures require inspection, not another request.
             case .invalidRequest?: retryAllowed = true
             default: retryAllowed = false
             }
             return (failure.map(Failure.runtime), retryAllowed)
-        } catch let error as RuntimeSessionFailure { return (.interrupted(error.contextualized(mayHaveMutated: true)), false) }
-        catch let error as GuesthouseError {
-            // RuntimeClient can reject locally before sending by throwing, rather than
-            // yielding a terminal event. A throw after any reply cannot prove non-admission.
-            if !answered, case .invalidRequest = error { return (.runtime(error), true) }
-            return (.runtime(error), false)
+        } catch let error as RuntimeSessionFailure {
+            retainUnknownOutcome()
+            return (.interrupted(error.contextualized(mayHaveMutated: true)), false)
         }
-        catch { return (.runtime(.invalidRuntimeReply(.malformed)), false) }
+        catch let error as GuesthouseError {
+            // A thrown local refusal before any reply is not runtime admission.
+            if !answered, !Task.isCancelled, case .invalidRequest = error {
+                observation(.operationFailed(error)); return (.runtime(error), true)
+            }
+            retainUnknownOutcome(); return (.runtime(error), false)
+        }
+        catch { retainUnknownOutcome(); return (.runtime(.invalidRuntimeReply(.malformed)), false) }
     }
 
 }

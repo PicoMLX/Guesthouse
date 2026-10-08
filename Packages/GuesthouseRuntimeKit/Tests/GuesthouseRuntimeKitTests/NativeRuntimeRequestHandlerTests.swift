@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 import GuesthouseCore
 import Synchronization
@@ -313,7 +314,7 @@ import XPC
         defer { first.cancel() }
         let second = try Fixture(deferredReplies: true, sharedWorker: first.worker)
         defer { second.cancel() }
-        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        var responses: [NativeXPCFixtureStream<RuntimeEvent>] = []
         for fixture in [first, second, first, second] {
             responses.append(fixture.request(try message(.current)))
             _ = try await next(fixture.processed)
@@ -332,7 +333,7 @@ import XPC
     @Test func terminalNativeRefusalAnswersQueuedReadsBeforeCancelWithoutProbing() async throws {
         let fixture = try Fixture(deferredReplies: true)
         defer { fixture.cancel() }
-        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        var responses: [NativeXPCFixtureStream<RuntimeEvent>] = []
         for _ in 0..<2 {
             responses.append(fixture.request(try message(.current)))
             _ = try await next(fixture.processed)
@@ -355,7 +356,7 @@ import XPC
     func deferredEncodingOrSendFailureDrainsSiblingRepliesOnce(failSend: Bool) async throws {
         let fixture = try Fixture(badVersion: !failSend, failSend: failSend, deferredReplies: true)
         defer { fixture.cancel() }
-        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        var responses: [NativeXPCFixtureStream<RuntimeEvent>] = []
         for _ in 0..<3 {
             responses.append(fixture.request(try message(.current)))
             _ = try await next(fixture.processed)
@@ -388,7 +389,7 @@ import XPC
     @Test func rejectedPlanReleasesCapturedOwnerAfterUnlockAndReplyHandoff() async throws {
         let fixture = try Fixture(deferredReplies: true, captureLifetime: true)
         defer { fixture.cancel() }
-        var responses: [AsyncThrowingStream<RuntimeEvent, any Error>] = []
+        var responses: [NativeXPCFixtureStream<RuntimeEvent>] = []
         for _ in 0..<4 {
             responses.append(fixture.request(try message(.current)))
             _ = try await next(fixture.processed)
@@ -553,21 +554,26 @@ private final class Fixture: Sendable {
     let worker: RuntimeReadOnlyWorker
     let listener: XPCListener
     let client: XPCSession
-    let processed: AsyncThrowingStream<Bool, any Error>
+    let processed: NativeXPCFixtureStream<Bool>
+    let progress = NativeXPCFixtureProgress()
 
     init(authorized: Bool = true, usePublicPolicy: Bool = false, gate: RuntimeSessionGate = RuntimeSessionGate(),
          refuseDuringDecode: Bool = false, badVersion: Bool = false, failSend: Bool = false,
          deferredReplies: Bool = false, sharedWorker: RuntimeReadOnlyWorker? = nil,
          captureLifetime: Bool = false, productionPlan: Bool = false, runtimeState: RuntimeStateLoader? = nil, supervisor: OperationSupervisor = OperationSupervisor(), savedState: RuntimeSavedStateStatus? = nil) throws {
         let (stream, completion) = AsyncThrowingStream<Bool, any Error>.makeStream()
-        processed = stream
+        processed = NativeXPCFixtureStream(stream: stream, progress: progress)
         self.gate = gate
         let executor = executor
         let worker = sharedWorker ?? RuntimeReadOnlyWorker(enqueue: { executor.enqueue($0) })
         self.worker = worker
-        let trace = trace, state = state
-        let listener = XPCListener { request in
-            request.accept { session in
+        let trace = trace, state = state, progress = progress
+        let listenerQueue = DispatchQueue(label: "runtime-ingress.listener.\(UUID())")
+        let clientQueue = DispatchQueue(label: "runtime-ingress.client.\(UUID())")
+        progress.observe(listenerQueue, bit: 1); progress.observe(clientQueue, bit: 2)
+        let listener = XPCListener(targetQueue: listenerQueue) { request in
+            progress.record(.accepting)
+            let decision = acceptNativeRuntimeSession(request) { session in
                 state.accepted.withLock { $0 = session }
                 let log: @Sendable (DiagnosticEvent) -> Void = { event in
                     trace.record(.diagnostic); trace.diagnostics.withLock { $0.append(event) }
@@ -601,24 +607,28 @@ private final class Fixture: Sendable {
                         cancel: { trace.record(.canceled); session.cancel(reason: "test refusal") }, diagnostic: log)
                 }
                 state.handler.withLock { $0 = native }
-                return ObservingHandler(native: native, completion: completion)
+                return ObservingHandler(native: native, completion: completion, progress: progress)
             }
+            progress.record(.bound)
+            return decision
         }
-        do { client = try XPCSession(endpoint: listener.endpoint) }
+        do { client = try XPCSession(endpoint: listener.endpoint, targetQueue: clientQueue) }
         catch { listener.cancel(); throw error }
         self.listener = listener
     }
 
-    func request(_ message: XPCDictionary) -> AsyncThrowingStream<RuntimeEvent, any Error> {
+    func request(_ message: XPCDictionary) -> NativeXPCFixtureStream<RuntimeEvent> {
         let (stream, replies) = AsyncThrowingStream<RuntimeEvent, any Error>.makeStream()
+        let progress = progress
         client.send(message: message) { response in
+            progress.record(.reply)
             do {
                 let native = try response.get()
                 let bytes = try RawRuntimeFrame.payload(native, expectedVersion: Int64(RuntimeProtocolVersion.current.rawValue))
                 replies.yield(try RuntimeEventEnvelope.decode(bytes).event); replies.finish()
             } catch { replies.finish(throwing: FixtureFailure.transport) }
         }
-        return stream
+        return NativeXPCFixtureStream(stream: stream, progress: progress)
     }
 
     func cancel() {
@@ -659,13 +669,19 @@ private final class SessionState: Sendable {
 private struct ObservingHandler: XPCPeerHandler {
     let native: NativeRuntimeRequestHandler
     let completion: AsyncThrowingStream<Bool, any Error>.Continuation
+    let progress: NativeXPCFixtureProgress
     func handleIncomingRequest(_ message: XPCDictionary) -> XPCDictionary? {
+        progress.record(.received)
         let result = native.handleIncomingRequest(message)
         #expect(result == nil)
+        progress.record(.processed)
         completion.yield(true)
         return nil
     }
-    func handleCancellation(error: XPCRichError) { native.handleCancellation(error: error) }
+    func handleCancellation(error: XPCRichError) {
+        progress.record(.canceled)
+        native.handleCancellation(error: error)
+    }
 }
 private enum FixtureFailure: Error { case transport, timeout }
 private func next<T: Sendable>(_ stream: AsyncThrowingStream<T, any Error>) async throws -> T {
@@ -681,4 +697,8 @@ private func next<T: Sendable>(_ stream: AsyncThrowingStream<T, any Error>) asyn
         defer { group.cancelAll() }
         return try #require(await group.next())
     }
+}
+
+private func next<T: Sendable>(_ stream: NativeXPCFixtureStream<T>) async throws -> T {
+    try await stream.next()
 }

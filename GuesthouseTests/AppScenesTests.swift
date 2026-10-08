@@ -17,12 +17,19 @@ import Testing
     }
 
     @Test func simulatedBackendRequiresAnExplicitDevelopmentEnvironment() {
-        #expect(AppRuntimeConfiguration.makeBackend(environment: [:]) is RuntimeClient)
+        #expect(RuntimeBackendFactory.makeBackend(environment: [:]) is RuntimeClient)
+        // Previews inject their fake directly. A launch variable must never make the
+        // production connection inspect an empty simulated inventory before Quit.
+        #expect(RuntimeBackendFactory.makeBackend(environment: ["XCODE_RUNNING_FOR_PREVIEWS": "1"]) is RuntimeClient)
         #if DEBUG
-        #expect(AppRuntimeConfiguration.makeBackend(environment: ["GUESTHOUSE_FAKE_RUNTIME": "1"]) is FakeRuntimeBackend)
-        #expect(AppRuntimeConfiguration.makeBackend(environment: ["XCTestConfigurationFilePath": "fixture"]) is FakeRuntimeBackend)
+        #expect(RuntimeBackendFactory.makeBackend(environment: ["GUESTHOUSE_FAKE_RUNTIME": "1"]) is FakeRuntimeBackend)
+        #expect(RuntimeBackendFactory.makeBackend(environment: ["XCTestConfigurationFilePath": "fixture"]) is FakeRuntimeBackend)
         #else
-        #expect(AppRuntimeConfiguration.makeBackend(environment: ["GUESTHOUSE_FAKE_RUNTIME": "1"]) is RuntimeClient)
+        #expect(RuntimeBackendFactory.makeBackend(environment: ["GUESTHOUSE_FAKE_RUNTIME": "1"]) is RuntimeClient)
+        #expect(RuntimeBackendFactory.makeBackend(environment: ["XCTestConfigurationFilePath": "fixture"]) is RuntimeClient)
+        #expect(RuntimeBackendFactory.makeBackend(environment: [
+            "GUESTHOUSE_FAKE_RUNTIME": "1", "XCTestConfigurationFilePath": "fixture", "XCODE_RUNNING_FOR_PREVIEWS": "1"
+        ]) is RuntimeClient)
         #endif
     }
 
