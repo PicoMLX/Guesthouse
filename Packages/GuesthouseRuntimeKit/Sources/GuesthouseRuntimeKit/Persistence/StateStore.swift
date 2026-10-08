@@ -132,6 +132,24 @@ public actor StateStore {
         }
     }
 
+    /// Complete bounded introspection on the existing authority, with one lease spanning all
+    /// four steps. Each actual child must be inspected/settled before the next fixed launch.
+    /// No GUI/XPC consumer, candidate pin adoption or production VM mutation is enabled here.
+    func probeLume(
+        coordinator: LumeRuntimeCoordinator = .shared,
+        diagnostic: @escaping @Sendable (DiagnosticEvent) -> Void = { _ in }
+    ) async throws -> LumeProbeResult {
+        guard let storage = try anchor?.verifiedProbeStorage() else {
+            throw StateStoreError.fileUnreadable(name: .stateDirectory)
+        }
+        return try await LumeProbeSequence.run(in: storage, coordinator: coordinator) { command in
+            // Both methods reuse this actor's current owner after waiting. Neither
+            // reacquires the coordinator, nor retains an old anchor across suspension.
+            let launch = try await self.launchOwnedLumeProbe(command: command)
+            return try await self.inspectOwnedLumeProbeResponse(launch, diagnostic: diagnostic)
+        }
+    }
+
     private func launchOwnedLumeProbe(command: LumeLaunchIntent.Command) throws -> LumeProbeLaunch {
         // Recheck the current owner after queueing; never carry its old anchor across that wait.
         guard let anchor else { throw StateStoreError.fileUnreadable(name: .stateDirectory) }
