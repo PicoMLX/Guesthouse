@@ -43,7 +43,7 @@ struct DiagnosticsView: View {
                         if environment == nil {
                             Text(record.event.environmentID.map { "Environment \($0.description)" } ?? "Session-wide event").font(.caption).foregroundStyle(.secondary)
                         }
-                        Text(record.event.operationID.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Text(record.event.origin.title + " " + record.event.operationID.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary)
                     }.tag(index).padding(.vertical, 3)
                 }
             }.overlay { if records.isEmpty { ContentUnavailableView("No matching diagnostic events", systemImage: "list.bullet.rectangle") } }
@@ -108,7 +108,7 @@ struct DiagnosticsView: View {
 nonisolated enum DiagnosticsSelection {
     private static func matches(_ record: DiagnosticLog.Record, query: String) -> Bool {
         query.isEmpty || (record.event.message + " " + (record.event.recoveryMessage ?? "") + " "
-            + record.event.operationID.uuidString + " " + (record.event.environmentID?.description ?? "")).localizedStandardContains(query)
+            + record.event.origin.title + " " + record.event.operationID.uuidString + " " + (record.event.environmentID?.description ?? "")).localizedStandardContains(query)
     }
     static func records(in log: DiagnosticLog, matching query: String) -> [DiagnosticLog.Record] {
         log.records.filter { matches($0, query: query) }

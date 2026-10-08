@@ -322,7 +322,10 @@ import Testing
     }
 
     private func backupExcluded(_ url: URL) throws -> Bool {
-        try #require(URL(fileURLWithPath: url.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup as Bool?)
+        // These tests change metadata; assert current disk policy rather than cached values.
+        var observed = URL(fileURLWithPath: url.path, isDirectory: true)
+        observed.removeAllCachedResourceValues()
+        return try #require(observed.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup as Bool?)
     }
     private final class Fixture: Sendable {
         let base: URL
